@@ -766,7 +766,7 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 }
 
 // -----------------------------------------------------------------------------
-// Convert internal state to output Hull with uint8_t-indexed arrays.
+// Convert internal state to output Hull with uint16_t-indexed arrays.
 
 static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 {
@@ -799,10 +799,10 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	for (int i = 0; i < asize(live); i++) {
 		int e = s->faces[live[i]].edge, start = e;
 		do { int o=eremap[e];
-			oe[o].next=(uint8_t)eremap[s->edges[e].next];
-			oe[o].twin=(uint8_t)eremap[s->edges[e].twin];
-			oe[o].origin=(uint8_t)vremap[s->edges[e].origin];
-			oe[o].face=(uint8_t)i;
+			oe[o].next=(uint16_t)eremap[s->edges[e].next];
+			oe[o].twin=(uint16_t)eremap[s->edges[e].twin];
+			oe[o].origin=(uint16_t)vremap[s->edges[e].origin];
+			oe[o].face=(uint16_t)i;
 			e=s->edges[e].next;
 		} while (e!=start);
 	}
@@ -810,7 +810,7 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	CK_DYNA HullFace* of = NULL;
 	CK_DYNA HullPlane* op = NULL;
 	for (int i = 0; i < asize(live); i++) {
-		HullFace hf = { .edge=(uint8_t)eremap[s->faces[live[i]].edge] };
+		HullFace hf = { .edge=(uint16_t)eremap[s->faces[live[i]].edge] };
 		apush(of, hf); apush(op, s->faces[live[i]].plane);
 	}
 

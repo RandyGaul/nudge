@@ -94,11 +94,21 @@ int main(int argc, char* argv[])
 }
 
 // -----------------------------------------------------------------------------
-// App implementation (placeholder).
+// App implementation -- test scene with all shape types.
 
 static World g_world;
 static Body g_floor;
-static Body g_ball;
+static Body g_sphere;
+static Body g_capsule;
+static Body g_box;
+static Body g_hull_body;
+static Hull* g_test_hull;
+static int g_mesh_capsule;
+static int g_mesh_hull;
+
+// Capsule rendering params (baked into mesh)
+static const float CAP_RADIUS = 0.3f;
+static const float CAP_HALF_H = 0.5f;
 
 void init()
 {
@@ -115,36 +125,91 @@ void init()
 	cImGui_ImplSDL3_InitForOpenGL(g_window, g_glctx);
 	cImGui_ImplOpenGL3_InitEx("#version 330");
 
+	// Build test hull (bipyramid)
+	v3 hull_pts[] = {
+		{  0.0f,  0.7f,  0.0f },
+		{  0.5f,  0.0f,  0.5f },
+		{ -0.5f,  0.0f,  0.5f },
+		{  0.5f,  0.0f, -0.5f },
+		{ -0.5f,  0.0f, -0.5f },
+		{  0.0f, -0.7f,  0.0f },
+	};
+	g_test_hull = quickhull(hull_pts, 6);
+
+	// Register custom meshes
+	g_mesh_capsule = render_create_capsule_mesh(CAP_RADIUS, CAP_HALF_H);
+	g_mesh_hull = render_create_hull_mesh(g_test_hull, V3(1, 1, 1));
+
 	g_world = create_world((WorldParams){
 		.gravity = V3(0, -9.81f, 0),
-});
+	});
 
-	// static floor
+	// Static floor
 	g_floor = create_body(g_world, (BodyParams){
 		.position = V3(0, -1, 0),
 		.rotation = quat_identity(),
-		.mass = 0, // static
+		.mass = 0,
 	});
 	body_add_shape(g_world, g_floor, (ShapeParams){
 		.type = SHAPE_BOX,
 		.box.half_extents = V3(10, 1, 10),
 	});
 
-	// dynamic sphere
-	g_ball = create_body(g_world, (BodyParams){
-		.position = V3(0, 5, 0),
+	// Dynamic sphere
+	g_sphere = create_body(g_world, (BodyParams){
+		.position = V3(-3, 5, 0),
 		.rotation = quat_identity(),
 		.mass = 1.0f,
 	});
-	body_add_shape(g_world, g_ball, (ShapeParams){
+	body_add_shape(g_world, g_sphere, (ShapeParams){
 		.type = SHAPE_SPHERE,
 		.sphere.radius = 0.5f,
+	});
+
+	// Dynamic capsule
+	g_capsule = create_body(g_world, (BodyParams){
+		.position = V3(-1, 6, 0),
+		.rotation = quat_identity(),
+		.mass = 1.0f,
+	});
+	body_add_shape(g_world, g_capsule, (ShapeParams){
+		.type = SHAPE_CAPSULE,
+		.capsule = { .half_height = CAP_HALF_H, .radius = CAP_RADIUS },
+	});
+
+	// Dynamic box
+	g_box = create_body(g_world, (BodyParams){
+		.position = V3(1, 7, 0),
+		.rotation = quat_identity(),
+		.mass = 1.0f,
+	});
+	body_add_shape(g_world, g_box, (ShapeParams){
+		.type = SHAPE_BOX,
+		.box.half_extents = V3(0.4f, 0.4f, 0.4f),
+	});
+
+	// Dynamic hull
+	g_hull_body = create_body(g_world, (BodyParams){
+		.position = V3(3, 8, 0),
+		.rotation = quat_identity(),
+		.mass = 1.0f,
+	});
+	body_add_shape(g_world, g_hull_body, (ShapeParams){
+		.type = SHAPE_HULL,
+		.hull = { .hull = g_test_hull, .scale = V3(1, 1, 1) },
 	});
 }
 
 void update()
 {
 	world_step(g_world, 1.0f / 60.0f);
+}
+
+static void draw_body_mesh(int mesh, Body body, v3 sc, v3 color)
+{
+	v3 pos = body_get_position(g_world, body);
+	quat rot = body_get_rotation(g_world, body);
+	render_push(mesh, mat4_trs(pos, rot, sc), color, 1.0f);
 }
 
 void draw()
@@ -154,22 +219,16 @@ void draw()
 
 	float aspect = (float)g_width / (float)g_height;
 	mat4 proj = mat4_perspective(1.0f, aspect, 0.1f, 100.0f);
-	mat4 view = mat4_look_at(V3(0, 5, 15), V3(0, 0, 0), V3(0, 1, 0));
+	mat4 view = mat4_look_at(V3(0, 5, 15), V3(0, 1, 0), V3(0, 1, 0));
 	mat4 vp = mul(proj, view);
 
 	render_begin(vp);
 
-	// Floor box
-	v3 floor_pos = body_get_position(g_world, g_floor);
-	quat floor_rot = body_get_rotation(g_world, g_floor);
-	mat4 floor_model = mat4_trs(floor_pos, floor_rot, V3(10, 1, 10));
-	render_push(MESH_BOX, floor_model, V3(0.4f, 0.4f, 0.45f), 1.0f);
-
-	// Sphere
-	v3 ball_pos = body_get_position(g_world, g_ball);
-	quat ball_rot = body_get_rotation(g_world, g_ball);
-	mat4 ball_model = mat4_trs(ball_pos, ball_rot, V3(0.5f, 0.5f, 0.5f));
-	render_push(MESH_SPHERE, ball_model, V3(0.9f, 0.3f, 0.2f), 1.0f);
+	draw_body_mesh(MESH_BOX,      g_floor,     V3(10, 1, 10),           V3(0.4f, 0.4f, 0.45f));
+	draw_body_mesh(MESH_SPHERE,   g_sphere,    V3(0.5f, 0.5f, 0.5f),   V3(0.9f, 0.3f, 0.2f));
+	draw_body_mesh(g_mesh_capsule,g_capsule,   V3(1, 1, 1),            V3(0.2f, 0.8f, 0.3f));
+	draw_body_mesh(MESH_BOX,      g_box,       V3(0.4f, 0.4f, 0.4f),  V3(0.3f, 0.5f, 0.9f));
+	draw_body_mesh(g_mesh_hull,   g_hull_body, V3(1, 1, 1),            V3(0.9f, 0.7f, 0.2f));
 
 	render_end();
 }

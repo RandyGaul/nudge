@@ -5,6 +5,7 @@
 //   capsule-capsule, capsule-box, box-box.
 
 #include <stdio.h>
+#include <time.h>
 
 static int test_pass;
 static int test_fail;
@@ -495,6 +496,7 @@ static void hull_validate(const Hull* h, const char* label)
 // validate structural invariants.
 
 static uint32_t fuzz_rng_state = 12345;
+static uint32_t fuzz_rng_seed  = 12345;
 
 static float fuzz_rand()
 {
@@ -1029,6 +1031,133 @@ static void test_quickhull_fuzz(int iterations)
 	TEST_ASSERT(total_fails == 0);
 }
 
+// ============================================================================
+// Cylinder stress test for face merging.
+//
+// A discretized cylinder has N coplanar triangles on each cap and N coplanar
+// quads (2 tris each) on the barrel. This hammers the merge code because:
+//  - Caps must merge N triangles into a single N-gon
+//  - Barrel quads are nearly coplanar with their neighbors at high N
+//  - Arbitrary rotation prevents axis-aligned shortcuts
+//
+// After quickhull + merging, the ideal hull has N+2 faces (N barrel quads +
+// 2 caps), but we accept any topologically valid convex result.
+
+static quat quat_axis_angle(v3 axis, float angle)
+{
+	float s = sinf(angle * 0.5f);
+	float c = cosf(angle * 0.5f);
+	return (quat){ axis.x * s, axis.y * s, axis.z * s, c };
+}
+
+static void test_quickhull_cylinder()
+{
+	int segs[] = { 8, 12, 16, 24, 32, 64 };
+	int nseg_counts = sizeof(segs) / sizeof(segs[0]);
+
+	// Rotation/scale combos: {axis, angle, scaleXYZ}
+	struct { v3 axis; float angle; v3 scl; const char* tag; } xforms[] = {
+		{ {0,1,0},  0.0f,        {1,1,1},           "identity"   },
+		{ {1,0,0},  1.5707963f,  {1,1,1},           "rot90X"     },
+		{ {0,0,1},  0.7853982f,  {1,1,1},           "rot45Z"     },
+		{ {0,1,0},  2.3561945f,  {1,1,1},           "rot135Y"    },
+		{ {1,1,1},  1.0471976f,  {1,1,1},           "rot60diag"  },
+		{ {0,1,0},  0.0f,        {0.01f,0.01f,0.01f}, "tiny"     },
+		{ {0,1,0},  0.0f,        {100,100,100},     "large"      },
+		{ {1,0,0},  0.3926991f,  {2,0.5f,1},        "aniso+rot"  },
+		{ {0,0,1},  2.0943951f,  {0.1f,10,0.1f},    "pancake"    },
+		{ {1,1,0},  0.5235988f,  {5,5,0.01f},       "flat disc"  },
+	};
+	int nxforms = sizeof(xforms) / sizeof(xforms[0]);
+
+	float radius = 1.0f;
+	float half_h = 1.0f;
+	int total = 0, fails = 0;
+
+	for (int si = 0; si < nseg_counts; si++) {
+		int n = segs[si];
+		for (int xi = 0; xi < nxforms; xi++) {
+			char label[128];
+			snprintf(label, sizeof(label), "cylinder n=%d %s", n, xforms[xi].tag);
+
+			quat q = quat_axis_angle(norm(xforms[xi].axis), xforms[xi].angle);
+			v3 s = xforms[xi].scl;
+
+			// Generate cylinder points: ring on top cap, ring on bottom cap.
+			CK_DYNA v3* pts = NULL;
+			for (int i = 0; i < n; i++) {
+				float theta = 2.0f * 3.14159265f * (float)i / (float)n;
+				float cx = radius * cosf(theta);
+				float cz = radius * sinf(theta);
+
+				// Top cap vertex.
+				v3 pt = V3(cx * s.x, half_h * s.y, cz * s.z);
+				apush(pts, rotate(q, pt));
+
+				// Bottom cap vertex.
+				v3 pb = V3(cx * s.x, -half_h * s.y, cz * s.z);
+				apush(pts, rotate(q, pb));
+			}
+
+			Hull* h = quickhull(pts, asize(pts));
+			total++;
+
+			if (!h) {
+				snprintf(label, sizeof(label), "cylinder n=%d %s build", n, xforms[xi].tag);
+				TEST_BEGIN(label);
+				TEST_ASSERT(h != NULL);
+				afree(pts);
+				continue;
+			}
+
+			int e_ok = hull_check_euler(h);
+			int t_ok = hull_check_twins(h);
+			int f_ok = hull_check_face_loops(h);
+			int n_ok = hull_check_normals_outward(h);
+			int c_ok = hull_check_convex(h, h->epsilon);
+			int i_ok = hull_check_contains_inputs(h, pts, asize(pts), h->epsilon + h->maxoutside);
+
+			char buf[128];
+			snprintf(buf, sizeof(buf), "%s euler", label);
+			TEST_BEGIN(buf); TEST_ASSERT(e_ok);
+			snprintf(buf, sizeof(buf), "%s twins", label);
+			TEST_BEGIN(buf); TEST_ASSERT(t_ok);
+			snprintf(buf, sizeof(buf), "%s loops", label);
+			TEST_BEGIN(buf); TEST_ASSERT(f_ok);
+			snprintf(buf, sizeof(buf), "%s normals", label);
+			TEST_BEGIN(buf); TEST_ASSERT(n_ok);
+			snprintf(buf, sizeof(buf), "%s convex", label);
+			TEST_BEGIN(buf); TEST_ASSERT(c_ok);
+			snprintf(buf, sizeof(buf), "%s inputs", label);
+			TEST_BEGIN(buf); TEST_ASSERT(i_ok);
+
+			if (!e_ok || !t_ok || !f_ok || !n_ok || !c_ok || !i_ok) {
+				fails++;
+				if (fails <= 5) {
+					printf("  CYLINDER FAIL: %s V=%d E=%d F=%d [%s%s%s%s%s%s]\n", label,
+						h->vert_count, h->edge_count, h->face_count,
+						e_ok ? "" : "euler ",
+						t_ok ? "" : "twins ",
+						f_ok ? "" : "loops ",
+						n_ok ? "" : "normals ",
+						c_ok ? "" : "convex ",
+						i_ok ? "" : "inputs ");
+					printf("    v3 pts[] = {\n");
+					for (int pi = 0; pi < asize(pts); pi++)
+						printf("        {%.9ef, %.9ef, %.9ef},\n",
+							pts[pi].x, pts[pi].y, pts[pi].z);
+					printf("    };\n");
+				}
+			}
+
+			hull_free(h);
+			afree(pts);
+		}
+	}
+
+	printf("  cylinder: %d hulls tested, %d failures\n", total, fails);
+}
+
 static void run_tests()
 {
 	test_pass = 0;
@@ -1047,10 +1176,205 @@ static void run_tests()
 	test_quickhull_case783();
 	test_quickhull_ico7037();
 	test_quickhull_tet8098();
+	test_quickhull_cylinder();
 
 	// Quickhull fuzz: moderate count for regular runs.
 	test_quickhull_fuzz(100); // use 1000+ for stress testing
 
 	printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	if (test_fail > 0) printf("*** FAILURES ***\n");
+}
+
+// Soak test: infinite-loop fuzz with crash logging to file.
+static void test_quickhull_soak()
+{
+	const int ITERS_PER_SHAPE = 200;
+	uint32_t base_seed = (uint32_t)time(NULL);
+	int round = 0;
+	int total_hulls = 0;
+	FILE* logf = NULL;
+
+	printf("=== quickhull soak test (seed base %u) ===\n", base_seed);
+	printf("    logging failures to crash_log.txt\n");
+	printf("    press Ctrl+C to stop\n\n");
+	fflush(stdout);
+
+	for (;;) {
+		uint32_t round_seed = base_seed ^ (uint32_t)(round * 2654435761u);
+		fuzz_rng_state = round_seed;
+		fuzz_rng_seed  = round_seed;
+
+		for (int shape_idx = 0; shape_idx < (int)FUZZ_SHAPE_COUNT; shape_idx++) {
+			const FuzzShape* base = &s_fuzz_shapes[shape_idx];
+
+			for (int iter = 0; iter < ITERS_PER_SHAPE; iter++) {
+				CK_DYNA v3* pts = NULL;
+
+				float hull_scale = 1.0f;
+				float sr = fuzz_rand();
+				if      (sr < 0.1f) hull_scale = fuzz_rand_range(0.001f, 0.01f);
+				else if (sr < 0.2f) hull_scale = fuzz_rand_range(10.0f, 1000.0f);
+
+				float jitter = fuzz_rand_range(0.0f, 0.001f) * hull_scale;
+				for (int i = 0; i < base->vert_count; i++) {
+					v3 p = scale(base->verts[i], hull_scale);
+					p = add(p, scale(fuzz_rand_dir(), jitter));
+					apush(pts, p);
+				}
+
+				int extras = (int)(fuzz_rand() * 20);
+				if (fuzz_rand() < 0.1f) extras += 50 + (int)(fuzz_rand() * 50);
+
+				for (int i = 0; i < extras; i++) {
+					float r = fuzz_rand();
+					v3 p;
+					if (r < 0.15f) {
+						int vi = fuzz_rand_int(base->vert_count);
+						float fuzz = fuzz_rand_range(1e-7f, 1e-2f) * hull_scale;
+						p = add(scale(base->verts[vi], hull_scale), scale(fuzz_rand_dir(), fuzz));
+					} else if (r < 0.20f) {
+						p = scale(base->verts[fuzz_rand_int(base->vert_count)], hull_scale);
+					} else if (r < 0.35f) {
+						int ei = fuzz_rand_int(base->edge_count);
+						v3 a = scale(base->verts[base->edges[ei][0]], hull_scale);
+						v3 b = scale(base->verts[base->edges[ei][1]], hull_scale);
+						float t = fuzz_rand();
+						p = add(scale(a, 1-t), scale(b, t));
+						if (fuzz_rand() < 0.5f) {
+							float fuzz = fuzz_rand_range(1e-7f, 1e-3f) * hull_scale;
+							p = add(p, scale(fuzz_rand_dir(), fuzz));
+						}
+					} else if (r < 0.45f) {
+						int ei = fuzz_rand_int(base->edge_count);
+						v3 a = scale(base->verts[base->edges[ei][0]], hull_scale);
+						v3 b = scale(base->verts[base->edges[ei][1]], hull_scale);
+						int cluster = 2 + (int)(fuzz_rand() * 5);
+						for (int c = 0; c < cluster; c++) {
+							float t = (float)(c + 1) / (float)(cluster + 1);
+							float fuzz = fuzz_rand_range(0, 1e-6f) * hull_scale;
+							apush(pts, add(add(scale(a, 1-t), scale(b, t)), scale(fuzz_rand_dir(), fuzz)));
+						}
+						continue;
+					} else if (r < 0.60f) {
+						int ti = fuzz_rand_int(base->tri_count);
+						v3 a = scale(base->verts[base->tris[ti][0]], hull_scale);
+						v3 b = scale(base->verts[base->tris[ti][1]], hull_scale);
+						v3 c = scale(base->verts[base->tris[ti][2]], hull_scale);
+						float u = fuzz_rand(), v = fuzz_rand();
+						if (u + v > 1.0f) { u = 1.0f - u; v = 1.0f - v; }
+						p = add(add(scale(a, 1-u-v), scale(b, u)), scale(c, v));
+						if (fuzz_rand() < 0.3f) {
+							v3 fn = norm(cross(sub(b, a), sub(c, a)));
+							float fuzz = fuzz_rand_range(-1e-4f, 1e-4f) * hull_scale;
+							p = add(p, scale(fn, fuzz));
+						}
+					} else if (r < 0.70f) {
+						int ti = fuzz_rand_int(base->tri_count);
+						v3 a = scale(base->verts[base->tris[ti][0]], hull_scale);
+						v3 b = scale(base->verts[base->tris[ti][1]], hull_scale);
+						v3 c = scale(base->verts[base->tris[ti][2]], hull_scale);
+						v3 fn = norm(cross(sub(b, a), sub(c, a)));
+						float plane_d = dot(fn, a);
+						p = scale(fuzz_rand_dir(), hull_scale * 1.5f);
+						p = sub(p, scale(fn, dot(fn, p) - plane_d));
+					} else if (r < 0.85f) {
+						int vi = fuzz_rand_int(base->vert_count);
+						p = scale(scale(base->verts[vi], hull_scale), fuzz_rand_range(0.0f, 0.9f));
+					} else {
+						p = scale(fuzz_rand_dir(), fuzz_rand_range(0.5f, 2.0f) * hull_scale);
+					}
+					apush(pts, p);
+				}
+
+				Hull* h = quickhull(pts, asize(pts));
+				total_hulls++;
+
+				if (!h) {
+					afree(pts);
+					continue;
+				}
+
+				int e_ok = hull_check_euler(h);
+				int t_ok = hull_check_twins(h);
+				int f_ok = hull_check_face_loops(h);
+				int n_ok = hull_check_normals_outward(h);
+				int c_ok = hull_check_convex(h, h->epsilon);
+				int i_ok = hull_check_contains_inputs(h, pts, asize(pts), h->epsilon + h->maxoutside);
+
+				if (!e_ok || !t_ok || !f_ok || !n_ok || !c_ok || !i_ok) {
+					printf("\n!!! SOAK FAILURE at round %d, %s #%d (seed %u, %d pts, scale=%.3g)\n",
+						round, base->name, iter, round_seed, asize(pts), hull_scale);
+					printf("    V=%d E=%d F=%d [%s%s%s%s%s%s]\n",
+						h->vert_count, h->edge_count, h->face_count,
+						e_ok ? "" : "euler ",
+						t_ok ? "" : "twins ",
+						f_ok ? "" : "loops ",
+						n_ok ? "" : "normals ",
+						c_ok ? "" : "convex ",
+						i_ok ? "" : "inputs ");
+
+					float worst = 0;
+					int worst_vi = -1, worst_fi = -1;
+					for (int _fi = 0; _fi < h->face_count; _fi++)
+						for (int _vi = 0; _vi < h->vert_count; _vi++) {
+							float d = dot(h->planes[_fi].normal, h->verts[_vi]) - h->planes[_fi].offset;
+							if (d > worst) { worst = d; worst_vi = _vi; worst_fi = _fi; }
+						}
+					float worst_input = 0;
+					int worst_pi = -1;
+					for (int _fi = 0; _fi < h->face_count; _fi++)
+						for (int _pi = 0; _pi < asize(pts); _pi++) {
+							float d = dot(h->planes[_fi].normal, pts[_pi]) - h->planes[_fi].offset;
+							if (d > worst_input) { worst_input = d; worst_pi = _pi; }
+						}
+					printf("    worst hull vert: v%d above f%d by %.8f\n", worst_vi, worst_fi, worst);
+					printf("    worst input pt:  p%d outside by %.8f\n", worst_pi, worst_input);
+					printf("    epsilon=%.2e maxoutside=%.2e\n", h->epsilon, h->maxoutside);
+
+					// Log to file.
+					logf = fopen("crash_log.txt", "a");
+					if (logf) {
+						fprintf(logf, "// SOAK FAILURE: round %d, %s #%d, seed %u\n",
+							round, base->name, iter, round_seed);
+						fprintf(logf, "// V=%d E=%d F=%d [%s%s%s%s%s%s]\n",
+							h->vert_count, h->edge_count, h->face_count,
+							e_ok ? "" : "euler ",
+							t_ok ? "" : "twins ",
+							f_ok ? "" : "loops ",
+							n_ok ? "" : "normals ",
+							c_ok ? "" : "convex ",
+							i_ok ? "" : "inputs ");
+						fprintf(logf, "// worst hull vert: v%d above f%d by %.8f\n", worst_vi, worst_fi, worst);
+						fprintf(logf, "// worst input pt:  p%d outside by %.8f\n", worst_pi, worst_input);
+						fprintf(logf, "// epsilon=%.2e maxoutside=%.2e\n", h->epsilon, h->maxoutside);
+						fprintf(logf, "// %d points, scale=%.3g\n", asize(pts), hull_scale);
+						fprintf(logf, "v3 pts[] = {\n");
+						for (int _pi = 0; _pi < asize(pts); _pi++)
+							fprintf(logf, "\t{%.9ef, %.9ef, %.9ef},\n",
+								pts[_pi].x, pts[_pi].y, pts[_pi].z);
+						fprintf(logf, "};\n\n");
+						fclose(logf);
+						logf = NULL;
+					}
+
+					printf("    -> logged to crash_log.txt\n");
+					printf("    -> stopping soak test.\n");
+					fflush(stdout);
+
+					hull_free(h);
+					afree(pts);
+					return;
+				}
+
+				hull_free(h);
+				afree(pts);
+			}
+		}
+
+		round++;
+		if (round % 10 == 0) {
+			printf("  soak: round %d done (%d hulls so far, no failures)\n", round, total_hulls);
+			fflush(stdout);
+		}
+	}
 }

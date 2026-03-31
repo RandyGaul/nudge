@@ -143,8 +143,10 @@ typedef enum MeshType
 {
 	MESH_BOX,
 	MESH_SPHERE,
-	MESH_COUNT,
+	MESH_BUILTIN_COUNT,
 } MeshType;
+
+#define MAX_MESH_TYPES 32
 
 // Per-instance data: model matrix + color + opacity.
 typedef struct RenderInstance
@@ -302,15 +304,172 @@ static void mesh_generate_sphere(Mesh* mesh)
 }
 
 // -----------------------------------------------------------------------------
+// Capsule mesh: two hemispheres + cylinder, baked radius and half_height.
+
+static void mesh_generate_capsule(Mesh* mesh, float radius, float half_height)
+{
+	const int slices = 16;
+	const int rings = 6;
+	const float PI = 3.14159265f;
+
+	MeshVertex* verts = NULL;
+	uint16_t* tris = NULL;
+
+	// South pole
+	apush(verts, ((MeshVertex){ V3(0, -half_height - radius, 0), V3(0, -1, 0) }));
+
+	// Bottom hemisphere rings (south pole toward equator)
+	for (int r = 0; r < rings; r++) {
+		float lat = -PI/2 + PI/2 * (float)(r + 1) / (rings + 1);
+		float y = -half_height + sinf(lat) * radius;
+		float rr = cosf(lat) * radius;
+		for (int s = 0; s < slices; s++) {
+			float lon = 2 * PI * s / slices;
+			float cx = cosf(lon), sz = sinf(lon);
+			v3 pos = V3(rr * cx, y, rr * sz);
+			v3 nrm = V3(cosf(lat)*cx, sinf(lat), cosf(lat)*sz);
+			apush(verts, ((MeshVertex){ pos, nrm }));
+		}
+	}
+
+	// Cylinder bottom ring
+	for (int s = 0; s < slices; s++) {
+		float lon = 2 * PI * s / slices;
+		float cx = cosf(lon), sz = sinf(lon);
+		apush(verts, ((MeshVertex){ V3(radius*cx, -half_height, radius*sz), V3(cx, 0, sz) }));
+	}
+
+	// Cylinder top ring
+	for (int s = 0; s < slices; s++) {
+		float lon = 2 * PI * s / slices;
+		float cx = cosf(lon), sz = sinf(lon);
+		apush(verts, ((MeshVertex){ V3(radius*cx, half_height, radius*sz), V3(cx, 0, sz) }));
+	}
+
+	// Top hemisphere rings (equator toward north pole)
+	for (int r = 0; r < rings; r++) {
+		float lat = PI/2 * (float)(r + 1) / (rings + 1);
+		float y = half_height + sinf(lat) * radius;
+		float rr = cosf(lat) * radius;
+		for (int s = 0; s < slices; s++) {
+			float lon = 2 * PI * s / slices;
+			float cx = cosf(lon), sz = sinf(lon);
+			v3 pos = V3(rr * cx, y, rr * sz);
+			v3 nrm = V3(cosf(lat)*cx, sinf(lat), cosf(lat)*sz);
+			apush(verts, ((MeshVertex){ pos, nrm }));
+		}
+	}
+
+	// North pole
+	apush(verts, ((MeshVertex){ V3(0, half_height + radius, 0), V3(0, 1, 0) }));
+
+	// Index layout
+	int south = 0;
+	int bh = 1;                          // bottom hemisphere start
+	int cb = bh + rings * slices;        // cylinder bottom ring
+	int ct = cb + slices;                // cylinder top ring
+	int th = ct + slices;                // top hemisphere start
+	int north = th + rings * slices;     // north pole
+
+	// Helper macro for ring-strip triangles between two rings
+	#define RING_STRIP(r0, r1) \
+		for (int s = 0; s < slices; s++) { \
+			int sn = (s + 1) % slices; \
+			apush(tris, (uint16_t)(r0 + s)); \
+			apush(tris, (uint16_t)(r0 + sn)); \
+			apush(tris, (uint16_t)(r1 + sn)); \
+			apush(tris, (uint16_t)(r0 + s)); \
+			apush(tris, (uint16_t)(r1 + sn)); \
+			apush(tris, (uint16_t)(r1 + s)); \
+		}
+
+	// South pole fan
+	for (int s = 0; s < slices; s++) {
+		int sn = (s + 1) % slices;
+		apush(tris, (uint16_t)south);
+		apush(tris, (uint16_t)(bh + sn));
+		apush(tris, (uint16_t)(bh + s));
+	}
+
+	// Bottom hemisphere ring strips
+	for (int r = 0; r < rings - 1; r++)
+		RING_STRIP(bh + r * slices, bh + (r + 1) * slices)
+
+	// Bottom hemisphere to cylinder bottom
+	RING_STRIP(bh + (rings - 1) * slices, cb)
+
+	// Cylinder
+	RING_STRIP(cb, ct)
+
+	// Cylinder top to top hemisphere
+	RING_STRIP(ct, th)
+
+	// Top hemisphere ring strips
+	for (int r = 0; r < rings - 1; r++)
+		RING_STRIP(th + r * slices, th + (r + 1) * slices)
+
+	// North pole fan
+	for (int s = 0; s < slices; s++) {
+		int sn = (s + 1) % slices;
+		int lr = th + (rings - 1) * slices;
+		apush(tris, (uint16_t)(lr + s));
+		apush(tris, (uint16_t)(lr + sn));
+		apush(tris, (uint16_t)north);
+	}
+
+	#undef RING_STRIP
+
+	mesh_upload(mesh, verts, asize(verts), tris, asize(tris));
+	afree(verts);
+	afree(tris);
+}
+
+// -----------------------------------------------------------------------------
+// Hull mesh: triangulate faces as fans, bake scale into vertices.
+
+static void mesh_generate_hull(Mesh* mesh, const Hull* hull, v3 sc)
+{
+	MeshVertex* verts = NULL;
+	uint16_t* tris = NULL;
+
+	for (int f = 0; f < hull->face_count; f++) {
+		v3 n = hull->planes[f].normal;
+		v3 sn = v3_norm(V3(n.x / sc.x, n.y / sc.y, n.z / sc.z));
+
+		int fan_start = asize(verts);
+		int fan_count = 0;
+		int start = hull->faces[f].edge;
+		int e = start;
+		do {
+			v3 v = hull->verts[hull->edges[e].origin];
+			apush(verts, ((MeshVertex){ V3(v.x*sc.x, v.y*sc.y, v.z*sc.z), sn }));
+			fan_count++;
+			e = hull->edges[e].next;
+		} while (e != start);
+
+		for (int i = 1; i < fan_count - 1; i++) {
+			apush(tris, (uint16_t)fan_start);
+			apush(tris, (uint16_t)(fan_start + i));
+			apush(tris, (uint16_t)(fan_start + i + 1));
+		}
+	}
+
+	mesh_upload(mesh, verts, asize(verts), tris, asize(tris));
+	afree(verts);
+	afree(tris);
+}
+
+// -----------------------------------------------------------------------------
 // Render state.
 
 static GLuint r_program;
 static GLint r_loc_vp;
 static GLint r_loc_light_dir;
 static GLint r_loc_ambient;
-static Mesh r_meshes[MESH_COUNT];
-static int r_mesh_ready[MESH_COUNT];
-static RenderInstance* r_instances[MESH_COUNT]; // dynamic arrays, one per mesh type
+static Mesh r_meshes[MAX_MESH_TYPES];
+static int r_mesh_ready[MAX_MESH_TYPES];
+static RenderInstance* r_instances[MAX_MESH_TYPES]; // dynamic arrays, one per mesh type
+static int r_mesh_count = MESH_BUILTIN_COUNT;
 static mat4 r_vp;
 static v3 r_light_dir;
 static v3 r_ambient;
@@ -326,6 +485,27 @@ static Mesh* get_mesh(MeshType type)
 		r_mesh_ready[type] = 1;
 	}
 	return &r_meshes[type];
+}
+
+// -----------------------------------------------------------------------------
+// Custom mesh registration.
+
+int render_create_capsule_mesh(float radius, float half_height)
+{
+	assert(r_mesh_count < MAX_MESH_TYPES);
+	int idx = r_mesh_count++;
+	mesh_generate_capsule(&r_meshes[idx], radius, half_height);
+	r_mesh_ready[idx] = 1;
+	return idx;
+}
+
+int render_create_hull_mesh(const Hull* hull, v3 sc)
+{
+	assert(r_mesh_count < MAX_MESH_TYPES);
+	int idx = r_mesh_count++;
+	mesh_generate_hull(&r_meshes[idx], hull, sc);
+	r_mesh_ready[idx] = 1;
+	return idx;
 }
 
 void render_init()
@@ -357,10 +537,10 @@ void render_set_ambient(v3 color)
 void render_begin(mat4 vp)
 {
 	r_vp = vp;
-	for (int i = 0; i < MESH_COUNT; i++) aclear(r_instances[i]);
+	for (int i = 0; i < r_mesh_count; i++) aclear(r_instances[i]);
 }
 
-void render_push(MeshType type, mat4 model, v3 color, float opacity)
+void render_push(int type, mat4 model, v3 color, float opacity)
 {
 	RenderInstance inst;
 	inst.model = model;
@@ -378,7 +558,7 @@ void render_end()
 	gl_Uniform3f(r_loc_light_dir, r_light_dir.x, r_light_dir.y, r_light_dir.z);
 	gl_Uniform3f(r_loc_ambient, r_ambient.x, r_ambient.y, r_ambient.z);
 
-	for (int i = 0; i < MESH_COUNT; i++) {
+	for (int i = 0; i < r_mesh_count; i++) {
 		int count = asize(r_instances[i]);
 		if (count == 0) continue;
 

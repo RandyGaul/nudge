@@ -7,10 +7,8 @@
 // -----------------------------------------------------------------------------
 // Opaque handles.
 
-typedef struct World
-{ uint64_t id; } World;
-typedef struct Body
-{ uint64_t id; } Body;
+typedef struct World { uint64_t id; } World;
+typedef struct Body { uint64_t id; } Body;
 
 // -----------------------------------------------------------------------------
 // Shape types -- usable standalone for direct collision queries.
@@ -38,10 +36,10 @@ typedef struct Box
 // Edges stored in twin pairs: edge 2k and twin 2k+1.
 typedef struct HalfEdge
 {
-	uint8_t twin;
-	uint8_t next;
-	uint8_t origin;
-	uint8_t face;
+	uint16_t twin;
+	uint16_t next;
+	uint16_t origin;
+	uint16_t face;
 } HalfEdge;
 
 typedef struct HullPlane
@@ -52,7 +50,7 @@ typedef struct HullPlane
 
 typedef struct HullFace
 {
-	uint8_t edge;    // first half-edge on this face
+	uint16_t edge;    // first half-edge on this face
 } HullFace;
 
 // Convex hull -- half-edge mesh with precomputed face planes.

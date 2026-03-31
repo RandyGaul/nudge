@@ -47,7 +47,7 @@ static const HalfEdge s_box_edges[24] = {
 	{ .twin =  0, .next = 16, .origin = 3, .face = 2 },  // e1:  3->0
 	// pair 1: 3->2 (face 0) / 2->3 (face 5)
 	{ .twin =  3, .next =  4, .origin = 3, .face = 0 },  // e2:  3->2
-	{ .twin =  2, .next = 20, .origin = 2, .face = 5 },  // e3:  2->3
+	{ .twin =  2, .next = 22, .origin = 2, .face = 5 },  // e3:  2->3
 	// pair 2: 2->1 (face 0) / 1->2 (face 3)
 	{ .twin =  5, .next =  6, .origin = 2, .face = 0 },  // e4:  2->1
 	{ .twin =  4, .next = 20, .origin = 1, .face = 3 },  // e5:  1->2
@@ -62,7 +62,7 @@ static const HalfEdge s_box_edges[24] = {
 	{ .twin = 10, .next = 19, .origin = 6, .face = 3 },  // e11: 6->5
 	// pair 6: 6->7 (face 1) / 7->6 (face 5)
 	{ .twin = 13, .next = 14, .origin = 6, .face = 1 },  // e12: 6->7
-	{ .twin = 12, .next = 22, .origin = 7, .face = 5 },  // e13: 7->6
+	{ .twin = 12, .next = 21, .origin = 7, .face = 5 },  // e13: 7->6
 	// pair 7: 7->4 (face 1) / 4->7 (face 2)
 	{ .twin = 15, .next =  8, .origin = 7, .face = 1 },  // e14: 7->4
 	{ .twin = 14, .next = 23, .origin = 4, .face = 2 },  // e15: 4->7
@@ -397,7 +397,7 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 	for (int i = 0; i < cp; i++) {
 		manifold->contacts[i] = (Contact){
 			.point = points[i],
-			.normal = world_n,
+			.normal = neg(world_n), // from A (capsule) toward B (hull)
 			.penetration = depths[i],
 		};
 	}
@@ -579,7 +579,149 @@ static EdgeQuery sat_query_edges(
 }
 
 // -----------------------------------------------------------------------------
-// Full SAT hull vs hull collision test.
+// Contact manifold helpers for hull-hull clipping.
+
+#define MAX_CLIP_VERTS 64
+
+// Collect face vertices in world space by walking the half-edge loop.
+static int hull_face_verts_world(
+	const Hull* hull, int face_idx, v3 pos, quat rot, v3 sc, v3* out)
+{
+	int start = hull->faces[face_idx].edge;
+	int e = start;
+	int count = 0;
+	do {
+		out[count++] = add(pos, rotate(rot, hull_vert_scaled(hull, hull->edges[e].origin, sc)));
+		e = hull->edges[e].next;
+	} while (e != start && count < MAX_CLIP_VERTS);
+	return count;
+}
+
+// Find face on hull most anti-parallel to a world-space normal.
+static int find_incident_face(
+	const Hull* hull, v3 pos, quat rot, v3 sc, v3 ref_normal)
+{
+	int best = 0;
+	float best_dot = 1e18f;
+	for (int i = 0; i < hull->face_count; i++) {
+		HullPlane pw = plane_transform(hull->planes[i], pos, rot, sc);
+		float d = dot(pw.normal, ref_normal);
+		if (d < best_dot) { best_dot = d; best = i; }
+	}
+	return best;
+}
+
+// Sutherland-Hodgman: clip polygon against a single plane.
+// Keeps points on the negative side: dot(plane_n, p) - plane_d <= 0.
+static int clip_to_plane(
+	v3* in, int in_count, v3 plane_n, float plane_d, v3* out)
+{
+	if (in_count == 0) return 0;
+	int out_count = 0;
+	v3 prev = in[in_count - 1];
+	float d_prev = dot(plane_n, prev) - plane_d;
+
+	for (int i = 0; i < in_count; i++) {
+		v3 cur = in[i];
+		float d_cur = dot(plane_n, cur) - plane_d;
+
+		if (d_prev <= 0.0f) {
+			out[out_count++] = prev;
+			if (d_cur > 0.0f) {
+				float t = d_prev / (d_prev - d_cur);
+				out[out_count++] = add(prev, scale(sub(cur, prev), t));
+			}
+		} else if (d_cur <= 0.0f) {
+			float t = d_prev / (d_prev - d_cur);
+			out[out_count++] = add(prev, scale(sub(cur, prev), t));
+		}
+
+		prev = cur;
+		d_prev = d_cur;
+	}
+	return out_count;
+}
+
+// Reduce contact manifold to MAX_CONTACTS points.
+// 1) Two farthest points.
+// 2) Farthest from that segment.
+// 3) Maximal barycentric contributor (most outside triangle).
+// 4) Deepest remaining point.
+static int reduce_contacts(Contact* contacts, int count)
+{
+	if (count <= MAX_CONTACTS) return count;
+
+	int sel[MAX_CONTACTS];
+	int used[MAX_CLIP_VERTS];
+	memset(used, 0, count * sizeof(int));
+
+	// Step 1: two farthest points
+	float best_d2 = -1.0f;
+	int i0 = 0, i1 = 1;
+	for (int i = 0; i < count; i++)
+		for (int j = i + 1; j < count; j++) {
+			float d2 = len2(sub(contacts[j].point, contacts[i].point));
+			if (d2 > best_d2) { best_d2 = d2; i0 = i; i1 = j; }
+		}
+	sel[0] = i0; sel[1] = i1;
+	used[i0] = used[i1] = 1;
+
+	// Step 2: farthest from line through (i0, i1)
+	v3 seg = sub(contacts[i1].point, contacts[i0].point);
+	float seg_l2 = len2(seg);
+	float best = -1.0f;
+	int i2 = -1;
+	for (int i = 0; i < count; i++) {
+		if (used[i]) continue;
+		v3 v = sub(contacts[i].point, contacts[i0].point);
+		float proj = seg_l2 > 1e-12f ? dot(v, seg) / seg_l2 : 0.0f;
+		float d2 = len2(sub(v, scale(seg, proj)));
+		if (d2 > best) { best = d2; i2 = i; }
+	}
+	sel[2] = i2;
+	used[i2] = 1;
+
+	// Step 3: maximal barycentric contributor (most outside triangle)
+	v3 A = contacts[sel[0]].point;
+	v3 B = contacts[sel[1]].point;
+	v3 C = contacts[sel[2]].point;
+	v3 N = cross(sub(B, A), sub(C, A));
+	float best_min = 1e18f;
+	int i3 = -1;
+	for (int i = 0; i < count; i++) {
+		if (used[i]) continue;
+		v3 P = contacts[i].point;
+		float u = dot(cross(sub(B, P), sub(C, P)), N);
+		float vc = dot(cross(sub(C, P), sub(A, P)), N);
+		float w = dot(cross(sub(A, P), sub(B, P)), N);
+		float m = u < vc ? u : vc;
+		m = m < w ? m : w;
+		if (m < best_min) { best_min = m; i3 = i; }
+	}
+	sel[3] = i3;
+	used[i3] = 1;
+
+	// Step 4: deepest remaining point
+	float best_depth = -1e18f;
+	int i4 = -1;
+	for (int i = 0; i < count; i++) {
+		if (used[i]) continue;
+		if (contacts[i].penetration > best_depth) {
+			best_depth = contacts[i].penetration;
+			i4 = i;
+		}
+	}
+	int result = 4;
+	if (i4 >= 0) { sel[4] = i4; result = 5; }
+
+	Contact tmp[MAX_CONTACTS];
+	for (int i = 0; i < result; i++) tmp[i] = contacts[sel[i]];
+	for (int i = 0; i < result; i++) contacts[i] = tmp[i];
+	return result;
+}
+
+// -----------------------------------------------------------------------------
+// Full SAT hull vs hull with Sutherland-Hodgman face clipping.
 
 int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 {
@@ -587,65 +729,113 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 	v3 pos_a = a.center; quat rot_a = a.rotation; v3 scale_a = a.scale;
 	const Hull* hull_b = b.hull;
 	v3 pos_b = b.center; quat rot_b = b.rotation; v3 scale_b = b.scale;
-	// Face queries
+
 	FaceQuery face_a = sat_query_faces(hull_a, pos_a, rot_a, scale_a, hull_b, pos_b, rot_b, scale_b);
 	if (face_a.separation > 0.0f) return 0;
 
 	FaceQuery face_b = sat_query_faces(hull_b, pos_b, rot_b, scale_b, hull_a, pos_a, rot_a, scale_a);
 	if (face_b.separation > 0.0f) return 0;
 
-	// Edge queries
 	EdgeQuery edge_q = sat_query_edges(hull_a, pos_a, rot_a, scale_a, hull_b, pos_b, rot_b, scale_b);
 	if (edge_q.separation > 0.0f) return 0;
 
-	// Find minimum penetration axis
-	// separation values are negative (penetrating), largest = least penetration
-	float best_sep = face_a.separation;
-	int best_type = 0; // 0=faceA, 1=faceB, 2=edge
-
-	if (face_b.separation > best_sep) { best_sep = face_b.separation; best_type = 1; }
-	if (edge_q.separation > best_sep) { best_sep = edge_q.separation; best_type = 2; }
-
 	if (!manifold) return 1;
 
-	// Build contact (placeholder: single contact point)
-	v3 normal;
-	if (best_type == 0) {
-		HullPlane pw = plane_transform(hull_a->planes[face_a.index], pos_a, rot_a, scale_a);
-		normal = pw.normal;
-	} else if (best_type == 1) {
-		HullPlane pw = plane_transform(hull_b->planes[face_b.index], pos_b, rot_b, scale_b);
-		normal = neg(pw.normal); // flip: normal from A toward B
-	} else {
-		// Edge-edge: recompute cross product normal
+	// Bias toward face contacts over edge contacts
+	const float k_tol = 0.05f;
+	float max_face_sep = face_a.separation > face_b.separation
+		? face_a.separation : face_b.separation;
+
+	if (edge_q.separation > max_face_sep + k_tol) {
+		// --- Edge-edge contact ---
 		const HalfEdge* e1 = &hull_a->edges[edge_q.index1];
 		const HalfEdge* t1 = &hull_a->edges[edge_q.index1 + 1];
 		v3 p1 = add(pos_a, rotate(rot_a, hull_vert_scaled(hull_a, e1->origin, scale_a)));
 		v3 q1 = add(pos_a, rotate(rot_a, hull_vert_scaled(hull_a, t1->origin, scale_a)));
+
 		const HalfEdge* e2 = &hull_b->edges[edge_q.index2];
 		const HalfEdge* t2 = &hull_b->edges[edge_q.index2 + 1];
 		v3 p2 = add(pos_b, rotate(rot_b, hull_vert_scaled(hull_b, e2->origin, scale_b)));
 		v3 q2 = add(pos_b, rotate(rot_b, hull_vert_scaled(hull_b, t2->origin, scale_b)));
-		normal = norm(cross(sub(q1, p1), sub(q2, p2)));
-		// Orient from A to B
+
+		v3 ca, cb;
+		segments_closest_points(p1, q1, p2, q2, &ca, &cb);
+
+		v3 normal = norm(cross(sub(q1, p1), sub(q2, p2)));
 		if (dot(normal, sub(pos_b, pos_a)) < 0.0f) normal = neg(normal);
+
+		manifold->count = 1;
+		manifold->contacts[0] = (Contact){
+			.point = scale(add(ca, cb), 0.5f),
+			.normal = normal,
+			.penetration = -edge_q.separation,
+		};
+		return 1;
 	}
 
-	// Approximate contact point using support
-	v3 sup_a = add(pos_a, rotate(rot_a,
-		hull_vert_scaled(hull_a, 0, scale_a))); // TODO: proper support
-	// Use support of A along normal
-	v3 sup_dir_a = rotate(inv(rot_a), normal);
-	v3 sa = hull_support(hull_a, sup_dir_a);
-	v3 sa_scaled = { sa.x * scale_a.x, sa.y * scale_a.y, sa.z * scale_a.z };
-	sup_a = add(pos_a, rotate(rot_a, sa_scaled));
+	// --- Face contact with Sutherland-Hodgman clipping ---
+	const Hull* ref_hull; const Hull* inc_hull;
+	v3 ref_pos, inc_pos, ref_sc, inc_sc;
+	quat ref_rot, inc_rot;
+	int ref_face, flip;
 
-	manifold->count = 1;
-	manifold->contacts[0] = (Contact){
-		.point = sup_a,
-		.normal = normal,
-		.penetration = -best_sep,
-	};
+	if (face_a.separation > face_b.separation + k_tol) {
+		ref_hull = hull_a; ref_pos = pos_a; ref_rot = rot_a; ref_sc = scale_a;
+		inc_hull = hull_b; inc_pos = pos_b; inc_rot = rot_b; inc_sc = scale_b;
+		ref_face = face_a.index; flip = 0;
+	} else {
+		ref_hull = hull_b; ref_pos = pos_b; ref_rot = rot_b; ref_sc = scale_b;
+		inc_hull = hull_a; inc_pos = pos_a; inc_rot = rot_a; inc_sc = scale_a;
+		ref_face = face_b.index; flip = 1;
+	}
+
+	HullPlane ref_plane = plane_transform(ref_hull->planes[ref_face], ref_pos, ref_rot, ref_sc);
+
+	// Collect incident face vertices
+	int inc_face = find_incident_face(inc_hull, inc_pos, inc_rot, inc_sc, ref_plane.normal);
+	v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
+	int clip_count = hull_face_verts_world(inc_hull, inc_face, inc_pos, inc_rot, inc_sc, buf1);
+
+	// Clip against each side plane of the reference face
+	v3* in_buf = buf1;
+	v3* out_buf = buf2;
+	int start_e = ref_hull->faces[ref_face].edge;
+	int ei = start_e;
+	do {
+		const HalfEdge* edge = &ref_hull->edges[ei];
+		v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, edge->origin, ref_sc)));
+		v3 head = add(ref_pos, rotate(ref_rot,
+			hull_vert_scaled(ref_hull, ref_hull->edges[edge->twin].origin, ref_sc)));
+		v3 side_n = norm(cross(sub(head, tail), ref_plane.normal));
+		float side_d = dot(side_n, tail);
+
+		clip_count = clip_to_plane(in_buf, clip_count, side_n, side_d, out_buf);
+		v3* swap = in_buf; in_buf = out_buf; out_buf = swap;
+
+		ei = edge->next;
+	} while (ei != start_e);
+
+	// Keep points below reference face, generate contacts
+	v3 contact_n = flip ? neg(ref_plane.normal) : ref_plane.normal;
+	Contact tmp_contacts[MAX_CLIP_VERTS];
+	int cp = 0;
+	for (int i = 0; i < clip_count; i++) {
+		float depth = ref_plane.offset - dot(ref_plane.normal, in_buf[i]);
+		if (depth >= 0.0f) {
+			tmp_contacts[cp++] = (Contact){
+				.point = in_buf[i],
+				.normal = contact_n,
+				.penetration = depth,
+			};
+		}
+	}
+
+	if (cp == 0) return 0;
+
+	cp = reduce_contacts(tmp_contacts, cp);
+	manifold->count = cp;
+	for (int i = 0; i < cp; i++)
+		manifold->contacts[i] = tmp_contacts[i];
 	return 1;
 }
 
