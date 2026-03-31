@@ -213,11 +213,12 @@ void init()
 		.box.half_extents = V3(10, 1, 10),
 	});
 
-	// Dynamic sphere
+	// Dynamic sphere (bouncy)
 	g_sphere = create_body(g_world, (BodyParams){
 		.position = V3(-3, 5, 0),
 		.rotation = quat_identity(),
 		.mass = 1.0f,
+		.restitution = 0.5f,
 	});
 	body_add_shape(g_world, g_sphere, (ShapeParams){
 		.type = SHAPE_SPHERE,

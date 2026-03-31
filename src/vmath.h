@@ -168,6 +168,90 @@ static inline mat4 mat4_trs(v3 pos, quat rot, v3 s)
 }
 
 // -----------------------------------------------------------------------------
+// v3 component-wise operations.
+
+static inline v3 v3_mul(v3 a, v3 b) { return (v3){ a.x*b.x, a.y*b.y, a.z*b.z }; }
+static inline v3 v3_rcp(v3 a) {
+	return (v3){
+		a.x != 0.0f ? 1.0f / a.x : 0.0f,
+		a.y != 0.0f ? 1.0f / a.y : 0.0f,
+		a.z != 0.0f ? 1.0f / a.z : 0.0f };
+}
+
+// -----------------------------------------------------------------------------
+// m3x3: row-major 3x3 matrix.
+
+typedef struct m3x3
+{ float m[9]; } m3x3;
+
+static inline m3x3 diag(v3 d)
+{
+	return (m3x3){{ d.x, 0, 0,  0, d.y, 0,  0, 0, d.z }};
+}
+
+static inline m3x3 skew(v3 v)
+{
+	return (m3x3){{ 0, -v.z, v.y,  v.z, 0, -v.x,  -v.y, v.x, 0 }};
+}
+
+static inline m3x3 m3x3_add(m3x3 a, m3x3 b)
+{
+	m3x3 r;
+	for (int i = 0; i < 9; i++) r.m[i] = a.m[i] + b.m[i];
+	return r;
+}
+
+static inline m3x3 m3x3_sub(m3x3 a, m3x3 b)
+{
+	m3x3 r;
+	for (int i = 0; i < 9; i++) r.m[i] = a.m[i] - b.m[i];
+	return r;
+}
+
+static inline m3x3 m3x3_scale(m3x3 a, float s)
+{
+	m3x3 r;
+	for (int i = 0; i < 9; i++) r.m[i] = a.m[i] * s;
+	return r;
+}
+
+// Row-major: m3x3_mul_v3 = M * v
+static inline v3 m3x3_mul_v3(m3x3 a, v3 v)
+{
+	return (v3){
+		a.m[0]*v.x + a.m[1]*v.y + a.m[2]*v.z,
+		a.m[3]*v.x + a.m[4]*v.y + a.m[5]*v.z,
+		a.m[6]*v.x + a.m[7]*v.y + a.m[8]*v.z };
+}
+
+static inline m3x3 m3x3_mul(m3x3 a, m3x3 b)
+{
+	m3x3 r;
+	for (int i = 0; i < 3; i++)
+		for (int j = 0; j < 3; j++) {
+			r.m[i*3+j] = 0;
+			for (int k = 0; k < 3; k++)
+				r.m[i*3+j] += a.m[i*3+k] * b.m[k*3+j];
+		}
+	return r;
+}
+
+// Solve A*x = b via Cramer's rule. Returns zero vector if singular.
+static inline v3 solve(m3x3 a, v3 b)
+{
+	float* m = a.m;
+	float det = m[0]*(m[4]*m[8] - m[5]*m[7])
+	          - m[1]*(m[3]*m[8] - m[5]*m[6])
+	          + m[2]*(m[3]*m[7] - m[4]*m[6]);
+	if (fabsf(det) < 1e-12f) return V3(0,0,0);
+	float d = 1.0f / det;
+	return (v3){
+		((m[4]*m[8]-m[5]*m[7])*b.x - (m[1]*m[8]-m[2]*m[7])*b.y + (m[1]*m[5]-m[2]*m[4])*b.z) * d,
+		(-(m[3]*m[8]-m[5]*m[6])*b.x + (m[0]*m[8]-m[2]*m[6])*b.y - (m[0]*m[5]-m[2]*m[3])*b.z) * d,
+		((m[3]*m[7]-m[4]*m[6])*b.x - (m[0]*m[7]-m[1]*m[6])*b.y + (m[0]*m[4]-m[1]*m[3])*b.z) * d };
+}
+
+// -----------------------------------------------------------------------------
 // _Generic polymorphic math API.
 //
 // add(a, b)     -- v3+v3
@@ -182,12 +266,14 @@ static inline mat4 mat4_trs(v3 pos, quat rot, v3 s)
 // len2(a)       -- squared length v3
 // inv(a)        -- inverse quat or Transform
 
-#define add(a, b)    _Generic((a), v3: v3_add)(a, b)
-#define sub(a, b)    _Generic((a), v3: v3_sub)(a, b)
-#define scale(a, s)  _Generic((a), v3: v3_scale)(a, s)
+#define add(a, b)    _Generic((a), v3: v3_add, m3x3: m3x3_add)(a, b)
+#define sub(a, b)    _Generic((a), v3: v3_sub, m3x3: m3x3_sub)(a, b)
+#define scale(a, s)  _Generic((a), v3: v3_scale, m3x3: m3x3_scale)(a, s)
 #define dot(a, b)    _Generic((a), v3: v3_dot)(a, b)
 #define cross(a, b)  _Generic((a), v3: v3_cross)(a, b)
 #define neg(a)       _Generic((a), v3: v3_neg)(a)
+#define hmul(a, b)   _Generic((a), v3: v3_mul)(a, b)
+#define rcp(a)       _Generic((a), v3: v3_rcp)(a)
 #define norm(a)      _Generic((a), v3: v3_norm)(a)
 #define len(a)       _Generic((a), v3: v3_len)(a)
 #define len2(a)      _Generic((a), v3: v3_len2)(a)
@@ -196,7 +282,7 @@ static inline mat4 mat4_trs(v3 pos, quat rot, v3 s)
 
 // mul(a, b): same-type multiply (mat4*mat4, Transform*Transform, quat*quat).
 // For mixed-type transforms use: rotate(quat, v3), xform(Transform, v3).
-#define mul(a, b)    _Generic((a), mat4: mat4_mul, Transform: xform_mul, quat: quat_mul)(a, b)
+#define mul(a, b)    _Generic((a), mat4: mat4_mul, Transform: xform_mul, quat: quat_mul, m3x3: m3x3_mul)(a, b)
 #define rotate(q, v) quat_rotate(q, v)
 #define xform(t, p)  xform_apply(t, p)
 

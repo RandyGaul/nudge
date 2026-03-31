@@ -152,7 +152,9 @@ typedef struct BodyParams
 {
 	v3 position;
 	quat rotation;
-	float mass;       // 0 = static/kinematic
+	float mass;         // 0 = static/kinematic
+	float friction;     // Coulomb mu (default 0.5)
+	float restitution;  // bounce coefficient (default 0.0)
 } BodyParams;
 
 typedef struct WorldParams
