@@ -107,6 +107,7 @@ static const Hull s_unit_box_hull = {
 	.vert_count = 8,
 	.edge_count = 24,
 	.face_count = 6,
+	.epsilon = 9.0f * FLT_EPSILON,
 };
 
 // -----------------------------------------------------------------------------

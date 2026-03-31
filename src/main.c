@@ -10,7 +10,6 @@
 
 #include "nudge.h"
 #include "nudge.c"
-#include "tests.c"
 #include "render.c"
 
 // -----------------------------------------------------------------------------
@@ -108,7 +107,6 @@ void init()
 		.w = 1280,
 		.h = 720,
 	};
-	run_tests();
 	start_app(settings);
 	render_init();
 

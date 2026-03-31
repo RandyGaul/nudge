@@ -19,6 +19,25 @@
 #define QH_DELETED    3
 #define QH_EDGE_DELETED 0x01
 
+// Debug state: set qh_debug=1 to enable runtime logging.
+static int        qh_debug;
+static const v3*  qh_dbg_points;
+static int        qh_dbg_count;
+
+#define QH_DEBUG(...) do { if (qh_debug) { __VA_ARGS__; } } while(0)
+
+#define QH_ASSERT(cond, msg) do { \
+	if (!(cond)) { \
+		fprintf(stderr, "quickhull: %s (%s:%d)\n", msg, __FILE__, __LINE__); \
+		fprintf(stderr, "  input: %d points\n  v3 pts[] = {\n", qh_dbg_count); \
+		for (int _i = 0; _i < qh_dbg_count; _i++) \
+			fprintf(stderr, "    {%.9ef, %.9ef, %.9ef},\n", \
+				qh_dbg_points[_i].x, qh_dbg_points[_i].y, qh_dbg_points[_i].z); \
+		fprintf(stderr, "  };\n"); \
+		exit(-1); \
+	} \
+} while(0)
+
 // -----------------------------------------------------------------------------
 // Internal types.
 
@@ -92,6 +111,9 @@ static int qh_alloc_face(QH_State* s)
 	apush(s->faces, f);
 	return asize(s->faces) - 1;
 }
+
+// Forward declaration (used by qh_conflict_add before full definition).
+static float qh_plane_dist(HullPlane p, v3 pt);
 
 // -----------------------------------------------------------------------------
 // Conflict list (circular doubly-linked via vertex next/prev).
@@ -167,7 +189,7 @@ static void qh_recompute_face(QH_State* s, int fi)
 		normal.z += (cur.x - nxt.x) * (cur.y + nxt.y);
 		centroid = add(centroid, cur);
 		count++;
-		if (count > 1000) { assert(0 && "infinite face loop in qh_recompute_face"); break; }
+		if (count > 1000) { QH_ASSERT(0, "infinite face loop in qh_recompute_face"); }
 		e = s->edges[e].next;
 	} while (e != f->edge);
 
@@ -436,14 +458,20 @@ static int qh_connect_half_edges(QH_State* s, int ep, int en)
 		int fin_face = opp_n;
 		int discarded = QH_INVALID;
 		int new_twin;
+		QH_DEBUG(fprintf(stderr, "[qh] connect_degenerate: ep=%d en=%d fin=%d nverts=%d this=%d\n",
+			ep, en, fin_face, qh_face_vert_count(s, fin_face), this_face));
 
 		if (ep == s->faces[this_face].edge)
 			s->faces[this_face].edge = en;
 
 		if (qh_face_vert_count(s, fin_face) == 3) {
 			// Triangle collapse: delete the fin face entirely.
+			// Find the third edge (not twin of ep or en) whose twin survives.
 			int ht = s->edges[en].twin;
-			new_twin = s->edges[s->edges[ht].prev].twin;
+			int hp = s->edges[ep].twin;
+			int e3 = s->edges[ht].next;
+			if (e3 == hp) e3 = s->edges[ht].prev;
+			new_twin = s->edges[e3].twin;
 			s->faces[fin_face].mark = QH_DELETED;
 			discarded = fin_face;
 		} else {
@@ -463,6 +491,8 @@ static int qh_connect_half_edges(QH_State* s, int ep, int en)
 		// Remove ep from this face's loop; en absorbs ep's origin.
 		s->edges[en].origin = s->edges[ep].origin;
 		int pp = s->edges[ep].prev;
+		QH_DEBUG(fprintf(stderr, "[qh]   splice out ep=%d: pp=%d->en=%d (en.next=%d)\n",
+			ep, pp, en, s->edges[en].next));
 		s->edges[en].prev = pp;
 		s->edges[pp].next = en;
 
@@ -486,6 +516,8 @@ static int qh_merge_adjacent_face(QH_State* s, int hedge_adj, int discarded[], i
 	int tfi = s->edges[hedge_adj].face;
 	int nd = 0;
 	discarded[nd++] = ofi;
+	QH_DEBUG(fprintf(stderr, "[qh] merge: face %d (mark=%d) absorbed into %d (mark=%d) via edge %d\n",
+		ofi, s->faces[ofi].mark, tfi, s->faces[tfi].mark, hedge_adj));
 	s->faces[ofi].mark = QH_DELETED;
 
 	int ho = s->edges[hedge_adj].twin;
@@ -510,6 +542,55 @@ static int qh_merge_adjacent_face(QH_State* s, int hedge_adj, int discarded[], i
 	if (s->faces[ofi].maxoutside > s->faces[tfi].maxoutside)
 		s->faces[tfi].maxoutside = s->faces[ofi].maxoutside;
 
+	// Reassign all edges on the surviving face's loop to tfi, and remove
+	// self-edges (both half-edges on the same face) left by degenerate merges.
+	{
+		int e = s->faces[tfi].edge, start = e, n = 0;
+		do {
+			n++;
+			QH_ASSERT(n < 1000, "face loop corrupted after merge");
+			s->edges[e].face = tfi;
+			e = s->edges[e].next;
+		} while (e != start);
+
+		// Remove stale boundary edges: edges whose twins are on deleted faces
+		// are remnants of the shared boundary that cascade splicing didn't clean.
+		{
+			int cleaned = 1;
+			while (cleaned) {
+				cleaned = 0;
+				e = s->faces[tfi].edge;
+				start = e;
+				do {
+					int tw = s->edges[e].twin;
+					int twf = s->edges[tw].face;
+					if (s->faces[twf].mark == QH_DELETED || twf == tfi) {
+						// Stale or self-edge: splice out.
+						int p = s->edges[e].prev;
+						int nx = s->edges[e].next;
+						s->edges[p].next = nx;
+						s->edges[nx].prev = p;
+						s->edges[nx].origin = s->edges[e].origin;
+						if (s->faces[tfi].edge == e)
+							s->faces[tfi].edge = nx;
+						cleaned = 1;
+						break;
+					}
+					e = s->edges[e].next;
+				} while (e != start);
+			}
+		}
+
+		QH_DEBUG({
+			e = s->faces[tfi].edge; start = e; n = 0;
+			do { n++; e = s->edges[e].next; } while (e != start);
+			fprintf(stderr, "[qh]   face %d loop (%d edges):", tfi, n);
+			e = start;
+			do { fprintf(stderr, " %d", e); e = s->edges[e].next; } while (e != start);
+			fprintf(stderr, "\n");
+		});
+	}
+
 	qh_recompute_face(s, tfi);
 	return nd;
 }
@@ -522,14 +603,13 @@ static int qh_merge_adjacent_face(QH_State* s, int hedge_adj, int discarded[], i
 
 static int qh_do_adjacent_merge(QH_State* s, int fi, int type, int* unclaimed)
 {
+	if (s->faces[fi].mark != QH_VISIBLE) return 0;
 	int hedge = s->faces[fi].edge;
 	int convex = 1;
 	do {
 		int ofi = qh_opp_face(s, hedge);
-		if (s->faces[ofi].mark == QH_DELETED) { hedge = s->edges[hedge].next; continue; }
+		if (ofi == fi || s->faces[ofi].mark == QH_DELETED) { hedge = s->edges[hedge].next; continue; }
 
-		// Use plain epsilon for merge threshold. The adaptive maxoutside approach
-		// was too aggressive and caused non-coplanar faces to merge.
 		float tol = s->epsilon;
 
 		int merge = 0;
@@ -546,6 +626,8 @@ static int qh_do_adjacent_merge(QH_State* s, int fi, int type, int* unclaimed)
 			}
 		}
 		if (merge) {
+			QH_DEBUG(fprintf(stderr, "[qh] do_adjacent_merge: fi=%d hedge=%d ofi=%d hedge.face=%d\n",
+				fi, hedge, ofi, s->edges[hedge].face));
 			int disc[3];
 			int nd = qh_merge_adjacent_face(s, hedge, disc, unclaimed);
 			for (int i = 0; i < nd; i++) qh_delete_face_points(s, disc[i], fi, unclaimed);
@@ -618,6 +700,43 @@ static void qh_resolve_unclaimed(QH_State* s, QH_FaceList* nf, int* unclaimed)
 	*unclaimed = QH_INVALID;
 }
 
+// Debug: validate mesh topology of all live faces.
+static void qh_validate_mesh(QH_State* s, const char* ctx)
+{
+	for (int fi = 0; fi < asize(s->faces); fi++) {
+		if (s->faces[fi].mark != QH_VISIBLE) continue;
+		int e = s->faces[fi].edge, start = e, n = 0;
+		do {
+			if (n > 500) {
+				fprintf(stderr, "qh_validate: infinite loop on face %d at %s\n", fi, ctx);
+				exit(-1);
+			}
+			// Check twin reciprocity.
+			int tw = s->edges[e].twin;
+			if (s->edges[tw].twin != e) {
+				fprintf(stderr, "qh_validate: edge %d twin=%d but twin's twin=%d at %s\n",
+					e, tw, s->edges[tw].twin, ctx);
+				exit(-1);
+			}
+			// Check twin's face is alive.
+			int twf = s->edges[tw].face;
+			if (s->faces[twf].mark != QH_VISIBLE) {
+				fprintf(stderr, "qh_validate: edge %d (face %d) twin=%d on deleted face %d at %s\n",
+					e, fi, tw, twf, ctx);
+				exit(-1);
+			}
+			// Check edge belongs to this face.
+			if (s->edges[e].face != fi) {
+				fprintf(stderr, "qh_validate: edge %d face=%d expected %d at %s\n",
+					e, s->edges[e].face, fi, ctx);
+				exit(-1);
+			}
+			n++;
+			e = s->edges[e].next;
+		} while (e != start);
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Process one conflict vertex: compute horizon, build cone, merge, reassign.
 
@@ -649,7 +768,7 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 // -----------------------------------------------------------------------------
 // Convert internal state to output Hull with uint8_t-indexed arrays.
 
-static Hull* qh_build_output(QH_State* s)
+static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 {
 	CK_DYNA int* live = NULL;
 	for (int i = 0; i < asize(s->faces); i++)
@@ -701,11 +820,40 @@ static Hull* qh_build_output(QH_State* s)
 
 	Hull* h = CK_ALLOC(sizeof(Hull));
 	h->centroid = centroid; h->vert_count = vc; h->edge_count = ec; h->face_count = asize(live);
+	h->epsilon = s->epsilon;
 
 	v3* vcp = CK_ALLOC(sizeof(v3)*vc);       memcpy(vcp, ov, sizeof(v3)*vc);       h->verts = vcp;
 	HalfEdge* ecp = CK_ALLOC(sizeof(HalfEdge)*ec); memcpy(ecp, oe, sizeof(HalfEdge)*ec); h->edges = ecp;
 	HullFace* fcp = CK_ALLOC(sizeof(HullFace)*asize(live)); memcpy(fcp, of, sizeof(HullFace)*asize(live)); h->faces = fcp;
 	HullPlane* pcp = CK_ALLOC(sizeof(HullPlane)*asize(live)); memcpy(pcp, op, sizeof(HullPlane)*asize(live)); h->planes = pcp;
+
+	// Fix inward-facing normals: degenerate merges can produce Newell normals
+	// that point toward the hull interior. Flip them before widening.
+	for (int i = 0; i < h->face_count; i++) {
+		v3 fc = V3(0,0,0); int cnt = 0;
+		int start = fcp[i].edge, e = start;
+		do { fc = add(fc, vcp[ecp[e].origin]); cnt++; e = ecp[e].next; } while (e != start);
+		fc = scale(fc, 1.0f / cnt);
+		if (dot(pcp[i].normal, sub(fc, centroid)) < 0) {
+			pcp[i].normal = scale(pcp[i].normal, -1.0f);
+			pcp[i].offset = -pcp[i].offset;
+		}
+	}
+
+	// Post-build plane widening: widen each plane so ALL original input points
+	// lie on or behind the plane. Must use original points (not welded subset)
+	// since welded-away points may lie outside the welded hull.
+	h->maxoutside = 0;
+	for (int i = 0; i < h->face_count; i++) {
+		float max_d = pcp[i].offset;
+		for (int pi = 0; pi < all_count; pi++) {
+			float d = dot(pcp[i].normal, all_points[pi]);
+			if (d > max_d) max_d = d;
+		}
+		float widen = max_d - pcp[i].offset;
+		if (widen > h->maxoutside) h->maxoutside = widen;
+		pcp[i].offset = max_d;
+	}
 
 	afree(live); afree(vremap); afree(ov); afree(eremap); afree(oe); afree(of); afree(op);
 	return h;
@@ -716,7 +864,9 @@ static Hull* qh_build_output(QH_State* s)
 
 Hull* quickhull(const v3* points, int count)
 {
-	assert(count >= 4);
+	qh_dbg_points = points;
+	qh_dbg_count = count;
+	QH_ASSERT(count >= 4, "quickhull needs at least 4 points");
 
 	QH_State state = {0};
 	state.edge_free = QH_INVALID;
@@ -730,23 +880,45 @@ Hull* quickhull(const v3* points, int count)
 	}
 	state.epsilon = 3.0f * (mx + my + mz) * FLT_EPSILON;
 
+	// Weld near-duplicate vertices to prevent degenerate triangles that corrupt
+	// topology during merge. Weld distance is epsilon (the floating-point
+	// precision floor for this input extent).
+	float weld_dist2 = state.epsilon * state.epsilon;
 	for (int i = 0; i < count; i++) {
-		QH_Vertex v = { .pos=points[i], .conflict_next=QH_INVALID, .conflict_prev=QH_INVALID };
-		apush(state.verts, v);
+		v3 p = points[i];
+		int dup = 0;
+		for (int j = 0; j < asize(state.verts); j++) {
+			if (len2(sub(p, state.verts[j].pos)) <= weld_dist2) { dup = 1; break; }
+		}
+		if (!dup) {
+			QH_Vertex v = { .pos=p, .conflict_next=QH_INVALID, .conflict_prev=QH_INVALID };
+			apush(state.verts, v);
+		}
 	}
+	int welded_count = asize(state.verts);
 
-	if (!qh_build_simplex(&state, count)) {
+	if (welded_count < 4) {
 		afree(state.verts); afree(state.edges); afree(state.faces);
 		return NULL;
 	}
 
-	for (int iter = 0; iter < count * 4; iter++) {
+	if (!qh_build_simplex(&state, welded_count)) {
+		afree(state.verts); afree(state.edges); afree(state.faces);
+		return NULL;
+	}
+
+	for (int iter = 0; iter < welded_count * 4; iter++) {
 		int fi; int vi = qh_next_conflict(&state, &fi);
 		if (vi == QH_INVALID) break;
 		qh_add_point(&state, vi, fi);
+		QH_DEBUG({
+			char buf[64];
+			snprintf(buf, sizeof(buf), "after adding vertex %d (iter %d)", vi, iter);
+			qh_validate_mesh(&state, buf);
+		});
 	}
 
-	Hull* result = qh_build_output(&state);
+	Hull* result = qh_build_output(&state, points, count);
 	afree(state.verts); afree(state.edges); afree(state.faces);
 	return result;
 }

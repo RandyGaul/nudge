@@ -67,6 +67,8 @@ typedef struct Hull
 	int vert_count;
 	int edge_count;  // total half-edges (2x undirected edges)
 	int face_count;
+	float epsilon;      // build tolerance: 3*(max|x|+max|y|+max|z|)*FLT_EPSILON
+	float maxoutside;   // max distance any vertex was widened beyond Newell plane
 } Hull;
 
 // Positioned hull for collision queries.
