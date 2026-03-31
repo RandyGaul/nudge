@@ -1,3 +1,4 @@
+// See LICENSE for licensing info.
 #ifndef SPLIT_STORE_H
 #define SPLIT_STORE_H
 

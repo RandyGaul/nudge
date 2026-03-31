@@ -1,3 +1,4 @@
+// See LICENSE for licensing info.
 #define CKIT_IMPLEMENTATION
 #include "ckit.h"
 

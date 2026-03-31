@@ -1,3 +1,4 @@
+// See LICENSE for licensing info.
 // gjk.c -- GJK distance algorithm for 3D convex shapes.
 //
 // 3D GJK distance algorithm with full tetrahedron Voronoi regions.

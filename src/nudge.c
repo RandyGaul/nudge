@@ -1,3 +1,4 @@
+// See LICENSE for licensing info.
 // nudge.c -- physics world implementation
 
 // -----------------------------------------------------------------------------

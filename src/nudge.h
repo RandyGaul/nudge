@@ -1,3 +1,4 @@
+// See LICENSE for licensing info.
 #ifndef NUDGE_H
 #define NUDGE_H
 

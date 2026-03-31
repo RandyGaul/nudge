@@ -1,3 +1,4 @@
+// See LICENSE for licensing info.
 #ifndef VMATH_H
 #define VMATH_H
 

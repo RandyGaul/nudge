@@ -1,3 +1,4 @@
+// See LICENSE for licensing info.
 // render.c -- GL 3.3 core instanced mesh renderer
 
 // -----------------------------------------------------------------------------

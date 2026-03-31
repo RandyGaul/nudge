@@ -1,3 +1,4 @@
+// See LICENSE for licensing info.
 // test_main.c -- unity build root for test executable.
 // Includes only the physics engine + tests, no rendering/SDL/imgui.
 

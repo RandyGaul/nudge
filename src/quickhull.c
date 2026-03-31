@@ -1,3 +1,4 @@
+// See LICENSE for licensing info.
 #include <float.h>
 // quickhull.c -- 3D Quickhull convex hull algorithm.
 //

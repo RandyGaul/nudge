@@ -1,3 +1,4 @@
+// See LICENSE for licensing info.
 // tests.c -- narrowphase collision unit tests.
 //
 // Tests all Voronoi region combinations for each shape pair:

@@ -1,3 +1,4 @@
+// See LICENSE for licensing info.
 // collision.c -- broadphase + narrowphase collision detection
 //
 // Hull SAT with Gauss map pruning for edge-edge axis elimination.
