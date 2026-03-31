@@ -173,4 +173,7 @@ void body_add_shape(World world, Body body, ShapeParams params);
 v3 body_get_position(World world, Body body);
 quat body_get_rotation(World world, Body body);
 
+// Debug: contact points from last step. Returns count, *out valid until next step.
+int world_get_contacts(World world, const Contact** out);
+
 #endif

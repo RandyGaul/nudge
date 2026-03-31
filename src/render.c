@@ -372,23 +372,24 @@ static void mesh_generate_capsule(Mesh* mesh, float radius, float half_height)
 	int north = th + rings * slices;     // north pole
 
 	// Helper macro for ring-strip triangles between two rings
+	// r0 = lower ring, r1 = upper ring. Winding: CCW from outside.
 	#define RING_STRIP(r0, r1) \
 		for (int s = 0; s < slices; s++) { \
 			int sn = (s + 1) % slices; \
 			apush(tris, (uint16_t)(r0 + s)); \
+			apush(tris, (uint16_t)(r1 + sn)); \
 			apush(tris, (uint16_t)(r0 + sn)); \
-			apush(tris, (uint16_t)(r1 + sn)); \
 			apush(tris, (uint16_t)(r0 + s)); \
-			apush(tris, (uint16_t)(r1 + sn)); \
 			apush(tris, (uint16_t)(r1 + s)); \
+			apush(tris, (uint16_t)(r1 + sn)); \
 		}
 
-	// South pole fan
+	// South pole fan (CCW from below)
 	for (int s = 0; s < slices; s++) {
 		int sn = (s + 1) % slices;
 		apush(tris, (uint16_t)south);
-		apush(tris, (uint16_t)(bh + sn));
 		apush(tris, (uint16_t)(bh + s));
+		apush(tris, (uint16_t)(bh + sn));
 	}
 
 	// Bottom hemisphere ring strips
@@ -408,12 +409,12 @@ static void mesh_generate_capsule(Mesh* mesh, float radius, float half_height)
 	for (int r = 0; r < rings - 1; r++)
 		RING_STRIP(th + r * slices, th + (r + 1) * slices)
 
-	// North pole fan
+	// North pole fan (CCW from above)
 	for (int s = 0; s < slices; s++) {
 		int sn = (s + 1) % slices;
 		int lr = th + (rings - 1) * slices;
-		apush(tris, (uint16_t)(lr + s));
 		apush(tris, (uint16_t)(lr + sn));
+		apush(tris, (uint16_t)(lr + s));
 		apush(tris, (uint16_t)north);
 	}
 
@@ -447,16 +448,104 @@ static void mesh_generate_hull(Mesh* mesh, const Hull* hull, v3 sc)
 			e = hull->edges[e].next;
 		} while (e != start);
 
+		// Check winding against face normal; flip if CW from outside
+		int flip = 0;
+		if (fan_count >= 3) {
+			v3 e1 = v3_sub(verts[fan_start+1].pos, verts[fan_start].pos);
+			v3 e2 = v3_sub(verts[fan_start+2].pos, verts[fan_start].pos);
+			flip = v3_dot(v3_cross(e1, e2), sn) < 0.0f;
+		}
 		for (int i = 1; i < fan_count - 1; i++) {
 			apush(tris, (uint16_t)fan_start);
-			apush(tris, (uint16_t)(fan_start + i));
-			apush(tris, (uint16_t)(fan_start + i + 1));
+			apush(tris, (uint16_t)(fan_start + (flip ? i + 1 : i)));
+			apush(tris, (uint16_t)(fan_start + (flip ? i : i + 1)));
 		}
 	}
 
 	mesh_upload(mesh, verts, asize(verts), tris, asize(tris));
 	afree(verts);
 	afree(tris);
+}
+
+// -----------------------------------------------------------------------------
+// Fullscreen gradient background (drawn before scene, at max depth).
+
+static const char* s_bg_vert_src =
+	"#version 330 core\n"
+	"const vec2 pos[3] = vec2[](vec2(-1,-1), vec2(3,-1), vec2(-1,3));\n"
+	"out vec2 v_uv;\n"
+	"void main() {\n"
+	"    gl_Position = vec4(pos[gl_VertexID], 1.0, 1.0);\n"
+	"    v_uv = pos[gl_VertexID] * 0.5 + 0.5;\n"
+	"}\n";
+
+static const char* s_bg_frag_src =
+	"#version 330 core\n"
+	"in vec2 v_uv;\n"
+	"out vec4 frag_color;\n"
+	"uniform vec3 u_top;\n"
+	"uniform vec3 u_bot;\n"
+	"void main() {\n"
+	"    frag_color = vec4(mix(u_bot, u_top, v_uv.y), 1.0);\n"
+	"}\n";
+
+static GLuint r_bg_program;
+static GLint  r_bg_loc_top;
+static GLint  r_bg_loc_bot;
+static GLuint r_bg_vao;
+
+void render_draw_bg(v3 top_color, v3 bot_color)
+{
+	glDisable(GL_DEPTH_TEST);
+	gl_UseProgram(r_bg_program);
+	gl_Uniform3f(r_bg_loc_top, top_color.x, top_color.y, top_color.z);
+	gl_Uniform3f(r_bg_loc_bot, bot_color.x, bot_color.y, bot_color.z);
+	gl_BindVertexArray(r_bg_vao);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	gl_BindVertexArray(0);
+	glEnable(GL_DEPTH_TEST);
+}
+
+// -----------------------------------------------------------------------------
+// Debug line renderer (unlit, GL_LINES).
+
+static const char* s_debug_vert_src =
+	"#version 330 core\n"
+	"layout(location=0) in vec3 a_pos;\n"
+	"layout(location=1) in vec3 a_color;\n"
+	"uniform mat4 u_vp;\n"
+	"out vec3 v_color;\n"
+	"void main() {\n"
+	"    gl_Position = u_vp * vec4(a_pos, 1.0);\n"
+	"    v_color = a_color;\n"
+	"}\n";
+
+static const char* s_debug_frag_src =
+	"#version 330 core\n"
+	"in vec3 v_color;\n"
+	"out vec4 frag_color;\n"
+	"void main() {\n"
+	"    frag_color = vec4(v_color, 1.0);\n"
+	"}\n";
+
+typedef struct DebugLineVert
+{
+	v3 pos;
+	v3 color;
+} DebugLineVert;
+
+#define MAX_DEBUG_VERTS 4096
+
+static GLuint r_dbg_program;
+static GLint r_dbg_loc_vp;
+static GLuint r_dbg_vao;
+static GLuint r_dbg_vbo;
+static CK_DYNA DebugLineVert* r_dbg_lines;
+
+void render_debug_line(v3 from, v3 to, v3 color)
+{
+	apush(r_dbg_lines, ((DebugLineVert){ from, color }));
+	apush(r_dbg_lines, ((DebugLineVert){ to, color }));
 }
 
 // -----------------------------------------------------------------------------
@@ -522,6 +611,26 @@ void render_init()
 	glEnable(GL_CULL_FACE);
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); // premultiplied alpha
+
+	// Background gradient
+	r_bg_program = create_program(s_bg_vert_src, s_bg_frag_src);
+	r_bg_loc_top = gl_GetUniformLocation(r_bg_program, "u_top");
+	r_bg_loc_bot = gl_GetUniformLocation(r_bg_program, "u_bot");
+	gl_GenVertexArrays(1, &r_bg_vao); // empty VAO for attributeless rendering
+
+	// Debug line renderer
+	r_dbg_program = create_program(s_debug_vert_src, s_debug_frag_src);
+	r_dbg_loc_vp = gl_GetUniformLocation(r_dbg_program, "u_vp");
+	gl_GenVertexArrays(1, &r_dbg_vao);
+	gl_BindVertexArray(r_dbg_vao);
+	gl_GenBuffers(1, &r_dbg_vbo);
+	gl_BindBuffer(GL_ARRAY_BUFFER, r_dbg_vbo);
+	gl_BufferData(GL_ARRAY_BUFFER, MAX_DEBUG_VERTS * sizeof(DebugLineVert), NULL, GL_DYNAMIC_DRAW);
+	gl_EnableVertexAttribArray(0);
+	gl_VertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(DebugLineVert), (void*)0);
+	gl_EnableVertexAttribArray(1);
+	gl_VertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(DebugLineVert), (void*)sizeof(v3));
+	gl_BindVertexArray(0);
 }
 
 void render_set_light_dir(v3 dir)
@@ -573,4 +682,19 @@ void render_end()
 	}
 
 	gl_BindVertexArray(0);
+
+	// Flush debug lines
+	int dbg_count = asize(r_dbg_lines);
+	if (dbg_count > 0) {
+		glDisable(GL_CULL_FACE);
+		gl_UseProgram(r_dbg_program);
+		gl_UniformMatrix4fv(r_dbg_loc_vp, 1, GL_FALSE, r_vp.m);
+		gl_BindVertexArray(r_dbg_vao);
+		gl_BindBuffer(GL_ARRAY_BUFFER, r_dbg_vbo);
+		gl_BufferSubData(GL_ARRAY_BUFFER, 0, dbg_count * sizeof(DebugLineVert), r_dbg_lines);
+		glDrawArrays(GL_LINES, 0, dbg_count);
+		gl_BindVertexArray(0);
+		glEnable(GL_CULL_FACE);
+		aclear(r_dbg_lines);
+	}
 }
