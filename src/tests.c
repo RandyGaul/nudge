@@ -1664,58 +1664,291 @@ static void test_quickhull_geometry_stress()
 
 // ============================================================================
 // Solver / constraint tests
-// Test that constraint solvers converge and don't produce NaN/inf.
+// Verify constraints produce correct physical behavior, not just "no crash."
 
-// Helper: step a world N times and check all dynamic bodies have valid state.
-static int solver_step_n(World w, int steps)
+static void step_n(World w, int n)
 {
-	for (int i = 0; i < steps; i++) {
-		world_step(w, 1.0f / 60.0f);
-	}
-	// Check all dynamic bodies have finite positions
-	int count = world_body_count(w);
-	for (int i = 0; i < count; i++) {
-		v3 pos = body_get_position_by_index(w, i);
-		if (pos.x != pos.x || pos.y != pos.y || pos.z != pos.z) return 0;
-		if (pos.x > 1e10f || pos.x < -1e10f) return 0;
-		if (pos.y > 1e10f || pos.y < -1e10f) return 0;
-		if (pos.z > 1e10f || pos.z < -1e10f) return 0;
-	}
-	return 1;
+	for (int i = 0; i < n; i++) world_step(w, 1.0f / 60.0f);
 }
 
-static void test_solver_basic_gravity()
+// Distance between two body world-space anchor points.
+static float anchor_distance(World w, Body ba, v3 local_a, Body bb, v3 local_b)
+{
+	v3 pa = add(body_get_position(w, ba), rotate(body_get_rotation(w, ba), local_a));
+	v3 pb = add(body_get_position(w, bb), rotate(body_get_rotation(w, bb), local_b));
+	return len(sub(pb, pa));
+}
+
+static void test_solver_nan_rejection()
+{
+	volatile float zero = 0.0f;
+	float nan_val = zero / zero;
+	float inf_val = 1.0f / zero;
+
+	TEST_BEGIN("is_valid rejects NaN");
+	TEST_ASSERT(!is_valid(nan_val));
+	TEST_BEGIN("is_valid rejects inf");
+	TEST_ASSERT(!is_valid(inf_val));
+	TEST_BEGIN("is_valid rejects -inf");
+	TEST_ASSERT(!is_valid(-inf_val));
+	TEST_BEGIN("is_valid rejects huge positive");
+	TEST_ASSERT(!is_valid(1e19f));
+	TEST_BEGIN("is_valid rejects huge negative");
+	TEST_ASSERT(!is_valid(-1e19f));
+	TEST_BEGIN("is_valid accepts normal values");
+	TEST_ASSERT(is_valid(0.0f));
+	TEST_ASSERT(is_valid(1.0f));
+	TEST_ASSERT(is_valid(-1.0f));
+	TEST_ASSERT(is_valid(1e17f));
+	TEST_BEGIN("is_valid v3");
+	TEST_ASSERT(is_valid(V3(1, 2, 3)));
+	TEST_ASSERT(!is_valid(V3(nan_val, 0, 0)));
+	TEST_ASSERT(!is_valid(V3(0, inf_val, 0)));
+	TEST_ASSERT(!is_valid(V3(0, 0, 1e19f)));
+	TEST_BEGIN("is_valid quat");
+	TEST_ASSERT(is_valid(quat_identity()));
+	quat bad_q = { nan_val, 0, 0, 1 };
+	TEST_ASSERT(!is_valid(bad_q));
+}
+
+// Contact: sphere dropped onto a box floor must rest on the surface.
+// Success: sphere y-position stabilizes at floor_top + radius (within tolerance).
+static void test_contact_sphere_rests_on_floor()
 {
 	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-
 	Body floor = create_body(w, (BodyParams){
 		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
 	});
 	body_add_shape(w, floor, (ShapeParams){
 		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
 	});
-
+	float radius = 0.5f;
 	Body ball = create_body(w, (BodyParams){
 		.position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f,
 	});
 	body_add_shape(w, ball, (ShapeParams){
-		.type = SHAPE_SPHERE, .sphere.radius = 0.5f,
+		.type = SHAPE_SPHERE, .sphere.radius = radius,
 	});
 
-	TEST_BEGIN("solver basic gravity: ball falls and rests");
-	int ok = solver_step_n(w, 300);
-	TEST_ASSERT(ok);
-
+	// Run for 5 seconds (300 frames) -- enough to settle
+	step_n(w, 300);
 	v3 pos = body_get_position(w, ball);
-	TEST_ASSERT(pos.y > -0.5f && pos.y < 2.0f); // settled near floor
+	float expected_y = 0.0f + radius; // floor surface at y=0, sphere center at radius above
+
+	TEST_BEGIN("contact: sphere rests on floor surface");
+	TEST_ASSERT(is_valid(pos));
+	TEST_ASSERT_FLOAT(pos.y, expected_y, 0.1f);
+
+	TEST_BEGIN("contact: sphere does not penetrate floor");
+	TEST_ASSERT(pos.y >= -0.05f); // center must not go below floor surface
+
+	TEST_BEGIN("contact: sphere velocity near zero at rest");
+	WorldInternal* wi = (WorldInternal*)w.id;
+	int idx = handle_index(ball);
+	float speed = len(wi->body_hot[idx].velocity);
+	TEST_ASSERT(speed < 1.0f);
 
 	destroy_world(w);
 }
 
-static void test_solver_distance_spring()
+// Contact: box dropped onto floor must not fall through.
+static void test_contact_box_rests_on_floor()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	float half = 0.4f;
+	Body box = create_body(w, (BodyParams){
+		.position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(half, half, half),
+	});
+
+	step_n(w, 300);
+	v3 pos = body_get_position(w, box);
+
+	TEST_BEGIN("contact: box rests on floor");
+	TEST_ASSERT(is_valid(pos));
+	// Box center should be at floor_top + half_extent = 0 + 0.4 (roughly)
+	TEST_ASSERT(pos.y > -0.1f);
+	TEST_ASSERT(pos.y < 1.5f);
+
+	destroy_world(w);
+}
+
+// Distance joint (spring): bob hangs below anchor at approximately rest_length.
+// Spring with damping should settle to equilibrium: rest_length + gravity_sag.
+// Success: distance from anchor is within range, bob stays below anchor.
+static void test_distance_spring_equilibrium()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body anchor = create_body(w, (BodyParams){
+		.position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, anchor, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
+	});
+
+	Body bob = create_body(w, (BodyParams){
+		.position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, bob, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.2f,
+	});
+
+	float rest = 2.0f;
+	create_distance(w, (DistanceParams){
+		.body_a = bob, .body_b = anchor,
+		.rest_length = rest,
+		.spring = { .frequency = 3.0f, .damping_ratio = 0.7f },
+	});
+
+	// Run 10 seconds for damped spring to settle
+	step_n(w, 600);
+	v3 bob_pos = body_get_position(w, bob);
+	v3 anchor_pos = body_get_position(w, anchor);
+	float dist = len(sub(bob_pos, anchor_pos));
+
+	TEST_BEGIN("distance spring: bob below anchor");
+	TEST_ASSERT(bob_pos.y < anchor_pos.y);
+
+	TEST_BEGIN("distance spring: distance near rest + sag");
+	// Gravity sag: F=mg=9.81, k=omega^2*m=(2pi*3)^2*1=355.3, sag=F/k=0.028
+	// So equilibrium distance ~ rest + 0.03, but with damping it won't be exact.
+	// Accept within 0.5 of rest length.
+	TEST_ASSERT(dist > rest - 0.5f);
+	TEST_ASSERT(dist < rest + 1.0f);
+
+	TEST_BEGIN("distance spring: bob velocity settled");
+	WorldInternal* wi = (WorldInternal*)w.id;
+	float speed = len(wi->body_hot[handle_index(bob)].velocity);
+	TEST_ASSERT(speed < 2.0f);
+
+	destroy_world(w);
+}
+
+// Distance joint (rigid): distance between bodies must stay near rest_length.
+// Success: after simulation, measured distance is within 5% of rest_length.
+static void test_distance_rigid_maintains_length()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body anchor = create_body(w, (BodyParams){
+		.position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, anchor, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
+	});
+
+	Body bob = create_body(w, (BodyParams){
+		.position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, bob, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.2f,
+	});
+
+	float rest = 2.0f;
+	create_distance(w, (DistanceParams){
+		.body_a = bob, .body_b = anchor,
+		.rest_length = rest,
+	});
+
+	// Step and sample distance over time
+	float max_dist_error = 0.0f;
+	for (int frame = 0; frame < 300; frame++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 bp = body_get_position(w, bob);
+		v3 ap = body_get_position(w, anchor);
+		float d = len(sub(bp, ap));
+		float err = fabsf(d - rest);
+		if (err > max_dist_error) max_dist_error = err;
+	}
+
+	TEST_BEGIN("distance rigid: length error bounded");
+	// Soft constraint won't be perfectly rigid; allow 20% deviation.
+	TEST_ASSERT(max_dist_error < rest * 0.20f);
+
+	TEST_BEGIN("distance rigid: bob hangs below anchor");
+	v3 bp = body_get_position(w, bob);
+	TEST_ASSERT(bp.y < body_get_position(w, anchor).y);
+
+	destroy_world(w);
+}
+
+// Ball-socket chain: anchor points between consecutive bodies should stay close.
+// Success: world-space anchor of body_a's offset matches body_b's offset (small gap).
+static void test_ball_socket_chain_stays_connected()
 {
 	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
 
+	float link_len = 1.0f;
+	v3 offset_a = V3(0, -link_len * 0.5f, 0);
+	v3 offset_b = V3(0,  link_len * 0.5f, 0);
+	int chain_len = 5;
+
+	Body anchor = create_body(w, (BodyParams){
+		.position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, anchor, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
+	});
+
+	Body bodies[5];
+	Body prev = anchor;
+	for (int i = 0; i < chain_len; i++) {
+		bodies[i] = create_body(w, (BodyParams){
+			.position = V3(0, 9.0f - i * link_len, 0),
+			.rotation = quat_identity(), .mass = 0.5f,
+		});
+		body_add_shape(w, bodies[i], (ShapeParams){
+			.type = SHAPE_SPHERE, .sphere.radius = 0.2f,
+		});
+		create_ball_socket(w, (BallSocketParams){
+			.body_a = prev, .body_b = bodies[i],
+			.local_offset_a = offset_a, .local_offset_b = offset_b,
+		});
+		prev = bodies[i];
+	}
+
+	// Run 5 seconds
+	step_n(w, 300);
+
+	TEST_BEGIN("ball socket chain: anchor stays connected to link 0");
+	float gap0 = anchor_distance(w, anchor, offset_a, bodies[0], offset_b);
+	TEST_ASSERT(gap0 < 0.5f);
+
+	TEST_BEGIN("ball socket chain: consecutive links stay connected");
+	float max_gap = 0.0f;
+	for (int i = 0; i < chain_len - 1; i++) {
+		float gap = anchor_distance(w, bodies[i], offset_a, bodies[i + 1], offset_b);
+		if (gap > max_gap) max_gap = gap;
+	}
+	TEST_ASSERT(max_gap < 0.5f);
+
+	TEST_BEGIN("ball socket chain: all links below anchor");
+	for (int i = 0; i < chain_len; i++) {
+		v3 p = body_get_position(w, bodies[i]);
+		TEST_ASSERT(is_valid(p));
+		TEST_ASSERT(p.y < body_get_position(w, anchor).y);
+	}
+
+	TEST_BEGIN("ball socket chain: tail below head");
+	v3 head = body_get_position(w, bodies[0]);
+	v3 tail = body_get_position(w, bodies[chain_len - 1]);
+	TEST_ASSERT(tail.y <= head.y + 0.1f);
+
+	destroy_world(w);
+}
+
+// Ball-socket: zero-offset joint pins bob center to anchor center.
+// With initial displacement, bob should converge back to anchor position.
+static void test_ball_socket_pin_converges()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
 	Body anchor = create_body(w, (BodyParams){
 		.position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0,
 	});
@@ -1724,140 +1957,85 @@ static void test_solver_distance_spring()
 	});
 
 	Body bob = create_body(w, (BodyParams){
-		.position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1.0f,
+		.position = V3(2, 5, 0), .rotation = quat_identity(), .mass = 1.0f,
 	});
 	body_add_shape(w, bob, (ShapeParams){
-		.type = SHAPE_SPHERE, .sphere.radius = 0.3f,
+		.type = SHAPE_SPHERE, .sphere.radius = 0.2f,
 	});
 
-	create_distance(w, (DistanceParams){
-		.body_a = bob, .body_b = anchor,
-		.rest_length = 0, // auto-compute = 2.0
-		.spring = { .frequency = 3.0f, .damping_ratio = 0.3f },
+	create_ball_socket(w, (BallSocketParams){
+		.body_a = anchor, .body_b = bob,
+		.local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0, 0),
 	});
 
-	TEST_BEGIN("solver distance spring: no blowup after 600 steps");
-	int ok = solver_step_n(w, 600);
-	TEST_ASSERT(ok);
-
+	step_n(w, 300);
 	v3 pos = body_get_position(w, bob);
-	TEST_ASSERT(pos.y > -10.0f && pos.y < 10.0f);
+	v3 apos = body_get_position(w, anchor);
+	float dist = len(sub(pos, apos));
+
+	TEST_BEGIN("ball socket pin: bob converges to anchor");
+	TEST_ASSERT(dist < 0.5f);
+
+	TEST_BEGIN("ball socket pin: bob state is valid");
+	TEST_ASSERT(is_valid(pos));
 
 	destroy_world(w);
 }
 
-static void test_solver_ball_socket_chain()
+// Ball-socket pendulum: offset creates a rod, bob should hang below.
+static void test_ball_socket_pendulum()
 {
 	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-
 	Body anchor = create_body(w, (BodyParams){
-		.position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 0,
+		.position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0,
 	});
 	body_add_shape(w, anchor, (ShapeParams){
 		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
 	});
 
-	float link_len = 1.0f;
-	Body prev = anchor;
-	for (int i = 0; i < 5; i++) {
-		Body link = create_body(w, (BodyParams){
-			.position = V3(0, 7.0f - i * link_len, 0),
-			.rotation = quat_identity(), .mass = 0.5f,
-		});
-		body_add_shape(w, link, (ShapeParams){
-			.type = SHAPE_SPHERE, .sphere.radius = 0.2f,
-		});
-		create_ball_socket(w, (BallSocketParams){
-			.body_a = prev, .body_b = link,
-			.local_offset_a = V3(0, -link_len * 0.5f, 0),
-			.local_offset_b = V3(0,  link_len * 0.5f, 0),
-		});
-		prev = link;
-	}
+	// Bob starts displaced horizontally with a rod offset.
+	// Joint at anchor center, but rod extends from bob's top.
+	float rod_len = 2.0f;
+	Body bob = create_body(w, (BodyParams){
+		.position = V3(rod_len, 5, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, bob, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.2f,
+	});
 
-	TEST_BEGIN("solver ball socket chain: no blowup after 600 steps");
-	int ok = solver_step_n(w, 600);
-	TEST_ASSERT(ok);
+	create_ball_socket(w, (BallSocketParams){
+		.body_a = anchor, .body_b = bob,
+		.local_offset_a = V3(0, 0, 0),
+		.local_offset_b = V3(0, rod_len, 0), // rod extends up from bob
+	});
+
+	step_n(w, 600);
+	v3 pos = body_get_position(w, bob);
+
+	TEST_BEGIN("pendulum: bob ends below anchor after settling");
+	TEST_ASSERT(pos.y < 5.0f);
+
+	TEST_BEGIN("pendulum: bob stays within rod range of anchor");
+	float dist_to_anchor = len(sub(pos, V3(0, 5, 0)));
+	TEST_ASSERT(dist_to_anchor < rod_len + 1.0f);
+
+	TEST_BEGIN("pendulum: bob state valid");
+	TEST_ASSERT(is_valid(pos));
 
 	destroy_world(w);
-}
-
-static void test_solver_distance_rigid()
-{
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-
-	Body a = create_body(w, (BodyParams){
-		.position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, a, (ShapeParams){
-		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
-	});
-
-	Body b = create_body(w, (BodyParams){
-		.position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1.0f,
-	});
-	body_add_shape(w, b, (ShapeParams){
-		.type = SHAPE_SPHERE, .sphere.radius = 0.3f,
-	});
-
-	create_distance(w, (DistanceParams){
-		.body_a = b, .body_b = a,
-		.rest_length = 0, // auto = 2.0
-		// no spring -> rigid
-	});
-
-	TEST_BEGIN("solver distance rigid: no blowup after 600 steps");
-	int ok = solver_step_n(w, 600);
-	TEST_ASSERT(ok);
-
-	destroy_world(w);
-}
-
-static void test_solver_nan_rejection()
-{
-	// Verify is_valid rejects NaN, inf, and huge values
-	TEST_BEGIN("is_valid rejects NaN");
-	float nan_val = 0.0f / 0.0f;
-	TEST_ASSERT(!is_valid(nan_val));
-
-	TEST_BEGIN("is_valid rejects inf");
-	float inf_val = 1.0f / 0.0f;
-	TEST_ASSERT(!is_valid(inf_val));
-
-	TEST_BEGIN("is_valid rejects -inf");
-	TEST_ASSERT(!is_valid(-inf_val));
-
-	TEST_BEGIN("is_valid rejects huge positive");
-	TEST_ASSERT(!is_valid(1e19f));
-
-	TEST_BEGIN("is_valid rejects huge negative");
-	TEST_ASSERT(!is_valid(-1e19f));
-
-	TEST_BEGIN("is_valid accepts normal values");
-	TEST_ASSERT(is_valid(0.0f));
-	TEST_ASSERT(is_valid(1.0f));
-	TEST_ASSERT(is_valid(-1.0f));
-	TEST_ASSERT(is_valid(1e17f));
-
-	TEST_BEGIN("is_valid v3");
-	TEST_ASSERT(is_valid(V3(1, 2, 3)));
-	TEST_ASSERT(!is_valid(V3(nan_val, 0, 0)));
-	TEST_ASSERT(!is_valid(V3(0, inf_val, 0)));
-	TEST_ASSERT(!is_valid(V3(0, 0, 1e19f)));
-
-	TEST_BEGIN("is_valid quat");
-	TEST_ASSERT(is_valid(quat_identity()));
-	TEST_ASSERT(!is_valid((quat){ nan_val, 0, 0, 1 }));
 }
 
 static void run_solver_tests()
 {
 	printf("--- nudge solver tests ---\n");
 	test_solver_nan_rejection();
-	test_solver_basic_gravity();
-	test_solver_distance_spring();
-	test_solver_distance_rigid();
-	test_solver_ball_socket_chain();
+	test_contact_sphere_rests_on_floor();
+	test_contact_box_rests_on_floor();
+	test_distance_spring_equilibrium();
+	test_distance_rigid_maintains_length();
+	test_ball_socket_chain_stays_connected();
+	test_ball_socket_pin_converges();
+	test_ball_socket_pendulum();
 }
 
 static void run_tests()

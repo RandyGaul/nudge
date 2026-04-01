@@ -633,10 +633,10 @@ static void spring_compute(SpringParams sp, float dt,
 	float* pos_to_vel, float* softness)
 {
 	if (sp.frequency <= 0.0f) {
-		// Rigid constraint: treat as stiff spring (high frequency, critical damping).
-		// Prevents PGS divergence on chains while staying visually rigid.
-		sp.frequency = 240.0f;
-		sp.damping_ratio = 1.0f;
+		// Rigid constraint: Baumgarte stabilization with fractional correction.
+		*pos_to_vel = dt > 0.0f ? SOLVER_BAUMGARTE / dt : 0.0f;
+		*softness = 0.0f;
+		return;
 	}
 	float omega = 2.0f * 3.14159265f * sp.frequency;
 	float d = 2.0f * sp.damping_ratio * omega;
@@ -727,7 +727,7 @@ static void joints_pre_solve(WorldInternal* w, float dt,
 			// Position error: world anchor B - world anchor A
 			v3 anchor_a = add(a->position, s.r_a);
 			v3 anchor_b = add(b->position, s.r_b);
-			s.bias = scale(sub(anchor_b, anchor_a), -ptv);
+			s.bias = scale(sub(anchor_b, anchor_a), ptv);
 
 			// Warm start from persistent storage
 			s.lambda = j->warm_lambda3;

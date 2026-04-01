@@ -120,6 +120,8 @@ static Body g_spring_a, g_spring_b;
 static const float CAP_RADIUS = 0.3f;
 static const float CAP_HALF_H = 0.5f;
 
+static void setup_scene();
+
 // Maya-style orbit camera: yaw/pitch angles, quaternion rebuilt each frame.
 // Y-locked: up is always world (0,1,0), no roll.
 static v3    g_cam_focus = { 0, 1, 0 };
@@ -206,6 +208,13 @@ void init()
 	g_mesh_capsule = render_create_capsule_mesh(CAP_RADIUS, CAP_HALF_H);
 	g_mesh_hull = render_create_hull_mesh(g_test_hull, V3(1, 1, 1));
 
+	setup_scene();
+}
+
+static void setup_scene()
+{
+	if (g_world.id) destroy_world(g_world);
+
 	g_world = create_world((WorldParams){
 		.gravity = V3(0, -9.81f, 0),
 	});
@@ -267,11 +276,10 @@ void init()
 	});
 
 	// --- Pendulum chain (ball sockets) ---
-	// Anchor point is a static body at the top
 	Body anchor = create_body(g_world, (BodyParams){
 		.position = V3(0, 8, -4),
 		.rotation = quat_identity(),
-		.mass = 0, // static
+		.mass = 0,
 	});
 	body_add_shape(g_world, anchor, (ShapeParams){
 		.type = SHAPE_SPHERE,
@@ -282,7 +290,7 @@ void init()
 	Body prev = anchor;
 	for (int i = 0; i < CHAIN_LEN; i++) {
 		g_chain[i] = create_body(g_world, (BodyParams){
-			.position = V3(0, 7.0f - i * link_len, -4),
+			.position = V3(0.6f * (i + 1), 7.0f - i * link_len, -4),
 			.rotation = quat_identity(),
 			.mass = 0.5f,
 		});
@@ -301,7 +309,7 @@ void init()
 
 	// --- Spring-connected pair (distance joint) ---
 	g_spring_a = create_body(g_world, (BodyParams){
-		.position = V3(5, 4, -4),
+		.position = V3(7, 4, -4),
 		.rotation = quat_identity(),
 		.mass = 1.0f,
 	});
@@ -312,7 +320,7 @@ void init()
 	g_spring_b = create_body(g_world, (BodyParams){
 		.position = V3(5, 6, -4),
 		.rotation = quat_identity(),
-		.mass = 0, // static anchor
+		.mass = 0,
 	});
 	body_add_shape(g_world, g_spring_b, (ShapeParams){
 		.type = SHAPE_SPHERE,
@@ -321,7 +329,7 @@ void init()
 	create_distance(g_world, (DistanceParams){
 		.body_a = g_spring_a,
 		.body_b = g_spring_b,
-		.rest_length = 0, // auto-compute from positions
+		.rest_length = 0,
 		.spring = { .frequency = 3.0f, .damping_ratio = 0.3f },
 	});
 }
@@ -343,6 +351,7 @@ void update()
 
 	// Debug panel
 	ImGui_Begin("Debug", NULL, 0);
+	if (ImGui_Button("Restart scene")) setup_scene();
 	ImGui_Checkbox("Show contacts", &g_show_contacts);
 	ImGui_Checkbox("Show joints", &g_show_joints);
 	const Contact* contacts;
