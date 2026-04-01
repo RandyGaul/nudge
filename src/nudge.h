@@ -185,6 +185,12 @@ typedef struct WorldParams
 	v3 gravity;
 	BroadphaseType broadphase;
 	FrictionModel friction_model;
+	int velocity_iters;  // 0 = default (10)
+	int position_iters;  // 0 = default (4)
+	float contact_hertz;          // 0 = default (30.0), soft contact frequency
+	float contact_damping_ratio;  // 0 = default (10.0), heavily overdamped
+	float max_push_velocity;      // 0 = default (3.0 m/s)
+	int sub_steps;                // 0 = default (1)
 } WorldParams;
 
 // -----------------------------------------------------------------------------

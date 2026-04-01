@@ -113,6 +113,12 @@ typedef struct WorldInternal
 	CK_MAP(uint8_t)     prev_touching; // body_pair_key -> 1 for pairs touching last frame
 	int sleep_enabled; // 1 = island sleep active (default)
 	FrictionModel friction_model;
+	int velocity_iters;
+	int position_iters;
+	float contact_hertz;
+	float contact_damping_ratio;
+	float max_push_velocity;
+	int sub_steps;
 } WorldInternal;
 
 #include "gjk.c"
@@ -310,6 +316,7 @@ typedef struct SolverContact
 	float lambda_n;      // accumulated normal impulse (>= 0)
 	float lambda_t1;     // accumulated tangent1 impulse
 	float lambda_t2;     // accumulated tangent2 impulse
+	float softness;      // soft constraint regularization (0 = rigid/NGS)
 	float penetration;   // cached for position correction pass
 	uint32_t feature_id; // geometric feature key for warm starting
 } SolverContact;
@@ -452,13 +459,31 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 
 			s.eff_mass_n = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.normal);
 
+			// Soft contact constraint (Box2D b2MakeSoft)
+			{
+				float hertz = w->contact_hertz;
+				if (a->inv_mass == 0.0f || b->inv_mass == 0.0f) hertz *= 2.0f;
+				float omega = 2.0f * 3.14159265f * hertz;
+				float d = 2.0f * w->contact_damping_ratio * omega;
+				float k = omega * omega;
+				float hd = dt * d, hhk = dt * dt * k;
+				float denom = hd + hhk;
+				if (denom > 1e-12f) {
+					s.softness = 1.0f / denom;
+					float bias_rate = dt * k * s.softness;
+					float K = s.eff_mass_n > 0.0f ? 1.0f / s.eff_mass_n : 0.0f;
+					s.eff_mass_n = (K + s.softness) > 1e-12f ? 1.0f / (K + s.softness) : 0.0f;
+					float pen = ct->penetration - SOLVER_SLOP;
+					s.bias = pen > 0.0f ? -bias_rate * pen : 0.0f;
+					if (s.bias < -w->max_push_velocity) s.bias = -w->max_push_velocity;
+				}
+			}
+
 			if (!patch_mode) {
 				contact_tangent_basis(ct->normal, &s.tangent1, &s.tangent2);
 				s.eff_mass_t1 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent1);
 				s.eff_mass_t2 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent2);
 			}
-
-			s.bias = 0.0f; // NGS handles position correction; no velocity-level bias
 
 			v3 vel_a = add(a->velocity, cross(a->angular_velocity, s.r_a));
 			v3 vel_b = add(b->velocity, cross(b->angular_velocity, s.r_b));
@@ -668,7 +693,7 @@ static void solver_iterate(WorldInternal* w, SolverManifold* sm, int sm_count, S
 // and position integration. Operates on positions only, no velocity modification.
 static void solver_position_correct(WorldInternal* w, SolverManifold* sm, int sm_count, SolverContact* sc)
 {
-	for (int iter = 0; iter < SOLVER_POSITION_ITERS; iter++) {
+	for (int iter = 0; iter < w->position_iters; iter++) {
 		for (int i = 0; i < sm_count; i++) {
 			SolverManifold* m = &sm[i];
 			BodyHot* a = &w->body_hot[m->body_a];
@@ -709,11 +734,7 @@ static void solver_position_correct(WorldInternal* w, SolverManifold* sm, int sm
 // when narrowphase misses a pair for a single frame (FP noise).
 static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count, SolverContact* sc, InternalManifold* manifolds, int manifold_count)
 {
-	// Age all existing entries (will be reset to 0 for active pairs below)
-	for (int i = 0; i < map_size(w->warm_cache); i++)
-		w->warm_cache[i].stale++;
-
-	// Update active pairs
+	// Update active pairs (per sub-step)
 	for (int i = 0; i < sm_count; i++) {
 		SolverManifold* m = &sm[i];
 		uint64_t key = body_pair_key(m->body_a, m->body_b);
@@ -740,20 +761,22 @@ static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count
 		map_set(w->warm_cache, key, wm);
 	}
 
-	// Evict stale entries (not touched for >1 frame).
-	// map_del swaps last into deleted slot, so re-check current index after delete.
-	{
-		int i = 0;
-		while (i < map_size(w->warm_cache)) {
-			if (w->warm_cache[i].stale > 1)
-				map_del(w->warm_cache, map_keys(w->warm_cache)[i]);
-			else
-				i++;
-		}
-	}
-
 	afree(sm);
 	afree(sc);
+}
+
+// Age and evict stale warm cache entries. Called once per frame (not per sub-step).
+static void warm_cache_age_and_evict(WorldInternal* w)
+{
+	for (int i = 0; i < map_size(w->warm_cache); i++)
+		w->warm_cache[i].stale++;
+	int i = 0;
+	while (i < map_size(w->warm_cache)) {
+		if (w->warm_cache[i].stale > 1)
+			map_del(w->warm_cache, map_keys(w->warm_cache)[i]);
+		else
+			i++;
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -1079,7 +1102,7 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 				SolverContact* s = &sc[m->contact_start + ci];
 				v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
 				float vn = dot(dv, s->normal);
-				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce));
+				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
 				float old_n = s->lambda_n;
 				s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
 				apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
@@ -1117,7 +1140,7 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 				v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
 
 				float vn = dot(dv, s->normal);
-				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce));
+				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
 				float old_n = s->lambda_n;
 				s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
 				apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
@@ -1625,6 +1648,12 @@ World create_world(WorldParams params)
 	w->broadphase_type = params.broadphase;
 	w->friction_model = params.friction_model;
 	w->sleep_enabled = 1;
+	w->velocity_iters = params.velocity_iters > 0 ? params.velocity_iters : SOLVER_VELOCITY_ITERS;
+	w->position_iters = params.position_iters > 0 ? params.position_iters : SOLVER_POSITION_ITERS;
+	w->contact_hertz = params.contact_hertz > 0.0f ? params.contact_hertz : 20.0f;
+	w->contact_damping_ratio = params.contact_damping_ratio > 0.0f ? params.contact_damping_ratio : 3.0f;
+	w->max_push_velocity = params.max_push_velocity > 0.0f ? params.max_push_velocity : 3.0f;
+	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 4;
 	w->bvh_static = CK_ALLOC(sizeof(BVHTree));
 	w->bvh_dynamic = CK_ALLOC(sizeof(BVHTree));
 	bvh_init(w->bvh_static);
@@ -1649,9 +1678,8 @@ void destroy_world(World world)
 	CK_FREE(w);
 }
 
-void world_step(World world, float dt)
+static void world_sub_step(WorldInternal* w, float dt)
 {
-	WorldInternal* w = (WorldInternal*)world.id;
 	int count = asize(w->body_hot);
 
 	// Integrate velocities (skip sleeping bodies)
@@ -1676,7 +1704,7 @@ void world_step(World world, float dt)
 	// Update island connectivity from contacts
 	islands_update_contacts(w, manifolds, asize(manifolds));
 
-	// Store contacts for debug visualization
+	// Store contacts for debug visualization (last sub-step wins)
 	aclear(w->debug_contacts);
 	for (int i = 0; i < asize(manifolds); i++)
 		for (int c = 0; c < manifolds[i].m.count; c++)
@@ -1721,7 +1749,7 @@ void world_step(World world, float dt)
 		color_constraints(crefs, cref_count, count, batch_starts, &color_count);
 
 	// Velocity iterations with colored batches
-	for (int iter = 0; iter < SOLVER_VELOCITY_ITERS; iter++)
+	for (int iter = 0; iter < w->velocity_iters; iter++)
 		for (int c = 0; c < color_count; c++)
 			for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
 				solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist);
@@ -1751,8 +1779,8 @@ void world_step(World world, float dt)
 			h->rotation, h->inv_inertia_local, h->angular_velocity, dt);
 
 		// Quaternion integration: q += 0.5 * dt * (0,omega) * q
-		v3 w = h->angular_velocity;
-		quat spin = { w.x, w.y, w.z, 0.0f };
+		v3 ww = h->angular_velocity;
+		quat spin = { ww.x, ww.y, ww.z, 0.0f };
 		quat dq = mul(spin, h->rotation);
 		h->rotation.x += 0.5f * dt * dq.x;
 		h->rotation.y += 0.5f * dt * dq.y;
@@ -1768,16 +1796,31 @@ void world_step(World world, float dt)
 	}
 
 	// Position correction pass (contacts only, after integration)
-	solver_position_correct(w, sm, asize(sm), sc);
+	// Skip NGS when soft contacts handle position correction via bias
+	if (w->contact_hertz <= 0.0f)
+		solver_position_correct(w, sm, asize(sm), sc);
 
 	// Store warm starting data and free solver arrays
 	solver_post_solve(w, sm, asize(sm), sc, manifolds, manifold_count);
 	joints_post_solve(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist));
 
-	// Evaluate sleep: check velocities, put resting islands to sleep
-	if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
-
 	afree(manifolds);
+}
+
+void world_step(World world, float dt)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int n_sub = w->sub_steps;
+	float sub_dt = dt / (float)n_sub;
+
+	// Age warm cache once per frame (not per sub-step)
+	warm_cache_age_and_evict(w);
+
+	for (int sub = 0; sub < n_sub; sub++)
+		world_sub_step(w, sub_dt);
+
+	// Evaluate sleep once per frame using full dt
+	if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
 }
 
 void world_set_friction_model(World world, FrictionModel model)

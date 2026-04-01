@@ -3711,6 +3711,80 @@ static void run_tests()
 	if (test_fail > 0) printf("*** FAILURES ***\n");
 }
 
+// ============================================================================
+// Box stack stability benchmark.
+// Creates a floor + N unit boxes stacked vertically, simulates 1000 frames at
+// 60Hz, and reports cumulative motion and max drift from ideal rest positions.
+
+static void bench_box_stack_ex(int height, WorldParams wp)
+{
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	// Floor: static box
+	Body floor_body = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor_body, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
+	});
+
+	// Stack N unit boxes (half_extents 0.5) at y = 0.5, 1.5, 2.5, ...
+	float half = 0.5f;
+	Body* boxes = NULL;
+	float* ideal_y = NULL;
+	for (int i = 0; i < height; i++) {
+		float y = half + (float)i;
+		apush(ideal_y, y);
+		Body b = create_body(w, (BodyParams){
+			.position = V3(0, y, 0), .rotation = quat_identity(), .mass = 1.0f,
+		});
+		body_add_shape(w, b, (ShapeParams){
+			.type = SHAPE_BOX, .box.half_extents = V3(half, half, half),
+		});
+		apush(boxes, b);
+	}
+
+	// Simulate 1000 frames, accumulate motion
+	float dt = 1.0f / 60.0f;
+	double cumulative_motion = 0.0;
+	v3* prev_pos = NULL;
+	for (int i = 0; i < height; i++)
+		apush(prev_pos, body_get_position(w, boxes[i]));
+
+	for (int frame = 0; frame < 1000; frame++) {
+		world_step(w, dt);
+		for (int i = 0; i < height; i++) {
+			v3 pos = body_get_position(w, boxes[i]);
+			v3 delta = sub(pos, prev_pos[i]);
+			cumulative_motion += (double)len(delta);
+			prev_pos[i] = pos;
+		}
+	}
+
+	// Measure max drift from ideal rest positions
+	float max_drift = 0.0f;
+	for (int i = 0; i < height; i++) {
+		v3 pos = body_get_position(w, boxes[i]);
+		v3 ideal = V3(0, ideal_y[i], 0);
+		float drift = len(sub(pos, ideal));
+		if (drift > max_drift) max_drift = drift;
+	}
+
+	printf("stack_%d (sub=%d vel=%d hz=%.0f damp=%.1f): motion=%.6f max_drift=%.4f\n", height, wi->sub_steps, wi->velocity_iters, wi->contact_hertz, wi->contact_damping_ratio, cumulative_motion, max_drift);
+
+	afree(boxes);
+	afree(ideal_y);
+	afree(prev_pos);
+	destroy_world(w);
+}
+
+static void bench_box_stack(int height)
+{
+	bench_box_stack_ex(height, (WorldParams){ .gravity = V3(0, -9.81f, 0) });
+}
+
 // Soak test: infinite-loop fuzz with crash logging to file.
 static void test_quickhull_soak()
 {

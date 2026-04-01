@@ -13,11 +13,32 @@ int main(int argc, char* argv[])
 {
 	int fuzz_iters = 0;
 	int soak = 0;
+	int bench_stack = 0;
+	int sub_steps = 0;
+	int vel_iters = 0;
+	float hertz = 0;
+	float damping = 0;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--fuzz") == 0 && i + 1 < argc)
 			fuzz_iters = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--soak") == 0)
 			soak = 1;
+		else if (strcmp(argv[i], "--bench-stack") == 0)
+			bench_stack = (i + 1 < argc && argv[i+1][0] != '-') ? atoi(argv[++i]) : 10;
+		else if (strcmp(argv[i], "--sub-steps") == 0 && i + 1 < argc)
+			sub_steps = atoi(argv[++i]);
+		else if (strcmp(argv[i], "--vel-iters") == 0 && i + 1 < argc)
+			vel_iters = atoi(argv[++i]);
+		else if (strcmp(argv[i], "--hertz") == 0 && i + 1 < argc)
+			hertz = (float)atof(argv[++i]);
+		else if (strcmp(argv[i], "--damping") == 0 && i + 1 < argc)
+			damping = (float)atof(argv[++i]);
+	}
+
+	if (bench_stack > 0) {
+		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
+		bench_box_stack_ex(bench_stack, wp);
+		return 0;
 	}
 
 	if (soak) {
