@@ -1159,6 +1159,707 @@ static void test_quickhull_cylinder()
 	printf("  cylinder: %d hulls tested, %d failures\n", total, fails);
 }
 
+// Soak failure: Euler violation on icosahedron (V=22 E=112 F=37, expected V-E/2+F=2).
+static void test_quickhull_soak_ico1336()
+{
+	TEST_BEGIN("quickhull soak_ico1336");
+	v3 pts[] = {
+		{-9.998443127e-01f, 1.618065357e+00f, -8.653744590e-05f},
+		{1.000008821e+00f, 1.618042588e+00f, -1.804200729e-04f},
+		{-1.000023603e+00f, -1.617910266e+00f, -1.297087874e-04f},
+		{9.998848438e-01f, -1.618144155e+00f, 8.552092913e-05f},
+		{1.557274954e-04f, -9.999080896e-01f, 1.618033528e+00f},
+		{-7.499678031e-05f, 9.999208450e-01f, 1.617889762e+00f},
+		{-3.326591468e-05f, -9.999384880e-01f, -1.618200779e+00f},
+		{1.087870623e-04f, 1.000144005e+00f, -1.618044853e+00f},
+		{1.618117929e+00f, 1.596595393e-04f, -9.999868870e-01f},
+		{1.618144155e+00f, -5.029122622e-05f, 9.998656511e-01f},
+		{-1.618043065e+00f, -1.179813116e-04f, -9.998632669e-01f},
+		{-1.617968559e+00f, -1.647294266e-04f, 1.000035763e+00f},
+		{-1.483431101e+00f, 3.524136543e-01f, 7.821941376e-01f},
+		{-1.621091485e+00f, -1.936959568e-03f, -9.982609153e-01f},
+		{1.458865047e+00f, -4.167097211e-01f, -5.984700322e-01f},
+		{-5.284439921e-01f, -3.075364828e-01f, 8.261925578e-01f},
+		{-1.478785157e+00f, -2.608410716e-01f, -8.782760501e-01f},
+		{-4.821130335e-01f, 3.202155232e-01f, -1.786070466e-01f},
+		{1.558186531e+00f, -1.572128534e-01f, 9.026681185e-01f},
+		{-1.168316364e+00f, -3.692707121e-01f, 1.080447078e+00f},
+		{2.187570333e-01f, -1.135104299e+00f, 1.264784575e+00f},
+		{-1.617757797e+00f, 5.264066858e-04f, 9.997240305e-01f},
+		{-7.926511019e-02f, 1.048145294e+00f, 1.491067529e+00f},
+		{-1.666325610e-03f, -9.974440336e-01f, -1.615188479e+00f},
+		{1.006952286e+00f, 1.615650654e+00f, -4.053545184e-03f},
+		{0.000000000e+00f, 3.444449008e-01f, -5.573235750e-01f},
+		{7.900940180e-01f, -1.278398991e+00f, 0.000000000e+00f},
+		{-1.244565725e+00f, -1.125827804e-02f, -1.255824924e+00f},
+		{-1.154508591e+00f, -1.213525414e+00f, -2.500001788e-01f},
+		{-1.309017301e+00f, -8.090171814e-01f, -5.000002384e-01f},
+		{-1.463525534e+00f, -4.045087695e-01f, -7.500005960e-01f},
+		{-6.362375570e-04f, -6.785897613e-01f, -1.618612170e+00f},
+		{9.463248253e-01f, 5.810145736e-01f, 6.789535880e-01f},
+		{3.047788143e-01f, -1.740671992e+00f, 1.182140589e+00f},
+		{-3.892679811e-01f, 1.038147688e+00f, 1.190618277e+00f},
+		{-1.154508710e+00f, -1.213525176e+00f, 2.499994338e-01f},
+		{-1.309016466e+00f, -8.090165854e-01f, 5.000002980e-01f},
+		{-1.463524818e+00f, -4.045090377e-01f, 7.500002980e-01f},
+		{1.001508951e+00f, -1.619185925e+00f, -1.232806011e-03f},
+		{1.145782232e+00f, 1.237686872e+00f, -2.355188727e-01f},
+		{1.386887193e+00f, -1.428574175e-01f, -1.088290811e+00f},
+		{1.155738711e+00f, -2.857138216e-01f, -1.176580548e+00f},
+		{9.245904088e-01f, -4.285714924e-01f, -1.264871716e+00f},
+		{6.934429407e-01f, -5.714291334e-01f, -1.353162646e+00f},
+		{4.622954130e-01f, -7.142856717e-01f, -1.441452861e+00f},
+		{2.311475873e-01f, -8.571430445e-01f, -1.529743552e+00f},
+		{-6.468786001e-01f, 1.046671629e+00f, 0.000000000e+00f},
+		{-1.286025882e+00f, 0.000000000e+00f, 7.948077321e-01f},
+		{1.828569293e+00f, 5.511882305e-01f, -3.639454395e-02f},
+		{-9.889257550e-01f, 0.000000000e+00f, -6.111897230e-01f},
+		{8.403830528e-01f, -2.282335982e-02f, 9.002639651e-01f},
+		{-3.254281182e-04f, -3.752844334e-01f, -1.618466973e+00f},
+		{-1.444956013e-07f, -7.142855525e-01f, -1.618034005e+00f},
+		{-5.037525952e-08f, -4.285715520e-01f, -1.618034124e+00f},
+		{-1.316915217e-07f, -1.428570300e-01f, -1.618033886e+00f},
+		{2.816018139e-07f, 1.428568363e-01f, -1.618034363e+00f},
+		{-1.477980494e-08f, 4.285713732e-01f, -1.618033171e+00f},
+		{-2.022295007e-07f, 7.142857313e-01f, -1.618033886e+00f},
+		{-1.825485587e+00f, -4.501773119e-01f, -3.423708677e-01f},
+		{3.906928934e-03f, -9.972873330e-01f, -1.617000341e+00f},
+		{3.330070293e-03f, 9.961679578e-01f, 1.615726829e+00f},
+		{-9.080737829e-01f, 3.027348518e-01f, 7.076822519e-01f},
+		{-1.453365326e+00f, -3.383456171e-01f, 8.264660835e-01f},
+		{-1.050187349e+00f, -1.486641765e+00f, -8.120489866e-02f},
+		{9.176892042e-01f, -1.833526254e+00f, 5.523809418e-02f},
+		{1.220894337e+00f, 1.039725065e+00f, 2.130673826e-02f},
+		{-6.092307568e-01f, 0.000000000e+00f, -3.765253127e-01f},
+		{0.000000000e+00f, -6.475350261e-01f, 1.047733665e+00f},
+		{-1.603541970e+00f, -3.777083382e-02f, -5.920574665e-01f},
+		{5.792362094e-01f, -3.458117545e-01f, -8.061514497e-01f},
+		{5.628519654e-01f, -1.290026903e+00f, 7.651551366e-01f},
+		{-1.116937518e+00f, 2.421482354e-01f, -1.089060307e-01f},
+		{7.714872956e-01f, -5.468678474e-01f, 1.633635521e+00f},
+		{1.311475396e+00f, -8.025808334e-01f, -5.039777756e-01f},
+		{1.479111195e+00f, -3.638058603e-01f, 7.751767039e-01f},
+		{-1.569204807e+00f, 1.278364509e-01f, 9.209927320e-01f},
+		{1.000000000e+00f, 1.618034005e+00f, 0.000000000e+00f},
+		{-1.102279544e+00f, 1.113913417e+00f, 4.018411040e-01f},
+		{1.352338046e-01f, -3.948976696e-01f, -1.566453576e+00f},
+		{-4.990850110e-03f, -9.976323843e-01f, -1.625341177e+00f},
+		{1.171967745e+00f, 8.084440231e-02f, 1.526910543e+00f},
+		{-8.333329558e-01f, -1.515027881e+00f, 2.696718872e-01f},
+		{-6.666659117e-01f, -1.412022829e+00f, 5.393452048e-01f},
+		{-5.000001788e-01f, -1.309016824e+00f, 8.090171218e-01f},
+		{-3.333331048e-01f, -1.206011176e+00f, 1.078689337e+00f},
+		{-1.666672081e-01f, -1.103005528e+00f, 1.348361015e+00f},
+		{-1.001470566e+00f, 1.616499662e+00f, -4.561771057e-04f},
+		{-5.116344094e-01f, 8.278418779e-01f, 0.000000000e+00f},
+		{-1.785489917e-01f, -2.654796243e-01f, -9.135619402e-01f},
+		{-4.047199488e-01f, -1.778397083e+00f, -4.349166751e-01f},
+		{0.000000000e+00f, -5.315647721e-01f, 8.600898981e-01f},
+		{8.571432233e-01f, -1.529743791e+00f, 2.311480194e-01f},
+		{7.142857909e-01f, -1.441452146e+00f, 4.622952640e-01f},
+		{5.714288950e-01f, -1.353161573e+00f, 6.934428215e-01f},
+		{4.285710454e-01f, -1.264871359e+00f, 9.245903492e-01f},
+		{2.857146561e-01f, -1.176581264e+00f, 1.155738235e+00f},
+		{1.428573281e-01f, -1.088290691e+00f, 1.386886477e+00f},
+		{1.612959266e+00f, 1.307880599e-02f, 4.425288439e-01f},
+		{1.136922479e+00f, -1.261270523e+00f, -2.210779041e-01f},
+		{-1.379806638e+00f, -6.236872077e-01f, 3.145914078e-01f},
+		{-1.445874453e+00f, 4.507191777e-01f, 1.044155955e-01f},
+		{1.099934801e-03f, 1.005945921e+00f, -1.618815660e+00f},
+		{-1.078688860e+00f, -3.333331645e-01f, 1.206010938e+00f},
+		{-5.393446088e-01f, -6.666666269e-01f, 1.412022829e+00f},
+		{1.245681763e+00f, 9.748613834e-01f, -1.215741932e-01f},
+		{-1.118878722e-01f, -4.971617162e-01f, -9.679811597e-01f},
+		{9.933810234e-01f, -1.617228270e+00f, -4.226116464e-03f},
+		{-1.606284142e+00f, 3.076153807e-02f, -9.809883237e-01f},
+		{-1.126724362e+00f, 0.000000000e+00f, 6.963539124e-01f},
+		{-7.368535399e-01f, -1.480157614e+00f, 3.609648943e-01f},
+		{-1.390085697e+00f, -5.967763662e-01f, 6.311719418e-01f},
+		{1.619863153e+00f, 1.071012695e-03f, -1.002707720e+00f},
+		{4.361957014e-01f, -3.072058558e-01f, -1.451422095e+00f},
+		{-1.001425505e+00f, -1.620300651e+00f, -4.062809967e-05f},
+		{1.748257875e-02f, 1.527979612e+00f, 2.357654870e-01f},
+		{-9.017625707e-04f, -9.984976649e-01f, 1.617181301e+00f},
+		{-1.667023301e-01f, 1.162230849e+00f, 1.193308353e+00f},
+		{1.172792196e+00f, 1.165658474e+00f, -2.795834839e-01f},
+		{2.529041171e-01f, 0.000000000e+00f, 1.563033313e-01f},
+	};
+	int npts = sizeof(pts) / sizeof(pts[0]);
+
+	Hull* h = quickhull(pts, npts);
+	TEST_ASSERT(h != NULL);
+	if (h) {
+		TEST_ASSERT(hull_check_euler(h));
+		TEST_ASSERT(hull_check_twins(h));
+		TEST_ASSERT(hull_check_face_loops(h));
+		TEST_ASSERT(hull_check_normals_outward(h));
+		TEST_ASSERT(hull_check_convex(h, h->epsilon));
+		TEST_ASSERT(hull_check_contains_inputs(h, pts, npts, h->epsilon + h->maxoutside));
+		hull_free(h);
+	}
+}
+
+// Soak failure: Euler+twins on tiny tetrahedron (V=13 E=61 F=20).
+static void test_quickhull_soak_tet101()
+{
+	TEST_BEGIN("quickhull soak_tet101");
+	v3 pts[] = {
+		{8.348876008e-07f, 4.681363702e-03f, 6.981662182e-07f},
+		{-4.680875689e-03f, -4.682406783e-03f, 4.681994673e-03f},
+		{4.680886865e-03f, -4.682447761e-03f, 4.681915976e-03f},
+		{5.302704835e-07f, -4.680839833e-03f, -4.682225175e-03f},
+		{2.199016308e-05f, -4.658407066e-03f, -4.654521123e-03f},
+		{-4.681670573e-03f, -4.681670573e-03f, 4.681670573e-03f},
+		{2.487084828e-03f, 2.295025159e-03f, 3.906742670e-03f},
+		{0.000000000e+00f, -4.681670573e-03f, -4.681670573e-03f},
+		{1.984762028e-03f, -4.681788385e-03f, -7.125165430e-04f},
+		{-4.967796485e-07f, -4.681355320e-03f, -4.682343919e-03f},
+		{5.329707172e-03f, 2.600779524e-03f, 1.040445175e-03f},
+		{-3.901390824e-03f, -4.681668244e-03f, 3.121116664e-03f},
+		{-3.121114103e-03f, -4.681670107e-03f, 1.560558681e-03f},
+		{-2.340835053e-03f, -4.681671504e-03f, 1.123785578e-10f},
+		{-1.560556819e-03f, -4.681670573e-03f, -1.560557052e-03f},
+		{-7.802789914e-04f, -4.681671038e-03f, -3.121113172e-03f},
+		{4.667766858e-03f, -4.693021998e-03f, 4.664019216e-03f},
+		{2.266348340e-03f, -4.681670573e-03f, -1.489738934e-04f},
+		{-3.373793326e-03f, -3.373793326e-03f, 3.373793326e-03f},
+		{4.672480281e-03f, -4.688905552e-03f, 4.669602029e-03f},
+		{7.668895705e-06f, -4.663798027e-03f, -4.680988379e-03f},
+		{2.402480692e-03f, -4.681670573e-03f, 1.232908107e-04f},
+		{-1.855140319e-03f, 9.713897016e-04f, 1.855140319e-03f},
+	};
+	int npts = sizeof(pts) / sizeof(pts[0]);
+	Hull* h = quickhull(pts, npts);
+	TEST_ASSERT(h != NULL);
+	if (h) {
+		TEST_ASSERT(hull_check_euler(h));
+		TEST_ASSERT(hull_check_twins(h));
+		TEST_ASSERT(hull_check_face_loops(h));
+		TEST_ASSERT(hull_check_normals_outward(h));
+		TEST_ASSERT(hull_check_convex(h, h->epsilon));
+		TEST_ASSERT(hull_check_contains_inputs(h, pts, npts, h->epsilon + h->maxoutside));
+		hull_free(h);
+	}
+}
+
+static void test_quickhull_bipyramid_loops()
+{
+	v3 pts[] = {
+		{  0.0f,  0.7f,  0.0f },
+		{  0.5f,  0.0f,  0.5f },
+		{ -0.5f,  0.0f,  0.5f },
+		{  0.5f,  0.0f, -0.5f },
+		{ -0.5f,  0.0f, -0.5f },
+		{  0.0f, -0.7f,  0.0f },
+	};
+	Hull* h = quickhull(pts, 6);
+	TEST_BEGIN("bipyramid hull built");
+	TEST_ASSERT(h != NULL);
+	TEST_ASSERT(h->face_count >= 4);
+
+	int any_broken = 0;
+	for (int f = 0; f < h->face_count; f++) {
+		int start = h->faces[f].edge;
+		int e = start;
+		int count = 0;
+		do {
+			count++;
+			if (count > 100) { any_broken = 1; break; }
+			if (h->edges[e].face != f) { any_broken = 1; break; }
+			e = h->edges[e].next;
+		} while (e != start);
+	}
+	TEST_BEGIN("bipyramid face loops valid");
+	TEST_ASSERT(!any_broken);
+
+	// Test collision at multiple heights (the crash was during runtime fall)
+	TEST_BEGIN("bipyramid vs floor box at multiple positions");
+	{
+		const Hull* box = hull_unit_box();
+		ConvexHull floor_hull = {
+			.hull = box,
+			.center = V3(0, -1, 0),
+			.rotation = quat_identity(),
+			.scale = V3(10, 1, 10),
+		};
+		// Test at many Y positions to cover different reference face selections
+		for (int yi = 0; yi < 20; yi++) {
+			float y = -0.5f + yi * 0.1f;
+			ConvexHull bip_hull = {
+				.hull = h,
+				.center = V3(3, y, 0),
+				.rotation = quat_identity(),
+				.scale = V3(1, 1, 1),
+			};
+			Manifold m = {0};
+			collide_hull_hull(floor_hull, bip_hull, &m);
+			collide_hull_hull(bip_hull, floor_hull, &m); // test both orderings
+		}
+		TEST_ASSERT(1);
+	}
+
+	// Test with rotated bipyramid (reproduces runtime scenario)
+	TEST_BEGIN("bipyramid vs floor rotated");
+	{
+		ConvexHull floor_hull = {
+			.hull = hull_unit_box(),
+			.center = V3(0, -1, 0),
+			.rotation = quat_identity(),
+			.scale = V3(10, 1, 10),
+		};
+		for (int ri = 0; ri < 36; ri++) {
+			float angle = ri * 0.175f; // ~10 deg steps
+			float sa = sinf(angle * 0.5f), ca = cosf(angle * 0.5f);
+			quat rots[] = {
+				{ sa, 0, 0, ca },  // pitch
+				{ 0, sa, 0, ca },  // yaw
+				{ 0, 0, sa, ca },  // roll
+				{ sa*0.577f, sa*0.577f, sa*0.577f, ca }, // diagonal
+			};
+			for (int r = 0; r < 4; r++) {
+				for (int yi = 0; yi < 10; yi++) {
+					float y = -0.3f + yi * 0.1f;
+					ConvexHull bip = {
+						.hull = h,
+						.center = V3(3, y, 0),
+						.rotation = rots[r],
+						.scale = V3(1, 1, 1),
+					};
+					Manifold m = {0};
+					collide_hull_hull(floor_hull, bip, &m);
+					collide_hull_hull(bip, floor_hull, &m);
+				}
+			}
+		}
+		TEST_ASSERT(1);
+	}
+
+	// Also test bipyramid vs small box (box-hull dispatch)
+	TEST_BEGIN("bipyramid vs small box collision");
+	{
+		ConvexHull box_hull = {
+			.hull = hull_unit_box(),
+			.center = V3(3, 1.5f, 0),
+			.rotation = quat_identity(),
+			.scale = V3(0.4f, 0.4f, 0.4f),
+		};
+		ConvexHull bip_hull = {
+			.hull = h,
+			.center = V3(3, 0.7f, 0),
+			.rotation = quat_identity(),
+			.scale = V3(1, 1, 1),
+		};
+		Manifold m = {0};
+		collide_hull_hull(box_hull, bip_hull, &m);
+		collide_hull_hull(bip_hull, box_hull, &m);
+		TEST_ASSERT(1);
+	}
+
+	hull_free(h);
+}
+
+// ============================================================================
+// Geometry stress tests: diverse input shapes that exercise different codepaths.
+
+static void validate_hull_or_null(const char* label, Hull* h, const v3* pts, int npts)
+{
+	if (!h) {
+		// NULL is acceptable for degenerate inputs.
+		char buf[128];
+		snprintf(buf, sizeof(buf), "%s build", label);
+		TEST_BEGIN(buf);
+		TEST_ASSERT(1);
+		return;
+	}
+	char buf[128];
+	snprintf(buf, sizeof(buf), "%s euler", label);
+	TEST_BEGIN(buf); TEST_ASSERT(hull_check_euler(h));
+	snprintf(buf, sizeof(buf), "%s twins", label);
+	TEST_BEGIN(buf); TEST_ASSERT(hull_check_twins(h));
+	snprintf(buf, sizeof(buf), "%s loops", label);
+	TEST_BEGIN(buf); TEST_ASSERT(hull_check_face_loops(h));
+	snprintf(buf, sizeof(buf), "%s normals", label);
+	TEST_BEGIN(buf); TEST_ASSERT(hull_check_normals_outward(h));
+	snprintf(buf, sizeof(buf), "%s convex", label);
+	TEST_BEGIN(buf); TEST_ASSERT(hull_check_convex(h, h->epsilon));
+	snprintf(buf, sizeof(buf), "%s inputs", label);
+	TEST_BEGIN(buf); TEST_ASSERT(hull_check_contains_inputs(h, pts, npts, h->epsilon + h->maxoutside));
+	hull_free(h);
+}
+
+static void test_quickhull_geometry_stress()
+{
+	int total = 0, fails = 0;
+	fuzz_rng_state = 99999;
+
+	// --- 1. Flat/degenerate: all points coplanar ---
+	for (int trial = 0; trial < 5; trial++) {
+		CK_DYNA v3* pts = NULL;
+		int n = 10 + fuzz_rand_int(40);
+		for (int i = 0; i < n; i++) {
+			float x = fuzz_rand_range(-10, 10);
+			float z = fuzz_rand_range(-10, 10);
+			float y = 1.0f + fuzz_rand_range(-1e-6f, 1e-6f); // near-coplanar
+			apush(pts, V3(x, y, z));
+		}
+		// Add 1-2 points slightly off-plane to make a thin sliver.
+		apush(pts, V3(0, 1.001f, 0));
+		apush(pts, V3(0, 0.999f, 0));
+		total++;
+		char label[64]; snprintf(label, sizeof(label), "flat sliver #%d (%d pts)", trial, asize(pts));
+		Hull* h = quickhull(pts, asize(pts));
+		validate_hull_or_null(label, h, pts, asize(pts));
+		afree(pts);
+	}
+
+	// --- 2. Needle shapes: extreme aspect ratio ---
+	{
+		float lengths[] = { 100, 1000, 10000 };
+		float radii[]   = { 0.1f, 0.01f, 0.001f };
+		for (int li = 0; li < 3; li++) {
+			CK_DYNA v3* pts = NULL;
+			float L = lengths[li], R = radii[li];
+			int segs = 8;
+			// Two endcaps + ring
+			apush(pts, V3(0, -L/2, 0));
+			apush(pts, V3(0,  L/2, 0));
+			for (int i = 0; i < segs; i++) {
+				float theta = 2.0f * 3.14159265f * (float)i / (float)segs;
+				float cx = R * cosf(theta), cz = R * sinf(theta);
+				apush(pts, V3(cx, -L/2, cz));
+				apush(pts, V3(cx,  L/2, cz));
+				apush(pts, V3(cx, 0, cz));
+			}
+			total++;
+			char label[64]; snprintf(label, sizeof(label), "needle L=%.0f R=%.3f", L, R);
+			Hull* h = quickhull(pts, asize(pts));
+			validate_hull_or_null(label, h, pts, asize(pts));
+			afree(pts);
+		}
+	}
+
+	// --- 4. Spherical distribution: all points on hull ---
+	for (int trial = 0; trial < 3; trial++) {
+		CK_DYNA v3* pts = NULL;
+		int n = 50 + trial * 50; // 50, 100, 150
+		for (int i = 0; i < n; i++) {
+			v3 d = fuzz_rand_dir();
+			float r = 1.0f + fuzz_rand_range(-1e-4f, 1e-4f);
+			apush(pts, scale(d, r));
+		}
+		total++;
+		char label[64]; snprintf(label, sizeof(label), "sphere %d pts", n);
+		Hull* h = quickhull(pts, asize(pts));
+		validate_hull_or_null(label, h, pts, asize(pts));
+		afree(pts);
+	}
+
+	// --- 5. Near-duplicate vertices: many within epsilon ---
+	for (int trial = 0; trial < 5; trial++) {
+		CK_DYNA v3* pts = NULL;
+		// 8 cube corners, each duplicated 5-10 times with tiny jitter.
+		v3 corners[] = {
+			{-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},
+			{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1},
+		};
+		for (int c = 0; c < 8; c++) {
+			int dupes = 5 + fuzz_rand_int(6);
+			for (int d = 0; d < dupes; d++) {
+				float jitter = fuzz_rand_range(0, 1e-5f);
+				apush(pts, add(corners[c], scale(fuzz_rand_dir(), jitter)));
+			}
+		}
+		total++;
+		char label[64]; snprintf(label, sizeof(label), "near-dup #%d (%d pts)", trial, asize(pts));
+		Hull* h = quickhull(pts, asize(pts));
+		validate_hull_or_null(label, h, pts, asize(pts));
+		afree(pts);
+	}
+
+	// --- 6. One-axis collapse: collinear / pencil ---
+	{
+		// Pure collinear: should return NULL.
+		CK_DYNA v3* pts = NULL;
+		for (int i = 0; i < 20; i++)
+			apush(pts, V3(0, (float)i * 0.1f, 0));
+		total++;
+		TEST_BEGIN("collinear 20pts");
+		Hull* h = quickhull(pts, asize(pts));
+		TEST_ASSERT(h == NULL); // degenerate, no valid hull
+		afree(pts);
+
+		// Thin pencil: line + tiny perturbation.
+		pts = NULL;
+		for (int i = 0; i < 30; i++) {
+			float t = (float)i / 29.0f;
+			apush(pts, V3(fuzz_rand_range(-1e-6f, 1e-6f), t * 10.0f,
+			              fuzz_rand_range(-1e-6f, 1e-6f)));
+		}
+		// Add 4 off-axis points to make it buildable.
+		apush(pts, V3(0.01f, 5.0f, 0));
+		apush(pts, V3(-0.01f, 5.0f, 0));
+		apush(pts, V3(0, 5.0f, 0.01f));
+		apush(pts, V3(0, 5.0f, -0.01f));
+		total++;
+		char label[64]; snprintf(label, sizeof(label), "pencil 34 pts");
+		h = quickhull(pts, asize(pts));
+		validate_hull_or_null(label, h, pts, asize(pts));
+		afree(pts);
+	}
+
+	// --- 8. Coplanar grid: NxN on a plane + off-plane points ---
+	{
+		int grids[] = { 5, 8, 10 };
+		for (int gi = 0; gi < 3; gi++) {
+			CK_DYNA v3* pts = NULL;
+			int N = grids[gi];
+			for (int x = 0; x < N; x++)
+				for (int z = 0; z < N; z++)
+					apush(pts, V3((float)x, 0, (float)z));
+			// 4 points above and below.
+			float mid = (float)(N-1) / 2.0f;
+			apush(pts, V3(mid, 1.0f, mid));
+			apush(pts, V3(mid, -1.0f, mid));
+			apush(pts, V3(0, 0.5f, 0));
+			apush(pts, V3((float)(N-1), 0.5f, (float)(N-1)));
+			total++;
+			char label[64]; snprintf(label, sizeof(label), "grid %dx%d+4", N, N);
+			Hull* h = quickhull(pts, asize(pts));
+			validate_hull_or_null(label, h, pts, asize(pts));
+			afree(pts);
+		}
+	}
+
+	// --- 9. Bipyramid / double cone ---
+	{
+		int ring_sizes[] = { 6, 12, 24, 48 };
+		for (int ri = 0; ri < 4; ri++) {
+			CK_DYNA v3* pts = NULL;
+			int n = ring_sizes[ri];
+			// Top and bottom apex.
+			apush(pts, V3(0, 2, 0));
+			apush(pts, V3(0, -2, 0));
+			// Equatorial ring.
+			for (int i = 0; i < n; i++) {
+				float theta = 2.0f * 3.14159265f * (float)i / (float)n;
+				apush(pts, V3(cosf(theta), 0, sinf(theta)));
+			}
+			// Add some interior points and near-edge points for stress.
+			for (int i = 0; i < n/2; i++) {
+				float theta = fuzz_rand() * 2.0f * 3.14159265f;
+				float r = fuzz_rand_range(0.1f, 0.9f);
+				float y = fuzz_rand_range(-1.5f, 1.5f);
+				apush(pts, V3(r * cosf(theta), y, r * sinf(theta)));
+			}
+			total++;
+			char label[64]; snprintf(label, sizeof(label), "bipyramid n=%d (%d pts)", n, asize(pts));
+			Hull* h = quickhull(pts, asize(pts));
+			validate_hull_or_null(label, h, pts, asize(pts));
+			afree(pts);
+		}
+	}
+
+	printf("  geometry stress: %d shapes tested\n", total);
+}
+
+// ============================================================================
+// Solver / constraint tests
+// Test that constraint solvers converge and don't produce NaN/inf.
+
+// Helper: step a world N times and check all dynamic bodies have valid state.
+static int solver_step_n(World w, int steps)
+{
+	for (int i = 0; i < steps; i++) {
+		world_step(w, 1.0f / 60.0f);
+	}
+	// Check all dynamic bodies have finite positions
+	int count = world_body_count(w);
+	for (int i = 0; i < count; i++) {
+		v3 pos = body_get_position_by_index(w, i);
+		if (pos.x != pos.x || pos.y != pos.y || pos.z != pos.z) return 0;
+		if (pos.x > 1e10f || pos.x < -1e10f) return 0;
+		if (pos.y > 1e10f || pos.y < -1e10f) return 0;
+		if (pos.z > 1e10f || pos.z < -1e10f) return 0;
+	}
+	return 1;
+}
+
+static void test_solver_basic_gravity()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+
+	Body ball = create_body(w, (BodyParams){
+		.position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, ball, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.5f,
+	});
+
+	TEST_BEGIN("solver basic gravity: ball falls and rests");
+	int ok = solver_step_n(w, 300);
+	TEST_ASSERT(ok);
+
+	v3 pos = body_get_position(w, ball);
+	TEST_ASSERT(pos.y > -0.5f && pos.y < 2.0f); // settled near floor
+
+	destroy_world(w);
+}
+
+static void test_solver_distance_spring()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+
+	Body anchor = create_body(w, (BodyParams){
+		.position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, anchor, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
+	});
+
+	Body bob = create_body(w, (BodyParams){
+		.position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, bob, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.3f,
+	});
+
+	create_distance(w, (DistanceParams){
+		.body_a = bob, .body_b = anchor,
+		.rest_length = 0, // auto-compute = 2.0
+		.spring = { .frequency = 3.0f, .damping_ratio = 0.3f },
+	});
+
+	TEST_BEGIN("solver distance spring: no blowup after 600 steps");
+	int ok = solver_step_n(w, 600);
+	TEST_ASSERT(ok);
+
+	v3 pos = body_get_position(w, bob);
+	TEST_ASSERT(pos.y > -10.0f && pos.y < 10.0f);
+
+	destroy_world(w);
+}
+
+static void test_solver_ball_socket_chain()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+
+	Body anchor = create_body(w, (BodyParams){
+		.position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, anchor, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
+	});
+
+	float link_len = 1.0f;
+	Body prev = anchor;
+	for (int i = 0; i < 5; i++) {
+		Body link = create_body(w, (BodyParams){
+			.position = V3(0, 7.0f - i * link_len, 0),
+			.rotation = quat_identity(), .mass = 0.5f,
+		});
+		body_add_shape(w, link, (ShapeParams){
+			.type = SHAPE_SPHERE, .sphere.radius = 0.2f,
+		});
+		create_ball_socket(w, (BallSocketParams){
+			.body_a = prev, .body_b = link,
+			.local_offset_a = V3(0, -link_len * 0.5f, 0),
+			.local_offset_b = V3(0,  link_len * 0.5f, 0),
+		});
+		prev = link;
+	}
+
+	TEST_BEGIN("solver ball socket chain: no blowup after 600 steps");
+	int ok = solver_step_n(w, 600);
+	TEST_ASSERT(ok);
+
+	destroy_world(w);
+}
+
+static void test_solver_distance_rigid()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+
+	Body a = create_body(w, (BodyParams){
+		.position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, a, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
+	});
+
+	Body b = create_body(w, (BodyParams){
+		.position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, b, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.3f,
+	});
+
+	create_distance(w, (DistanceParams){
+		.body_a = b, .body_b = a,
+		.rest_length = 0, // auto = 2.0
+		// no spring -> rigid
+	});
+
+	TEST_BEGIN("solver distance rigid: no blowup after 600 steps");
+	int ok = solver_step_n(w, 600);
+	TEST_ASSERT(ok);
+
+	destroy_world(w);
+}
+
+static void test_solver_nan_rejection()
+{
+	// Verify is_valid rejects NaN, inf, and huge values
+	TEST_BEGIN("is_valid rejects NaN");
+	float nan_val = 0.0f / 0.0f;
+	TEST_ASSERT(!is_valid(nan_val));
+
+	TEST_BEGIN("is_valid rejects inf");
+	float inf_val = 1.0f / 0.0f;
+	TEST_ASSERT(!is_valid(inf_val));
+
+	TEST_BEGIN("is_valid rejects -inf");
+	TEST_ASSERT(!is_valid(-inf_val));
+
+	TEST_BEGIN("is_valid rejects huge positive");
+	TEST_ASSERT(!is_valid(1e19f));
+
+	TEST_BEGIN("is_valid rejects huge negative");
+	TEST_ASSERT(!is_valid(-1e19f));
+
+	TEST_BEGIN("is_valid accepts normal values");
+	TEST_ASSERT(is_valid(0.0f));
+	TEST_ASSERT(is_valid(1.0f));
+	TEST_ASSERT(is_valid(-1.0f));
+	TEST_ASSERT(is_valid(1e17f));
+
+	TEST_BEGIN("is_valid v3");
+	TEST_ASSERT(is_valid(V3(1, 2, 3)));
+	TEST_ASSERT(!is_valid(V3(nan_val, 0, 0)));
+	TEST_ASSERT(!is_valid(V3(0, inf_val, 0)));
+	TEST_ASSERT(!is_valid(V3(0, 0, 1e19f)));
+
+	TEST_BEGIN("is_valid quat");
+	TEST_ASSERT(is_valid(quat_identity()));
+	TEST_ASSERT(!is_valid((quat){ nan_val, 0, 0, 1 }));
+}
+
+static void run_solver_tests()
+{
+	printf("--- nudge solver tests ---\n");
+	test_solver_nan_rejection();
+	test_solver_basic_gravity();
+	test_solver_distance_spring();
+	test_solver_distance_rigid();
+	test_solver_ball_socket_chain();
+}
+
 static void run_tests()
 {
 	test_pass = 0;
@@ -1177,10 +1878,16 @@ static void run_tests()
 	test_quickhull_case783();
 	test_quickhull_ico7037();
 	test_quickhull_tet8098();
+	test_quickhull_soak_ico1336();
+	test_quickhull_soak_tet101();
 	test_quickhull_cylinder();
+	test_quickhull_bipyramid_loops();
+	test_quickhull_geometry_stress();
 
 	// Quickhull fuzz: moderate count for regular runs.
 	test_quickhull_fuzz(100); // use 1000+ for stress testing
+
+	run_solver_tests();
 
 	printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	if (test_fail > 0) printf("*** FAILURES ***\n");

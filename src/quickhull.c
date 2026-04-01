@@ -476,17 +476,11 @@ static int qh_connect_half_edges(QH_State* s, int ep, int en)
 			s->faces[fin_face].mark = QH_DELETED;
 			discarded = fin_face;
 		} else {
-			// Polygon: remove one edge from the fin face's loop.
-			int ht = s->edges[en].twin;
-			new_twin = s->edges[ht].next;
-			if (s->faces[fin_face].edge == s->edges[new_twin].prev)
-				s->faces[fin_face].edge = new_twin;
-			// new_twin absorbs the removed edge's origin.
-			int removed = s->edges[new_twin].prev;
-			s->edges[new_twin].origin = s->edges[removed].origin;
-			int skip = s->edges[removed].prev;
-			s->edges[new_twin].prev = skip;
-			s->edges[skip].next = new_twin;
+			// Polygon fin should have been pre-merged by the caller.
+			// If we still get here, use normal linkage as fallback.
+			s->edges[ep].next = en;
+			s->edges[en].prev = ep;
+			return QH_INVALID;
 		}
 
 		// Remove ep from this face's loop; en absorbs ep's origin.
@@ -539,6 +533,7 @@ static int qh_merge_adjacent_face(QH_State* s, int hedge_adj, int discarded[], i
 	df = qh_connect_half_edges(s, ap, on);
 	if (df != QH_INVALID) discarded[nd++] = df;
 
+
 	// Inherit maxoutside from absorbed face.
 	if (s->faces[ofi].maxoutside > s->faces[tfi].maxoutside)
 		s->faces[tfi].maxoutside = s->faces[ofi].maxoutside;
@@ -582,6 +577,7 @@ static int qh_merge_adjacent_face(QH_State* s, int hedge_adj, int discarded[], i
 			}
 		}
 
+
 		QH_DEBUG({
 			e = s->faces[tfi].edge; start = e; n = 0;
 			do { n++; e = s->edges[e].next; } while (e != start);
@@ -609,7 +605,9 @@ static int qh_do_adjacent_merge(QH_State* s, int fi, int type, int* unclaimed)
 	int convex = 1;
 	do {
 		int ofi = qh_opp_face(s, hedge);
-		if (ofi == fi || s->faces[ofi].mark == QH_DELETED) { hedge = s->edges[hedge].next; continue; }
+		if (ofi == fi || s->faces[ofi].mark == QH_DELETED) {
+			hedge = s->edges[hedge].next; continue;
+		}
 
 		float tol = s->epsilon;
 
@@ -629,6 +627,23 @@ static int qh_do_adjacent_merge(QH_State* s, int fi, int type, int* unclaimed)
 		if (merge) {
 			QH_DEBUG(fprintf(stderr, "[qh] do_adjacent_merge: fi=%d hedge=%d ofi=%d hedge.face=%d\n",
 				fi, hedge, ofi, s->edges[hedge].face));
+			// Check if the merge will hit a polygon fin degenerate.
+			// If so, skip it to avoid infinite loops.
+			int will_poly_fin = 0;
+			{
+				int ho = s->edges[hedge].twin;
+				int ap = s->edges[hedge].prev, an = s->edges[hedge].next;
+				int op = s->edges[ho].prev, on = s->edges[ho].next;
+				while (qh_opp_face(s, ap) == ofi) { ap = s->edges[ap].prev; on = s->edges[on].next; }
+				while (qh_opp_face(s, an) == ofi) { op = s->edges[op].prev; an = s->edges[an].next; }
+				if ((qh_opp_face(s, op) == qh_opp_face(s, an) && qh_face_vert_count(s, qh_opp_face(s, op)) >= 4) ||
+				    (qh_opp_face(s, ap) == qh_opp_face(s, on) && qh_face_vert_count(s, qh_opp_face(s, ap)) >= 4))
+					will_poly_fin = 1;
+			}
+			if (will_poly_fin) {
+				hedge = s->edges[hedge].next;
+				continue;
+			}
 			int disc[3];
 			int nd = qh_merge_adjacent_face(s, hedge, disc, unclaimed);
 			for (int i = 0; i < nd; i++) qh_delete_face_points(s, disc[i], fi, unclaimed);
@@ -736,6 +751,32 @@ static void qh_validate_mesh(QH_State* s, const char* ctx)
 			e = s->edges[e].next;
 		} while (e != start);
 	}
+
+	// Euler check: V - E/2 + F = 2 on the live mesh.
+	{
+		CK_DYNA int* vremap = NULL;
+		afit(vremap, asize(s->verts));
+		for (int i = 0; i < asize(s->verts); i++) apush(vremap, 0);
+		int nf = 0, ne = 0;
+		for (int fi = 0; fi < asize(s->faces); fi++) {
+			if (s->faces[fi].mark != QH_VISIBLE) continue;
+			nf++;
+			int e = s->faces[fi].edge, start = e;
+			do {
+				ne++;
+				vremap[s->edges[e].origin] = 1;
+				e = s->edges[e].next;
+			} while (e != start);
+		}
+		int nv = 0;
+		for (int i = 0; i < asize(s->verts); i++) nv += vremap[i];
+		afree(vremap);
+		if (nv - ne/2 + nf != 2) {
+			fprintf(stderr, "qh_validate: Euler FAIL V=%d E=%d F=%d (V-E/2+F=%d) at %s\n",
+				nv, ne, nf, nv - ne/2 + nf, ctx);
+			exit(-1);
+		}
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -753,6 +794,8 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 	qh_add_new_faces(s, &nf, eye, horizon, asize(horizon));
 
 	// Two-pass merge: first larger-face-biased, then mutual non-convexity.
+	// Each successful merge reduces the live face count by 1, so the total
+	// number of merges across all faces is bounded by the initial face count.
 	for (int fi = nf.first; fi != QH_INVALID; fi = s->faces[fi].next)
 		if (s->faces[fi].mark == QH_VISIBLE)
 			while (qh_do_adjacent_merge(s, fi, QH_MERGE_LARGE, &unclaimed));
@@ -761,6 +804,49 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 			s->faces[fi].mark = QH_VISIBLE;
 			while (qh_do_adjacent_merge(s, fi, QH_MERGE_ANY, &unclaimed));
 		}
+
+
+	// Global topology fixup: cascade merges + degenerate connect can create
+	// face pairs sharing >1 edge, violating manifold topology. Sweep ALL
+	// live faces and forcibly merge multi-adjacent pairs.
+	{
+		int fixed = 1;
+		while (fixed) {
+			fixed = 0;
+			for (int fi = 0; fi < asize(s->faces) && !fixed; fi++) {
+				if (s->faces[fi].mark != QH_VISIBLE) continue;
+				int hedge = s->faces[fi].edge;
+				do {
+					int ofi = qh_opp_face(s, hedge);
+					if (ofi == fi || s->faces[ofi].mark != QH_VISIBLE) {
+						hedge = s->edges[hedge].next;
+						continue;
+					}
+					int shared = 0;
+					int e2 = s->faces[fi].edge;
+					do {
+						if (qh_opp_face(s, e2) == ofi) shared++;
+						e2 = s->edges[e2].next;
+					} while (e2 != s->faces[fi].edge);
+					if (shared > 1) {
+						// Merge smaller into larger so boundary walk sees
+						// contiguous shared edges on the absorbed (smaller) face.
+						int small = (s->faces[fi].num_verts <= s->faces[ofi].num_verts) ? fi : ofi;
+						int large = (small == fi) ? ofi : fi;
+						int me = s->faces[large].edge;
+						while (qh_opp_face(s, me) != small) me = s->edges[me].next;
+						int disc[3];
+						int nd = qh_merge_adjacent_face(s, me, disc, &unclaimed);
+						for (int k = 0; k < nd; k++)
+							qh_delete_face_points(s, disc[k], large, &unclaimed);
+						fixed = 1;
+						break;
+					}
+					hedge = s->edges[hedge].next;
+				} while (hedge != s->faces[fi].edge);
+			}
+		}
+	}
 
 	qh_resolve_unclaimed(s, &nf, &unclaimed);
 	afree(horizon);
@@ -774,6 +860,22 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	CK_DYNA int* live = NULL;
 	for (int i = 0; i < asize(s->faces); i++)
 		if (s->faces[i].mark == QH_VISIBLE) apush(live, i);
+
+	// Validate face loops before output -- detect broken topology from merges.
+	int total_edges = asize(s->edges);
+	for (int i = 0; i < asize(live); i++) {
+		int fi = live[i];
+		int e = s->faces[fi].edge, start = e, steps = 0;
+		do {
+			steps++;
+			if (steps > total_edges) {
+				fprintf(stderr, "qh_build_output: face %d (live[%d]) edge loop did not close after %d steps (start edge %d, cur edge %d)\n",
+					fi, i, steps, start, e);
+				assert(0 && "qh_build_output: broken face edge loop");
+			}
+			e = s->edges[e].next;
+		} while (e != start);
+	}
 
 	// Vertex remap.
 	CK_DYNA int* vremap = NULL;

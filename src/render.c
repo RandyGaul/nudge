@@ -447,6 +447,7 @@ static void mesh_generate_hull(Mesh* mesh, const Hull* hull, v3 sc)
 			apush(verts, ((MeshVertex){ V3(v.x*sc.x, v.y*sc.y, v.z*sc.z), sn }));
 			fan_count++;
 			e = hull->edges[e].next;
+			assert(fan_count <= hull->edge_count && "mesh_generate_hull: face edge loop didn't close");
 		} while (e != start);
 
 		// Check winding against face normal; flip if CW from outside

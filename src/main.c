@@ -107,6 +107,14 @@ static Hull* g_test_hull;
 static int g_mesh_capsule;
 static int g_mesh_hull;
 static bool g_show_contacts = true;
+static bool g_show_joints = true;
+
+// Pendulum chain (ball sockets)
+#define CHAIN_LEN 5
+static Body g_chain[CHAIN_LEN];
+
+// Spring pair (distance joint)
+static Body g_spring_a, g_spring_b;
 
 // Capsule rendering params (baked into mesh)
 static const float CAP_RADIUS = 0.3f;
@@ -257,6 +265,65 @@ void init()
 		.type = SHAPE_HULL,
 		.hull = { .hull = g_test_hull, .scale = V3(1, 1, 1) },
 	});
+
+	// --- Pendulum chain (ball sockets) ---
+	// Anchor point is a static body at the top
+	Body anchor = create_body(g_world, (BodyParams){
+		.position = V3(0, 8, -4),
+		.rotation = quat_identity(),
+		.mass = 0, // static
+	});
+	body_add_shape(g_world, anchor, (ShapeParams){
+		.type = SHAPE_SPHERE,
+		.sphere.radius = 0.15f,
+	});
+
+	float link_len = 1.0f;
+	Body prev = anchor;
+	for (int i = 0; i < CHAIN_LEN; i++) {
+		g_chain[i] = create_body(g_world, (BodyParams){
+			.position = V3(0, 7.0f - i * link_len, -4),
+			.rotation = quat_identity(),
+			.mass = 0.5f,
+		});
+		body_add_shape(g_world, g_chain[i], (ShapeParams){
+			.type = SHAPE_SPHERE,
+			.sphere.radius = 0.2f,
+		});
+		create_ball_socket(g_world, (BallSocketParams){
+			.body_a = prev,
+			.body_b = g_chain[i],
+			.local_offset_a = V3(0, -link_len * 0.5f, 0),
+			.local_offset_b = V3(0,  link_len * 0.5f, 0),
+		});
+		prev = g_chain[i];
+	}
+
+	// --- Spring-connected pair (distance joint) ---
+	g_spring_a = create_body(g_world, (BodyParams){
+		.position = V3(5, 4, -4),
+		.rotation = quat_identity(),
+		.mass = 1.0f,
+	});
+	body_add_shape(g_world, g_spring_a, (ShapeParams){
+		.type = SHAPE_BOX,
+		.box.half_extents = V3(0.3f, 0.3f, 0.3f),
+	});
+	g_spring_b = create_body(g_world, (BodyParams){
+		.position = V3(5, 6, -4),
+		.rotation = quat_identity(),
+		.mass = 0, // static anchor
+	});
+	body_add_shape(g_world, g_spring_b, (ShapeParams){
+		.type = SHAPE_SPHERE,
+		.sphere.radius = 0.15f,
+	});
+	create_distance(g_world, (DistanceParams){
+		.body_a = g_spring_a,
+		.body_b = g_spring_b,
+		.rest_length = 0, // auto-compute from positions
+		.spring = { .frequency = 3.0f, .damping_ratio = 0.3f },
+	});
 }
 
 void update()
@@ -277,6 +344,7 @@ void update()
 	// Debug panel
 	ImGui_Begin("Debug", NULL, 0);
 	ImGui_Checkbox("Show contacts", &g_show_contacts);
+	ImGui_Checkbox("Show joints", &g_show_joints);
 	const Contact* contacts;
 	int ncontacts = world_get_contacts(g_world, &contacts);
 	ImGui_Text("Contacts: %d", ncontacts);
@@ -318,6 +386,31 @@ void draw()
 	draw_body_mesh(g_mesh_capsule,g_capsule,   V3(1, 1, 1),            V3(0.2f, 0.8f, 0.3f));
 	draw_body_mesh(MESH_BOX,      g_box,       V3(0.4f, 0.4f, 0.4f),  V3(0.3f, 0.5f, 0.9f));
 	draw_body_mesh(g_mesh_hull,   g_hull_body, V3(1, 1, 1),            V3(0.9f, 0.7f, 0.2f));
+
+	// Pendulum chain bodies
+	for (int i = 0; i < CHAIN_LEN; i++)
+		draw_body_mesh(MESH_SPHERE, g_chain[i], V3(0.2f,0.2f,0.2f), V3(0.8f,0.4f,0.9f));
+
+	// Spring bodies
+	draw_body_mesh(MESH_BOX,    g_spring_a, V3(0.3f,0.3f,0.3f), V3(0.2f,0.7f,0.9f));
+	draw_body_mesh(MESH_SPHERE, g_spring_b, V3(0.15f,0.15f,0.15f), V3(0.7f,0.7f,0.7f));
+
+	// Joint visualization: lines between connected bodies
+	if (g_show_joints) {
+		v3 jcol = V3(1.0f, 0.4f, 0.1f);
+		// Chain links
+		for (int i = 0; i < CHAIN_LEN; i++) {
+			v3 p = body_get_position(g_world, g_chain[i]);
+			v3 above = i == 0
+				? V3(0, 8, -4) // static anchor position
+				: body_get_position(g_world, g_chain[i-1]);
+			render_debug_line(above, p, jcol);
+		}
+		// Distance spring
+		v3 sa = body_get_position(g_world, g_spring_a);
+		v3 sb = body_get_position(g_world, g_spring_b);
+		render_debug_line(sa, sb, V3(0.1f, 0.9f, 1.0f));
+	}
 
 	// Debug: contact points and normals
 	if (g_show_contacts) {

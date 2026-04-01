@@ -179,4 +179,36 @@ quat body_get_rotation(World world, Body body);
 // Debug: contact points from last step. Returns count, *out valid until next step.
 int world_get_contacts(World world, const Contact** out);
 
+// -----------------------------------------------------------------------------
+// Joints.
+
+typedef struct Joint { uint64_t id; } Joint;
+
+typedef struct SpringParams
+{
+	float frequency;      // Hz (0 = rigid constraint)
+	float damping_ratio;  // 1.0 = critically damped
+} SpringParams;
+
+typedef struct BallSocketParams
+{
+	Body body_a, body_b;
+	v3 local_offset_a;
+	v3 local_offset_b;
+	SpringParams spring;  // {0,0} = rigid
+} BallSocketParams;
+
+typedef struct DistanceParams
+{
+	Body body_a, body_b;
+	v3 local_offset_a;
+	v3 local_offset_b;
+	float rest_length;    // 0 = compute from initial body positions
+	SpringParams spring;
+} DistanceParams;
+
+Joint create_ball_socket(World world, BallSocketParams params);
+Joint create_distance(World world, DistanceParams params);
+void destroy_joint(World world, Joint joint);
+
 #endif

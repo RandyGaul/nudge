@@ -737,6 +737,9 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 	FaceQuery face_b = sat_query_faces(hull_b, pos_b, rot_b, scale_b, hull_a, pos_a, rot_a, scale_a);
 	if (face_b.separation > 0.0f) return 0;
 
+	// NaN transforms cause face_index to stay -1 (NaN comparisons always false)
+	if (face_a.index < 0 || face_b.index < 0) return 0;
+
 	EdgeQuery edge_q = sat_query_edges(hull_a, pos_a, rot_a, scale_a, hull_b, pos_b, rot_b, scale_b);
 	if (edge_q.separation > 0.0f) return 0;
 
@@ -802,6 +805,7 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 	v3* out_buf = buf2;
 	int start_e = ref_hull->faces[ref_face].edge;
 	int ei = start_e;
+	int guard = 0;
 	do {
 		const HalfEdge* edge = &ref_hull->edges[ei];
 		v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, edge->origin, ref_sc)));
@@ -814,6 +818,7 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 		v3* swap = in_buf; in_buf = out_buf; out_buf = swap;
 
 		ei = edge->next;
+		assert(++guard < MAX_CLIP_VERTS && "collide_hull_hull: face edge loop didn't close");
 	} while (ei != start_e);
 
 	// Keep points below reference face, generate contacts

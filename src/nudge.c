@@ -1,6 +1,13 @@
 // See LICENSE for licensing info.
 // nudge.c -- physics world implementation
 
+// Portable float validity: rejects NaN, inf, and extreme magnitudes.
+// NaN fails the self-equality test; inf and huge values fail the bound test.
+static inline int float_valid(float f) { return f == f && f > -1e18f && f < 1e18f; }
+static inline int v3_is_valid(v3 v) { return float_valid(v.x) && float_valid(v.y) && float_valid(v.z); }
+static inline int quat_is_valid(quat q) { return float_valid(q.x) && float_valid(q.y) && float_valid(q.z) && float_valid(q.w); }
+#define is_valid(x) _Generic((x), float: float_valid, v3: v3_is_valid, quat: quat_is_valid)(x)
+
 // -----------------------------------------------------------------------------
 // Internal types: cold (metadata) and hot (solver iteration) splits.
 
@@ -38,6 +45,24 @@ typedef struct BodyHot
 
 typedef struct WarmManifold WarmManifold; // forward decl for warm cache
 
+// Joint persistent storage (handle-based, parallel arrays like bodies).
+typedef enum JointType { JOINT_BALL_SOCKET, JOINT_DISTANCE } JointType;
+
+typedef struct JointInternal
+{
+	JointType type;
+	int body_a, body_b; // array indices (resolved from handles at creation)
+	union {
+		struct { v3 local_a, local_b; SpringParams spring; } ball_socket;
+		struct { v3 local_a, local_b; float rest_length; SpringParams spring; } distance;
+	};
+	// Warm starting: accumulated impulses persisted across frames.
+	union {
+		v3 warm_lambda3;   // ball socket (3 DOF)
+		float warm_lambda1; // distance (1 DOF)
+	};
+} JointInternal;
+
 typedef struct WorldInternal
 {
 	v3 gravity;
@@ -45,8 +70,12 @@ typedef struct WorldInternal
 	CK_DYNA BodyHot*     body_hot;
 	CK_DYNA uint32_t*    body_gen;
 	CK_DYNA int*         body_free;
-	CK_DYNA Contact*     debug_contacts; // flat contact array from last step
-	CK_MAP(WarmManifold) warm_cache;     // contact impulse cache for warm starting
+	CK_DYNA Contact*     debug_contacts;
+	CK_MAP(WarmManifold) warm_cache;
+	// Joints
+	CK_DYNA JointInternal* joints;
+	CK_DYNA uint32_t*      joint_gen;
+	CK_DYNA int*           joint_free;
 } WorldInternal;
 
 #include "gjk.c"
@@ -224,6 +253,8 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 #define SOLVER_RESTITUTION_THRESH  1.0f
 #define SOLVER_POS_BAUMGARTE       0.2f
 #define SOLVER_POS_MAX_CORRECTION  0.2f  // max position correction per step
+#define SOLVER_MAX_LINEAR_VEL      500.0f
+#define SOLVER_MAX_ANGULAR_VEL     100.0f
 
 typedef struct SolverContact
 {
@@ -538,6 +569,369 @@ static void solver_post_solve(
 }
 
 // -----------------------------------------------------------------------------
+// Joint solver types.
+
+typedef struct SolverBallSocket
+{
+	int body_a, body_b;
+	v3 r_a, r_b;
+	float eff_mass[6]; // symmetric 3x3 inverse (xx,xy,xz,yy,yz,zz)
+	v3 bias;
+	float softness;
+	v3 lambda;
+	int joint_idx;
+} SolverBallSocket;
+
+typedef struct SolverDistance
+{
+	int body_a, body_b;
+	v3 r_a, r_b;
+	v3 axis;
+	float eff_mass;
+	float bias;
+	float softness;
+	float lambda;
+	int joint_idx;
+} SolverDistance;
+
+// Constraint ref for graph coloring dispatch.
+enum { CTYPE_CONTACT, CTYPE_BALL_SOCKET, CTYPE_DISTANCE };
+
+typedef struct ConstraintRef
+{
+	uint8_t type;
+	uint8_t color;
+	int index;
+	int body_a, body_b;
+} ConstraintRef;
+
+// Symmetric 3x3 stored as 6 floats: [xx, xy, xz, yy, yz, zz].
+static void sym3x3_inverse(const float* in, float* out)
+{
+	float a = in[0], b = in[1], c = in[2];
+	float d = in[3], e = in[4], f = in[5];
+	float det = a*(d*f - e*e) - b*(b*f - c*e) + c*(b*e - c*d);
+	float inv_det = det != 0.0f ? 1.0f / det : 0.0f;
+	out[0] = (d*f - e*e) * inv_det;
+	out[1] = (c*e - b*f) * inv_det;
+	out[2] = (b*e - c*d) * inv_det;
+	out[3] = (a*f - c*c) * inv_det;
+	out[4] = (b*c - a*e) * inv_det;
+	out[5] = (a*d - b*b) * inv_det;
+}
+
+static v3 sym3x3_mul_v3(const float* m, v3 v)
+{
+	return V3(
+		m[0]*v.x + m[1]*v.y + m[2]*v.z,
+		m[1]*v.x + m[3]*v.y + m[4]*v.z,
+		m[2]*v.x + m[4]*v.y + m[5]*v.z);
+}
+
+// Convert spring params to solver coefficients (bepu approach).
+static void spring_compute(SpringParams sp, float dt,
+	float* pos_to_vel, float* softness)
+{
+	if (sp.frequency <= 0.0f) {
+		// Rigid constraint: treat as stiff spring (high frequency, critical damping).
+		// Prevents PGS divergence on chains while staying visually rigid.
+		sp.frequency = 240.0f;
+		sp.damping_ratio = 1.0f;
+	}
+	float omega = 2.0f * 3.14159265f * sp.frequency;
+	float d = 2.0f * sp.damping_ratio * omega;
+	float k = omega * omega;
+	float hd = dt * d, hk = dt * k, hhk = dt * hk;
+	float denom = hd + hhk;
+	if (denom < 1e-12f) { *pos_to_vel = 0; *softness = 0; return; }
+	*softness = 1.0f / denom;
+	*pos_to_vel = hk * (*softness);
+}
+
+// Build ball socket effective mass (symmetric 3x3).
+// K = (inv_mass_a + inv_mass_b)*I + skew(r_a)^T * I_a^-1 * skew(r_a) + same for B.
+static void ball_socket_eff_mass(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b,
+	float softness, float* out)
+{
+	float inv_m = a->inv_mass + b->inv_mass;
+	// Skew-sandwich: skew(r)^T * I^-1 * skew(r) for diagonal inertia.
+	// For body A: I_a^-1 is diagonal in local space, r_a is world space.
+	// Transform r_a to local, compute product, transform back.
+	// Or equivalently use the explicit formula.
+	float K[6] = { inv_m, 0, 0, inv_m, 0, inv_m }; // start with linear term
+
+	// Add angular contribution for body A
+	v3 ia = a->inv_inertia_local;
+	if (ia.x > 0 || ia.y > 0 || ia.z > 0) {
+		// columns of world-space inverse inertia: R * diag(ia) * R^T
+		// skew(r)^T * I_world^-1 * skew(r) computed column by column
+		v3 e0 = inv_inertia_mul(a->rotation, ia, V3(0, -r_a.z, r_a.y));
+		v3 e1 = inv_inertia_mul(a->rotation, ia, V3(r_a.z, 0, -r_a.x));
+		v3 e2 = inv_inertia_mul(a->rotation, ia, V3(-r_a.y, r_a.x, 0));
+		// skew(r)^T * [e0 e1 e2] -- but skew(r)^T has rows [0 -rz ry; rz 0 -rx; -ry rx 0]
+		// Result[i][j] = dot(skew_row_i(r), e_j)
+		// Row 0 of skew^T: (0, -rz, ry)
+		K[0] += -r_a.z*e0.y + r_a.y*e0.z; // xx
+		K[1] += -r_a.z*e1.y + r_a.y*e1.z; // xy
+		K[2] += -r_a.z*e2.y + r_a.y*e2.z; // xz
+		K[3] +=  r_a.z*e1.x - r_a.x*e1.z; // yy
+		K[4] +=  r_a.z*e2.x - r_a.x*e2.z; // yz
+		K[5] += -r_a.y*e2.x + r_a.x*e2.y; // zz
+	}
+
+	v3 ib = b->inv_inertia_local;
+	if (ib.x > 0 || ib.y > 0 || ib.z > 0) {
+		v3 e0 = inv_inertia_mul(b->rotation, ib, V3(0, -r_b.z, r_b.y));
+		v3 e1 = inv_inertia_mul(b->rotation, ib, V3(r_b.z, 0, -r_b.x));
+		v3 e2 = inv_inertia_mul(b->rotation, ib, V3(-r_b.y, r_b.x, 0));
+		K[0] += -r_b.z*e0.y + r_b.y*e0.z;
+		K[1] += -r_b.z*e1.y + r_b.y*e1.z;
+		K[2] += -r_b.z*e2.y + r_b.y*e2.z;
+		K[3] +=  r_b.z*e1.x - r_b.x*e1.z;
+		K[4] +=  r_b.z*e2.x - r_b.x*e2.z;
+		K[5] += -r_b.y*e2.x + r_b.x*e2.y;
+	}
+
+	// Add softness to diagonal: K_eff = K + gamma * I
+	K[0] += softness; K[3] += softness; K[5] += softness;
+	sym3x3_inverse(K, out);
+}
+
+// Pre-solve joints: build solver arrays from persistent JointInternal data.
+static void joints_pre_solve(WorldInternal* w, float dt,
+	SolverBallSocket** out_bs, SolverDistance** out_dist)
+{
+	CK_DYNA SolverBallSocket* bs = NULL;
+	CK_DYNA SolverDistance* dist = NULL;
+	int joint_count = asize(w->joints);
+
+	for (int i = 0; i < joint_count; i++) {
+		if (!split_alive(w->joint_gen, i)) continue;
+		JointInternal* j = &w->joints[i];
+		BodyHot* a = &w->body_hot[j->body_a];
+		BodyHot* b = &w->body_hot[j->body_b];
+
+		if (j->type == JOINT_BALL_SOCKET) {
+			SolverBallSocket s = {0};
+			s.body_a = j->body_a;
+			s.body_b = j->body_b;
+			s.joint_idx = i;
+			s.r_a = rotate(a->rotation, j->ball_socket.local_a);
+			s.r_b = rotate(b->rotation, j->ball_socket.local_b);
+
+			float ptv, soft;
+			spring_compute(j->ball_socket.spring, dt, &ptv, &soft);
+			s.softness = soft;
+			ball_socket_eff_mass(a, b, s.r_a, s.r_b, soft, s.eff_mass);
+
+			// Position error: world anchor B - world anchor A
+			v3 anchor_a = add(a->position, s.r_a);
+			v3 anchor_b = add(b->position, s.r_b);
+			s.bias = scale(sub(anchor_b, anchor_a), -ptv);
+
+			// Warm start from persistent storage
+			s.lambda = j->warm_lambda3;
+
+			apush(bs, s);
+		} else if (j->type == JOINT_DISTANCE) {
+			SolverDistance s = {0};
+			s.body_a = j->body_a;
+			s.body_b = j->body_b;
+			s.joint_idx = i;
+			s.r_a = rotate(a->rotation, j->distance.local_a);
+			s.r_b = rotate(b->rotation, j->distance.local_b);
+
+			v3 anchor_a = add(a->position, s.r_a);
+			v3 anchor_b = add(b->position, s.r_b);
+			v3 delta = sub(anchor_b, anchor_a);
+			float dist_val = len(delta);
+			s.axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
+
+			float ptv, soft;
+			spring_compute(j->distance.spring, dt, &ptv, &soft);
+			s.softness = soft;
+
+			float inv_mass_sum = a->inv_mass + b->inv_mass;
+			float k = inv_mass_sum
+				+ dot(cross(inv_inertia_mul(a->rotation, a->inv_inertia_local,
+					cross(s.r_a, s.axis)), s.r_a), s.axis)
+				+ dot(cross(inv_inertia_mul(b->rotation, b->inv_inertia_local,
+					cross(s.r_b, s.axis)), s.r_b), s.axis);
+			k += soft;
+			s.eff_mass = k > 1e-12f ? 1.0f / k : 0.0f;
+
+			float error = dist_val - j->distance.rest_length;
+			s.bias = -ptv * error;
+
+			s.lambda = j->warm_lambda1;
+
+			apush(dist, s);
+		}
+	}
+
+	*out_bs = bs;
+	*out_dist = dist;
+}
+
+// Apply warm start impulses for joints.
+static void joints_warm_start(WorldInternal* w,
+	SolverBallSocket* bs, int bs_count,
+	SolverDistance* dist, int dist_count)
+{
+	for (int i = 0; i < bs_count; i++) {
+		SolverBallSocket* s = &bs[i];
+		if (s->lambda.x == 0 && s->lambda.y == 0 && s->lambda.z == 0) continue;
+		apply_impulse(&w->body_hot[s->body_a], &w->body_hot[s->body_b],
+			s->r_a, s->r_b, s->lambda);
+	}
+	for (int i = 0; i < dist_count; i++) {
+		SolverDistance* s = &dist[i];
+		if (s->lambda == 0) continue;
+		apply_impulse(&w->body_hot[s->body_a], &w->body_hot[s->body_b],
+			s->r_a, s->r_b, scale(s->axis, s->lambda));
+	}
+}
+
+static void solve_ball_socket(WorldInternal* w, SolverBallSocket* s)
+{
+	BodyHot* a = &w->body_hot[s->body_a];
+	BodyHot* b = &w->body_hot[s->body_b];
+	v3 dv = sub(
+		add(b->velocity, cross(b->angular_velocity, s->r_b)),
+		add(a->velocity, cross(a->angular_velocity, s->r_a)));
+	v3 rhs = sub(neg(add(dv, s->bias)), scale(s->lambda, s->softness));
+	v3 impulse = sym3x3_mul_v3(s->eff_mass, rhs);
+	s->lambda = add(s->lambda, impulse);
+	apply_impulse(a, b, s->r_a, s->r_b, impulse);
+}
+
+static void solve_distance(WorldInternal* w, SolverDistance* s)
+{
+	BodyHot* a = &w->body_hot[s->body_a];
+	BodyHot* b = &w->body_hot[s->body_b];
+	v3 dv = sub(
+		add(b->velocity, cross(b->angular_velocity, s->r_b)),
+		add(a->velocity, cross(a->angular_velocity, s->r_a)));
+	float cdot = dot(dv, s->axis);
+	float lambda = s->eff_mass * (-cdot + s->bias - s->softness * s->lambda);
+	s->lambda += lambda;
+	apply_impulse(a, b, s->r_a, s->r_b, scale(s->axis, lambda));
+}
+
+// Store joint accumulated impulses back to persistent storage.
+static void joints_post_solve(WorldInternal* w,
+	SolverBallSocket* bs, int bs_count,
+	SolverDistance* dist, int dist_count)
+{
+	for (int i = 0; i < bs_count; i++)
+		w->joints[bs[i].joint_idx].warm_lambda3 = bs[i].lambda;
+	for (int i = 0; i < dist_count; i++)
+		w->joints[dist[i].joint_idx].warm_lambda1 = dist[i].lambda;
+	afree(bs);
+	afree(dist);
+}
+
+// -----------------------------------------------------------------------------
+// Graph coloring: assign colors to constraints so no two in same color share a body.
+// Uses uint64_t bitmask per body (max 64 colors).
+
+static void color_constraints(ConstraintRef* refs, int count, int body_count,
+	int* out_batch_starts, int* out_color_count)
+{
+	uint64_t* body_colors = (uint64_t*)CK_ALLOC(body_count * sizeof(uint64_t));
+	memset(body_colors, 0, body_count * sizeof(uint64_t));
+	int max_color = 0;
+
+	for (int i = 0; i < count; i++) {
+		uint64_t used = body_colors[refs[i].body_a] | body_colors[refs[i].body_b];
+		uint64_t avail = ~used;
+		int color = 0;
+		if (avail) {
+			// Find lowest set bit (MSVC: _BitScanForward64, GCC: __builtin_ctzll)
+#ifdef _MSC_VER
+			unsigned long idx;
+			_BitScanForward64(&idx, avail);
+			color = (int)idx;
+#else
+			color = __builtin_ctzll(avail);
+#endif
+		}
+		assert(color < 64);
+		refs[i].color = (uint8_t)color;
+		uint64_t bit = 1ULL << color;
+		body_colors[refs[i].body_a] |= bit;
+		body_colors[refs[i].body_b] |= bit;
+		if (color > max_color) max_color = color;
+	}
+
+	// Counting sort by color
+	int color_count = max_color + 1;
+	int counts[64] = {0};
+	for (int i = 0; i < count; i++) counts[refs[i].color]++;
+
+	int offsets[64];
+	offsets[0] = 0;
+	for (int c = 1; c < color_count; c++) offsets[c] = offsets[c-1] + counts[c-1];
+
+	// Record batch starts before sorting
+	for (int c = 0; c < color_count; c++) out_batch_starts[c] = offsets[c];
+	out_batch_starts[color_count] = count; // sentinel
+
+	ConstraintRef* sorted = (ConstraintRef*)CK_ALLOC(count * sizeof(ConstraintRef));
+	for (int i = 0; i < count; i++)
+		sorted[offsets[refs[i].color]++] = refs[i];
+	memcpy(refs, sorted, count * sizeof(ConstraintRef));
+
+	CK_FREE(sorted);
+	CK_FREE(body_colors);
+	*out_color_count = color_count;
+}
+
+// Dispatch a single constraint solve by type.
+static void solve_constraint(WorldInternal* w, ConstraintRef* ref,
+	SolverManifold* sm, SolverContact* sc,
+	SolverBallSocket* bs, SolverDistance* dist)
+{
+	switch (ref->type) {
+	case CTYPE_CONTACT: {
+		SolverManifold* m = &sm[ref->index];
+		BodyHot* a = &w->body_hot[m->body_a];
+		BodyHot* b = &w->body_hot[m->body_b];
+		for (int ci = 0; ci < m->contact_count; ci++) {
+			SolverContact* s = &sc[m->contact_start + ci];
+			v3 dv = sub(
+				add(b->velocity, cross(b->angular_velocity, s->r_b)),
+				add(a->velocity, cross(a->angular_velocity, s->r_a)));
+
+			float vn = dot(dv, s->normal);
+			float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce));
+			float old_n = s->lambda_n;
+			s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
+			apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
+
+			dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)),
+				add(a->velocity, cross(a->angular_velocity, s->r_a)));
+			float max_f = m->friction * s->lambda_n;
+			float vt1 = dot(dv, s->tangent1);
+			float old_t1 = s->lambda_t1;
+			s->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + s->eff_mass_t1*(-vt1), max_f));
+			apply_impulse(a, b, s->r_a, s->r_b, scale(s->tangent1, s->lambda_t1 - old_t1));
+
+			dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)),
+				add(a->velocity, cross(a->angular_velocity, s->r_a)));
+			float vt2 = dot(dv, s->tangent2);
+			float old_t2 = s->lambda_t2;
+			s->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + s->eff_mass_t2*(-vt2), max_f));
+			apply_impulse(a, b, s->r_a, s->r_b, scale(s->tangent2, s->lambda_t2 - old_t2));
+		}
+		break;
+	}
+	case CTYPE_BALL_SOCKET: solve_ball_socket(w, &bs[ref->index]); break;
+	case CTYPE_DISTANCE:    solve_distance(w, &dist[ref->index]); break;
+	}
+}
+
+// -----------------------------------------------------------------------------
 // World.
 
 World create_world(WorldParams params)
@@ -557,6 +951,7 @@ void destroy_world(World world)
 	afree(w->debug_contacts);
 	map_free(w->warm_cache);
 	split_free(w->body_cold, w->body_hot, w->body_gen, w->body_free);
+	afree(w->joints); afree(w->joint_gen); afree(w->joint_free);
 	CK_FREE(w);
 }
 
@@ -583,20 +978,66 @@ void world_step(World world, float dt)
 		for (int c = 0; c < manifolds[i].m.count; c++)
 			apush(w->debug_contacts, manifolds[i].m.contacts[c]);
 
-	// Sequential impulses solver
+	// Pre-solve contacts
 	int manifold_count = asize(manifolds);
 	SolverManifold* sm = NULL;
 	SolverContact*  sc = NULL;
 	solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, dt);
 
+	// Pre-solve joints
+	SolverBallSocket* sol_bs = NULL;
+	SolverDistance*    sol_dist = NULL;
+	joints_pre_solve(w, dt, &sol_bs, &sol_dist);
+	joints_warm_start(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist));
+
+	// Build constraint refs for graph coloring
+	CK_DYNA ConstraintRef* crefs = NULL;
+	int sm_count = asize(sm);
+	for (int i = 0; i < sm_count; i++) {
+		ConstraintRef r = { .type = CTYPE_CONTACT, .index = i,
+			.body_a = sm[i].body_a, .body_b = sm[i].body_b };
+		apush(crefs, r);
+	}
+	for (int i = 0; i < asize(sol_bs); i++) {
+		ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
+			.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
+		apush(crefs, r);
+	}
+	for (int i = 0; i < asize(sol_dist); i++) {
+		ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
+			.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
+		apush(crefs, r);
+	}
+
+	// Graph color and sort
+	int cref_count = asize(crefs);
+	int batch_starts[65] = {0};
+	int color_count = 0;
+	if (cref_count > 0)
+		color_constraints(crefs, cref_count, count, batch_starts, &color_count);
+
+	// Velocity iterations with colored batches
 	for (int iter = 0; iter < SOLVER_VELOCITY_ITERS; iter++)
-		solver_iterate(w, sm, asize(sm), sc);
+		for (int c = 0; c < color_count; c++)
+			for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+				solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist);
+
+	afree(crefs);
 
 	// Integrate positions and rotations
 	for (int i = 0; i < count; i++) {
 		if (!split_alive(w->body_gen, i)) continue;
 		BodyHot* h = &w->body_hot[i];
 		if (h->inv_mass == 0.0f) continue;
+
+		// Clamp velocities to prevent solver divergence from blowing up.
+		float lv2 = len2(h->velocity);
+		if (lv2 > SOLVER_MAX_LINEAR_VEL * SOLVER_MAX_LINEAR_VEL)
+			h->velocity = scale(h->velocity, SOLVER_MAX_LINEAR_VEL / sqrtf(lv2));
+		float av2 = len2(h->angular_velocity);
+		if (av2 > SOLVER_MAX_ANGULAR_VEL * SOLVER_MAX_ANGULAR_VEL)
+			h->angular_velocity = scale(h->angular_velocity, SOLVER_MAX_ANGULAR_VEL / sqrtf(av2));
+
 		h->position = add(h->position, scale(h->velocity, dt));
 
 		// Gyroscopic torque correction before angular integration.
@@ -614,16 +1055,18 @@ void world_step(World world, float dt)
 		// Renormalize
 		float ql = sqrtf(h->rotation.x*h->rotation.x + h->rotation.y*h->rotation.y
 			+ h->rotation.z*h->rotation.z + h->rotation.w*h->rotation.w);
+		if (ql < 1e-15f) ql = 1.0f;  // prevent div-by-zero if quat collapsed
 		float inv_ql = 1.0f / ql;
 		h->rotation.x *= inv_ql; h->rotation.y *= inv_ql;
 		h->rotation.z *= inv_ql; h->rotation.w *= inv_ql;
 	}
 
-	// Position correction pass (after integration)
+	// Position correction pass (contacts only, after integration)
 	solver_position_correct(w, sm, asize(sm), sc);
 
 	// Store warm starting data and free solver arrays
 	solver_post_solve(w, sm, asize(sm), sc, manifolds, manifold_count);
+	joints_post_solve(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist));
 	afree(manifolds);
 }
 
@@ -632,6 +1075,10 @@ void world_step(World world, float dt)
 
 Body create_body(World world, BodyParams params)
 {
+	assert(is_valid(params.position) && "create_body: position is NaN/inf");
+	assert(is_valid(params.rotation) && "create_body: rotation is NaN/inf");
+	assert(is_valid(params.mass) && params.mass >= 0.0f && "create_body: mass must be >= 0 and finite");
+
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx;
 	split_add(w->body_cold, w->body_hot, w->body_gen, w->body_free, idx);
@@ -664,6 +1111,8 @@ void destroy_body(World world, Body body)
 
 void body_add_shape(World world, Body body, ShapeParams params)
 {
+	assert(is_valid(params.local_pos) && "body_add_shape: local_pos is NaN/inf");
+
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
@@ -697,6 +1146,100 @@ quat body_get_rotation(World world, Body body)
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
 	return w->body_hot[idx].rotation;
+}
+
+// -----------------------------------------------------------------------------
+// Joints.
+
+Joint create_ball_socket(World world, BallSocketParams params)
+{
+	assert(is_valid(params.local_offset_a) && "create_ball_socket: local_offset_a is NaN/inf");
+	assert(is_valid(params.local_offset_b) && "create_ball_socket: local_offset_b is NaN/inf");
+
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx;
+	int ba = handle_index(params.body_a);
+	int bb = handle_index(params.body_b);
+	assert(split_valid(w->body_gen, params.body_a));
+	assert(split_valid(w->body_gen, params.body_b));
+
+	// Grow joint arrays manually (no split_add -- joints don't need hot/cold split)
+	if (asize(w->joint_free) > 0) {
+		idx = apop(w->joint_free);
+		w->joint_gen[idx]++;
+	} else {
+		idx = asize(w->joints);
+		JointInternal zero = {0};
+		apush(w->joints, zero);
+		apush(w->joint_gen, 1); // odd = alive
+	}
+
+	w->joints[idx] = (JointInternal){
+		.type = JOINT_BALL_SOCKET,
+		.body_a = ba, .body_b = bb,
+		.ball_socket = {
+			.local_a = params.local_offset_a,
+			.local_b = params.local_offset_b,
+			.spring = params.spring,
+		},
+	};
+	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
+}
+
+Joint create_distance(World world, DistanceParams params)
+{
+	assert(is_valid(params.local_offset_a) && "create_distance: local_offset_a is NaN/inf");
+	assert(is_valid(params.local_offset_b) && "create_distance: local_offset_b is NaN/inf");
+	assert(is_valid(params.rest_length) && "create_distance: rest_length is NaN/inf");
+
+	WorldInternal* w = (WorldInternal*)world.id;
+	int ba = handle_index(params.body_a);
+	int bb = handle_index(params.body_b);
+	assert(split_valid(w->body_gen, params.body_a));
+	assert(split_valid(w->body_gen, params.body_b));
+
+	int idx;
+	if (asize(w->joint_free) > 0) {
+		idx = apop(w->joint_free);
+		w->joint_gen[idx]++;
+	} else {
+		idx = asize(w->joints);
+		JointInternal zero = {0};
+		apush(w->joints, zero);
+		apush(w->joint_gen, 1);
+	}
+
+	// Auto-compute rest length if not specified
+	float rest = params.rest_length;
+	if (rest <= 0.0f) {
+		BodyHot* a = &w->body_hot[ba];
+		BodyHot* b = &w->body_hot[bb];
+		v3 wa = add(a->position, rotate(a->rotation, params.local_offset_a));
+		v3 wb = add(b->position, rotate(b->rotation, params.local_offset_b));
+		rest = len(sub(wb, wa));
+	}
+
+	w->joints[idx] = (JointInternal){
+		.type = JOINT_DISTANCE,
+		.body_a = ba, .body_b = bb,
+		.distance = {
+			.local_a = params.local_offset_a,
+			.local_b = params.local_offset_b,
+			.rest_length = rest,
+			.spring = params.spring,
+		},
+	};
+	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
+}
+
+void destroy_joint(World world, Joint joint)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(joint);
+	assert(w->joint_gen[idx] == handle_gen(joint));
+	memset(&w->joints[idx], 0, sizeof(JointInternal));
+	w->joint_gen[idx]++; // even = dead
+	apush(w->joint_free, idx);
 }
 
 int world_get_contacts(World world, const Contact** out)
