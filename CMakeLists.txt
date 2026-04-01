@@ -37,8 +37,10 @@ add_executable(nudge src/main.c)
 target_link_libraries(nudge nudge_imgui opengl32)
 
 add_executable(nudge_tests src/test_main.c)
+add_executable(gjk_bench src/gjk_bench.c)
 
 if(MSVC)
 	target_compile_options(nudge PRIVATE /experimental:c11atomics)
 	target_compile_options(nudge_tests PRIVATE /experimental:c11atomics)
+	target_compile_options(gjk_bench PRIVATE /experimental:c11atomics)
 endif()

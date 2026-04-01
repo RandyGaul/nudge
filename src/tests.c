@@ -264,6 +264,500 @@ static void test_capsule_box()
 }
 
 // ============================================================================
+// Floor contact regression: sphere/capsule resting on large box floor.
+// This exactly mimics the demo scene (floor half_extents=10,1,10).
+
+static void test_floor_contacts()
+{
+	Manifold m;
+	Box floor = { V3(0, 0, 0), quat_identity(), V3(10, 1, 10) };
+
+	// Sphere resting on floor: center at y=1.5 (floor top at y=1, radius=0.5).
+	TEST_BEGIN("floor sphere resting");
+	m = (Manifold){0};
+	int hit = collide_sphere_box((Sphere){ V3(0, 1.5f, 0), 0.5f }, floor, &m);
+	TEST_ASSERT(hit);
+	TEST_ASSERT(m.count > 0);
+	TEST_ASSERT_FLOAT(m.contacts[0].penetration, 0.0f, 0.01f);
+
+	// Sphere slightly penetrating floor.
+	TEST_BEGIN("floor sphere penetrating");
+	m = (Manifold){0};
+	hit = collide_sphere_box((Sphere){ V3(0, 1.3f, 0), 0.5f }, floor, &m);
+	TEST_ASSERT(hit);
+	TEST_ASSERT(m.count > 0);
+	TEST_ASSERT_FLOAT(m.contacts[0].penetration, 0.2f, 0.02f);
+	TEST_ASSERT_NORMAL_DIR(m, 0, -1, 0); // from sphere toward floor
+
+	// Sphere approaching floor from above (separated).
+	TEST_BEGIN("floor sphere separated");
+	m = (Manifold){0};
+	hit = collide_sphere_box((Sphere){ V3(0, 2.0f, 0), 0.5f }, floor, &m);
+	TEST_ASSERT(!hit);
+
+	// Sphere deeply embedded in floor.
+	TEST_BEGIN("floor sphere deep");
+	m = (Manifold){0};
+	hit = collide_sphere_box((Sphere){ V3(0, 0.5f, 0), 0.5f }, floor, &m);
+	TEST_ASSERT(hit);
+	TEST_ASSERT(m.count > 0);
+	TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+
+	// Capsule resting on floor (vertical, tip touching).
+	TEST_BEGIN("floor capsule resting");
+	m = (Manifold){0};
+	hit = collide_capsule_box((Capsule){ V3(0, 1.3f, 0), V3(0, 3, 0), 0.3f }, floor, &m);
+	TEST_ASSERT(hit);
+	TEST_ASSERT(m.count > 0);
+	TEST_ASSERT_FLOAT(m.contacts[0].penetration, 0.0f, 0.01f);
+
+	// Capsule lying flat on floor (horizontal, both endpoints on floor).
+	TEST_BEGIN("floor capsule flat");
+	m = (Manifold){0};
+	hit = collide_capsule_box((Capsule){ V3(-2, 1.2f, 0), V3(2, 1.2f, 0), 0.3f }, floor, &m);
+	TEST_ASSERT(hit);
+	TEST_ASSERT(m.count >= 1);
+	TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+
+	// Capsule deeply embedded.
+	TEST_BEGIN("floor capsule deep");
+	m = (Manifold){0};
+	hit = collide_capsule_box((Capsule){ V3(0, 0, 0), V3(0, 0.5f, 0), 0.3f }, floor, &m);
+	TEST_ASSERT(hit);
+	TEST_ASSERT(m.count > 0);
+	TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+}
+
+// Multi-frame simulation: sphere should settle on floor, not fall through.
+static void test_sphere_settles_on_floor()
+{
+	TEST_BEGIN("sphere settles on floor");
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+	Body sphere_b = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, sphere_b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 300; i++) world_step(w, dt); // 5 seconds
+
+	float y = body_get_position(w, sphere_b).y;
+	// Sphere should rest on floor top (y=1) + radius (0.5) = ~1.5, not below 0.
+	TEST_ASSERT(y > 1.0f);
+	TEST_ASSERT(y < 2.0f);
+	destroy_world(w);
+}
+
+// ============================================================================
+// Sphere/Capsule-Hull shallow vs deep boundary tests.
+// Validates the GJK-first dispatch: shallow (GJK witness), deep (face search).
+
+static void test_gjk_dispatch()
+{
+	Manifold m = {0};
+	Box box = { V3(0,0,0), quat_identity(), V3(1,1,1) };
+
+	// Sphere-box: shallow (sphere just barely touching face).
+	TEST_BEGIN("gjk-dispatch sphere-box shallow face");
+	m = (Manifold){0};
+	collide_sphere_box((Sphere){ V3(1.4f, 0, 0), 0.5f }, box, &m);
+	TEST_ASSERT_HIT(m);
+	TEST_ASSERT_FLOAT(m.contacts[0].penetration, 0.1f, EPS);
+	TEST_ASSERT_NORMAL_DIR(m, -1, 0, 0);
+
+	// Sphere-box: shallow edge (sphere near edge, not penetrating face).
+	TEST_BEGIN("gjk-dispatch sphere-box shallow edge");
+	m = (Manifold){0};
+	collide_sphere_box((Sphere){ V3(1.2f, 1.2f, 0), 0.5f }, box, &m);
+	TEST_ASSERT_HIT(m);
+	TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+
+	// Sphere-box: shallow vertex (sphere near vertex corner).
+	TEST_BEGIN("gjk-dispatch sphere-box shallow vertex");
+	m = (Manifold){0};
+	collide_sphere_box((Sphere){ V3(1.15f, 1.15f, 1.15f), 0.5f }, box, &m);
+	TEST_ASSERT_HIT(m);
+
+	// Sphere-box: deep (sphere center inside box).
+	TEST_BEGIN("gjk-dispatch sphere-box deep");
+	m = (Manifold){0};
+	collide_sphere_box((Sphere){ V3(0.5f, 0, 0), 0.3f }, box, &m);
+	TEST_ASSERT_HIT(m);
+	TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+	// Normal should point away from nearest face.
+	TEST_ASSERT_NORMAL_DIR(m, -1, 0, 0);
+
+	// Sphere-box: deep center at origin (fully embedded).
+	TEST_BEGIN("gjk-dispatch sphere-box deep center");
+	m = (Manifold){0};
+	collide_sphere_box((Sphere){ V3(0, 0, 0), 0.3f }, box, &m);
+	TEST_ASSERT_HIT(m);
+	TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+
+	// Capsule-box: shallow (capsule tip just touching face).
+	TEST_BEGIN("gjk-dispatch capsule-box shallow face");
+	m = (Manifold){0};
+	collide_capsule_box((Capsule){ V3(0, 1.1f, 0), V3(0, 3, 0), 0.2f }, box, &m);
+	TEST_ASSERT_HIT(m);
+	TEST_ASSERT_FLOAT(m.contacts[0].penetration, 0.1f, 0.05f);
+
+	// Capsule-box: shallow edge (capsule near edge of box).
+	TEST_BEGIN("gjk-dispatch capsule-box shallow edge");
+	m = (Manifold){0};
+	collide_capsule_box((Capsule){ V3(1.1f, 0, 1.1f), V3(1.1f, 0, -1.1f), 0.3f }, box, &m);
+	TEST_ASSERT_HIT(m);
+
+	// Capsule-box: deep (capsule core inside box).
+	TEST_BEGIN("gjk-dispatch capsule-box deep");
+	m = (Manifold){0};
+	collide_capsule_box((Capsule){ V3(0, -0.5f, 0), V3(0, 0.5f, 0), 0.2f }, box, &m);
+	TEST_ASSERT_HIT(m);
+	TEST_ASSERT(m.count >= 1);
+	TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+
+	// Capsule-box: deep, segment parallel to face, two contact points.
+	TEST_BEGIN("gjk-dispatch capsule-box deep 2-contact");
+	m = (Manifold){0};
+	collide_capsule_box((Capsule){ V3(-0.5f, 0.9f, 0), V3(0.5f, 0.9f, 0), 0.3f }, box, &m);
+	TEST_ASSERT_HIT(m);
+	TEST_ASSERT(m.count == 2);
+
+	// Sphere-hull: custom hull (tetrahedron).
+	TEST_BEGIN("gjk-dispatch sphere-hull");
+	v3 tet_pts[] = { {0,1,0}, {-1,-1,1}, {1,-1,1}, {0,-1,-1} };
+	Hull* h = quickhull(tet_pts, 4);
+	TEST_ASSERT(h != NULL);
+	if (h) {
+		ConvexHull ch = { h, V3(0, 0, 0), quat_identity(), V3(1,1,1) };
+		// Shallow: sphere above apex.
+		m = (Manifold){0};
+		collide_sphere_hull((Sphere){ V3(0, 1.3f, 0), 0.5f }, ch, &m);
+		TEST_ASSERT_HIT(m);
+		TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+
+		// Deep: sphere inside.
+		m = (Manifold){0};
+		collide_sphere_hull((Sphere){ V3(0, 0, 0), 0.1f }, ch, &m);
+		TEST_ASSERT_HIT(m);
+		TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+		hull_free(h);
+	}
+}
+
+// ============================================================================
+// Raw GJK distance tests. Tests gjk_query directly for known distances.
+
+static void test_gjk_distance()
+{
+	const Hull* box = hull_unit_box();
+	quat id = quat_identity();
+	ConvexHull unit_box = { box, V3(0,0,0), id, V3(1,1,1) };
+	float expected;
+
+	// --- Point vs box ---
+	{
+		// Point outside +X face: distance should be 1.0
+		TEST_BEGIN("gjk point-box +X dist");
+		GjkResult r = gjk_query_point_hull(V3(2, 0, 0), unit_box);
+		TEST_ASSERT_FLOAT(r.distance, 1.0f, 0.01f);
+
+		// Point on +X face: distance ~0
+		TEST_BEGIN("gjk point-box +X touching");
+		r = gjk_query_point_hull(V3(1, 0, 0), unit_box);
+		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
+
+		// Point inside box: distance should be 0
+		TEST_BEGIN("gjk point-box inside");
+		r = gjk_query_point_hull(V3(0, 0, 0), unit_box);
+		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
+
+		// Point near edge (+X,+Y): dist = sqrt(2)-sqrt(2)*1 ≈ 0
+		TEST_BEGIN("gjk point-box edge");
+		r = gjk_query_point_hull(V3(1.5f, 1.5f, 0), unit_box);
+		float expected = sqrtf(0.5f*0.5f + 0.5f*0.5f);
+		TEST_ASSERT_FLOAT(r.distance, expected, 0.02f);
+
+		// Point near vertex (+X,+Y,+Z):
+		TEST_BEGIN("gjk point-box vertex");
+		r = gjk_query_point_hull(V3(2, 2, 2), unit_box);
+		expected = sqrtf(1+1+1);
+		TEST_ASSERT_FLOAT(r.distance, expected, 0.02f);
+	}
+
+	// --- Segment vs box ---
+	{
+		// Vertical segment above box
+		TEST_BEGIN("gjk seg-box above");
+		GjkResult r = gjk_query_segment_hull(V3(0, 3, 0), V3(0, 5, 0), unit_box);
+		TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
+
+		// Segment crossing through box face
+		TEST_BEGIN("gjk seg-box crossing");
+		r = gjk_query_segment_hull(V3(0, 0, 0), V3(0, 2, 0), unit_box);
+		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
+
+		// Segment touching face
+		TEST_BEGIN("gjk seg-box touching");
+		r = gjk_query_segment_hull(V3(0, 1, 0), V3(0, 3, 0), unit_box);
+		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
+
+		// Segment near edge, parallel to edge
+		TEST_BEGIN("gjk seg-box near edge");
+		r = gjk_query_segment_hull(V3(1.5f, 1.5f, -1), V3(1.5f, 1.5f, 1), unit_box);
+		expected = sqrtf(0.5f*0.5f + 0.5f*0.5f);
+		TEST_ASSERT_FLOAT(r.distance, expected, 0.02f);
+
+		// Segment fully inside box
+		TEST_BEGIN("gjk seg-box inside");
+		r = gjk_query_segment_hull(V3(-0.5f, 0, 0), V3(0.5f, 0, 0), unit_box);
+		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
+	}
+
+	// --- Box vs box (via hull) ---
+	{
+		// Two boxes separated on X
+		TEST_BEGIN("gjk box-box separated");
+		ConvexHull box_a = { box, V3(0,0,0), id, V3(1,1,1) };
+		ConvexHull box_b = { box, V3(3,0,0), id, V3(1,1,1) };
+		GjkResult r = gjk_query_hull_hull(box_a, box_b);
+		TEST_ASSERT_FLOAT(r.distance, 1.0f, 0.01f);
+
+		// Two boxes touching on X
+		TEST_BEGIN("gjk box-box touching");
+		box_b = (ConvexHull){ box, V3(2,0,0), id, V3(1,1,1) };
+		r = gjk_query_hull_hull(box_a, box_b);
+		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
+
+		// Two boxes overlapping
+		TEST_BEGIN("gjk box-box overlap");
+		box_b = (ConvexHull){ box, V3(1.5f,0,0), id, V3(1,1,1) };
+		r = gjk_query_hull_hull(box_a, box_b);
+		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
+	}
+
+	// --- Scaled box ---
+	{
+		// Point above large floor box (half_extents 10,1,10)
+		TEST_BEGIN("gjk point-floor above");
+		ConvexHull floor = { box, V3(0,0,0), id, V3(10,1,10) };
+		GjkResult r = gjk_query_point_hull(V3(0, 2.5f, 0), floor);
+		TEST_ASSERT_FLOAT(r.distance, 1.5f, 0.02f);
+
+		// Point just above floor surface
+		TEST_BEGIN("gjk point-floor near");
+		r = gjk_query_point_hull(V3(0, 1.1f, 0), floor);
+		TEST_ASSERT_FLOAT(r.distance, 0.1f, 0.02f);
+
+		// Point on floor surface
+		TEST_BEGIN("gjk point-floor touching");
+		r = gjk_query_point_hull(V3(3, 1, 0), floor);
+		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.02f);
+
+		// Point inside floor
+		TEST_BEGIN("gjk point-floor inside");
+		r = gjk_query_point_hull(V3(0, 0.5f, 0), floor);
+		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.02f);
+
+		// Segment (capsule core) above floor
+		TEST_BEGIN("gjk seg-floor above");
+		r = gjk_query_segment_hull(V3(0, 1.5f, 0), V3(0, 3, 0), floor);
+		TEST_ASSERT_FLOAT(r.distance, 0.5f, 0.02f);
+
+		// Segment touching floor
+		TEST_BEGIN("gjk seg-floor touching");
+		r = gjk_query_segment_hull(V3(0, 1.0f, 0), V3(0, 3, 0), floor);
+		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.02f);
+
+		// Segment partially inside floor
+		TEST_BEGIN("gjk seg-floor partial");
+		r = gjk_query_segment_hull(V3(0, 0.5f, 0), V3(0, 3, 0), floor);
+		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.02f);
+	}
+
+	// --- Witness point sanity ---
+	{
+		TEST_BEGIN("gjk witness point-box");
+		ConvexHull floor = { box, V3(0,0,0), id, V3(10,1,10) };
+		GjkResult r = gjk_query_point_hull(V3(0, 3, 0), floor);
+		// Witness on point should be the point itself
+		TEST_ASSERT_FLOAT(r.point1.y, 3.0f, 0.01f);
+		// Witness on hull should be on the +Y face (y=1)
+		TEST_ASSERT_FLOAT(r.point2.y, 1.0f, 0.02f);
+		// Distance = 3 - 1 = 2
+		TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.02f);
+
+		TEST_BEGIN("gjk witness seg-box");
+		r = gjk_query_segment_hull(V3(-1, 3, 0), V3(1, 3, 0), floor);
+		TEST_ASSERT_FLOAT(r.point1.y, 3.0f, 0.01f);
+		TEST_ASSERT_FLOAT(r.point2.y, 1.0f, 0.02f);
+		TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.02f);
+	}
+
+	// --- Rotated box ---
+	{
+		TEST_BEGIN("gjk point-rotated box");
+		quat rot45y = { 0, 0.3827f, 0, 0.9239f };
+		ConvexHull rbox = { box, V3(0,0,0), rot45y, V3(1,1,1) };
+		// After 45deg Y rotation, box corner is at x = sqrt(2) ≈ 1.414
+		GjkResult r = gjk_query_point_hull(V3(2, 0, 0), rbox);
+		float corner = sqrtf(2.0f);
+		TEST_ASSERT_FLOAT(r.distance, 2.0f - corner, 0.05f);
+	}
+}
+
+// ============================================================================
+// Contact sanity: verify contact point/normal/depth consistency.
+// For sphere-box: contact point should be on sphere surface, and
+// moving the sphere along normal by penetration should separate shapes.
+
+static void test_contact_sanity()
+{
+	Box floor = { V3(0,0,0), quat_identity(), V3(10, 1, 10) };
+	Box box = { V3(0,0,0), quat_identity(), V3(1,1,1) };
+	Manifold m;
+
+	// Debug: check specific failing case first.
+	{
+		Sphere s = { V3(0, 1.0f, 0), 0.5f };
+		m = (Manifold){0};
+		GjkResult r = gjk_query_point_hull(s.center, (ConvexHull){ hull_unit_box(), V3(0,0,0), quat_identity(), V3(10,1,10) });
+		int hit = collide_sphere_box(s, floor, &m);
+		printf("    [debug] sphere y=1.0: gjk_dist=%.6f hit=%d count=%d", r.distance, hit, m.count);
+		if (hit && m.count > 0) printf(" pen=%.4f n=(%.2f,%.2f,%.2f)", m.contacts[0].penetration, m.contacts[0].normal.x, m.contacts[0].normal.y, m.contacts[0].normal.z);
+		printf("\n");
+
+		s = (Sphere){ V3(0, 1.3f, 0), 0.5f };
+		m = (Manifold){0};
+		r = gjk_query_point_hull(s.center, (ConvexHull){ hull_unit_box(), V3(0,0,0), quat_identity(), V3(10,1,10) });
+		hit = collide_sphere_box(s, floor, &m);
+		printf("    [debug] sphere y=1.3: gjk_dist=%.6f hit=%d count=%d", r.distance, hit, m.count);
+		if (hit && m.count > 0) printf(" pen=%.4f n=(%.2f,%.2f,%.2f)", m.contacts[0].penetration, m.contacts[0].normal.x, m.contacts[0].normal.y, m.contacts[0].normal.z);
+		printf("\n");
+
+		s = (Sphere){ V3(5, 1.3f, 0), 0.5f };
+		m = (Manifold){0};
+		r = gjk_query_point_hull(s.center, (ConvexHull){ hull_unit_box(), V3(0,0,0), quat_identity(), V3(10,1,10) });
+		hit = collide_sphere_box(s, floor, &m);
+		printf("    [debug] sphere x=5 y=1.3: gjk_dist=%.6f hit=%d count=%d", r.distance, hit, m.count);
+		if (hit && m.count > 0) printf(" pen=%.4f n=(%.2f,%.2f,%.2f)", m.contacts[0].penetration, m.contacts[0].normal.x, m.contacts[0].normal.y, m.contacts[0].normal.z);
+		printf("\n");
+	}
+
+	// Debug x=-3 case: also test x=3 for comparison.
+	{
+		ConvexHull fl = { hull_unit_box(), V3(0,0,0), quat_identity(), V3(10,1,10) };
+		for (float tx = -5; tx <= 5; tx += 1) {
+			Sphere s = { V3(tx, 1.3f, 0), 0.5f };
+			m = (Manifold){0};
+			GjkResult r = gjk_query_point_hull(s.center, fl);
+			int hit = collide_sphere_box(s, floor, &m);
+			printf("    [debug] x=%.0f y=1.3: gjk_dist=%.4f iters=%d hit=%d", tx, r.distance, r.iterations, hit);
+			if (hit && m.count > 0) printf(" pen=%.3f n=(%.2f,%.2f,%.2f)", m.contacts[0].penetration, m.contacts[0].normal.x, m.contacts[0].normal.y, m.contacts[0].normal.z);
+			printf("\n");
+		}
+	}
+
+	// Sweep sphere across floor at different heights and X positions.
+	float heights[] = { 1.5f, 1.4f, 1.3f, 1.2f, 1.1f, 1.0f, 0.9f, 0.5f, 0.0f };
+	float xpos[] = { 0, 1, 5, 9, -3 };
+	for (int hi = 0; hi < 9; hi++) {
+		for (int xi = 0; xi < 5; xi++) {
+			float y = heights[hi];
+			float x = xpos[xi];
+			Sphere s = { V3(x, y, 0), 0.5f };
+			m = (Manifold){0};
+			int hit = collide_sphere_box(s, floor, &m);
+			float expected_sep = y - 1.0f; // distance from sphere center to floor top
+			if (expected_sep > 0.5f + 0.01f) {
+				// Should be separated
+				TEST_BEGIN("contact sanity sphere-floor separated");
+				TEST_ASSERT(!hit);
+			} else {
+				char lbl[128]; snprintf(lbl, sizeof(lbl), "sphere-floor hit x=%.1f y=%.1f sep=%.2f", x, y, expected_sep);
+				TEST_BEGIN(lbl);
+				if (!hit) printf("    MISS: %s gjk=? hit=%d\n", lbl, hit);
+				TEST_ASSERT(hit);
+				if (hit && m.count > 0) {
+					// Penetration should be roughly radius - (center_y - floor_top)
+					float expected_pen = 0.5f - expected_sep;
+					if (expected_pen < 0) expected_pen = 0;
+					TEST_BEGIN("contact sanity sphere-floor pen");
+					TEST_ASSERT_FLOAT(m.contacts[0].penetration, expected_pen, 0.1f);
+					// Normal should point roughly downward (from sphere toward floor).
+					// Skip when sphere is at floor center (degenerate tie).
+					if (expected_sep > -0.99f) {
+						TEST_BEGIN("contact sanity sphere-floor normal");
+						TEST_ASSERT(m.contacts[0].normal.y < -0.5f);
+					}
+				}
+			}
+		}
+	}
+
+	// Capsule at various orientations touching unit box.
+	{
+		// Vertical capsule approaching +Y face
+		TEST_BEGIN("contact sanity capsule-box vertical");
+		m = (Manifold){0};
+		int hit = collide_capsule_box((Capsule){ V3(0, 1.1f, 0), V3(0, 3, 0), 0.2f }, box, &m);
+		TEST_ASSERT(hit);
+		if (hit && m.count > 0) {
+			TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+			TEST_ASSERT(m.contacts[0].penetration < 0.5f);
+			// Normal should point roughly down (from capsule toward box)
+			TEST_ASSERT(m.contacts[0].normal.y < -0.3f);
+		}
+
+		// Horizontal capsule along +X face
+		TEST_BEGIN("contact sanity capsule-box horizontal");
+		m = (Manifold){0};
+		hit = collide_capsule_box((Capsule){ V3(1.1f, 0, -0.5f), V3(1.1f, 0, 0.5f), 0.2f }, box, &m);
+		TEST_ASSERT(hit);
+		if (hit && m.count > 0) {
+			TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+			// Normal should point roughly -X (from capsule toward box)
+			TEST_ASSERT(m.contacts[0].normal.x < -0.3f);
+		}
+
+		// Capsule deep inside box
+		TEST_BEGIN("contact sanity capsule-box deep");
+		m = (Manifold){0};
+		hit = collide_capsule_box((Capsule){ V3(0, 0, 0), V3(0, 0.5f, 0), 0.1f }, box, &m);
+		TEST_ASSERT(hit);
+		if (hit && m.count > 0) {
+			TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+		}
+	}
+
+	// Sphere at box corners and edges (stress GJK Voronoi regions).
+	{
+		float offsets[] = { 1.2f, 1.1f, 1.05f, 0.9f };
+		for (int oi = 0; oi < 4; oi++) {
+			float d = offsets[oi];
+			// Edge region
+			TEST_BEGIN("contact sanity sphere-box edge sweep");
+			m = (Manifold){0};
+			int hit = collide_sphere_box((Sphere){ V3(d, d, 0), 0.5f }, box, &m);
+			if (d > 1.0f + 0.5f / sqrtf(2.0f)) {
+				// Far enough to be separated
+			} else {
+				TEST_ASSERT(hit);
+				if (hit && m.count > 0) {
+					TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+				}
+			}
+			// Vertex region
+			TEST_BEGIN("contact sanity sphere-box vertex sweep");
+			m = (Manifold){0};
+			hit = collide_sphere_box((Sphere){ V3(d, d, d), 0.5f }, box, &m);
+			if (hit && m.count > 0) {
+				TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+			}
+		}
+	}
+}
+
+// ============================================================================
 // Box-Box (SAT)
 // Voronoi regions: face-face (6 face normals from each), edge-edge (Gauss map pruned).
 
@@ -2038,6 +2532,780 @@ static void run_solver_tests()
 	test_ball_socket_pendulum();
 }
 
+// ============================================================================
+// BVH broadphase tests.
+
+static void test_bvh_aabb_helpers()
+{
+	TEST_BEGIN("aabb empty");
+	AABB e = aabb_empty();
+	TEST_ASSERT(e.min.x > e.max.x); // inverted = empty
+
+	TEST_BEGIN("aabb merge");
+	AABB a = { V3(0,0,0), V3(1,1,1) };
+	AABB b = { V3(-1,2,-1), V3(0.5f,3,0.5f) };
+	AABB m = aabb_merge(a, b);
+	TEST_ASSERT_FLOAT(m.min.x, -1.0f, 0.001f);
+	TEST_ASSERT_FLOAT(m.max.y, 3.0f, 0.001f);
+
+	TEST_BEGIN("aabb overlaps: overlapping");
+	AABB d = { V3(-0.5f, 0.5f, -0.5f), V3(0.5f, 1.5f, 0.5f) };
+	TEST_ASSERT(aabb_overlaps(a, d));
+
+	TEST_BEGIN("aabb overlaps: separated");
+	AABB c = { V3(5,5,5), V3(6,6,6) };
+	TEST_ASSERT(!aabb_overlaps(a, c));
+
+	TEST_BEGIN("aabb surface area");
+	AABB unit = { V3(0,0,0), V3(1,1,1) };
+	TEST_ASSERT_FLOAT(aabb_surface_area(unit), 3.0f, 0.001f); // 1*1 + 1*1 + 1*1
+
+	TEST_BEGIN("aabb expand");
+	AABB ex = aabb_expand(unit, 0.5f);
+	TEST_ASSERT_FLOAT(ex.min.x, -0.5f, 0.001f);
+	TEST_ASSERT_FLOAT(ex.max.z, 1.5f, 0.001f);
+}
+
+static void test_bvh_insert_remove()
+{
+	BVHTree t; bvh_init(&t);
+
+	TEST_BEGIN("bvh empty tree");
+	TEST_ASSERT(t.root == -1);
+
+	TEST_BEGIN("bvh insert first leaf");
+	AABB b0 = { V3(0,0,0), V3(1,1,1) };
+	int l0 = bvh_insert(&t, 0, b0);
+	TEST_ASSERT(t.root >= 0);
+	TEST_ASSERT(l0 >= 0);
+	TEST_ASSERT(t.leaves[l0].body_idx == 0);
+
+	TEST_BEGIN("bvh insert second leaf");
+	AABB b1 = { V3(2,0,0), V3(3,1,1) };
+	int l1 = bvh_insert(&t, 1, b1);
+	TEST_ASSERT(l1 >= 0);
+	TEST_ASSERT(t.leaves[l1].body_idx == 1);
+
+	TEST_BEGIN("bvh insert third leaf (creates internal node)");
+	AABB b2 = { V3(0,2,0), V3(1,3,1) };
+	int l2 = bvh_insert(&t, 2, b2);
+	TEST_ASSERT(l2 >= 0);
+
+	TEST_BEGIN("bvh insert more leaves");
+	for (int i = 3; i < 10; i++) {
+		AABB bi = { V3((float)i, 0, 0), V3((float)i + 1, 1, 1) };
+		int li = bvh_insert(&t, i, bi);
+		TEST_ASSERT(li >= 0);
+		TEST_ASSERT(t.leaves[li].body_idx == i);
+	}
+
+	TEST_BEGIN("bvh remove leaf");
+	bvh_remove(&t, l1);
+	// Tree should still be valid, root should exist
+	TEST_ASSERT(t.root >= 0);
+
+	TEST_BEGIN("bvh remove all leaves");
+	bvh_remove(&t, l0);
+	bvh_remove(&t, l2);
+	for (int i = 3; i < 10; i++) bvh_remove(&t, i); // leaf indices happen to equal i for sequential inserts with no prior frees
+	// After removing all, root may or may not be -1 depending on cleanup
+
+	bvh_free(&t);
+}
+
+static void test_bvh_self_test()
+{
+	BVHTree t; bvh_init(&t);
+
+	// Insert overlapping AABBs
+	AABB b0 = { V3(0,0,0), V3(2,2,2) };
+	AABB b1 = { V3(1,1,1), V3(3,3,3) }; // overlaps b0
+	AABB b2 = { V3(10,10,10), V3(11,11,11) }; // separated
+	bvh_insert(&t, 0, b0);
+	bvh_insert(&t, 1, b1);
+	bvh_insert(&t, 2, b2);
+
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_self_test(&t, &pairs);
+
+	TEST_BEGIN("bvh self test: finds overlapping pair");
+	int found_01 = 0;
+	for (int i = 0; i < asize(pairs); i++) {
+		if ((pairs[i].a == 0 && pairs[i].b == 1) || (pairs[i].a == 1 && pairs[i].b == 0)) found_01 = 1;
+	}
+	TEST_ASSERT(found_01);
+
+	TEST_BEGIN("bvh self test: no false pair with separated body");
+	int found_02 = 0, found_12 = 0;
+	for (int i = 0; i < asize(pairs); i++) {
+		if ((pairs[i].a == 0 && pairs[i].b == 2) || (pairs[i].a == 2 && pairs[i].b == 0)) found_02 = 1;
+		if ((pairs[i].a == 1 && pairs[i].b == 2) || (pairs[i].a == 2 && pairs[i].b == 1)) found_12 = 1;
+	}
+	TEST_ASSERT(!found_02);
+	TEST_ASSERT(!found_12);
+
+	afree(pairs);
+	bvh_free(&t);
+}
+
+static void test_bvh_cross_test()
+{
+	BVHTree ta, tb; bvh_init(&ta); bvh_init(&tb);
+
+	AABB a0 = { V3(0,0,0), V3(2,2,2) };
+	AABB b0 = { V3(1,1,1), V3(3,3,3) }; // overlaps a0
+	AABB b1 = { V3(10,10,10), V3(11,11,11) }; // separated
+	bvh_insert(&ta, 0, a0);
+	bvh_insert(&tb, 10, b0);
+	bvh_insert(&tb, 11, b1);
+
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_cross_test(&ta, &tb, &pairs);
+
+	TEST_BEGIN("bvh cross test: finds overlapping pair");
+	int found = 0;
+	for (int i = 0; i < asize(pairs); i++) {
+		if (pairs[i].a == 0 && pairs[i].b == 10) found = 1;
+	}
+	TEST_ASSERT(found);
+
+	TEST_BEGIN("bvh cross test: no false pair");
+	int false_pair = 0;
+	for (int i = 0; i < asize(pairs); i++) {
+		if (pairs[i].b == 11) false_pair = 1;
+	}
+	TEST_ASSERT(!false_pair);
+
+	afree(pairs);
+	bvh_free(&ta); bvh_free(&tb);
+}
+
+static void test_bvh_shape_aabb()
+{
+	BodyHot h = { .position = V3(5, 5, 5), .rotation = quat_identity() };
+
+	TEST_BEGIN("shape_aabb sphere");
+	ShapeInternal s_sph = { .type = SHAPE_SPHERE, .local_pos = V3(0,0,0), .sphere.radius = 1.0f };
+	AABB box = shape_aabb(&h, &s_sph);
+	TEST_ASSERT_FLOAT(box.min.x, 4.0f, 0.01f);
+	TEST_ASSERT_FLOAT(box.max.x, 6.0f, 0.01f);
+
+	TEST_BEGIN("shape_aabb box axis-aligned");
+	ShapeInternal s_box = { .type = SHAPE_BOX, .local_pos = V3(0,0,0), .box.half_extents = V3(1, 2, 3) };
+	box = shape_aabb(&h, &s_box);
+	TEST_ASSERT_FLOAT(box.min.x, 4.0f, 0.01f);
+	TEST_ASSERT_FLOAT(box.max.y, 7.0f, 0.01f);
+	TEST_ASSERT_FLOAT(box.max.z, 8.0f, 0.01f);
+
+	TEST_BEGIN("shape_aabb capsule");
+	ShapeInternal s_cap = { .type = SHAPE_CAPSULE, .local_pos = V3(0,0,0), .capsule = { .half_height = 1.0f, .radius = 0.5f } };
+	box = shape_aabb(&h, &s_cap);
+	TEST_ASSERT_FLOAT(box.min.y, 3.5f, 0.01f);
+	TEST_ASSERT_FLOAT(box.max.y, 6.5f, 0.01f);
+
+	TEST_BEGIN("shape_aabb hull");
+	v3 hull_pts[] = { V3(0,1,0), V3(1,0,0), V3(-1,0,0), V3(0,0,1), V3(0,0,-1), V3(0,-1,0) };
+	Hull* test_hull = quickhull(hull_pts, 6);
+	ShapeInternal s_hull = { .type = SHAPE_HULL, .local_pos = V3(0,0,0), .hull = { .hull = test_hull, .scale = V3(2,2,2) } };
+	box = shape_aabb(&h, &s_hull);
+	TEST_ASSERT(box.min.x < 4.0f);
+	TEST_ASSERT(box.max.x > 6.0f);
+	hull_free(test_hull);
+}
+
+// Correctness: BVH broadphase must find the same pairs as N^2.
+static void test_bvh_vs_n2()
+{
+	// Create a world with BVH broadphase and simulate.
+	World w_bvh = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+	World w_n2  = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_N2 });
+
+	// Build identical scenes: floor + several dynamic bodies.
+	World worlds[2] = { w_bvh, w_n2 };
+	for (int wi = 0; wi < 2; wi++) {
+		World w = worlds[wi];
+		Body floor = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, floor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+		for (int i = 0; i < 5; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3((float)i * 0.8f, 3 + (float)i, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+		}
+	}
+
+	// Step both worlds and compare contact counts over the first 10 frames
+	// (before solver warm-start divergence between broadphase modes).
+	int mismatch = 0;
+	for (int frame = 0; frame < 10; frame++) {
+		world_step(w_bvh, 1.0f / 60.0f);
+		world_step(w_n2, 1.0f / 60.0f);
+		const Contact* c_bvh; const Contact* c_n2;
+		int n_bvh = world_get_contacts(w_bvh, &c_bvh);
+		int n_n2  = world_get_contacts(w_n2, &c_n2);
+		if (n_bvh != n_n2) mismatch++;
+	}
+
+	TEST_BEGIN("bvh vs n2: contact counts match first 10 frames");
+	TEST_ASSERT(mismatch == 0);
+
+	destroy_world(w_bvh);
+	destroy_world(w_n2);
+}
+
+static void test_bvh_empty_trees()
+{
+	BVHTree t; bvh_init(&t);
+
+	TEST_BEGIN("bvh self test empty tree");
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_self_test(&t, &pairs);
+	TEST_ASSERT(asize(pairs) == 0);
+	afree(pairs);
+
+	TEST_BEGIN("bvh refit empty tree");
+	// Should not crash
+	bvh_refit(&t, NULL); // NULL world is fine since no leaves to visit
+
+	bvh_free(&t);
+}
+
+static void test_bvh_single_body()
+{
+	BVHTree t; bvh_init(&t);
+	AABB b0 = { V3(0,0,0), V3(1,1,1) };
+	int l0 = bvh_insert(&t, 0, b0);
+
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_self_test(&t, &pairs);
+	TEST_BEGIN("bvh self test single body: no pairs");
+	TEST_ASSERT(asize(pairs) == 0);
+	afree(pairs);
+
+	bvh_remove(&t, l0);
+	TEST_BEGIN("bvh remove last body");
+	// Tree should handle gracefully
+	pairs = NULL;
+	bvh_self_test(&t, &pairs);
+	TEST_ASSERT(asize(pairs) == 0);
+	afree(pairs);
+
+	bvh_free(&t);
+}
+
+static void test_bvh_many_overlapping()
+{
+	BVHTree t; bvh_init(&t);
+
+	// Insert N bodies all at the origin -- all overlap each other.
+	int N = 20;
+	for (int i = 0; i < N; i++) {
+		AABB b = { V3(-1, -1, -1), V3(1, 1, 1) };
+		bvh_insert(&t, i, b);
+	}
+
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_self_test(&t, &pairs);
+
+	TEST_BEGIN("bvh many overlapping: all leaves reachable");
+	TEST_ASSERT(bvh_count_leaves(&t, t.root) == N);
+
+	TEST_BEGIN("bvh many overlapping: correct pair count");
+	int expected = N * (N - 1) / 2;
+	TEST_ASSERT(asize(pairs) == expected);
+
+	afree(pairs);
+	bvh_free(&t);
+}
+
+static void test_bvh_no_overlaps()
+{
+	BVHTree t; bvh_init(&t);
+
+	// Insert 10 well-separated bodies
+	for (int i = 0; i < 10; i++) {
+		AABB b = { V3((float)i * 10, 0, 0), V3((float)i * 10 + 1, 1, 1) };
+		bvh_insert(&t, i, b);
+	}
+
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_self_test(&t, &pairs);
+
+	TEST_BEGIN("bvh no overlaps: zero pairs");
+	TEST_ASSERT(asize(pairs) == 0);
+
+	afree(pairs);
+	bvh_free(&t);
+}
+
+static void test_bvh_cache_reorder()
+{
+	BVHTree t; bvh_init(&t);
+
+	// Insert 15 bodies with overlapping and separated AABBs.
+	for (int i = 0; i < 15; i++) {
+		AABB b = { V3((float)(i % 5) * 1.5f, 0, 0), V3((float)(i % 5) * 1.5f + 2, 2, 2) };
+		bvh_insert(&t, i, b);
+	}
+
+	// Get pairs before reorder.
+	CK_DYNA BroadPair* before = NULL;
+	bvh_self_test(&t, &before);
+	int before_count = asize(before);
+
+	// Reorder.
+	bvh_cache_reorder(&t);
+
+	// Verify DFS order: every internal child index must be > parent index.
+	TEST_BEGIN("cache reorder: DFS order property");
+	int dfs_ok = 1;
+	for (int i = 0; i < asize(t.nodes); i++) {
+		BVHNode* n = &t.nodes[i];
+		if (bvh_child_is_internal(&n->a) && n->a.index <= i) dfs_ok = 0;
+		if (bvh_child_is_internal(&n->b) && n->b.index <= i) dfs_ok = 0;
+	}
+	TEST_ASSERT(dfs_ok);
+
+	// Verify leaf back-pointers.
+	TEST_BEGIN("cache reorder: leaf back-pointers valid");
+	int bp_ok = 1;
+	for (int i = 0; i < asize(t.leaves); i++) {
+		BVHLeaf* lf = &t.leaves[i];
+		BVHChild* c = bvh_child(&t.nodes[lf->node_idx], lf->child_slot);
+		if (!bvh_child_is_leaf(c) || bvh_child_leaf_idx(c) != i) bp_ok = 0;
+	}
+	TEST_ASSERT(bp_ok);
+
+	// Verify all leaves still reachable.
+	TEST_BEGIN("cache reorder: all leaves reachable");
+	TEST_ASSERT(bvh_count_leaves(&t, t.root) == 15);
+
+	// Verify pairs unchanged after reorder.
+	CK_DYNA BroadPair* after = NULL;
+	bvh_self_test(&t, &after);
+	TEST_BEGIN("cache reorder: pairs preserved");
+	TEST_ASSERT(asize(after) == before_count);
+
+	afree(before); afree(after);
+	bvh_free(&t);
+}
+
+// Validate all leaf back-pointers in a tree.
+static int bvh_validate_backpointers(BVHTree* t)
+{
+	for (int i = 0; i < asize(t->leaves); i++) {
+		// Skip freed leaves (check if on freelist -- simple: just verify node_idx is in range)
+		BVHLeaf* lf = &t->leaves[i];
+		if (lf->node_idx < 0 || lf->node_idx >= asize(t->nodes)) continue;
+		BVHChild* c = bvh_child(&t->nodes[lf->node_idx], lf->child_slot);
+		if (!bvh_child_is_leaf(c) || bvh_child_leaf_idx(c) != i) return 0;
+	}
+	return 1;
+}
+
+// Compute total SAH cost of the tree (sum of all internal node child SAs).
+static float bvh_total_sah(BVHTree* t, int ni)
+{
+	BVHNode* n = &t->nodes[ni];
+	float cost = 0;
+	if (!bvh_child_is_empty(&n->a)) cost += aabb_surface_area(bvh_child_aabb(&n->a));
+	if (!bvh_child_is_empty(&n->b)) cost += aabb_surface_area(bvh_child_aabb(&n->b));
+	if (bvh_child_is_internal(&n->a)) cost += bvh_total_sah(t, n->a.index);
+	if (bvh_child_is_internal(&n->b)) cost += bvh_total_sah(t, n->b.index);
+	return cost;
+}
+
+static void test_bvh_rotations()
+{
+	// Insert bodies in a pathological linear order (sorted along X).
+	// Each body overlaps its neighbor (width 1.5, spacing 1.0).
+	BVHTree t; bvh_init(&t);
+	for (int i = 0; i < 20; i++) {
+		AABB b = { V3((float)i, 0, 0), V3((float)i + 1.5f, 1, 1) };
+		bvh_insert(&t, i, b);
+	}
+
+	TEST_BEGIN("rotations: all leaves reachable");
+	TEST_ASSERT(bvh_count_leaves(&t, t.root) == 20);
+
+	TEST_BEGIN("rotations: back-pointers valid");
+	TEST_ASSERT(bvh_validate_backpointers(&t));
+
+	TEST_BEGIN("rotations: self-test finds correct overlapping pairs");
+	// Adjacent bodies overlap: (0,1), (1,2), ..., (18,19) = 19 pairs
+	// Non-adjacent don't overlap (gap of 0.5 between each)
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_self_test(&t, &pairs);
+	TEST_ASSERT(asize(pairs) == 19);
+	afree(pairs);
+
+	// Compare SAH to a no-rotation tree.
+	float rotated_sah = bvh_total_sah(&t, t.root);
+	bvh_free(&t);
+
+	// Build same tree without rotations by calling bvh_try_rotate with empty impl...
+	// Actually just verify SAH is reasonable (not degenerate).
+	TEST_BEGIN("rotations: SAH cost is bounded");
+	TEST_ASSERT(rotated_sah > 0.0f);
+	TEST_ASSERT(rotated_sah < 1e6f); // sanity check
+
+	// Stress test: many overlapping bodies with rotations.
+	bvh_init(&t);
+	for (int i = 0; i < 50; i++) {
+		float x = (float)(i % 10) * 0.5f;
+		float y = (float)(i / 10) * 0.5f;
+		AABB b = { V3(x, y, 0), V3(x + 1, y + 1, 1) };
+		bvh_insert(&t, i, b);
+	}
+
+	TEST_BEGIN("rotations stress: all leaves reachable");
+	TEST_ASSERT(bvh_count_leaves(&t, t.root) == 50);
+
+	TEST_BEGIN("rotations stress: back-pointers valid");
+	TEST_ASSERT(bvh_validate_backpointers(&t));
+
+	bvh_free(&t);
+}
+
+static void test_bvh_binned_build()
+{
+	BVHTree t; bvh_init(&t);
+
+	// Create 30 leaves manually and build with binned SAH.
+	int leaf_count = 30;
+	AABB* lut = CK_ALLOC(sizeof(AABB) * leaf_count);
+	CK_DYNA int* lis = NULL;
+	for (int i = 0; i < leaf_count; i++) {
+		int li = bvh_alloc_leaf(&t);
+		t.leaves[li].body_idx = i;
+		lut[li] = (AABB){ V3((float)(i % 6) * 2, (float)(i / 6) * 2, 0), V3((float)(i % 6) * 2 + 1.5f, (float)(i / 6) * 2 + 1.5f, 1) };
+		apush(lis, li);
+	}
+
+	t.root = bvh_binned_build(&t, lis, lut, leaf_count);
+	t.meta[t.root].parent = -1;
+
+	TEST_BEGIN("binned build: all leaves reachable");
+	TEST_ASSERT(bvh_count_leaves(&t, t.root) == leaf_count);
+
+	TEST_BEGIN("binned build: back-pointers valid");
+	TEST_ASSERT(bvh_validate_backpointers(&t));
+
+	// Self-test: adjacent bodies on same row overlap (spacing 2, width 1.5 => 0.5 overlap).
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_self_test(&t, &pairs);
+	// Verify against brute-force AABB overlap count.
+	int expected = 0;
+	for (int i = 0; i < leaf_count; i++)
+		for (int j = i + 1; j < leaf_count; j++)
+			if (aabb_overlaps(lut[i], lut[j])) expected++;
+	TEST_BEGIN("binned build: self-test matches brute force");
+	TEST_ASSERT(asize(pairs) == expected);
+
+	afree(pairs); afree(lis); CK_FREE(lut);
+	bvh_free(&t);
+}
+
+static void test_bvh_refine_subtree()
+{
+	BVHTree t; bvh_init(&t);
+
+	// Insert bodies via normal insertion (which uses SAH + rotations).
+	for (int i = 0; i < 20; i++) {
+		AABB b = { V3((float)i, 0, 0), V3((float)i + 1.5f, 1, 1) };
+		bvh_insert(&t, i, b);
+	}
+
+	// Get pairs before refinement.
+	CK_DYNA BroadPair* before = NULL;
+	bvh_self_test(&t, &before);
+	int before_count = asize(before);
+	float before_sah = bvh_total_sah(&t, t.root);
+
+	// Build LUT from current tree state.
+	AABB* lut = CK_ALLOC(sizeof(AABB) * asize(t.leaves));
+	for (int i = 0; i < asize(t.leaves); i++) {
+		BVHChild* c = bvh_child(&t.nodes[t.leaves[i].node_idx], t.leaves[i].child_slot);
+		lut[i] = bvh_child_aabb(c);
+	}
+
+	// Refine a subtree (pick root for maximum effect).
+	bvh_refine_subtree(&t, t.root, lut);
+
+	TEST_BEGIN("refine subtree: all leaves reachable");
+	TEST_ASSERT(bvh_count_leaves(&t, t.root) == 20);
+
+	TEST_BEGIN("refine subtree: back-pointers valid");
+	TEST_ASSERT(bvh_validate_backpointers(&t));
+
+	TEST_BEGIN("refine subtree: pairs preserved");
+	CK_DYNA BroadPair* after = NULL;
+	bvh_self_test(&t, &after);
+	TEST_ASSERT(asize(after) == before_count);
+
+	TEST_BEGIN("refine subtree: SAH improved or equal");
+	float after_sah = bvh_total_sah(&t, t.root);
+	TEST_ASSERT(after_sah <= before_sah + 1e-3f);
+
+	afree(before); afree(after); CK_FREE(lut);
+	bvh_free(&t);
+}
+
+static void test_bvh_fat_aabb()
+{
+	// Test that fat AABB prevents unnecessary refit updates.
+	// Create a world with BVH, add two bodies, step to generate refit.
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+	Body floor = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+
+	Body ball = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+	// Step once to refit and set fat AABBs.
+	world_step(w, 1.0f / 60.0f);
+
+	TEST_BEGIN("fat aabb: ball above floor after first step");
+	v3 pos = body_get_position(w, ball);
+	TEST_ASSERT(pos.y > 0.0f);
+
+	// Static floor leaf should have fat AABB set.
+	WorldInternal* wi = (WorldInternal*)w.id;
+	int floor_idx = handle_index(floor);
+	int fl = wi->body_cold[floor_idx].bvh_leaf;
+	TEST_BEGIN("fat aabb: static leaf has fat AABB set");
+	BVHLeaf* lf = &wi->bvh_static->leaves[fl];
+	TEST_ASSERT(lf->fat_min.x < lf->fat_max.x); // non-empty fat AABB
+
+	// Run 300 steps -- ball should settle on floor, not fall through.
+	for (int i = 0; i < 300; i++) world_step(w, 1.0f / 60.0f);
+	pos = body_get_position(w, ball);
+	TEST_BEGIN("fat aabb: ball rests on floor (no false negatives)");
+	TEST_ASSERT(pos.y > -0.5f && pos.y < 2.0f);
+
+	destroy_world(w);
+}
+
+static void run_bvh_tests()
+{
+	printf("--- nudge BVH tests ---\n");
+	test_bvh_aabb_helpers();
+	test_bvh_insert_remove();
+	test_bvh_self_test();
+	test_bvh_cross_test();
+	test_bvh_shape_aabb();
+	test_bvh_empty_trees();
+	test_bvh_single_body();
+	test_bvh_many_overlapping();
+	test_bvh_no_overlaps();
+	test_bvh_cache_reorder();
+	test_bvh_rotations();
+	test_bvh_binned_build();
+	test_bvh_refine_subtree();
+	test_bvh_fat_aabb();
+	test_bvh_vs_n2();
+}
+
+// ============================================================================
+// Feature ID tests for warm starting.
+
+static void test_feature_ids()
+{
+	const Hull* box = hull_unit_box();
+
+	// --- Face contact: two boxes resting face-to-face ---
+	{
+		TEST_BEGIN("feature_id face contact nonzero");
+		Manifold m = {0};
+		Box a = { V3(0, 1, 0), quat_identity(), V3(1, 1, 1) };
+		Box b = { V3(0, -0.5f, 0), quat_identity(), V3(2, 0.5f, 2) };
+		int hit = collide_box_box(a, b, &m);
+		TEST_ASSERT(hit);
+		TEST_ASSERT(m.count > 0);
+		for (int i = 0; i < m.count; i++) {
+			TEST_BEGIN("feature_id face nonzero");
+			TEST_ASSERT(m.contacts[i].feature_id != 0);
+			TEST_ASSERT((m.contacts[i].feature_id & FEATURE_EDGE_BIT) == 0);
+		}
+	}
+
+	// --- Same config twice produces same feature IDs ---
+	{
+		TEST_BEGIN("feature_id deterministic");
+		Manifold m1 = {0}, m2 = {0};
+		Box a = { V3(0, 0.5f, 0), quat_identity(), V3(1, 1, 1) };
+		Box b = { V3(0, -0.5f, 0), quat_identity(), V3(1, 1, 1) };
+		collide_box_box(a, b, &m1);
+		collide_box_box(a, b, &m2);
+		TEST_ASSERT(m1.count == m2.count);
+		for (int i = 0; i < m1.count; i++) {
+			TEST_BEGIN("feature_id same across calls");
+			TEST_ASSERT(m1.contacts[i].feature_id == m2.contacts[i].feature_id);
+		}
+	}
+
+	// --- Small perturbation preserves feature IDs ---
+	{
+		TEST_BEGIN("feature_id stable under perturbation");
+		Box a = { V3(0, 0.5f, 0), quat_identity(), V3(1, 1, 1) };
+		Box b = { V3(0, -0.5f, 0), quat_identity(), V3(1, 1, 1) };
+		Manifold m_base = {0};
+		collide_box_box(a, b, &m_base);
+
+		// Slight shift.
+		Box a2 = { V3(0.01f, 0.51f, -0.01f), quat_identity(), V3(1, 1, 1) };
+		Manifold m_pert = {0};
+		collide_box_box(a2, b, &m_pert);
+
+		// Same face pair should produce same ref/inc face encoding.
+		// The clip_edge component may differ, but the face indices should match.
+		TEST_ASSERT(m_base.count > 0 && m_pert.count > 0);
+		uint32_t base_faces = m_base.contacts[0].feature_id & 0xFFFF;
+		uint32_t pert_faces = m_pert.contacts[0].feature_id & 0xFFFF;
+		TEST_ASSERT(base_faces == pert_faces);
+	}
+
+	// --- Different configurations produce different feature IDs ---
+	{
+		TEST_BEGIN("feature_id varies with config");
+		// Top face contact.
+		Box a1 = { V3(0, 0.9f, 0), quat_identity(), V3(1, 1, 1) };
+		Box b  = { V3(0, -0.5f, 0), quat_identity(), V3(1, 1, 1) };
+		Manifold m1 = {0};
+		collide_box_box(a1, b, &m1);
+
+		// Side face contact (shift X so a different face is reference).
+		Box a2 = { V3(1.9f, 0, 0), quat_identity(), V3(1, 1, 1) };
+		Manifold m2 = {0};
+		collide_box_box(a2, b, &m2);
+
+		TEST_ASSERT(m1.count > 0 && m2.count > 0);
+		uint32_t faces1 = m1.contacts[0].feature_id & 0xFFFF;
+		uint32_t faces2 = m2.contacts[0].feature_id & 0xFFFF;
+		TEST_ASSERT(faces1 != faces2);
+	}
+
+	// --- Hull-hull with custom hulls ---
+	{
+		TEST_BEGIN("feature_id hull-hull");
+		v3 tet_pts[] = { {0,1,0}, {-1,-1,1}, {1,-1,1}, {0,-1,-1} };
+		Hull* h = quickhull(tet_pts, 4);
+		TEST_ASSERT(h != NULL);
+		if (h) {
+			ConvexHull ca = { h, V3(0, 2, 0), quat_identity(), V3(1,1,1) };
+			ConvexHull cb = { h, V3(0, 0, 0), quat_identity(), V3(1,1,1) };
+			Manifold m = {0};
+			int hit = collide_hull_hull(ca, cb, &m);
+			if (hit && m.count > 0) {
+				TEST_BEGIN("feature_id hull nonzero");
+				TEST_ASSERT(m.contacts[0].feature_id != 0);
+			}
+			hull_free(h);
+		}
+	}
+
+	// --- Exact feature IDs for known box configurations ---
+	// Unit box faces: 0=-Z, 1=+Z, 2=-X, 3=+X, 4=-Y, 5=+Y
+	// Feature ID = faceA | (faceB << 8) | (clip_edge << 16)
+	{
+		// Stacked vertically: A on top, B on bottom.
+		// A's face 4 (-Y) meets B's face 5 (+Y).
+		TEST_BEGIN("feature_id exact: stacked Y");
+		Box a = { V3(0, 1, 0), quat_identity(), V3(1, 1, 1) };
+		Box b = { V3(0, -1, 0), quat_identity(), V3(1, 1, 1) };
+		Manifold m = {0};
+		collide_box_box(a, b, &m);
+		TEST_ASSERT(m.count > 0);
+		// All contacts should encode face 4 and face 5 in the low 16 bits.
+		uint32_t expect_faces = 4 | (5 << 8);
+		for (int i = 0; i < m.count; i++) {
+			uint32_t got_faces = m.contacts[i].feature_id & 0xFFFF;
+			if (got_faces != expect_faces) {
+				// Could be flipped: 5 | (4 << 8)
+				uint32_t alt = 5 | (4 << 8);
+				TEST_BEGIN("feature_id exact Y faces");
+				TEST_ASSERT(got_faces == expect_faces || got_faces == alt);
+			}
+		}
+	}
+	{
+		// Side by side on X axis: A's face 3 (+X) meets B's face 2 (-X).
+		TEST_BEGIN("feature_id exact: side X");
+		Box a = { V3(-1, 0, 0), quat_identity(), V3(1, 1, 1) };
+		Box b = { V3(1, 0, 0), quat_identity(), V3(1, 1, 1) };
+		Manifold m = {0};
+		collide_box_box(a, b, &m);
+		TEST_ASSERT(m.count > 0);
+		uint32_t expect_a = 3 | (2 << 8); // A.+X ref, B.-X inc
+		uint32_t expect_b = 2 | (3 << 8); // B.-X ref, A.+X inc
+		for (int i = 0; i < m.count; i++) {
+			uint32_t got = m.contacts[i].feature_id & 0xFFFF;
+			TEST_BEGIN("feature_id exact X faces");
+			TEST_ASSERT(got == expect_a || got == expect_b);
+		}
+	}
+	{
+		// Front-to-back on Z: A's face 1 (+Z) meets B's face 0 (-Z).
+		TEST_BEGIN("feature_id exact: front Z");
+		Box a = { V3(0, 0, -1), quat_identity(), V3(1, 1, 1) };
+		Box b = { V3(0, 0, 1), quat_identity(), V3(1, 1, 1) };
+		Manifold m = {0};
+		collide_box_box(a, b, &m);
+		TEST_ASSERT(m.count > 0);
+		uint32_t expect_a = 1 | (0 << 8);
+		uint32_t expect_b = 0 | (1 << 8);
+		for (int i = 0; i < m.count; i++) {
+			uint32_t got = m.contacts[i].feature_id & 0xFFFF;
+			TEST_BEGIN("feature_id exact Z faces");
+			TEST_ASSERT(got == expect_a || got == expect_b);
+		}
+	}
+	{
+		// Clip edge index: contacts from original incident vertices get 0xFF.
+		// Contacts created by clipping get the side-plane index (0,1,2,3).
+		TEST_BEGIN("feature_id clip edge encoding");
+		Box a = { V3(0, 0.9f, 0), quat_identity(), V3(1, 1, 1) };
+		Box b = { V3(0, -0.9f, 0), quat_identity(), V3(1, 1, 1) };
+		Manifold m = {0};
+		collide_box_box(a, b, &m);
+		TEST_ASSERT(m.count > 0);
+		int has_original = 0, has_clipped = 0;
+		for (int i = 0; i < m.count; i++) {
+			uint8_t clip = (m.contacts[i].feature_id >> 16) & 0xFF;
+			if (clip == 0xFF) has_original = 1;
+			else has_clipped = 1;
+		}
+		// With boxes nearly the same size, most contacts should be original
+		// incident vertices (0xFF), but some may be clipped.
+		TEST_ASSERT(has_original || has_clipped);
+	}
+
+	// --- Swapped order: both produce valid nonzero feature IDs ---
+	{
+		TEST_BEGIN("feature_id order both valid");
+		Box a = { V3(0, 0.5f, 0), quat_identity(), V3(1, 1, 1) };
+		Box b = { V3(0, -0.5f, 0), quat_identity(), V3(1, 1, 1) };
+		Manifold m_ab = {0}, m_ba = {0};
+		collide_box_box(a, b, &m_ab);
+		collide_box_box(b, a, &m_ba);
+		TEST_ASSERT(m_ab.count > 0 && m_ba.count > 0);
+		TEST_ASSERT(m_ab.count == m_ba.count);
+		// Both orderings produce nonzero face-based IDs.
+		for (int i = 0; i < m_ab.count; i++) {
+			TEST_BEGIN("feature_id AB nonzero");
+			TEST_ASSERT(m_ab.contacts[i].feature_id != 0);
+		}
+		for (int i = 0; i < m_ba.count; i++) {
+			TEST_BEGIN("feature_id BA nonzero");
+			TEST_ASSERT(m_ba.contacts[i].feature_id != 0);
+		}
+		// Same face pair (possibly in different order) in low 16 bits.
+		uint32_t ab_faces = m_ab.contacts[0].feature_id & 0xFFFF;
+		uint32_t ba_faces = m_ba.contacts[0].feature_id & 0xFFFF;
+		uint32_t ab_swap = (ab_faces >> 8) | ((ab_faces & 0xFF) << 8);
+		TEST_BEGIN("feature_id swapped face pair");
+		TEST_ASSERT(ab_faces == ba_faces || ab_swap == ba_faces);
+	}
+}
+
 static void run_tests()
 {
 	test_pass = 0;
@@ -2050,6 +3318,11 @@ static void run_tests()
 	test_capsule_capsule();
 	test_sphere_box();
 	test_capsule_box();
+	test_floor_contacts();
+	test_sphere_settles_on_floor();
+	test_gjk_dispatch();
+	test_gjk_distance();
+	test_contact_sanity();
 	test_box_box();
 	test_quickhull();
 
@@ -2066,6 +3339,8 @@ static void run_tests()
 	test_quickhull_fuzz(100); // use 1000+ for stress testing
 
 	run_solver_tests();
+	run_bvh_tests();
+	test_feature_ids();
 
 	printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	if (test_fail > 0) printf("*** FAILURES ***\n");

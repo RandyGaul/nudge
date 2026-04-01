@@ -340,8 +340,7 @@ static int qh_build_simplex(QH_State* s, int nv)
 		}
 	}
 
-	s->interior = scale(add(add(s->verts[vtx[0]].pos, s->verts[vtx[1]].pos),
-	                        add(s->verts[vtx[2]].pos, s->verts[vtx[3]].pos)), 0.25f);
+	s->interior = scale(add(add(s->verts[vtx[0]].pos, s->verts[vtx[1]].pos), add(s->verts[vtx[2]].pos, s->verts[vtx[3]].pos)), 0.25f);
 
 	// Assign conflict vertices: each point goes to the face it's furthest outside of.
 	for (int i = 0; i < nv; i++) {

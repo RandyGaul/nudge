@@ -3,6 +3,7 @@
 #define VMATH_H
 
 #include <math.h>
+#include <float.h>
 
 // -----------------------------------------------------------------------------
 // Types.
@@ -52,9 +53,7 @@ static inline v3 quat_rotate(quat q, v3 v)
 {
 	v3 u = { q.x, q.y, q.z };
 	float s = q.w;
-	return v3_add(v3_add(v3_scale(u, 2.0f * v3_dot(u, v)),
-	              v3_scale(v, s*s - v3_dot(u, u))),
-	              v3_scale(v3_cross(u, v), 2.0f * s));
+	return v3_add(v3_add(v3_scale(u, 2.0f * v3_dot(u, v)), v3_scale(v, s*s - v3_dot(u, u))), v3_scale(v3_cross(u, v), 2.0f * s));
 }
 
 // -----------------------------------------------------------------------------
@@ -171,6 +170,8 @@ static inline mat4 mat4_trs(v3 pos, quat rot, v3 s)
 // v3 component-wise operations.
 
 static inline v3 v3_mul(v3 a, v3 b) { return (v3){ a.x*b.x, a.y*b.y, a.z*b.z }; }
+static inline v3 v3_min(v3 a, v3 b) { return (v3){ fminf(a.x, b.x), fminf(a.y, b.y), fminf(a.z, b.z) }; }
+static inline v3 v3_max(v3 a, v3 b) { return (v3){ fmaxf(a.x, b.x), fmaxf(a.y, b.y), fmaxf(a.z, b.z) }; }
 static inline v3 v3_rcp(v3 a) {
 	return (v3){
 		a.x != 0.0f ? 1.0f / a.x : 0.0f,

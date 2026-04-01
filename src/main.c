@@ -108,6 +108,9 @@ static int g_mesh_capsule;
 static int g_mesh_hull;
 static bool g_show_contacts = true;
 static bool g_show_joints = true;
+static bool g_show_bvh = true;
+static bool g_paused = false;
+static bool g_step_once = false;
 
 // Pendulum chain (ball sockets)
 #define CHAIN_LEN 5
@@ -217,6 +220,7 @@ static void setup_scene()
 
 	g_world = create_world((WorldParams){
 		.gravity = V3(0, -9.81f, 0),
+		.broadphase = BROADPHASE_BVH,
 	});
 
 	// Static floor
@@ -347,15 +351,20 @@ void update()
 			cam_zoom(io->MouseWheel);
 	}
 
-	world_step(g_world, 1.0f / 60.0f);
+	if (!g_paused || g_step_once) { world_step(g_world, 1.0f / 60.0f); g_step_once = false; }
 
 	// Debug panel
 	ImGui_Begin("Debug", NULL, 0);
 	if (ImGui_Button("Restart scene")) setup_scene();
+	ImGui_Checkbox("Pause", &g_paused);
+	if (g_paused && ImGui_Button("Step")) g_step_once = true;
 	ImGui_Checkbox("Show contacts", &g_show_contacts);
 	ImGui_Checkbox("Show joints", &g_show_joints);
+	ImGui_Checkbox("Show BVH", &g_show_bvh);
 	const Contact* contacts;
 	int ncontacts = world_get_contacts(g_world, &contacts);
+	WorldInternal* dbg_w = (WorldInternal*)g_world.id;
+	ImGui_Text("Broadphase: %s", dbg_w->broadphase_type == BROADPHASE_BVH ? "BVH" : "N^2");
 	ImGui_Text("Contacts: %d", ncontacts);
 	ImGui_End();
 }
@@ -365,6 +374,34 @@ static void draw_body_mesh(int mesh, Body body, v3 sc, v3 color)
 	v3 pos = body_get_position(g_world, body);
 	quat rot = body_get_rotation(g_world, body);
 	render_push(mesh, mat4_trs(pos, rot, sc), color, 1.0f);
+}
+
+static void draw_aabb_wireframe(v3 lo, v3 hi, v3 color)
+{
+	v3 c[8] = {
+		V3(lo.x, lo.y, lo.z), V3(hi.x, lo.y, lo.z), V3(hi.x, hi.y, lo.z), V3(lo.x, hi.y, lo.z),
+		V3(lo.x, lo.y, hi.z), V3(hi.x, lo.y, hi.z), V3(hi.x, hi.y, hi.z), V3(lo.x, hi.y, hi.z),
+	};
+	// Bottom face
+	render_debug_line(c[0], c[1], color); render_debug_line(c[1], c[2], color);
+	render_debug_line(c[2], c[3], color); render_debug_line(c[3], c[0], color);
+	// Top face
+	render_debug_line(c[4], c[5], color); render_debug_line(c[5], c[6], color);
+	render_debug_line(c[6], c[7], color); render_debug_line(c[7], c[4], color);
+	// Verticals
+	render_debug_line(c[0], c[4], color); render_debug_line(c[1], c[5], color);
+	render_debug_line(c[2], c[6], color); render_debug_line(c[3], c[7], color);
+}
+
+static void bvh_debug_draw_cb(v3 mn, v3 mx, int depth, int is_leaf, void* user)
+{
+	(void)user;
+	// Color by depth: cycle through distinct hues.
+	float hues[][3] = { {1,0.3f,0.3f}, {0.3f,1,0.3f}, {0.3f,0.3f,1}, {1,1,0.3f}, {1,0.3f,1}, {0.3f,1,1} };
+	int hi = depth % 6;
+	float a = is_leaf ? 1.0f : 0.5f;
+	v3 col = V3(hues[hi][0] * a, hues[hi][1] * a, hues[hi][2] * a);
+	draw_aabb_wireframe(mn, mx, col);
 }
 
 void draw()
@@ -442,6 +479,8 @@ void draw()
 			render_debug_line(p, tip, V3(0.0f, 1.0f, 0.5f));
 		}
 	}
+
+	if (g_show_bvh) world_debug_bvh(g_world, bvh_debug_draw_cb, NULL);
 
 	render_end();
 }

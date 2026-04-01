@@ -1,10 +1,5 @@
 // See LICENSE for licensing info.
 // gjk.c -- GJK distance algorithm for 3D convex shapes.
-//
-// 3D GJK distance algorithm with full tetrahedron Voronoi regions.
-//
-// Computes closest distance between two convex shapes defined by
-// support functions. Returns witness points on each shape.
 
 // -----------------------------------------------------------------------------
 // GJK types.
@@ -34,211 +29,185 @@ typedef struct GjkResult
 	int iterations;
 } GjkResult;
 
-// Support function signature: returns support point in world space
-// and writes the vertex index to *out_index.
+// GJK shape: tagged union for support function dispatch.
+// Support operates on UNSCALED local-space vertices. The caller transforms
+// the result to world space. For hulls, scale is baked into the vertex lookup.
+enum { GJK_POINT, GJK_SEGMENT, GJK_HULL };
+
+typedef struct GjkShape
+{
+	int type;
+	int count;
+	const v3* verts;  // pointer to vertex array (local space)
+	v3 verts_buf[2];  // inline storage for point/segment
+} GjkShape;
+
+static int gjk_get_support(const GjkShape* s, v3 dir)
+{
+	int best = 0;
+	float best_d = dot(s->verts[0], dir);
+	for (int i = 1; i < s->count; i++) {
+		float d = dot(s->verts[i], dir);
+		if (d > best_d) { best_d = d; best = i; }
+	}
+	return best;
+}
+
+// Positioned shape: GjkShape + transform for world-space queries.
+typedef struct GjkProxy
+{
+	GjkShape shape;
+	v3 pos;
+	quat rot;
+} GjkProxy;
+
+// Proxy init functions: take output pointer to avoid dangling self-referential
+// pointers when returning structs by value (verts -> verts_buf).
+static void gjk_proxy_point(GjkProxy* pr, v3 p)
+{
+	*pr = (GjkProxy){0};
+	pr->shape.type = GJK_POINT;
+	pr->shape.count = 1;
+	pr->shape.verts_buf[0] = p;
+	pr->shape.verts = pr->shape.verts_buf;
+	pr->pos = V3(0,0,0);
+	pr->rot = quat_identity();
+}
+
+static void gjk_proxy_segment(GjkProxy* pr, v3 p, v3 q)
+{
+	*pr = (GjkProxy){0};
+	pr->shape.type = GJK_SEGMENT;
+	pr->shape.count = 2;
+	pr->shape.verts_buf[0] = p;
+	pr->shape.verts_buf[1] = q;
+	pr->shape.verts = pr->shape.verts_buf;
+	pr->pos = V3(0,0,0);
+	pr->rot = quat_identity();
+}
+
+// For hulls: pre-scale the vertices into a temp buffer, store as proxy.
+// Caller must keep scaled_verts alive for the duration of the GJK call.
+static void gjk_proxy_hull(GjkProxy* pr, const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts)
+{
+	for (int i = 0; i < hull->vert_count; i++)
+		scaled_verts[i] = hmul(hull->verts[i], sc);
+	*pr = (GjkProxy){0};
+	pr->shape.type = GJK_HULL;
+	pr->shape.count = hull->vert_count;
+	pr->shape.verts = scaled_verts;
+	pr->pos = pos;
+	pr->rot = rot;
+}
+
+// Legacy function pointer typedef kept for gjk_bench compatibility.
 typedef v3 (*GjkSupportFn)(const void* shape, v3 dir, int* out_index);
 
 // -----------------------------------------------------------------------------
 // Simplex solvers: find closest point on simplex to origin.
+// Ported directly from lm engine (lmSimplex::Solve2/3/4).
 
-// Line segment: Voronoi regions A, B, AB
 static void gjk_solve2(GjkSimplex* s)
 {
-	v3 A = s->v[0].point;
-	v3 B = s->v[1].point;
-
-	float u = dot(sub(V3(0,0,0), B), sub(A, B));
-	float v = dot(sub(V3(0,0,0), A), sub(B, A));
-
-	if (v <= 0.0f) {
-		s->v[0].u = 1.0f;
-		s->divisor = 1.0f;
-		s->count = 1;
-		return;
-	}
-	if (u <= 0.0f) {
-		s->v[0] = s->v[1];
-		s->v[0].u = 1.0f;
-		s->divisor = 1.0f;
-		s->count = 1;
-		return;
-	}
-	s->v[0].u = u;
-	s->v[1].u = v;
-	v3 e = sub(B, A);
-	s->divisor = dot(e, e);
-	s->count = 2;
+	v3 a = s->v[0].point, b = s->v[1].point;
+	float u = dot(b, sub(b, a));
+	float v = dot(a, sub(a, b));
+	if (v <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return; }
+	if (u <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return; }
+	s->v[0].u = u; s->v[1].u = v; s->divisor = u + v; s->count = 2;
 }
 
-// Triangle: Voronoi regions A, B, C, AB, BC, CA, ABC
 static void gjk_solve3(GjkSimplex* s)
 {
-	v3 A = s->v[0].point;
-	v3 B = s->v[1].point;
-	v3 C = s->v[2].point;
-	v3 Q = V3(0,0,0);
+	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point;
+	float uAB = dot(b, sub(b, a)), vAB = dot(a, sub(a, b));
+	float uBC = dot(c, sub(c, b)), vBC = dot(b, sub(b, c));
+	float uCA = dot(a, sub(a, c)), vCA = dot(c, sub(c, a));
+	v3 n = cross(sub(b, a), sub(c, a));
+	float uABC = dot(cross(b, c), n), vABC = dot(cross(c, a), n), wABC = dot(cross(a, b), n);
 
-	float uAB = dot(sub(Q, B), sub(A, B));
-	float vAB = dot(sub(Q, A), sub(B, A));
-	float uBC = dot(sub(Q, C), sub(B, C));
-	float vBC = dot(sub(Q, B), sub(C, B));
-	float uCA = dot(sub(Q, A), sub(C, A));
-	float vCA = dot(sub(Q, C), sub(A, C));
-
-	// Vertex regions
-	if (vAB <= 0.0f && uCA <= 0.0f) {
-		s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return;
-	}
-	if (uAB <= 0.0f && vBC <= 0.0f) {
-		s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return;
-	}
-	if (uBC <= 0.0f && vCA <= 0.0f) {
-		s->v[0] = s->v[2]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return;
-	}
-
-	// Triangle normal and area-based barycentric coordinates
-	v3 n = cross(sub(B, A), sub(C, A));
-	float uABC = dot(cross(sub(B, Q), sub(C, Q)), n);
-	float vABC = dot(cross(sub(C, Q), sub(A, Q)), n);
-	float wABC = dot(cross(sub(A, Q), sub(B, Q)), n);
-
-	// Edge regions
-	if (uAB > 0.0f && vAB > 0.0f && wABC <= 0.0f) {
-		s->v[0].u = uAB; s->v[1].u = vAB;
-		s->divisor = dot(sub(B, A), sub(B, A));
-		s->count = 2; return;
-	}
-	if (uBC > 0.0f && vBC > 0.0f && uABC <= 0.0f) {
-		s->v[0] = s->v[1]; s->v[1] = s->v[2];
-		s->v[0].u = uBC; s->v[1].u = vBC;
-		s->divisor = dot(sub(C, B), sub(C, B));
-		s->count = 2; return;
-	}
-	if (uCA > 0.0f && vCA > 0.0f && vABC <= 0.0f) {
-		s->v[1] = s->v[0]; s->v[0] = s->v[2];
-		s->v[0].u = uCA; s->v[1].u = vCA;
-		s->divisor = dot(sub(A, C), sub(A, C));
-		s->count = 2; return;
-	}
-
-	// Interior
-	s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC;
-	s->divisor = dot(n, n);
-	s->count = 3;
+	if (vAB <= 0.0f && uCA <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return; }
+	if (uAB <= 0.0f && vBC <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return; }
+	if (uBC <= 0.0f && vCA <= 0.0f) { s->v[0] = s->v[2]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return; }
+	if (uAB > 0.0f && vAB > 0.0f && wABC <= 0.0f) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return; }
+	if (uBC > 0.0f && vBC > 0.0f && uABC <= 0.0f) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return; }
+	if (uCA > 0.0f && vCA > 0.0f && vABC <= 0.0f) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return; }
+	s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = uABC + vABC + wABC; s->count = 3;
 }
 
-// Tetrahedron: Voronoi regions for 4 verts, 6 edges, 4 faces, interior.
-// Uses scalar triple product for volume-based barycentric coordinates.
-static inline float triple(v3 a, v3 b, v3 c) { return dot(a, cross(b, c)); }
+static inline float stp(v3 a, v3 b, v3 c) { return dot(a, cross(b, c)); }
 
 static void gjk_solve4(GjkSimplex* s)
 {
-	v3 A = s->v[0].point;
-	v3 B = s->v[1].point;
-	v3 C = s->v[2].point;
-	v3 D = s->v[3].point;
-	v3 Q = V3(0,0,0);
+	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point, d = s->v[3].point;
 
-	// Face normals (outward from each face)
-	// Compute signed volumes for the 4 sub-tetrahedra
-	float uABCD = triple(sub(B, Q), sub(C, Q), sub(D, Q));
-	float vABCD = triple(sub(A, Q), sub(D, Q), sub(C, Q));
-	float wABCD = triple(sub(A, Q), sub(B, Q), sub(D, Q));
-	float xABCD = triple(sub(A, Q), sub(C, Q), sub(B, Q));
+	// Edge barycentric coords
+	float uAB = dot(b, sub(b, a)), vAB = dot(a, sub(a, b));
+	float uBC = dot(c, sub(c, b)), vBC = dot(b, sub(b, c));
+	float uCA = dot(a, sub(a, c)), vCA = dot(c, sub(c, a));
+	float uBD = dot(d, sub(d, b)), vBD = dot(b, sub(b, d));
+	float uDC = dot(c, sub(c, d)), vDC = dot(d, sub(d, c));
+	float uAD = dot(d, sub(d, a)), vAD = dot(a, sub(a, d));
 
-	// If origin is inside the tetrahedron
-	if (uABCD > 0.0f && vABCD > 0.0f && wABCD > 0.0f && xABCD > 0.0f) {
-		s->v[0].u = uABCD; s->v[1].u = vABCD;
-		s->v[2].u = wABCD; s->v[3].u = xABCD;
-		s->divisor = uABCD + vABCD + wABCD + xABCD;
-		s->count = 4;
-		return;
-	}
+	// Face barycentric coords
+	v3 n;
+	n = cross(sub(d, a), sub(b, a));
+	float uADB = dot(cross(d, b), n), vADB = dot(cross(b, a), n), wADB = dot(cross(a, d), n);
+	n = cross(sub(c, a), sub(d, a));
+	float uACD = dot(cross(c, d), n), vACD = dot(cross(d, a), n), wACD = dot(cross(a, c), n);
+	n = cross(sub(b, c), sub(d, c));
+	float uCBD = dot(cross(b, d), n), vCBD = dot(cross(d, c), n), wCBD = dot(cross(c, b), n);
+	n = cross(sub(b, a), sub(c, a));
+	float uABC = dot(cross(b, c), n), vABC = dot(cross(c, a), n), wABC = dot(cross(a, b), n);
 
-	// Otherwise, find closest feature among the 4 triangular faces.
-	// Try each face (triangle), keep the one closest to origin.
-	float best_dist = 1e18f;
-	GjkSimplex best = *s;
+	// Tetrahedron volume coords
+	float denom = stp(sub(c, b), sub(a, b), sub(d, b));
+	float vol = (denom == 0.0f) ? 1.0f : 1.0f / denom;
+	float uABCD = stp(c, d, b) * vol, vABCD = stp(c, a, d) * vol;
+	float wABCD = stp(d, a, b) * vol, xABCD = stp(b, a, c) * vol;
 
-	// Face BCD (opposite A, when uABCD <= 0)
-	if (uABCD <= 0.0f) {
-		GjkSimplex test = *s;
-		test.v[0] = s->v[1]; test.v[1] = s->v[2]; test.v[2] = s->v[3];
-		test.count = 3;
-		gjk_solve3(&test);
-		float inv = 1.0f / test.divisor;
-		v3 cp = V3(0,0,0);
-		for (int i = 0; i < test.count; i++)
-			cp = add(cp, scale(test.v[i].point, test.v[i].u * inv));
-		float d = len2(cp);
-		if (d < best_dist) { best_dist = d; best = test; }
-	}
+	// Vertex regions
+	if (vAB <= 0 && uCA <= 0 && vAD <= 0) { s->v[0].u = 1; s->divisor = 1; s->count = 1; return; }
+	if (uAB <= 0 && vBC <= 0 && vBD <= 0) { s->v[0] = s->v[1]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return; }
+	if (uBC <= 0 && vCA <= 0 && uDC <= 0) { s->v[0] = s->v[2]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return; }
+	if (uBD <= 0 && vDC <= 0 && uAD <= 0) { s->v[0] = s->v[3]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return; }
 
-	// Face ACD (opposite B, when vABCD <= 0)
-	if (vABCD <= 0.0f) {
-		GjkSimplex test = *s;
-		test.v[0] = s->v[0]; test.v[1] = s->v[2]; test.v[2] = s->v[3];
-		test.count = 3;
-		gjk_solve3(&test);
-		float inv = 1.0f / test.divisor;
-		v3 cp = V3(0,0,0);
-		for (int i = 0; i < test.count; i++)
-			cp = add(cp, scale(test.v[i].point, test.v[i].u * inv));
-		float d = len2(cp);
-		if (d < best_dist) { best_dist = d; best = test; }
-	}
+	// Edge regions
+	#define EDGE2(cond, va, vb, ua_val, vb_val) if (cond) { s->v[0] = va; s->v[1] = vb; s->v[0].u = ua_val; s->v[1].u = vb_val; s->divisor = ua_val + vb_val; s->count = 2; return; }
+	if (wABC <= 0 && vADB <= 0 && uAB > 0 && vAB > 0) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return; }
+	if (uABC <= 0 && wCBD <= 0 && uBC > 0 && vBC > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return; }
+	if (vABC <= 0 && wACD <= 0 && uCA > 0 && vCA > 0) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return; }
+	if (vCBD <= 0 && uACD <= 0 && uDC > 0 && vDC > 0) { s->v[0] = s->v[3]; s->v[1] = s->v[2]; s->v[0].u = uDC; s->v[1].u = vDC; s->divisor = uDC + vDC; s->count = 2; return; }
+	if (vACD <= 0 && wADB <= 0 && uAD > 0 && vAD > 0) { s->v[1] = s->v[3]; s->v[0].u = uAD; s->v[1].u = vAD; s->divisor = uAD + vAD; s->count = 2; return; }
+	if (uCBD <= 0 && uADB <= 0 && uBD > 0 && vBD > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uBD; s->v[1].u = vBD; s->divisor = uBD + vBD; s->count = 2; return; }
+	#undef EDGE2
 
-	// Face ABD (opposite C, when wABCD <= 0)
-	if (wABCD <= 0.0f) {
-		GjkSimplex test = *s;
-		test.v[0] = s->v[0]; test.v[1] = s->v[1]; test.v[2] = s->v[3];
-		test.count = 3;
-		gjk_solve3(&test);
-		float inv = 1.0f / test.divisor;
-		v3 cp = V3(0,0,0);
-		for (int i = 0; i < test.count; i++)
-			cp = add(cp, scale(test.v[i].point, test.v[i].u * inv));
-		float d = len2(cp);
-		if (d < best_dist) { best_dist = d; best = test; }
-	}
+	// Face regions
+	if (xABCD <= 0 && uABC > 0 && vABC > 0 && wABC > 0) { s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = uABC + vABC + wABC; s->count = 3; return; }
+	if (uABCD <= 0 && uCBD > 0 && vCBD > 0 && wCBD > 0) { s->v[0] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uCBD; s->v[1].u = vCBD; s->v[2].u = wCBD; s->divisor = uCBD + vCBD + wCBD; s->count = 3; return; }
+	if (vABCD <= 0 && uACD > 0 && vACD > 0 && wACD > 0) { s->v[1] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uACD; s->v[1].u = vACD; s->v[2].u = wACD; s->divisor = uACD + vACD + wACD; s->count = 3; return; }
+	if (wABCD <= 0 && uADB > 0 && vADB > 0 && wADB > 0) { s->v[2] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uADB; s->v[1].u = vADB; s->v[2].u = wADB; s->divisor = uADB + vADB + wADB; s->count = 3; return; }
 
-	// Face ABC (opposite D, when xABCD <= 0)
-	if (xABCD <= 0.0f) {
-		GjkSimplex test = *s;
-		test.v[0] = s->v[0]; test.v[1] = s->v[1]; test.v[2] = s->v[2];
-		test.count = 3;
-		gjk_solve3(&test);
-		float inv = 1.0f / test.divisor;
-		v3 cp = V3(0,0,0);
-		for (int i = 0; i < test.count; i++)
-			cp = add(cp, scale(test.v[i].point, test.v[i].u * inv));
-		float d = len2(cp);
-		if (d < best_dist) { best_dist = d; best = test; }
-	}
-
-	*s = best;
+	// Interior
+	s->v[0].u = uABCD; s->v[1].u = vABCD; s->v[2].u = wABCD; s->v[3].u = xABCD;
+	s->divisor = 1.0f; s->count = 4;
 }
 
 // -----------------------------------------------------------------------------
-// Closest point on the current simplex.
+// Closest point and witness points.
 
 static v3 gjk_closest_point(const GjkSimplex* s)
 {
 	float inv = 1.0f / s->divisor;
 	switch (s->count) {
 	case 1: return s->v[0].point;
-	case 2: return add(scale(s->v[0].point, s->v[0].u * inv),
-	                      scale(s->v[1].point, s->v[1].u * inv));
-	case 3: return add(add(
-	                      scale(s->v[0].point, s->v[0].u * inv),
-	                      scale(s->v[1].point, s->v[1].u * inv)),
-	                      scale(s->v[2].point, s->v[2].u * inv));
-	case 4: return V3(0,0,0); // origin is inside
+	case 2: return add(scale(s->v[0].point, s->v[0].u * inv), scale(s->v[1].point, s->v[1].u * inv));
+	case 3: return add(add(scale(s->v[0].point, s->v[0].u * inv), scale(s->v[1].point, s->v[1].u * inv)), scale(s->v[2].point, s->v[2].u * inv));
+	case 4: return V3(0,0,0);
 	}
 	return V3(0,0,0);
 }
 
-// Witness points on each shape from barycentric coords.
 static void gjk_witness_points(const GjkSimplex* s, v3* p1, v3* p2)
 {
 	float inv = 1.0f / s->divisor;
@@ -249,68 +218,54 @@ static void gjk_witness_points(const GjkSimplex* s, v3* p1, v3* p2)
 	}
 }
 
-// Search direction: negative of closest point for 1-simplex,
-// perpendicular to edge/face for higher simplices.
 static v3 gjk_search_dir(const GjkSimplex* s)
 {
 	switch (s->count) {
 	case 1: return neg(s->v[0].point);
 	case 2: {
-		v3 ab = sub(s->v[1].point, s->v[0].point);
-		v3 ao = neg(s->v[0].point);
-		// Triple cross: ab x ao x ab (perpendicular to ab toward origin)
-		v3 n = cross(cross(ab, ao), ab);
-		return len2(n) > 1e-12f ? n : neg(gjk_closest_point(s));
+		v3 ba = sub(s->v[0].point, s->v[1].point);
+		return cross(cross(ba, neg(s->v[0].point)), ba);
 	}
 	case 3: {
-		v3 ab = sub(s->v[1].point, s->v[0].point);
-		v3 ac = sub(s->v[2].point, s->v[0].point);
-		v3 n = cross(ab, ac);
-		// Orient toward origin
-		if (dot(n, s->v[0].point) > 0.0f) n = neg(n);
-		return n;
+		v3 n = cross(sub(s->v[1].point, s->v[0].point), sub(s->v[2].point, s->v[0].point));
+		if (dot(n, s->v[0].point) <= 0.0f) return n;
+		return neg(n);
 	}
 	}
 	return V3(0,0,0);
 }
 
 // -----------------------------------------------------------------------------
-// Main GJK distance function.
+// Main GJK distance function (lm engine pattern).
 
 #define GJK_MAX_ITERS 20
 
-static GjkResult gjk_distance(
-	GjkSupportFn support_a, const void* shape_a,
-	GjkSupportFn support_b, const void* shape_b)
+static GjkResult gjk_distance_ex(const GjkProxy* proxyA, const GjkProxy* proxyB)
 {
 	GjkResult result = {0};
-
-	// Initialize simplex with first support point
 	GjkSimplex simplex = {0};
-	int idx_a, idx_b;
-	v3 d = V3(1, 0, 0); // initial search direction
 
-	simplex.v[0].point1 = support_a(shape_a, neg(d), &idx_a);
-	simplex.v[0].point2 = support_b(shape_b, d, &idx_b);
+	// Initialize with first support point.
+	simplex.v[0].index1 = 0;
+	simplex.v[0].index2 = 0;
+	simplex.v[0].point1 = add(proxyA->pos, rotate(proxyA->rot, proxyA->shape.verts[0]));
+	simplex.v[0].point2 = add(proxyB->pos, rotate(proxyB->rot, proxyB->shape.verts[0]));
 	simplex.v[0].point = sub(simplex.v[0].point2, simplex.v[0].point1);
-	simplex.v[0].index1 = idx_a;
-	simplex.v[0].index2 = idx_b;
 	simplex.v[0].u = 1.0f;
 	simplex.divisor = 1.0f;
 	simplex.count = 1;
 
 	int save1[4], save2[4];
+	float dsq0 = FLT_MAX;
 	int iter = 0;
 
 	while (iter < GJK_MAX_ITERS) {
-		// Save indices for duplicate check
 		int save_count = simplex.count;
 		for (int i = 0; i < save_count; i++) {
 			save1[i] = simplex.v[i].index1;
 			save2[i] = simplex.v[i].index2;
 		}
 
-		// Solve for closest point on simplex to origin
 		switch (simplex.count) {
 		case 1: break;
 		case 2: gjk_solve2(&simplex); break;
@@ -318,31 +273,33 @@ static GjkResult gjk_distance(
 		case 4: gjk_solve4(&simplex); break;
 		}
 
-		// Origin inside tetrahedron = shapes overlap
 		if (simplex.count == 4) break;
 
-		d = gjk_search_dir(&simplex);
-		if (len2(d) < 1e-14f) break;
+		v3 p = gjk_closest_point(&simplex);
+		float dsq1 = len2(p);
+		if (dsq1 > dsq0) break;
+		dsq0 = dsq1;
 
-		// New support point
-		GjkVertex* vertex = &simplex.v[simplex.count];
-		v3 nd = norm(d);
-		vertex->point1 = support_a(shape_a, neg(nd), &idx_a);
-		vertex->point2 = support_b(shape_b, nd, &idx_b);
-		vertex->point = sub(vertex->point2, vertex->point1);
-		vertex->index1 = idx_a;
-		vertex->index2 = idx_b;
+		v3 d = gjk_search_dir(&simplex);
+		if (len2(d) < FLT_EPSILON * FLT_EPSILON) break;
+
+		// New support point (transform local dir to proxy local space).
+		int iA = gjk_get_support(&proxyA->shape, rotate(inv(proxyA->rot), neg(d)));
+		v3 sA = add(proxyA->pos, rotate(proxyA->rot, proxyA->shape.verts[iA]));
+		int iB = gjk_get_support(&proxyB->shape, rotate(inv(proxyB->rot), d));
+		v3 sB = add(proxyB->pos, rotate(proxyB->rot, proxyB->shape.verts[iB]));
 		iter++;
 
 		// Duplicate check
-		int duplicate = 0;
-		for (int i = 0; i < save_count; i++) {
-			if (vertex->index1 == save1[i] && vertex->index2 == save2[i]) {
-				duplicate = 1; break;
-			}
-		}
-		if (duplicate) break;
+		int dup = 0;
+		for (int i = 0; i < save_count; i++)
+			if (iA == save1[i] && iB == save2[i]) { dup = 1; break; }
+		if (dup) break;
 
+		GjkVertex* v = &simplex.v[simplex.count];
+		v->index1 = iA; v->point1 = sA;
+		v->index2 = iB; v->point2 = sB;
+		v->point = sub(sB, sA);
 		simplex.count++;
 	}
 

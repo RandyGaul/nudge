@@ -82,11 +82,24 @@ typedef struct ConvexHull
 // -----------------------------------------------------------------------------
 // Contact manifold.
 
+// Contact feature ID for warm starting.
+// Encodes which geometric features (face/edge/vertex) produced the contact,
+// enabling frame-to-frame matching by integer comparison (Box2D/BEPU style).
+//
+// Face contacts: ref_face | (inc_face << 8) | (clip_edge << 16)
+//   ref_face:  index of reference face (the clipping face)
+//   inc_face:  index of incident face
+//   clip_edge: which side plane produced this vertex (0xFF = original vertex)
+//
+// Edge contacts: edge_a | (edge_b << 16) | FEATURE_EDGE_BIT
+#define FEATURE_EDGE_BIT 0x80000000u
+
 typedef struct Contact
 {
 	v3 point;
 	v3 normal;         // from shape A toward shape B
 	float penetration; // positive = overlapping
+	uint32_t feature_id;
 } Contact;
 
 #define MAX_CONTACTS 5
@@ -157,9 +170,12 @@ typedef struct BodyParams
 	float restitution;  // bounce coefficient (default 0.0)
 } BodyParams;
 
+typedef enum BroadphaseType { BROADPHASE_N2, BROADPHASE_BVH } BroadphaseType;
+
 typedef struct WorldParams
 {
 	v3 gravity;
+	BroadphaseType broadphase;
 } WorldParams;
 
 // -----------------------------------------------------------------------------
@@ -210,5 +226,9 @@ typedef struct DistanceParams
 Joint create_ball_socket(World world, BallSocketParams params);
 Joint create_distance(World world, DistanceParams params);
 void destroy_joint(World world, Joint joint);
+
+// Debug: iterate BVH nodes. Calls fn(min, max, depth, is_leaf, user) for each node child.
+typedef void (*BVHDebugFn)(v3 min, v3 max, int depth, int is_leaf, void* user);
+void world_debug_bvh(World world, BVHDebugFn fn, void* user);
 
 #endif

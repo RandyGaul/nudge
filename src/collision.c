@@ -126,12 +126,9 @@ static inline HullPlane plane_transform(HullPlane p, v3 pos, quat rot, v3 scale)
 {
 	// For axis-aligned unit box with uniform-ish scale:
 	// normal needs inverse-transpose scale, then rotate.
-	v3 n = norm(rotate(rot, V3(
-		p.normal.x / scale.x, p.normal.y / scale.y, p.normal.z / scale.z)));
+	v3 n = norm(rotate(rot, V3(p.normal.x / scale.x, p.normal.y / scale.y, p.normal.z / scale.z)));
 	// A point on the plane in local space: normal * offset, then scale + transform
-	v3 local_pt = V3(p.normal.x * p.offset * scale.x,
-	                      p.normal.y * p.offset * scale.y,
-	                      p.normal.z * p.offset * scale.z);
+	v3 local_pt = V3(p.normal.x * p.offset * scale.x, p.normal.y * p.offset * scale.y, p.normal.z * p.offset * scale.z);
 	v3 world_pt = add(pos, rotate(rot, local_pt));
 	return (HullPlane){ .normal = n, .offset = dot(n, world_pt) };
 }
@@ -303,140 +300,99 @@ int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
 // -----------------------------------------------------------------------------
 // Capsule-box (hull) narrowphase.
 // Shallow: GJK witness points. Deep: face search (lm-style).
+// GJK distance is fuzzy near zero -- use layered thresholds.
+#define LINEAR_SLOP 0.005f
 
-// GJK support for a capsule (core segment only, radius handled externally).
-static v3 capsule_gjk_support(v3 P, v3 Q, v3 dir)
+// GJK query helpers. Hull proxies need a temp buffer for pre-scaled verts.
+#define MAX_HULL_VERTS 256
+
+static GjkResult gjk_query_point_hull(v3 pt, ConvexHull h)
 {
-	return dot(P, dir) >= dot(Q, dir) ? P : Q;
+	v3 scaled[MAX_HULL_VERTS];
+	GjkProxy pa, pb;
+	gjk_proxy_point(&pa, pt);
+	gjk_proxy_hull(&pb, h.hull, h.center, h.rotation, h.scale, scaled);
+	return gjk_distance_ex(&pa, &pb);
 }
 
-// GJK support for a scaled hull.
-static v3 hull_gjk_support(const Hull* hull, v3 pos, quat rot, v3 scale, v3 dir)
+static GjkResult gjk_query_segment_hull(v3 p, v3 q, ConvexHull h)
 {
-	v3 local_dir = rotate(inv(rot), dir);
-	v3 local_sup = hull_support(hull, local_dir);
-	v3 scaled = { local_sup.x * scale.x, local_sup.y * scale.y, local_sup.z * scale.z };
-	return add(pos, rotate(rot, scaled));
+	v3 scaled[MAX_HULL_VERTS];
+	GjkProxy pa, pb;
+	gjk_proxy_segment(&pa, p, q);
+	gjk_proxy_hull(&pb, h.hull, h.center, h.rotation, h.scale, scaled);
+	return gjk_distance_ex(&pa, &pb);
 }
 
-int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
+static GjkResult gjk_query_hull_hull(ConvexHull a, ConvexHull b)
 {
-	v3 cap_p = a.p, cap_q = a.q;
-	float cap_radius = a.radius;
-	const Hull* hull = b.hull;
-	v3 hull_pos = b.center;
-	quat hull_rot = b.rotation;
-	v3 hull_scale = b.scale;
-	float hull_radius = 0.0f;
-	// Find closest points between capsule core segment and hull
-	// using support-function iteration (simplified GJK-like approach).
-	// Project capsule onto hull faces to find separation.
-	quat inv_rot = inv(hull_rot);
+	v3 sa[MAX_HULL_VERTS], sb[MAX_HULL_VERTS];
+	GjkProxy pa, pb;
+	gjk_proxy_hull(&pa, a.hull, a.center, a.rotation, a.scale, sa);
+	gjk_proxy_hull(&pb, b.hull, b.center, b.rotation, b.scale, sb);
+	return gjk_distance_ex(&pa, &pb);
+}
 
-	// Transform capsule into hull local space
-	v3 lp = rotate(inv_rot, sub(cap_p, hull_pos));
-	v3 lq = rotate(inv_rot, sub(cap_q, hull_pos));
-	// Scale to unit hull space
-	lp = V3(lp.x / hull_scale.x, lp.y / hull_scale.y, lp.z / hull_scale.z);
-	lq = V3(lq.x / hull_scale.x, lq.y / hull_scale.y, lq.z / hull_scale.z);
 
-	float r_sum = cap_radius + hull_radius;
-
-	// Find best separating face (SAT-style, like lm's sphere-to-hull deep path)
-	float best_sep = -1e18f;
-	int best_face = -1;
-
+// Deep penetration: find most-separated face on hull from a point.
+static int hull_deepest_face(const Hull* hull, v3 local_pt)
+{
+	float best = -1e18f;
+	int face = 0;
 	for (int i = 0; i < hull->face_count; i++) {
-		v3 n = hull->planes[i].normal;
-		float d = hull->planes[i].offset;
-		// Support of capsule segment along -n (closest point to face)
-		float dp = dot(lp, n);
-		float dq = dot(lq, n);
-		float sup = dp < dq ? dp : dq; // min projection = closest to face
-		float sep = sup - d; // negative = penetrating
-		// Account for radii in scaled space (approximate)
-		if (sep > best_sep) {
-			best_sep = sep;
-			best_face = i;
-		}
+		float s = dot(local_pt, hull->planes[i].normal) - hull->planes[i].offset;
+		if (s > best) { best = s; face = i; }
 	}
-
-	if (best_sep > r_sum) return 0; // separated
-
-	// For shallow hits, use closest point on capsule to hull face
-	v3 face_n = hull->planes[best_face].normal;
-	v3 world_n = rotate(hull_rot, face_n);
-
-	// Clip capsule endpoints to reference face side planes
-	// (simplified: just use the endpoint(s) that penetrate the face)
-	float dp = dot(lp, face_n) - hull->planes[best_face].offset;
-	float dq = dot(lq, face_n) - hull->planes[best_face].offset;
-
-	int cp = 0;
-	v3 points[2];
-	float depths[2];
-
-	if (dp - r_sum < 0.0f) {
-		v3 wp = add(hull_pos, rotate(hull_rot, V3(
-			lp.x * hull_scale.x, lp.y * hull_scale.y, lp.z * hull_scale.z)));
-		points[cp] = add(wp, scale(world_n, cap_radius));
-		depths[cp] = r_sum - dp;
-		cp++;
-	}
-	if (dq - r_sum < 0.0f) {
-		v3 wq = add(hull_pos, rotate(hull_rot, V3(
-			lq.x * hull_scale.x, lq.y * hull_scale.y, lq.z * hull_scale.z)));
-		points[cp] = add(wq, scale(world_n, cap_radius));
-		depths[cp] = r_sum - dq;
-		cp++;
-	}
-
-	if (cp == 0) return 0;
-	if (!manifold) return 1;
-
-	manifold->count = cp;
-	for (int i = 0; i < cp; i++) {
-		manifold->contacts[i] = (Contact){
-			.point = points[i],
-			.normal = neg(world_n), // from A (capsule) toward B (hull)
-			.penetration = depths[i],
-		};
-	}
-	return 1;
+	return face;
 }
 
-// -----------------------------------------------------------------------------
-int collide_capsule_box(Capsule a, Box b, Manifold* manifold)
+// Transform a world point to hull local (unit) space.
+static v3 to_hull_local(v3 pt, v3 pos, quat rot, v3 sc)
 {
-	return collide_capsule_hull(a, (ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents }, manifold);
+	v3 lp = rotate(inv(rot), sub(pt, pos));
+	return V3(lp.x / sc.x, lp.y / sc.y, lp.z / sc.z);
 }
 
-// Sphere-hull.
-
+// Sphere-hull: GJK on sphere center (point) vs hull for distance,
+// then shallow path (GJK witness) or deep path (face search).
 int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold)
 {
-	const Hull* hull = b.hull;
-	quat inv_rot = inv(b.rotation);
-	v3 local_pos = rotate(inv_rot, sub(a.center, b.center));
-	v3 lp = V3(local_pos.x / b.scale.x, local_pos.y / b.scale.y, local_pos.z / b.scale.z);
+	// GJK on the sphere CENTER (point) vs hull core.
+	GjkResult r = gjk_query_point_hull(a.center, b);
 
-	float best_sep = -1e18f;
-	int best_face = -1;
+	if (r.distance > a.radius) return 0; // separated
 
-	for (int i = 0; i < hull->face_count; i++) {
-		float sep = dot(lp, hull->planes[i].normal) - hull->planes[i].offset;
-		if (sep > a.radius) return 0;
-		if (sep > best_sep) { best_sep = sep; best_face = i; }
+	if (r.distance > LINEAR_SLOP) {
+		// Shallow: center is outside hull but within radius.
+		v3 normal = scale(sub(r.point2, r.point1), 1.0f / r.distance);
+		if (!manifold) return 1;
+		manifold->count = 1;
+		manifold->contacts[0] = (Contact){
+			.point = add(a.center, scale(normal, a.radius)),
+			.normal = normal,
+			.penetration = a.radius - r.distance,
+		};
+		return 1;
 	}
 
+	// Deep: center is inside hull. Find face with least penetration in world space.
+	// Transform each hull plane to world space (accounts for non-uniform scale).
+	float best_sep = -1e18f;
+	int best_face = -1;
+	HullPlane best_plane = {0};
+	for (int i = 0; i < b.hull->face_count; i++) {
+		HullPlane wp = plane_transform(b.hull->planes[i], b.center, b.rotation, b.scale);
+		float s = dot(a.center, wp.normal) - wp.offset;
+		if (s > a.radius) return 0;
+		if (s > best_sep) { best_sep = s; best_face = i; best_plane = wp; }
+	}
 	if (!manifold) return 1;
 
-	v3 world_n = rotate(b.rotation, hull->planes[best_face].normal);
-
+	v3 world_pt = sub(a.center, scale(best_plane.normal, best_sep));
 	manifold->count = 1;
 	manifold->contacts[0] = (Contact){
-		.point = add(a.center, scale(world_n, -a.radius)),
-		.normal = neg(world_n),
+		.point = world_pt,
+		.normal = neg(best_plane.normal),
 		.penetration = a.radius - best_sep,
 	};
 	return 1;
@@ -445,6 +401,127 @@ int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold)
 int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 {
 	return collide_sphere_hull(a, (ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents }, manifold);
+}
+
+// Capsule-hull: GJK shallow path, face/edge-search deep path.
+int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
+{
+	GjkResult r = gjk_query_segment_hull(a.p, a.q, b);
+
+	if (r.distance > a.radius) return 0;
+
+	if (r.distance > LINEAR_SLOP) {
+		// Shallow: GJK witness points.
+		v3 normal = scale(sub(r.point2, r.point1), 1.0f / r.distance);
+		v3 contact_pt = add(r.point1, scale(normal, a.radius));
+		if (!manifold) return 1;
+		manifold->count = 1;
+		manifold->contacts[0] = (Contact){
+			.point = contact_pt,
+			.normal = normal,
+			.penetration = a.radius - r.distance,
+		};
+		return 1;
+	}
+
+	// Deep: SAT on hull faces + capsule edge axes. Work in world space to
+	// avoid non-uniform scale distortion (lm pattern).
+	const Hull* hull = b.hull;
+	v3 cap_dir = sub(a.q, a.p);
+	float cap_len2 = len2(cap_dir);
+
+	// --- Axis family 1: hull face normals (world space) ---
+	float face_sep = -1e18f;
+	int face_idx = -1;
+	HullPlane face_plane = {0};
+	for (int i = 0; i < hull->face_count; i++) {
+		HullPlane wp = plane_transform(hull->planes[i], b.center, b.rotation, b.scale);
+		float dp = dot(a.p, wp.normal) - wp.offset;
+		float dq = dot(a.q, wp.normal) - wp.offset;
+		float sup = dp < dq ? dp : dq;
+		if (sup > face_sep) { face_sep = sup; face_idx = i; face_plane = wp; }
+	}
+
+	// --- Axis family 2: capsule dir x hull edge dirs (world space) ---
+	float edge_sep = -1e18f;
+	int edge_idx = -1;
+	v3 edge_axis = V3(0,0,0);
+	v3 edge_pt_world = V3(0,0,0);
+	if (cap_len2 > 1e-12f) {
+		v3 cd = scale(cap_dir, 1.0f / sqrtf(cap_len2));
+		for (int i = 0; i < hull->edge_count; i += 2) {
+			v3 ev0 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edges[i].origin], b.scale)));
+			v3 ev1 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edges[hull->edges[i].next].origin], b.scale)));
+			v3 ed = sub(ev1, ev0);
+			v3 ax = cross(cd, ed);
+			float al = len2(ax);
+			if (al < 1e-12f) continue;
+			ax = scale(ax, 1.0f / sqrtf(al));
+			if (dot(ax, sub(a.p, ev0)) < 0.0f) ax = neg(ax);
+			float cs = dot(a.p, ax) < dot(a.q, ax) ? dot(a.p, ax) : dot(a.q, ax);
+			float hs = -1e18f;
+			for (int j = 0; j < hull->vert_count; j++) {
+				v3 wv = add(b.center, rotate(b.rotation, hmul(hull->verts[j], b.scale)));
+				float d = dot(wv, ax);
+				if (d > hs) hs = d;
+			}
+			float sep = cs - hs;
+			if (sep > edge_sep) { edge_sep = sep; edge_idx = i; edge_axis = ax; edge_pt_world = ev0; }
+		}
+	}
+
+	// Pick axis of minimum penetration.
+	float best_sep;
+	v3 best_n;
+	int use_face;
+	if (edge_idx >= 0 && edge_sep > face_sep + 0.001f) {
+		best_sep = edge_sep;
+		best_n = edge_axis;
+		use_face = 0;
+	} else {
+		best_sep = face_sep;
+		best_n = face_plane.normal;
+		use_face = 1;
+	}
+
+	if (best_sep > a.radius) return 0;
+	if (!manifold) return 1;
+
+	// Generate contacts: project capsule endpoints onto the reference plane,
+	// keep those that penetrate.
+	float plane_d = use_face ? face_plane.offset : dot(best_n, edge_pt_world);
+	float dp = dot(a.p, best_n) - plane_d;
+	float dq = dot(a.q, best_n) - plane_d;
+
+	int cp = 0;
+	v3 points[2];
+	float depths[2];
+	if (dp < a.radius) {
+		points[cp] = sub(a.p, scale(best_n, a.radius));
+		depths[cp] = a.radius - dp;
+		cp++;
+	}
+	if (dq < a.radius) {
+		points[cp] = sub(a.q, scale(best_n, a.radius));
+		depths[cp] = a.radius - dq;
+		cp++;
+	}
+
+	if (cp == 0) return 0;
+	manifold->count = cp;
+	for (int i = 0; i < cp; i++) {
+		manifold->contacts[i] = (Contact){
+			.point = points[i],
+			.normal = neg(best_n),
+			.penetration = depths[i],
+		};
+	}
+	return 1;
+}
+
+int collide_capsule_box(Capsule a, Box b, Manifold* manifold)
+{
+	return collide_capsule_hull(a, (ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents }, manifold);
 }
 
 // -----------------------------------------------------------------------------
@@ -614,30 +691,42 @@ static int find_incident_face(
 
 // Sutherland-Hodgman: clip polygon against a single plane.
 // Keeps points on the negative side: dot(plane_n, p) - plane_d <= 0.
+// Tracks feature IDs: clip_edge is the side plane index that clips new verts.
 static int clip_to_plane(
-	v3* in, int in_count, v3 plane_n, float plane_d, v3* out)
+	v3* in, uint8_t* in_fid, int in_count,
+	v3 plane_n, float plane_d, uint8_t clip_edge,
+	v3* out, uint8_t* out_fid)
 {
 	if (in_count == 0) return 0;
 	int out_count = 0;
 	v3 prev = in[in_count - 1];
+	uint8_t fid_prev = in_fid[in_count - 1];
 	float d_prev = dot(plane_n, prev) - plane_d;
 
 	for (int i = 0; i < in_count; i++) {
 		v3 cur = in[i];
+		uint8_t fid_cur = in_fid[i];
 		float d_cur = dot(plane_n, cur) - plane_d;
 
 		if (d_prev <= 0.0f) {
-			out[out_count++] = prev;
+			out[out_count] = prev;
+			out_fid[out_count] = fid_prev;
+			out_count++;
 			if (d_cur > 0.0f) {
 				float t = d_prev / (d_prev - d_cur);
-				out[out_count++] = add(prev, scale(sub(cur, prev), t));
+				out[out_count] = add(prev, scale(sub(cur, prev), t));
+				out_fid[out_count] = clip_edge; // new vertex from this clip plane
+				out_count++;
 			}
 		} else if (d_cur <= 0.0f) {
 			float t = d_prev / (d_prev - d_cur);
-			out[out_count++] = add(prev, scale(sub(cur, prev), t));
+			out[out_count] = add(prev, scale(sub(cur, prev), t));
+			out_fid[out_count] = clip_edge;
+			out_count++;
 		}
 
 		prev = cur;
+		fid_prev = fid_cur;
 		d_prev = d_cur;
 	}
 	return out_count;
@@ -773,6 +862,7 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 			.point = scale(add(ca, cb), 0.5f),
 			.normal = normal,
 			.penetration = -edge_q.separation,
+			.feature_id = FEATURE_EDGE_BIT | (uint32_t)edge_q.index1 | ((uint32_t)edge_q.index2 << 16),
 		};
 		return 1;
 	}
@@ -795,17 +885,21 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 
 	HullPlane ref_plane = plane_transform(ref_hull->planes[ref_face], ref_pos, ref_rot, ref_sc);
 
-	// Collect incident face vertices
+	// Collect incident face vertices with initial feature IDs.
 	int inc_face = find_incident_face(inc_hull, inc_pos, inc_rot, inc_sc, ref_plane.normal);
 	v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
+	uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
 	int clip_count = hull_face_verts_world(inc_hull, inc_face, inc_pos, inc_rot, inc_sc, buf1);
+	// Initial feature: each incident vertex gets 0xFF (original, not clipped).
+	for (int i = 0; i < clip_count; i++) fid1[i] = 0xFF;
 
-	// Clip against each side plane of the reference face
-	v3* in_buf = buf1;
-	v3* out_buf = buf2;
+	// Clip against each side plane of the reference face.
+	v3* in_buf = buf1;   v3* out_buf = buf2;
+	uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
 	int start_e = ref_hull->faces[ref_face].edge;
 	int ei = start_e;
 	int guard = 0;
+	uint8_t clip_edge_idx = 0;
 	do {
 		const HalfEdge* edge = &ref_hull->edges[ei];
 		v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, edge->origin, ref_sc)));
@@ -814,24 +908,35 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 		v3 side_n = norm(cross(sub(head, tail), ref_plane.normal));
 		float side_d = dot(side_n, tail);
 
-		clip_count = clip_to_plane(in_buf, clip_count, side_n, side_d, out_buf);
+		clip_count = clip_to_plane(in_buf, in_fid, clip_count,
+			side_n, side_d, clip_edge_idx, out_buf, out_fid);
 		v3* swap = in_buf; in_buf = out_buf; out_buf = swap;
+		uint8_t* fswap = in_fid; in_fid = out_fid; out_fid = fswap;
 
+		clip_edge_idx++;
 		ei = edge->next;
 		assert(++guard < MAX_CLIP_VERTS && "collide_hull_hull: face edge loop didn't close");
 	} while (ei != start_e);
 
-	// Keep points below reference face, generate contacts
+	// Keep points below reference face, generate contacts with feature IDs.
+	// Feature ID encodes: ref_face | (inc_face << 8) | (clip_edge << 16).
+	// flip bit: if ref was hull_b, swap the face roles so the ID is canonical.
 	v3 contact_n = flip ? neg(ref_plane.normal) : ref_plane.normal;
 	Contact tmp_contacts[MAX_CLIP_VERTS];
 	int cp = 0;
 	for (int i = 0; i < clip_count; i++) {
 		float depth = ref_plane.offset - dot(ref_plane.normal, in_buf[i]);
 		if (depth >= 0.0f) {
+			uint32_t fid;
+			if (!flip)
+				fid = (uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16);
+			else
+				fid = (uint32_t)inc_face | ((uint32_t)ref_face << 8) | ((uint32_t)in_fid[i] << 16);
 			tmp_contacts[cp++] = (Contact){
 				.point = in_buf[i],
 				.normal = contact_n,
 				.penetration = depth,
+				.feature_id = fid,
 			};
 		}
 	}
@@ -895,62 +1000,100 @@ static ConvexHull make_convex_hull(BodyHot* h, ShapeInternal* s)
 	return (ConvexHull){ s->hull.hull, h->position, h->rotation, s->hull.scale };
 }
 
-static void broadphase_and_collide(WorldInternal* w, InternalManifold** manifolds)
+// Narrowphase dispatch for a single body pair.
+static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** manifolds)
+{
+	ShapeInternal* sa = &w->body_cold[i].shapes[0];
+	ShapeInternal* sb = &w->body_cold[j].shapes[0];
+	BodyHot* ha = &w->body_hot[i];
+	BodyHot* hb = &w->body_hot[j];
+
+	InternalManifold im = { .body_a = i, .body_b = j };
+
+	// Ensure s0->type <= s1->type for upper-triangle dispatch.
+	ShapeInternal* s0 = sa; ShapeInternal* s1 = sb;
+	BodyHot* h0 = ha; BodyHot* h1 = hb;
+	if (s0->type > s1->type) {
+		ShapeInternal* tmp_s = s0; s0 = s1; s1 = tmp_s;
+		BodyHot* tmp_h = h0; h0 = h1; h1 = tmp_h;
+		im.body_a = j; im.body_b = i;
+	}
+
+	int hit = 0;
+
+	if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE)
+		hit = collide_sphere_sphere(make_sphere(h0, s0), make_sphere(h1, s1), &im.m);
+	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CAPSULE)
+		hit = collide_sphere_capsule(make_sphere(h0, s0), make_capsule(h1, s1), &im.m);
+	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_BOX)
+		hit = collide_sphere_box(make_sphere(h0, s0), make_box(h1, s1), &im.m);
+	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CAPSULE)
+		hit = collide_capsule_capsule(make_capsule(h0, s0), make_capsule(h1, s1), &im.m);
+	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX)
+		hit = collide_capsule_box(make_capsule(h0, s0), make_box(h1, s1), &im.m);
+	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX)
+		hit = collide_box_box(make_box(h0, s0), make_box(h1, s1), &im.m);
+	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL)
+		hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m);
+	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL)
+		hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
+	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL)
+		hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
+	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL)
+		hit = collide_hull_hull(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m);
+
+	if (hit) apush(*manifolds, im);
+}
+
+static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
 {
 	int count = asize(w->body_hot);
-
 	for (int i = 0; i < count; i++) {
 		if (!split_alive(w->body_gen, i)) continue;
 		if (asize(w->body_cold[i].shapes) == 0) continue;
-
 		for (int j = i + 1; j < count; j++) {
 			if (!split_alive(w->body_gen, j)) continue;
 			if (asize(w->body_cold[j].shapes) == 0) continue;
-
 			if (w->body_hot[i].inv_mass == 0.0f && w->body_hot[j].inv_mass == 0.0f) continue;
-
-			ShapeInternal* sa = &w->body_cold[i].shapes[0];
-			ShapeInternal* sb = &w->body_cold[j].shapes[0];
-			BodyHot* ha = &w->body_hot[i];
-			BodyHot* hb = &w->body_hot[j];
-
-			InternalManifold im = { .body_a = i, .body_b = j };
-
-			// Ensure s0->type <= s1->type for upper-triangle dispatch.
-			ShapeInternal* s0 = sa; ShapeInternal* s1 = sb;
-			BodyHot* h0 = ha; BodyHot* h1 = hb;
-			if (s0->type > s1->type) {
-				ShapeInternal* tmp_s = s0; s0 = s1; s1 = tmp_s;
-				BodyHot* tmp_h = h0; h0 = h1; h1 = tmp_h;
-				im.body_a = j; im.body_b = i;
-			}
-
-			int hit = 0;
-
-			if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE)
-				hit = collide_sphere_sphere(make_sphere(h0, s0), make_sphere(h1, s1), &im.m);
-			else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CAPSULE)
-				hit = collide_sphere_capsule(make_sphere(h0, s0), make_capsule(h1, s1), &im.m);
-			else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_BOX)
-				hit = collide_sphere_box(make_sphere(h0, s0), make_box(h1, s1), &im.m);
-			else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CAPSULE)
-				hit = collide_capsule_capsule(make_capsule(h0, s0), make_capsule(h1, s1), &im.m);
-			else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX)
-				hit = collide_capsule_box(make_capsule(h0, s0), make_box(h1, s1), &im.m);
-			else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX)
-				hit = collide_box_box(make_box(h0, s0), make_box(h1, s1), &im.m);
-			else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL)
-				hit = collide_hull_hull(
-					(ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents },
-					make_convex_hull(h1, s1), &im.m);
-			else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL)
-				hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
-			else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL)
-				hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
-			else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL)
-				hit = collide_hull_hull(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m);
-
-			if (hit) apush(*manifolds, im);
+			narrowphase_pair(w, i, j, manifolds);
 		}
 	}
+}
+
+// Build AABB lookup table indexed by leaf index from current node contents.
+static AABB* bvh_build_lut(BVHTree* t)
+{
+	int lcount = asize(t->leaves);
+	if (lcount == 0) return NULL;
+	AABB* lut = CK_ALLOC(sizeof(AABB) * lcount);
+	for (int i = 0; i < lcount; i++) {
+		BVHLeaf* lf = &t->leaves[i];
+		BVHChild* c = bvh_child(&t->nodes[lf->node_idx], lf->child_slot);
+		lut[i] = bvh_child_aabb(c);
+	}
+	return lut;
+}
+
+static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
+{
+	bvh_refit(w->bvh_dynamic, w);
+
+	// Incremental refinement: rebuild a subtree using binned SAH.
+	AABB* lut = bvh_build_lut(w->bvh_dynamic);
+	if (lut) { bvh_incremental_refine(w->bvh_dynamic, lut, 0.05f); CK_FREE(lut); }
+
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_self_test(w->bvh_dynamic, &pairs);
+	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
+
+	for (int i = 0; i < asize(pairs); i++)
+		narrowphase_pair(w, pairs[i].a, pairs[i].b, manifolds);
+
+	afree(pairs);
+}
+
+static void broadphase_and_collide(WorldInternal* w, InternalManifold** manifolds)
+{
+	if (w->broadphase_type == BROADPHASE_BVH) broadphase_bvh(w, manifolds);
+	else broadphase_n2(w, manifolds);
 }

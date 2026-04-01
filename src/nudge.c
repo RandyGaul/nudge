@@ -28,6 +28,7 @@ typedef struct BodyCold
 {
 	float mass;
 	CK_DYNA ShapeInternal* shapes;
+	int bvh_leaf; // -1 if not in BVH
 } BodyCold;
 
 // Hot: solver working set, iterated every step, packed for cache.
@@ -63,6 +64,8 @@ typedef struct JointInternal
 	};
 } JointInternal;
 
+typedef struct BVHTree BVHTree; // forward decl, defined in bvh.c
+
 typedef struct WorldInternal
 {
 	v3 gravity;
@@ -76,10 +79,16 @@ typedef struct WorldInternal
 	CK_DYNA JointInternal* joints;
 	CK_DYNA uint32_t*      joint_gen;
 	CK_DYNA int*           joint_free;
+	// Broadphase
+	BroadphaseType broadphase_type;
+	BVHTree* bvh_static;
+	BVHTree* bvh_dynamic;
 } WorldInternal;
 
 #include "gjk.c"
+#include "gjk_gino.c"
 #include "quickhull.c"
+#include "bvh.c"
 #include "collision.c"
 
 // -----------------------------------------------------------------------------
@@ -272,6 +281,7 @@ typedef struct SolverContact
 	float lambda_t1;     // accumulated tangent1 impulse
 	float lambda_t2;     // accumulated tangent2 impulse
 	float penetration;   // cached for position correction pass
+	uint32_t feature_id; // geometric feature key for warm starting
 } SolverContact;
 
 typedef struct SolverManifold
@@ -285,7 +295,7 @@ typedef struct SolverManifold
 // Warm starting: cached impulses from previous frame, keyed by body pair.
 typedef struct WarmContact
 {
-	v3 point;            // world-space position for matching
+	uint32_t feature_id; // geometric feature key for matching
 	float lambda_n;
 	float lambda_t1;
 	float lambda_t2;
@@ -313,9 +323,7 @@ static void contact_tangent_basis(v3 n, v3* t1, v3* t2)
 	*t2 = cross(n, *t1);
 }
 
-static float compute_effective_mass(
-	BodyHot* a, BodyHot* b, float inv_mass_sum,
-	v3 r_a, v3 r_b, v3 dir)
+static float compute_effective_mass(BodyHot* a, BodyHot* b, float inv_mass_sum, v3 r_a, v3 r_b, v3 dir)
 {
 	v3 ra_x_d = cross(r_a, dir);
 	v3 rb_x_d = cross(r_b, dir);
@@ -330,29 +338,19 @@ static void apply_impulse(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, v3 impulse)
 {
 	a->velocity = sub(a->velocity, scale(impulse, a->inv_mass));
 	b->velocity = add(b->velocity, scale(impulse, b->inv_mass));
-	a->angular_velocity = sub(a->angular_velocity,
-		inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(r_a, impulse)));
-	b->angular_velocity = add(b->angular_velocity,
-		inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(r_b, impulse)));
+	a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(r_a, impulse)));
+	b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(r_b, impulse)));
 }
 
-// Match a new contact to the nearest cached contact. Returns index or -1.
-static int warm_match(WarmManifold* wm, v3 point, float threshold2)
+// Match a new contact to a cached contact by feature ID. Returns index or -1.
+static int warm_match(WarmManifold* wm, uint32_t feature_id)
 {
-	int best = -1;
-	float best_d2 = threshold2;
-	for (int i = 0; i < wm->count; i++) {
-		float d2 = len2(sub(point, wm->contacts[i].point));
-		if (d2 < best_d2) { best_d2 = d2; best = i; }
-	}
-	return best;
+	for (int i = 0; i < wm->count; i++)
+		if (wm->contacts[i].feature_id == feature_id) return i;
+	return -1;
 }
 
-static void solver_pre_solve(
-	WorldInternal* w,
-	InternalManifold* manifolds, int manifold_count,
-	SolverManifold** out_sm, SolverContact** out_sc,
-	float dt)
+static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, float dt)
 {
 	CK_DYNA SolverManifold* sm = NULL;
 	CK_DYNA SolverContact*  sc = NULL;
@@ -388,6 +386,7 @@ static void solver_pre_solve(
 			s.r_b = sub(ct->point, b->position);
 			s.normal = ct->normal;
 			s.penetration = ct->penetration;
+			s.feature_id = ct->feature_id;
 			contact_tangent_basis(ct->normal, &s.tangent1, &s.tangent2);
 
 			s.eff_mass_n  = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.normal);
@@ -401,17 +400,47 @@ static void solver_pre_solve(
 			float vn_rel = dot(sub(vel_b, vel_a), ct->normal);
 			s.bounce = (-vn_rel > SOLVER_RESTITUTION_THRESH) ? rest * vn_rel : 0.0f;
 
-			// Warm start: match to cached contact by proximity
-			if (wm) {
-				int match = warm_match(wm, ct->point, 0.05f * 0.05f);
+			apush(sc, s);
+		}
+
+		// Warm start: match new contacts to cached by feature ID.
+		// Unmatched old impulse is redistributed evenly (BEPU style).
+		if (wm) {
+			int old_matched[MAX_CONTACTS] = {0};
+			int new_unmatched = 0;
+			for (int c = 0; c < smf.contact_count; c++) {
+				SolverContact* s = &sc[smf.contact_start + c];
+				if (s->feature_id == 0) { new_unmatched++; continue; }
+				int match = warm_match(wm, s->feature_id);
 				if (match >= 0) {
-					s.lambda_n  = wm->contacts[match].lambda_n;
-					s.lambda_t1 = wm->contacts[match].lambda_t1;
-					s.lambda_t2 = wm->contacts[match].lambda_t2;
+					s->lambda_n  = wm->contacts[match].lambda_n;
+					s->lambda_t1 = wm->contacts[match].lambda_t1;
+					s->lambda_t2 = wm->contacts[match].lambda_t2;
+					old_matched[match] = 1;
+				} else {
+					new_unmatched++;
 				}
 			}
-
-			apush(sc, s);
+			// Redistribute unmatched old impulse to unmatched new contacts.
+			if (new_unmatched > 0) {
+				float leftover_n = 0, leftover_t1 = 0, leftover_t2 = 0;
+				for (int j = 0; j < wm->count; j++) {
+					if (!old_matched[j]) {
+						leftover_n  += wm->contacts[j].lambda_n;
+						leftover_t1 += wm->contacts[j].lambda_t1;
+						leftover_t2 += wm->contacts[j].lambda_t2;
+					}
+				}
+				float share = 1.0f / (float)new_unmatched;
+				for (int c = 0; c < smf.contact_count; c++) {
+					SolverContact* s = &sc[smf.contact_start + c];
+					if (s->lambda_n == 0.0f && s->lambda_t1 == 0.0f && s->lambda_t2 == 0.0f) {
+						s->lambda_n  = leftover_n * share;
+						s->lambda_t1 = leftover_t1 * share;
+						s->lambda_t2 = leftover_t2 * share;
+					}
+				}
+			}
 		}
 
 		apush(sm, smf);
@@ -438,10 +467,7 @@ static void solver_pre_solve(
 	*out_sc = sc;
 }
 
-static void solver_iterate(
-	WorldInternal* w,
-	SolverManifold* sm, int sm_count,
-	SolverContact* sc)
+static void solver_iterate(WorldInternal* w, SolverManifold* sm, int sm_count, SolverContact* sc)
 {
 	for (int i = 0; i < sm_count; i++) {
 		SolverManifold* m = &sm[i];
@@ -490,10 +516,7 @@ static void solver_iterate(
 
 // NGS position correction: directly fix remaining penetration after velocity solve
 // and position integration. Operates on positions only, no velocity modification.
-static void solver_position_correct(
-	WorldInternal* w,
-	SolverManifold* sm, int sm_count,
-	SolverContact* sc)
+static void solver_position_correct(WorldInternal* w, SolverManifold* sm, int sm_count, SolverContact* sc)
 {
 	for (int iter = 0; iter < SOLVER_POSITION_ITERS; iter++) {
 		for (int i = 0; i < sm_count; i++) {
@@ -506,10 +529,8 @@ static void solver_position_correct(
 				SolverContact* s = &sc[m->contact_start + ci];
 
 				// Recompute separation from current positions
-				v3 r_a = sub(add(a->position, rotate(a->rotation,
-					rotate(inv(a->rotation), s->r_a))), a->position);
-				v3 r_b = sub(add(b->position, rotate(b->rotation,
-					rotate(inv(b->rotation), s->r_b))), b->position);
+				v3 r_a = sub(add(a->position, rotate(a->rotation, rotate(inv(a->rotation), s->r_a))), a->position);
+				v3 r_b = sub(add(b->position, rotate(b->rotation, rotate(inv(b->rotation), s->r_b))), b->position);
 				v3 p_a = add(a->position, r_a);
 				v3 p_b = add(b->position, r_b);
 				float separation = dot(sub(p_b, p_a), s->normal) - s->penetration;
@@ -534,11 +555,7 @@ static void solver_position_correct(
 }
 
 // Store accumulated impulses into warm cache for next frame.
-static void solver_post_solve(
-	WorldInternal* w,
-	SolverManifold* sm, int sm_count,
-	SolverContact* sc,
-	InternalManifold* manifolds, int manifold_count)
+static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count, SolverContact* sc, InternalManifold* manifolds, int manifold_count)
 {
 	map_clear(w->warm_cache);
 
@@ -550,11 +567,8 @@ static void solver_post_solve(
 		wm.count = m->contact_count;
 		for (int ci = 0; ci < m->contact_count; ci++) {
 			SolverContact* s = &sc[m->contact_start + ci];
-			v3 world_pt = scale(add(
-				add(w->body_hot[m->body_a].position, s->r_a),
-				add(w->body_hot[m->body_b].position, s->r_b)), 0.5f);
 			wm.contacts[ci] = (WarmContact){
-				.point = world_pt,
+				.feature_id = s->feature_id,
 				.lambda_n = s->lambda_n,
 				.lambda_t1 = s->lambda_t1,
 				.lambda_t2 = s->lambda_t2,
@@ -629,8 +643,7 @@ static v3 sym3x3_mul_v3(const float* m, v3 v)
 }
 
 // Convert spring params to solver coefficients (bepu approach).
-static void spring_compute(SpringParams sp, float dt,
-	float* pos_to_vel, float* softness)
+static void spring_compute(SpringParams sp, float dt, float* pos_to_vel, float* softness)
 {
 	if (sp.frequency <= 0.0f) {
 		// Rigid constraint: Baumgarte stabilization with fractional correction.
@@ -650,8 +663,7 @@ static void spring_compute(SpringParams sp, float dt,
 
 // Build ball socket effective mass (symmetric 3x3).
 // K = (inv_mass_a + inv_mass_b)*I + skew(r_a)^T * I_a^-1 * skew(r_a) + same for B.
-static void ball_socket_eff_mass(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b,
-	float softness, float* out)
+static void ball_socket_eff_mass(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, float softness, float* out)
 {
 	float inv_m = a->inv_mass + b->inv_mass;
 	// Skew-sandwich: skew(r)^T * I^-1 * skew(r) for diagonal inertia.
@@ -698,8 +710,7 @@ static void ball_socket_eff_mass(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b,
 }
 
 // Pre-solve joints: build solver arrays from persistent JointInternal data.
-static void joints_pre_solve(WorldInternal* w, float dt,
-	SolverBallSocket** out_bs, SolverDistance** out_dist)
+static void joints_pre_solve(WorldInternal* w, float dt, SolverBallSocket** out_bs, SolverDistance** out_dist)
 {
 	CK_DYNA SolverBallSocket* bs = NULL;
 	CK_DYNA SolverDistance* dist = NULL;
@@ -752,11 +763,7 @@ static void joints_pre_solve(WorldInternal* w, float dt,
 			s.softness = soft;
 
 			float inv_mass_sum = a->inv_mass + b->inv_mass;
-			float k = inv_mass_sum
-				+ dot(cross(inv_inertia_mul(a->rotation, a->inv_inertia_local,
-					cross(s.r_a, s.axis)), s.r_a), s.axis)
-				+ dot(cross(inv_inertia_mul(b->rotation, b->inv_inertia_local,
-					cross(s.r_b, s.axis)), s.r_b), s.axis);
+			float k = inv_mass_sum + dot(cross(inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(s.r_a, s.axis)), s.r_a), s.axis) + dot(cross(inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(s.r_b, s.axis)), s.r_b), s.axis);
 			k += soft;
 			s.eff_mass = k > 1e-12f ? 1.0f / k : 0.0f;
 
@@ -774,9 +781,7 @@ static void joints_pre_solve(WorldInternal* w, float dt,
 }
 
 // Apply warm start impulses for joints.
-static void joints_warm_start(WorldInternal* w,
-	SolverBallSocket* bs, int bs_count,
-	SolverDistance* dist, int dist_count)
+static void joints_warm_start(WorldInternal* w, SolverBallSocket* bs, int bs_count, SolverDistance* dist, int dist_count)
 {
 	for (int i = 0; i < bs_count; i++) {
 		SolverBallSocket* s = &bs[i];
@@ -819,9 +824,7 @@ static void solve_distance(WorldInternal* w, SolverDistance* s)
 }
 
 // Store joint accumulated impulses back to persistent storage.
-static void joints_post_solve(WorldInternal* w,
-	SolverBallSocket* bs, int bs_count,
-	SolverDistance* dist, int dist_count)
+static void joints_post_solve(WorldInternal* w, SolverBallSocket* bs, int bs_count, SolverDistance* dist, int dist_count)
 {
 	for (int i = 0; i < bs_count; i++)
 		w->joints[bs[i].joint_idx].warm_lambda3 = bs[i].lambda;
@@ -835,8 +838,7 @@ static void joints_post_solve(WorldInternal* w,
 // Graph coloring: assign colors to constraints so no two in same color share a body.
 // Uses uint64_t bitmask per body (max 64 colors).
 
-static void color_constraints(ConstraintRef* refs, int count, int body_count,
-	int* out_batch_starts, int* out_color_count)
+static void color_constraints(ConstraintRef* refs, int count, int body_count, int* out_batch_starts, int* out_color_count)
 {
 	uint64_t* body_colors = (uint64_t*)CK_ALLOC(body_count * sizeof(uint64_t));
 	memset(body_colors, 0, body_count * sizeof(uint64_t));
@@ -888,9 +890,7 @@ static void color_constraints(ConstraintRef* refs, int count, int body_count,
 }
 
 // Dispatch a single constraint solve by type.
-static void solve_constraint(WorldInternal* w, ConstraintRef* ref,
-	SolverManifold* sm, SolverContact* sc,
-	SolverBallSocket* bs, SolverDistance* dist)
+static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifold* sm, SolverContact* sc, SolverBallSocket* bs, SolverDistance* dist)
 {
 	switch (ref->type) {
 	case CTYPE_CONTACT: {
@@ -939,6 +939,11 @@ World create_world(WorldParams params)
 	WorldInternal* w = CK_ALLOC(sizeof(WorldInternal));
 	memset(w, 0, sizeof(*w));
 	w->gravity = params.gravity;
+	w->broadphase_type = params.broadphase;
+	w->bvh_static = CK_ALLOC(sizeof(BVHTree));
+	w->bvh_dynamic = CK_ALLOC(sizeof(BVHTree));
+	bvh_init(w->bvh_static);
+	bvh_init(w->bvh_dynamic);
 	return (World){ (uint64_t)w };
 }
 
@@ -950,6 +955,8 @@ void destroy_world(World world)
 	}
 	afree(w->debug_contacts);
 	map_free(w->warm_cache);
+	bvh_free(w->bvh_static); CK_FREE(w->bvh_static);
+	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
 	split_free(w->body_cold, w->body_hot, w->body_gen, w->body_free);
 	afree(w->joints); afree(w->joint_gen); afree(w->joint_free);
 	CK_FREE(w);
@@ -1086,6 +1093,7 @@ Body create_body(World world, BodyParams params)
 	w->body_cold[idx] = (BodyCold){
 		.mass = params.mass,
 		.shapes = NULL,
+		.bvh_leaf = -1,
 	};
 	float fric = params.friction;
 	if (fric == 0.0f) fric = 0.5f; // default for all bodies
@@ -1105,6 +1113,10 @@ void destroy_body(World world, Body body)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
+	if (w->body_cold[idx].bvh_leaf >= 0) {
+		BVHTree* tree = w->body_hot[idx].inv_mass == 0.0f ? w->bvh_static : w->bvh_dynamic;
+		bvh_remove(tree, w->body_cold[idx].bvh_leaf);
+	}
 	afree(w->body_cold[idx].shapes);
 	split_del(w->body_cold, w->body_hot, w->body_gen, w->body_free, idx);
 }
@@ -1130,6 +1142,13 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	}
 	apush(w->body_cold[idx].shapes, s);
 	recompute_body_inertia(w, idx);
+
+	// Insert into BVH on first shape add.
+	if (w->broadphase_type == BROADPHASE_BVH && asize(w->body_cold[idx].shapes) == 1) {
+		AABB box = aabb_expand(body_aabb(&w->body_hot[idx], &w->body_cold[idx]), BVH_AABB_MARGIN);
+		BVHTree* tree = w->body_hot[idx].inv_mass == 0.0f ? w->bvh_static : w->bvh_dynamic;
+		w->body_cold[idx].bvh_leaf = bvh_insert(tree, idx, box);
+	}
 }
 
 v3 body_get_position(World world, Body body)
@@ -1240,6 +1259,24 @@ void destroy_joint(World world, Joint joint)
 	memset(&w->joints[idx], 0, sizeof(JointInternal));
 	w->joint_gen[idx]++; // even = dead
 	apush(w->joint_free, idx);
+}
+
+static void bvh_debug_walk(BVHTree* t, int ni, int depth, BVHDebugFn fn, void* user)
+{
+	BVHNode* n = &t->nodes[ni];
+	for (int s = 0; s < 2; s++) {
+		BVHChild* c = bvh_child(n, s);
+		if (bvh_child_is_empty(c)) continue;
+		fn(c->min, c->max, depth, bvh_child_is_leaf(c), user);
+		if (bvh_child_is_internal(c)) bvh_debug_walk(t, c->index, depth + 1, fn, user);
+	}
+}
+
+void world_debug_bvh(World world, BVHDebugFn fn, void* user)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	if (w->bvh_dynamic->root >= 0) bvh_debug_walk(w->bvh_dynamic, w->bvh_dynamic->root, 0, fn, user);
+	if (w->bvh_static->root >= 0) bvh_debug_walk(w->bvh_static, w->bvh_static->root, 0, fn, user);
 }
 
 int world_get_contacts(World world, const Contact** out)
