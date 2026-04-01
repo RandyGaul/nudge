@@ -301,7 +301,7 @@ int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
 // Capsule-box (hull) narrowphase.
 // Shallow: GJK witness points. Deep: face search (lm-style).
 // GJK distance is fuzzy near zero -- use layered thresholds.
-#define LINEAR_SLOP 0.005f
+// LINEAR_SLOP defined in nudge.c (solver constants)
 
 // GJK query helpers. Hull proxies need a temp buffer for pre-scaled verts.
 #define MAX_HULL_VERTS 256
@@ -858,14 +858,17 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 	quat ref_rot, inc_rot;
 	int ref_face, flip;
 
-	if (face_a.separation > face_b.separation + k_tol) {
-		ref_hull = hull_a; ref_pos = pos_a; ref_rot = rot_a; ref_sc = scale_a;
-		inc_hull = hull_b; inc_pos = pos_b; inc_rot = rot_b; inc_sc = scale_b;
-		ref_face = face_a.index; flip = 0;
-	} else {
+	// Bias toward shape A as reference face: B must be significantly better to win.
+	// This keeps feature IDs stable across frames for nearly-parallel face pairs.
+	float face_bias = 0.98f * face_a.separation + 0.001f;
+	if (face_b.separation > face_bias) {
 		ref_hull = hull_b; ref_pos = pos_b; ref_rot = rot_b; ref_sc = scale_b;
 		inc_hull = hull_a; inc_pos = pos_a; inc_rot = rot_a; inc_sc = scale_a;
 		ref_face = face_b.index; flip = 1;
+	} else {
+		ref_hull = hull_a; ref_pos = pos_a; ref_rot = rot_a; ref_sc = scale_a;
+		inc_hull = hull_b; inc_pos = pos_b; inc_rot = rot_b; inc_sc = scale_b;
+		ref_face = face_a.index; flip = 0;
 	}
 
 	HullPlane ref_plane = plane_transform(ref_hull->planes[ref_face], ref_pos, ref_rot, ref_sc);
@@ -929,16 +932,15 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 	}
 
 	// Keep points within margin of reference face, generate contacts with feature IDs.
-	// Margin keeps contacts alive slightly before/after touching, preventing blink.
+	// LINEAR_SLOP margin keeps contacts alive near zero-penetration, preventing blink.
 	// Feature ID encodes: ref_face | (inc_face << 8) | (clip_edge << 16).
 	// flip bit: if ref was hull_b, swap the face roles so the ID is canonical.
-	float contact_margin = 0.01f;
 	v3 contact_n = flip ? neg(ref_plane.normal) : ref_plane.normal;
 	Contact tmp_contacts[MAX_CLIP_VERTS];
 	int cp = 0;
 	for (int i = 0; i < clip_count; i++) {
 		float depth = ref_plane.offset - dot(ref_plane.normal, in_buf[i]);
-		if (depth >= -contact_margin) {
+		if (depth >= -LINEAR_SLOP) {
 			uint32_t fid;
 			if (!flip)
 				fid = (uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16);
@@ -1015,21 +1017,17 @@ static ConvexHull make_convex_hull(BodyHot* h, ShapeInternal* s)
 // Narrowphase dispatch for a single body pair.
 static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** manifolds)
 {
-	ShapeInternal* sa = &w->body_cold[i].shapes[0];
-	ShapeInternal* sb = &w->body_cold[j].shapes[0];
-	BodyHot* ha = &w->body_hot[i];
-	BodyHot* hb = &w->body_hot[j];
-
-	InternalManifold im = { .body_a = i, .body_b = j };
-
-	// Ensure s0->type <= s1->type for upper-triangle dispatch.
-	ShapeInternal* s0 = sa; ShapeInternal* s1 = sb;
-	BodyHot* h0 = ha; BodyHot* h1 = hb;
-	if (s0->type > s1->type) {
-		ShapeInternal* tmp_s = s0; s0 = s1; s1 = tmp_s;
-		BodyHot* tmp_h = h0; h0 = h1; h1 = tmp_h;
-		im.body_a = j; im.body_b = i;
+	// Canonical ordering: lower type first for upper-triangle dispatch,
+	// lower body index first for same-type pairs (deterministic shape A).
+	if (w->body_cold[i].shapes[0].type > w->body_cold[j].shapes[0].type || (w->body_cold[i].shapes[0].type == w->body_cold[j].shapes[0].type && i > j)) {
+		int tmp = i; i = j; j = tmp;
 	}
+
+	ShapeInternal* s0 = &w->body_cold[i].shapes[0];
+	ShapeInternal* s1 = &w->body_cold[j].shapes[0];
+	BodyHot* h0 = &w->body_hot[i];
+	BodyHot* h1 = &w->body_hot[j];
+	InternalManifold im = { .body_a = i, .body_b = j };
 
 	int hit = 0;
 

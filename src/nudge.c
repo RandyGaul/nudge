@@ -45,6 +45,8 @@ typedef struct BodyHot
 	v3 inv_inertia_local; // diagonal of local-space inverse inertia tensor
 	float friction;
 	float restitution;
+	float linear_damping;
+	float angular_damping;
 	float sleep_time; // accumulated seconds below velocity threshold
 } BodyHot;
 
@@ -85,6 +87,7 @@ typedef struct Island
 
 #define SLEEP_VEL_THRESHOLD   0.01f  // squared velocity magnitude threshold
 #define SLEEP_TIME_THRESHOLD  0.5f   // seconds of stillness before sleep
+#define LINEAR_SLOP           0.01f  // contact margin: keeps contacts alive near zero-penetration
 
 typedef struct WorldInternal
 {
@@ -284,11 +287,11 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 
 #define SOLVER_VELOCITY_ITERS      10
 #define SOLVER_POSITION_ITERS      4
-#define SOLVER_BAUMGARTE           0.2f
-#define SOLVER_SLOP                0.01f
+#define SOLVER_BAUMGARTE           0.2f   // used by joints only; contacts use NGS
+#define SOLVER_SLOP                0.005f // NGS position correction dead zone
 #define SOLVER_RESTITUTION_THRESH  1.0f
 #define SOLVER_POS_BAUMGARTE       0.2f
-#define SOLVER_POS_MAX_CORRECTION  0.2f  // max position correction per step
+#define SOLVER_POS_MAX_CORRECTION  0.2f   // max position correction per step
 #define SOLVER_MAX_LINEAR_VEL      500.0f
 #define SOLVER_MAX_ANGULAR_VEL     100.0f
 
@@ -344,6 +347,7 @@ struct WarmManifold
 {
 	WarmContact contacts[MAX_CONTACTS];
 	int count;
+	int stale; // 0 = updated this frame, incremented each frame not touched, evicted at >1
 	// Manifold-level friction warm data (FRICTION_PATCH)
 	float manifold_lambda_t1;
 	float manifold_lambda_t2;
@@ -454,7 +458,7 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 				s.eff_mass_t2 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent2);
 			}
 
-			s.bias = -SOLVER_BAUMGARTE * inv_dt * fmaxf(ct->penetration - SOLVER_SLOP, 0.0f);
+			s.bias = 0.0f; // NGS handles position correction; no velocity-level bias
 
 			v3 vel_a = add(a->velocity, cross(a->angular_velocity, s.r_a));
 			v3 vel_b = add(b->velocity, cross(b->angular_velocity, s.r_b));
@@ -700,17 +704,23 @@ static void solver_position_correct(WorldInternal* w, SolverManifold* sm, int sm
 	}
 }
 
-// Store accumulated impulses into warm cache for next frame.
+// Persistent warm cache: update active pairs, age stale pairs, evict old stale.
+// BEPU-style freshness: entries survive one extra frame so warm data isn't lost
+// when narrowphase misses a pair for a single frame (FP noise).
 static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count, SolverContact* sc, InternalManifold* manifolds, int manifold_count)
 {
-	map_clear(w->warm_cache);
+	// Age all existing entries (will be reset to 0 for active pairs below)
+	for (int i = 0; i < map_size(w->warm_cache); i++)
+		w->warm_cache[i].stale++;
 
+	// Update active pairs
 	for (int i = 0; i < sm_count; i++) {
 		SolverManifold* m = &sm[i];
 		uint64_t key = body_pair_key(m->body_a, m->body_b);
 
 		WarmManifold wm = {0};
 		wm.count = m->contact_count;
+		wm.stale = 0;
 		for (int ci = 0; ci < m->contact_count; ci++) {
 			SolverContact* s = &sc[m->contact_start + ci];
 			wm.contacts[ci] = (WarmContact){
@@ -728,6 +738,18 @@ static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count
 		}
 
 		map_set(w->warm_cache, key, wm);
+	}
+
+	// Evict stale entries (not touched for >1 frame).
+	// map_del swaps last into deleted slot, so re-check current index after delete.
+	{
+		int i = 0;
+		while (i < map_size(w->warm_cache)) {
+			if (w->warm_cache[i].stale > 1)
+				map_del(w->warm_cache, map_keys(w->warm_cache)[i]);
+			else
+				i++;
+		}
 	}
 
 	afree(sm);
@@ -1640,6 +1662,11 @@ void world_step(World world, float dt)
 		int isl = w->body_cold[i].island_id;
 		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake) continue;
 		h->velocity = add(h->velocity, scale(w->gravity, dt));
+		// Pade approximation of exponential damping: v *= 1 / (1 + c*dt)
+		if (h->linear_damping > 0.0f)
+			h->velocity = scale(h->velocity, 1.0f / (1.0f + h->linear_damping * dt));
+		if (h->angular_damping > 0.0f)
+			h->angular_velocity = scale(h->angular_velocity, 1.0f / (1.0f + h->angular_damping * dt));
 	}
 
 	// Collision detection
@@ -1782,12 +1809,16 @@ Body create_body(World world, BodyParams params)
 	};
 	float fric = params.friction;
 	if (fric == 0.0f) fric = 0.5f; // default for all bodies
+	float ang_damp = params.angular_damping;
+	if (ang_damp == 0.0f) ang_damp = 0.03f; // default: 3%/s (BEPU-style)
 	w->body_hot[idx] = (BodyHot){
 		.position = params.position,
 		.rotation = params.rotation,
 		.inv_mass = params.mass > 0.0f ? 1.0f / params.mass : 0.0f,
 		.friction = fric,
 		.restitution = params.restitution,
+		.linear_damping = params.linear_damping,
+		.angular_damping = ang_damp,
 	};
 
 	return split_handle(Body, w->body_gen, idx);
