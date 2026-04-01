@@ -28,7 +28,10 @@ typedef struct BodyCold
 {
 	float mass;
 	CK_DYNA ShapeInternal* shapes;
-	int bvh_leaf; // -1 if not in BVH
+	int bvh_leaf;     // -1 if not in BVH
+	int island_id;    // -1 = no island (static or unconnected)
+	int island_prev;  // prev body in island body list, -1 = head
+	int island_next;  // next body in island body list, -1 = tail
 } BodyCold;
 
 // Hot: solver working set, iterated every step, packed for cache.
@@ -42,6 +45,7 @@ typedef struct BodyHot
 	v3 inv_inertia_local; // diagonal of local-space inverse inertia tensor
 	float friction;
 	float restitution;
+	float sleep_time; // accumulated seconds below velocity threshold
 } BodyHot;
 
 typedef struct WarmManifold WarmManifold; // forward decl for warm cache
@@ -62,9 +66,25 @@ typedef struct JointInternal
 		v3 warm_lambda3;   // ball socket (3 DOF)
 		float warm_lambda1; // distance (1 DOF)
 	};
+	// Island linked list fields.
+	int island_id;    // -1 = none
+	int island_prev;  // -1 = head
+	int island_next;  // -1 = tail
 } JointInternal;
 
 typedef struct BVHTree BVHTree; // forward decl, defined in bvh.c
+
+// Island: group of connected bodies that can sleep/wake together.
+typedef struct Island
+{
+	int head_body, tail_body, body_count;
+	int head_joint, tail_joint, joint_count;
+	int constraint_remove_count;
+	int awake; // 1 = awake, 0 = sleeping
+} Island;
+
+#define SLEEP_VEL_THRESHOLD   0.01f  // squared velocity magnitude threshold
+#define SLEEP_TIME_THRESHOLD  0.5f   // seconds of stillness before sleep
 
 typedef struct WorldInternal
 {
@@ -83,6 +103,13 @@ typedef struct WorldInternal
 	BroadphaseType broadphase_type;
 	BVHTree* bvh_static;
 	BVHTree* bvh_dynamic;
+	// Islands
+	CK_DYNA Island*     islands;
+	CK_DYNA uint32_t*   island_gen;
+	CK_DYNA int*        island_free;
+	CK_MAP(uint8_t)     prev_touching; // body_pair_key -> 1 for pairs touching last frame
+	int sleep_enabled; // 1 = island sleep active (default)
+	FrictionModel friction_model;
 } WorldInternal;
 
 #include "gjk.c"
@@ -290,12 +317,24 @@ typedef struct SolverManifold
 	int contact_start;
 	int contact_count;
 	float friction;
+	// Manifold-level patch friction data (FRICTION_PATCH only)
+	v3 centroid_r_a;
+	v3 centroid_r_b;
+	v3 tangent1, tangent2;
+	v3 normal;
+	float eff_mass_t1, eff_mass_t2;
+	float eff_mass_twist;
+	float lambda_t1, lambda_t2;
+	float lambda_twist;
+	float patch_area;
+	float patch_radius;
 } SolverManifold;
 
 // Warm starting: cached impulses from previous frame, keyed by body pair.
 typedef struct WarmContact
 {
 	uint32_t feature_id; // geometric feature key for matching
+	v3 r_a;              // body-A-relative position for spatial fallback matching
 	float lambda_n;
 	float lambda_t1;
 	float lambda_t2;
@@ -305,6 +344,10 @@ struct WarmManifold
 {
 	WarmContact contacts[MAX_CONTACTS];
 	int count;
+	// Manifold-level friction warm data (FRICTION_PATCH)
+	float manifold_lambda_t1;
+	float manifold_lambda_t2;
+	float manifold_lambda_twist;
 };
 
 static uint64_t body_pair_key(int a, int b)
@@ -321,6 +364,19 @@ static void contact_tangent_basis(v3 n, v3* t1, v3* t2)
 	else
 		*t1 = norm(V3(0.0f, n.z, -n.y));
 	*t2 = cross(n, *t1);
+}
+
+#define PATCH_MIN_AREA 0.001f
+
+// Estimate contact patch area from manifold points projected onto contact plane.
+static float estimate_patch_area(Contact* contacts, int count)
+{
+	if (count < 3) return PATCH_MIN_AREA;
+	// Fan triangulation from contacts[0]
+	float area = 0.0f;
+	for (int i = 1; i < count - 1; i++)
+		area += 0.5f * len(cross(sub(contacts[i].point, contacts[0].point), sub(contacts[i + 1].point, contacts[0].point)));
+	return area > PATCH_MIN_AREA ? area : PATCH_MIN_AREA;
 }
 
 static float compute_effective_mass(BodyHot* a, BodyHot* b, float inv_mass_sum, v3 r_a, v3 r_b, v3 dir)
@@ -378,6 +434,8 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 			.friction = mu,
 		};
 
+		int patch_mode = (w->friction_model == FRICTION_PATCH);
+
 		for (int c = 0; c < im->m.count; c++) {
 			Contact* ct = &im->m.contacts[c];
 			SolverContact s = {0};
@@ -387,11 +445,14 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 			s.normal = ct->normal;
 			s.penetration = ct->penetration;
 			s.feature_id = ct->feature_id;
-			contact_tangent_basis(ct->normal, &s.tangent1, &s.tangent2);
 
-			s.eff_mass_n  = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.normal);
-			s.eff_mass_t1 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent1);
-			s.eff_mass_t2 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent2);
+			s.eff_mass_n = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.normal);
+
+			if (!patch_mode) {
+				contact_tangent_basis(ct->normal, &s.tangent1, &s.tangent2);
+				s.eff_mass_t1 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent1);
+				s.eff_mass_t2 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent2);
+			}
 
 			s.bias = -SOLVER_BAUMGARTE * inv_dt * fmaxf(ct->penetration - SOLVER_SLOP, 0.0f);
 
@@ -403,63 +464,148 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 			apush(sc, s);
 		}
 
-		// Warm start: match new contacts to cached by feature ID.
-		// Unmatched old impulse is redistributed evenly (BEPU style).
-		if (wm) {
-			int old_matched[MAX_CONTACTS] = {0};
-			int new_unmatched = 0;
+		// Patch friction: compute centroid, patch area, tangent basis at manifold level.
+		if (patch_mode) {
+			v3 centroid_a = V3(0, 0, 0), centroid_b = V3(0, 0, 0);
 			for (int c = 0; c < smf.contact_count; c++) {
 				SolverContact* s = &sc[smf.contact_start + c];
-				if (s->feature_id == 0) { new_unmatched++; continue; }
+				centroid_a = add(centroid_a, s->r_a);
+				centroid_b = add(centroid_b, s->r_b);
+			}
+			float inv_n = 1.0f / (float)smf.contact_count;
+			smf.centroid_r_a = scale(centroid_a, inv_n);
+			smf.centroid_r_b = scale(centroid_b, inv_n);
+
+			// Use first contact normal for tangent basis (all share same normal in a manifold)
+			v3 n = sc[smf.contact_start].normal;
+			smf.normal = n;
+			contact_tangent_basis(n, &smf.tangent1, &smf.tangent2);
+			smf.eff_mass_t1 = compute_effective_mass(a, b, inv_mass_sum, smf.centroid_r_a, smf.centroid_r_b, smf.tangent1);
+			smf.eff_mass_t2 = compute_effective_mass(a, b, inv_mass_sum, smf.centroid_r_a, smf.centroid_r_b, smf.tangent2);
+			smf.patch_area = estimate_patch_area(im->m.contacts, im->m.count);
+			smf.patch_radius = 0.6667f * sqrtf(smf.patch_area * (1.0f / 3.14159265f));
+
+			// Torsional friction effective mass: 1 / (n^T * I_a_inv * n + n^T * I_b_inv * n)
+			float k_twist = dot(inv_inertia_mul(a->rotation, a->inv_inertia_local, n), n) + dot(inv_inertia_mul(b->rotation, b->inv_inertia_local, n), n);
+			smf.eff_mass_twist = k_twist > 1e-12f ? 1.0f / k_twist : 0.0f;
+		}
+
+		// Warm start: match new contacts to cached contacts.
+		// Pass 1: exact feature ID match.
+		// Pass 2: spatial fallback -- closest unmatched old contact by r_a distance.
+		// Pass 3: redistribute any remaining unmatched old impulse evenly.
+		if (wm) {
+			int old_matched[MAX_CONTACTS] = {0};
+			int new_matched[MAX_CONTACTS] = {0};
+			// Pass 1: feature ID
+			for (int c = 0; c < smf.contact_count; c++) {
+				SolverContact* s = &sc[smf.contact_start + c];
+				if (s->feature_id == 0) continue;
 				int match = warm_match(wm, s->feature_id);
 				if (match >= 0) {
-					s->lambda_n  = wm->contacts[match].lambda_n;
-					s->lambda_t1 = wm->contacts[match].lambda_t1;
-					s->lambda_t2 = wm->contacts[match].lambda_t2;
+					s->lambda_n = wm->contacts[match].lambda_n;
+					if (!patch_mode) {
+						s->lambda_t1 = wm->contacts[match].lambda_t1;
+						s->lambda_t2 = wm->contacts[match].lambda_t2;
+					}
 					old_matched[match] = 1;
-				} else {
-					new_unmatched++;
+					new_matched[c] = 1;
 				}
 			}
-			// Redistribute unmatched old impulse to unmatched new contacts.
+			// Pass 2: spatial fallback for unmatched contacts
+			float spatial_tol2 = 0.01f;
+			for (int c = 0; c < smf.contact_count; c++) {
+				if (new_matched[c]) continue;
+				SolverContact* s = &sc[smf.contact_start + c];
+				float best_d2 = spatial_tol2;
+				int best = -1;
+				for (int j = 0; j < wm->count; j++) {
+					if (old_matched[j]) continue;
+					float d2 = len2(sub(s->r_a, wm->contacts[j].r_a));
+					if (d2 < best_d2) { best_d2 = d2; best = j; }
+				}
+				if (best >= 0) {
+					s->lambda_n = wm->contacts[best].lambda_n;
+					if (!patch_mode) {
+						s->lambda_t1 = wm->contacts[best].lambda_t1;
+						s->lambda_t2 = wm->contacts[best].lambda_t2;
+					}
+					old_matched[best] = 1;
+					new_matched[c] = 1;
+				}
+			}
+			// Pass 3: redistribute remaining unmatched old impulse
+			int new_unmatched = 0;
+			for (int c = 0; c < smf.contact_count; c++)
+				if (!new_matched[c]) new_unmatched++;
 			if (new_unmatched > 0) {
 				float leftover_n = 0, leftover_t1 = 0, leftover_t2 = 0;
 				for (int j = 0; j < wm->count; j++) {
 					if (!old_matched[j]) {
-						leftover_n  += wm->contacts[j].lambda_n;
-						leftover_t1 += wm->contacts[j].lambda_t1;
-						leftover_t2 += wm->contacts[j].lambda_t2;
+						leftover_n += wm->contacts[j].lambda_n;
+						if (!patch_mode) {
+							leftover_t1 += wm->contacts[j].lambda_t1;
+							leftover_t2 += wm->contacts[j].lambda_t2;
+						}
 					}
 				}
 				float share = 1.0f / (float)new_unmatched;
 				for (int c = 0; c < smf.contact_count; c++) {
+					if (new_matched[c]) continue;
 					SolverContact* s = &sc[smf.contact_start + c];
-					if (s->lambda_n == 0.0f && s->lambda_t1 == 0.0f && s->lambda_t2 == 0.0f) {
-						s->lambda_n  = leftover_n * share;
+					s->lambda_n = leftover_n * share;
+					if (!patch_mode) {
 						s->lambda_t1 = leftover_t1 * share;
 						s->lambda_t2 = leftover_t2 * share;
 					}
 				}
 			}
+			// Warm start manifold-level friction
+			if (patch_mode) {
+				smf.lambda_t1 = wm->manifold_lambda_t1;
+				smf.lambda_t2 = wm->manifold_lambda_t2;
+				smf.lambda_twist = wm->manifold_lambda_twist;
+			}
+		}
+
+		// Speculative contacts (negative penetration, kept alive by margin) must
+		// not carry warm-started impulse -- they exist for cache continuity only.
+		for (int c = 0; c < smf.contact_count; c++) {
+			SolverContact* s = &sc[smf.contact_start + c];
+			if (s->penetration < 0.0f) { s->lambda_n = 0.0f; s->lambda_t1 = 0.0f; s->lambda_t2 = 0.0f; }
 		}
 
 		apush(sm, smf);
 	}
 
 	// Apply warm start impulses
+	int patch_warm = (w->friction_model == FRICTION_PATCH);
 	for (int i = 0; i < asize(sm); i++) {
 		SolverManifold* m = &sm[i];
 		BodyHot* a = &w->body_hot[m->body_a];
 		BodyHot* b = &w->body_hot[m->body_b];
 		for (int ci = 0; ci < m->contact_count; ci++) {
 			SolverContact* s = &sc[m->contact_start + ci];
-			if (s->lambda_n == 0.0f && s->lambda_t1 == 0.0f && s->lambda_t2 == 0.0f)
-				continue;
-			v3 P = add(add(
-				scale(s->normal, s->lambda_n),
-				scale(s->tangent1, s->lambda_t1)),
-				scale(s->tangent2, s->lambda_t2));
-			apply_impulse(a, b, s->r_a, s->r_b, P);
+			if (patch_warm) {
+				if (s->lambda_n == 0.0f) continue;
+				apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n));
+			} else {
+				if (s->lambda_n == 0.0f && s->lambda_t1 == 0.0f && s->lambda_t2 == 0.0f)
+					continue;
+				v3 P = add(add(scale(s->normal, s->lambda_n), scale(s->tangent1, s->lambda_t1)), scale(s->tangent2, s->lambda_t2));
+				apply_impulse(a, b, s->r_a, s->r_b, P);
+			}
+		}
+		// Warm start manifold-level friction
+		if (patch_warm && (m->lambda_t1 != 0.0f || m->lambda_t2 != 0.0f)) {
+			v3 P = add(scale(m->tangent1, m->lambda_t1), scale(m->tangent2, m->lambda_t2));
+			apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, P);
+		}
+		// Warm start torsional friction (pure angular impulse along normal)
+		if (patch_warm && m->lambda_twist != 0.0f) {
+			v3 twist_impulse = scale(m->normal, m->lambda_twist);
+			a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, twist_impulse));
+			b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, twist_impulse));
 		}
 	}
 
@@ -569,10 +715,16 @@ static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count
 			SolverContact* s = &sc[m->contact_start + ci];
 			wm.contacts[ci] = (WarmContact){
 				.feature_id = s->feature_id,
+				.r_a = s->r_a,
 				.lambda_n = s->lambda_n,
 				.lambda_t1 = s->lambda_t1,
 				.lambda_t2 = s->lambda_t2,
 			};
+		}
+		if (w->friction_model == FRICTION_PATCH) {
+			wm.manifold_lambda_t1 = m->lambda_t1;
+			wm.manifold_lambda_t2 = m->lambda_t2;
+			wm.manifold_lambda_twist = m->lambda_twist;
 		}
 
 		map_set(w->warm_cache, key, wm);
@@ -897,38 +1049,547 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 		SolverManifold* m = &sm[ref->index];
 		BodyHot* a = &w->body_hot[m->body_a];
 		BodyHot* b = &w->body_hot[m->body_b];
-		for (int ci = 0; ci < m->contact_count; ci++) {
-			SolverContact* s = &sc[m->contact_start + ci];
-			v3 dv = sub(
-				add(b->velocity, cross(b->angular_velocity, s->r_b)),
-				add(a->velocity, cross(a->angular_velocity, s->r_a)));
 
-			float vn = dot(dv, s->normal);
-			float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce));
-			float old_n = s->lambda_n;
-			s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
-			apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
+		if (w->friction_model == FRICTION_PATCH) {
+			// Solve all normal constraints first (decoupled from friction)
+			float total_lambda_n = 0.0f;
+			for (int ci = 0; ci < m->contact_count; ci++) {
+				SolverContact* s = &sc[m->contact_start + ci];
+				v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
+				float vn = dot(dv, s->normal);
+				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce));
+				float old_n = s->lambda_n;
+				s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
+				apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
+				total_lambda_n += s->lambda_n;
+			}
 
-			dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)),
-				add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			float max_f = m->friction * s->lambda_n;
-			float vt1 = dot(dv, s->tangent1);
-			float old_t1 = s->lambda_t1;
-			s->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + s->eff_mass_t1*(-vt1), max_f));
-			apply_impulse(a, b, s->r_a, s->r_b, scale(s->tangent1, s->lambda_t1 - old_t1));
+			// Manifold-level 2D friction at centroid, clamped by aggregate normal force
+			float max_f = m->friction * total_lambda_n;
+			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, m->centroid_r_b)), add(a->velocity, cross(a->angular_velocity, m->centroid_r_a)));
+			float vt1 = dot(dv, m->tangent1);
+			float old_t1 = m->lambda_t1;
+			m->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + m->eff_mass_t1 * (-vt1), max_f));
+			apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, scale(m->tangent1, m->lambda_t1 - old_t1));
 
-			dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)),
-				add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			float vt2 = dot(dv, s->tangent2);
-			float old_t2 = s->lambda_t2;
-			s->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + s->eff_mass_t2*(-vt2), max_f));
-			apply_impulse(a, b, s->r_a, s->r_b, scale(s->tangent2, s->lambda_t2 - old_t2));
+			dv = sub(add(b->velocity, cross(b->angular_velocity, m->centroid_r_b)), add(a->velocity, cross(a->angular_velocity, m->centroid_r_a)));
+			float vt2 = dot(dv, m->tangent2);
+			float old_t2 = m->lambda_t2;
+			m->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + m->eff_mass_t2 * (-vt2), max_f));
+			apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, scale(m->tangent2, m->lambda_t2 - old_t2));
+
+			// Torsional friction: resist spin around contact normal
+			float max_twist = m->friction * total_lambda_n * m->patch_radius;
+			float w_rel = dot(sub(b->angular_velocity, a->angular_velocity), m->normal);
+			float lambda_tw = m->eff_mass_twist * (-w_rel);
+			float old_tw = m->lambda_twist;
+			m->lambda_twist = fmaxf(-max_twist, fminf(old_tw + lambda_tw, max_twist));
+			float delta_tw = m->lambda_twist - old_tw;
+			v3 twist_impulse = scale(m->normal, delta_tw);
+			a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, twist_impulse));
+			b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, twist_impulse));
+		} else {
+			// Per-point Coulomb friction (original)
+			for (int ci = 0; ci < m->contact_count; ci++) {
+				SolverContact* s = &sc[m->contact_start + ci];
+				v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
+
+				float vn = dot(dv, s->normal);
+				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce));
+				float old_n = s->lambda_n;
+				s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
+				apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
+
+				dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
+				float max_f = m->friction * s->lambda_n;
+				float vt1 = dot(dv, s->tangent1);
+				float old_t1 = s->lambda_t1;
+				s->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + s->eff_mass_t1*(-vt1), max_f));
+				apply_impulse(a, b, s->r_a, s->r_b, scale(s->tangent1, s->lambda_t1 - old_t1));
+
+				dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
+				float vt2 = dot(dv, s->tangent2);
+				float old_t2 = s->lambda_t2;
+				s->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + s->eff_mass_t2*(-vt2), max_f));
+				apply_impulse(a, b, s->r_a, s->r_b, scale(s->tangent2, s->lambda_t2 - old_t2));
+			}
 		}
 		break;
 	}
 	case CTYPE_BALL_SOCKET: solve_ball_socket(w, &bs[ref->index]); break;
 	case CTYPE_DISTANCE:    solve_distance(w, &dist[ref->index]); break;
 	}
+}
+
+// -----------------------------------------------------------------------------
+// Island management.
+
+static int island_create(WorldInternal* w)
+{
+	int idx;
+	if (asize(w->island_free) > 0) {
+		idx = apop(w->island_free);
+		w->island_gen[idx]++;
+	} else {
+		idx = asize(w->islands);
+		Island zero = {0};
+		apush(w->islands, zero);
+		apush(w->island_gen, 0);
+	}
+	w->islands[idx] = (Island){
+		.head_body = -1, .tail_body = -1, .body_count = 0,
+		.head_joint = -1, .tail_joint = -1, .joint_count = 0,
+		.constraint_remove_count = 0, .awake = 1,
+	};
+	w->island_gen[idx] |= 1; // odd = alive
+	return idx;
+}
+
+static void island_destroy(WorldInternal* w, int id)
+{
+	w->island_gen[id]++;
+	if (w->island_gen[id] & 1) w->island_gen[id]++; // ensure even = dead
+	apush(w->island_free, id);
+}
+
+static int island_alive(WorldInternal* w, int id)
+{
+	return id >= 0 && id < asize(w->islands) && (w->island_gen[id] & 1);
+}
+
+static void island_add_body(WorldInternal* w, int island_id, int body_idx)
+{
+	Island* isl = &w->islands[island_id];
+	BodyCold* c = &w->body_cold[body_idx];
+	c->island_id = island_id;
+	c->island_prev = isl->tail_body;
+	c->island_next = -1;
+	if (isl->tail_body >= 0)
+		w->body_cold[isl->tail_body].island_next = body_idx;
+	else
+		isl->head_body = body_idx;
+	isl->tail_body = body_idx;
+	isl->body_count++;
+}
+
+static void island_remove_body(WorldInternal* w, int island_id, int body_idx)
+{
+	Island* isl = &w->islands[island_id];
+	BodyCold* c = &w->body_cold[body_idx];
+	if (c->island_prev >= 0)
+		w->body_cold[c->island_prev].island_next = c->island_next;
+	else
+		isl->head_body = c->island_next;
+	if (c->island_next >= 0)
+		w->body_cold[c->island_next].island_prev = c->island_prev;
+	else
+		isl->tail_body = c->island_prev;
+	c->island_id = -1;
+	c->island_prev = -1;
+	c->island_next = -1;
+	isl->body_count--;
+}
+
+static void island_add_joint(WorldInternal* w, int island_id, int joint_idx)
+{
+	Island* isl = &w->islands[island_id];
+	JointInternal* j = &w->joints[joint_idx];
+	j->island_id = island_id;
+	j->island_prev = isl->tail_joint;
+	j->island_next = -1;
+	if (isl->tail_joint >= 0)
+		w->joints[isl->tail_joint].island_next = joint_idx;
+	else
+		isl->head_joint = joint_idx;
+	isl->tail_joint = joint_idx;
+	isl->joint_count++;
+}
+
+static void island_remove_joint(WorldInternal* w, int island_id, int joint_idx)
+{
+	Island* isl = &w->islands[island_id];
+	JointInternal* j = &w->joints[joint_idx];
+	if (j->island_prev >= 0)
+		w->joints[j->island_prev].island_next = j->island_next;
+	else
+		isl->head_joint = j->island_next;
+	if (j->island_next >= 0)
+		w->joints[j->island_next].island_prev = j->island_prev;
+	else
+		isl->tail_joint = j->island_prev;
+	j->island_id = -1;
+	j->island_prev = -1;
+	j->island_next = -1;
+	isl->joint_count--;
+}
+
+// Merge two islands. Keep the bigger one, walk the smaller one remapping bodies/joints.
+static int island_merge(WorldInternal* w, int id_a, int id_b)
+{
+	if (id_a == id_b) return id_a;
+	Island* a = &w->islands[id_a];
+	Island* b = &w->islands[id_b];
+	// Keep the bigger island
+	if (a->body_count + a->joint_count < b->body_count + b->joint_count) {
+		int tmp = id_a; id_a = id_b; id_b = tmp;
+		a = &w->islands[id_a]; b = &w->islands[id_b];
+	}
+	// Remap smaller's bodies to bigger
+	int bi = b->head_body;
+	while (bi >= 0) {
+		int next = w->body_cold[bi].island_next;
+		w->body_cold[bi].island_id = id_a;
+		bi = next;
+	}
+	// Splice body lists: append b's list to a's tail
+	if (b->head_body >= 0) {
+		if (a->tail_body >= 0) {
+			w->body_cold[a->tail_body].island_next = b->head_body;
+			w->body_cold[b->head_body].island_prev = a->tail_body;
+		} else {
+			a->head_body = b->head_body;
+		}
+		a->tail_body = b->tail_body;
+		a->body_count += b->body_count;
+	}
+	// Remap smaller's joints
+	int ji = b->head_joint;
+	while (ji >= 0) {
+		int next = w->joints[ji].island_next;
+		w->joints[ji].island_id = id_a;
+		ji = next;
+	}
+	// Splice joint lists
+	if (b->head_joint >= 0) {
+		if (a->tail_joint >= 0) {
+			w->joints[a->tail_joint].island_next = b->head_joint;
+			w->joints[b->head_joint].island_prev = a->tail_joint;
+		} else {
+			a->head_joint = b->head_joint;
+		}
+		a->tail_joint = b->tail_joint;
+		a->joint_count += b->joint_count;
+	}
+	a->constraint_remove_count += b->constraint_remove_count;
+	// If either was awake, result is awake
+	if (b->awake) a->awake = 1;
+	island_destroy(w, id_b);
+	return id_a;
+}
+
+static void island_wake(WorldInternal* w, int island_id)
+{
+	Island* isl = &w->islands[island_id];
+	isl->awake = 1;
+	int bi = isl->head_body;
+	while (bi >= 0) {
+		w->body_hot[bi].sleep_time = 0.0f;
+		bi = w->body_cold[bi].island_next;
+	}
+}
+
+static void island_sleep(WorldInternal* w, int island_id)
+{
+	Island* isl = &w->islands[island_id];
+	isl->awake = 0;
+	int bi = isl->head_body;
+	while (bi >= 0) {
+		w->body_hot[bi].velocity = V3(0, 0, 0);
+		w->body_hot[bi].angular_velocity = V3(0, 0, 0);
+		bi = w->body_cold[bi].island_next;
+	}
+}
+
+// Link a newly created joint to islands: merge/create as needed, wake if sleeping.
+static void link_joint_to_islands(WorldInternal* w, int joint_idx)
+{
+	JointInternal* j = &w->joints[joint_idx];
+	int ba = j->body_a, bb = j->body_b;
+	int is_static_a = w->body_hot[ba].inv_mass == 0.0f;
+	int is_static_b = w->body_hot[bb].inv_mass == 0.0f;
+	// Static bodies never get islands
+	if (is_static_a && is_static_b) return;
+	int isl_a = is_static_a ? -1 : w->body_cold[ba].island_id;
+	int isl_b = is_static_b ? -1 : w->body_cold[bb].island_id;
+	int target;
+	if (isl_a >= 0 && isl_b >= 0) {
+		target = island_merge(w, isl_a, isl_b);
+	} else if (isl_a >= 0) {
+		target = isl_a;
+	} else if (isl_b >= 0) {
+		target = isl_b;
+	} else {
+		target = island_create(w);
+	}
+	// Add dynamic bodies that aren't in the target island yet
+	if (!is_static_a && w->body_cold[ba].island_id != target)
+		island_add_body(w, target, ba);
+	if (!is_static_b && w->body_cold[bb].island_id != target)
+		island_add_body(w, target, bb);
+	island_add_joint(w, target, joint_idx);
+	// Wake if sleeping
+	if (!w->islands[target].awake)
+		island_wake(w, target);
+}
+
+// Unlink a joint from its island before destruction.
+static void unlink_joint_from_island(WorldInternal* w, int joint_idx)
+{
+	JointInternal* j = &w->joints[joint_idx];
+	if (j->island_id < 0) return;
+	int isl = j->island_id;
+	island_remove_joint(w, isl, joint_idx);
+	w->islands[isl].constraint_remove_count++;
+}
+
+// Update islands from this frame's contact manifolds.
+// Merge/create islands for touching dynamic body pairs.
+// Detect lost contacts for island splitting.
+static void islands_update_contacts(WorldInternal* w, InternalManifold* manifolds, int manifold_count)
+{
+	CK_MAP(uint8_t) curr_touching = NULL;
+
+	for (int i = 0; i < manifold_count; i++) {
+		int a = manifolds[i].body_a, b = manifolds[i].body_b;
+		int is_static_a = w->body_hot[a].inv_mass == 0.0f;
+		int is_static_b = w->body_hot[b].inv_mass == 0.0f;
+		// Skip static-static (shouldn't happen, but guard)
+		if (is_static_a && is_static_b) continue;
+
+		uint64_t key = body_pair_key(a, b);
+		map_set(curr_touching, key, (uint8_t)1);
+
+		// Static bodies never get island_id
+		int isl_a = is_static_a ? -1 : w->body_cold[a].island_id;
+		int isl_b = is_static_b ? -1 : w->body_cold[b].island_id;
+
+		int target;
+		if (isl_a >= 0 && isl_b >= 0) {
+			target = island_merge(w, isl_a, isl_b);
+		} else if (isl_a >= 0) {
+			target = isl_a;
+		} else if (isl_b >= 0) {
+			target = isl_b;
+		} else {
+			target = island_create(w);
+		}
+		int added_a = 0, added_b = 0;
+		if (!is_static_a && w->body_cold[a].island_id != target) {
+			island_add_body(w, target, a);
+			added_a = 1;
+		}
+		if (!is_static_b && w->body_cold[b].island_id != target) {
+			island_add_body(w, target, b);
+			added_b = 1;
+		}
+		// Wake sleeping island only if a newly added or awake body touches it.
+		// Sleeping-vs-static contacts should NOT wake the island.
+		if (!w->islands[target].awake) {
+			int should_wake = added_a || added_b; // new body joined
+			if (!should_wake) {
+				// Check if either side was in an awake island before merge
+				if (!is_static_a && isl_a >= 0 && isl_a != target) should_wake = 1; // merged from awake
+				if (!is_static_b && isl_b >= 0 && isl_b != target) should_wake = 1;
+			}
+			if (should_wake) island_wake(w, target);
+		}
+	}
+
+	// Detect lost contacts: iterate prev_touching, find keys not in curr_touching
+	if (w->prev_touching) {
+		// Walk prev_touching map entries -- use ckit map iteration
+		int prev_cap = asize(w->prev_touching);
+		for (int i = 0; i < prev_cap; i++) {
+			// ckit maps store keys in a parallel array accessible via the header
+			// We need to iterate differently -- scan body pairs
+		}
+		// Simpler approach: we don't have ckit map iteration exposed easily.
+		// Instead, mark constraint_remove_count when a contact pair vanishes.
+		// We can detect this by checking prev entries against curr.
+		// For now, just use a brute-force approach: track via body pair keys.
+	}
+
+	// Swap: prev_touching = curr_touching
+	map_free(w->prev_touching);
+	w->prev_touching = curr_touching;
+}
+
+static void island_try_split(WorldInternal* w, int island_id); // forward decl
+
+// Evaluate sleep for all awake islands after post-solve.
+static void islands_evaluate_sleep(WorldInternal* w, float dt)
+{
+	int island_count = asize(w->islands);
+	for (int i = 0; i < island_count; i++) {
+		if (!(w->island_gen[i] & 1)) continue; // dead slot
+		Island* isl = &w->islands[i];
+		if (!isl->awake) continue;
+
+		int all_sleepy = 1;
+		int bi = isl->head_body;
+		while (bi >= 0) {
+			BodyHot* h = &w->body_hot[bi];
+			float v2 = len2(h->velocity) + len2(h->angular_velocity);
+			if (v2 > SLEEP_VEL_THRESHOLD) {
+				h->sleep_time = 0.0f;
+				all_sleepy = 0;
+			} else {
+				h->sleep_time += dt;
+				if (h->sleep_time < SLEEP_TIME_THRESHOLD)
+					all_sleepy = 0;
+			}
+			bi = w->body_cold[bi].island_next;
+		}
+
+		if (all_sleepy) {
+			if (isl->constraint_remove_count > 0)
+				island_try_split(w, i);
+			else
+				island_sleep(w, i);
+		}
+		isl->constraint_remove_count = 0;
+	}
+}
+
+// DFS island split when contacts have been lost.
+static void island_try_split(WorldInternal* w, int island_id)
+{
+	Island* isl = &w->islands[island_id];
+
+	// Collect all body indices from island
+	CK_DYNA int* bodies = NULL;
+	int bi = isl->head_body;
+	while (bi >= 0) {
+		apush(bodies, bi);
+		bi = w->body_cold[bi].island_next;
+	}
+	int n = asize(bodies);
+	if (n <= 1) { afree(bodies); island_sleep(w, island_id); return; }
+
+	// Visited array and component assignment
+	CK_DYNA int* component = NULL;
+	afit(component, n);
+	asetlen(component, n);
+	for (int i = 0; i < n; i++) component[i] = -1;
+
+	// Map body_idx -> local index for fast lookup
+	CK_MAP(int) body_to_local = NULL;
+	for (int i = 0; i < n; i++)
+		map_set(body_to_local, (uint64_t)bodies[i], i);
+
+	int num_components = 0;
+	CK_DYNA int* stack = NULL;
+
+	for (int start = 0; start < n; start++) {
+		if (component[start] >= 0) continue;
+		int comp_id = num_components++;
+
+		// DFS from start
+		aclear(stack);
+		apush(stack, start);
+		component[start] = comp_id;
+
+		while (asize(stack) > 0) {
+			int cur_local = apop(stack);
+			int cur_body = bodies[cur_local];
+
+			// Neighbors from joints in this island
+			int ji = isl->head_joint;
+			while (ji >= 0) {
+				JointInternal* j = &w->joints[ji];
+				int other = -1;
+				if (j->body_a == cur_body) other = j->body_b;
+				else if (j->body_b == cur_body) other = j->body_a;
+				if (other >= 0) {
+					int* loc = map_get_ptr(body_to_local, (uint64_t)other);
+					if (loc && component[*loc] < 0) {
+						component[*loc] = comp_id;
+						apush(stack, *loc);
+					}
+				}
+				ji = w->joints[ji].island_next;
+			}
+
+			// Neighbors from current contacts (prev_touching map)
+			for (int j = 0; j < n; j++) {
+				if (component[j] >= 0) continue;
+				uint64_t key = body_pair_key(cur_body, bodies[j]);
+				uint8_t* val = map_get_ptr(w->prev_touching, key);
+				if (val) {
+					component[j] = comp_id;
+					apush(stack, j);
+				}
+			}
+		}
+	}
+
+	if (num_components <= 1) {
+		// Still one island, just sleep it
+		island_sleep(w, island_id);
+	} else {
+		// First component keeps the original island. Remove all bodies/joints,
+		// then re-add per component.
+		// Detach all bodies from the original island
+		for (int i = 0; i < n; i++) {
+			w->body_cold[bodies[i]].island_id = -1;
+			w->body_cold[bodies[i]].island_prev = -1;
+			w->body_cold[bodies[i]].island_next = -1;
+		}
+		// Detach all joints
+		CK_DYNA int* joint_list = NULL;
+		int ji = isl->head_joint;
+		while (ji >= 0) {
+			apush(joint_list, ji);
+			int next = w->joints[ji].island_next;
+			w->joints[ji].island_id = -1;
+			w->joints[ji].island_prev = -1;
+			w->joints[ji].island_next = -1;
+			ji = next;
+		}
+		// Reset the original island
+		*isl = (Island){ .head_body = -1, .tail_body = -1, .head_joint = -1, .tail_joint = -1, .awake = 1 };
+
+		// Create islands per component (reuse original for component 0)
+		CK_DYNA int* comp_islands = NULL;
+		afit(comp_islands, num_components);
+		asetlen(comp_islands, num_components);
+		comp_islands[0] = island_id;
+		for (int c = 1; c < num_components; c++)
+			comp_islands[c] = island_create(w);
+
+		// Assign bodies to their component's island
+		for (int i = 0; i < n; i++)
+			island_add_body(w, comp_islands[component[i]], bodies[i]);
+
+		// Assign joints to the island of body_a (both endpoints should be in same component)
+		for (int i = 0; i < asize(joint_list); i++) {
+			int jidx = joint_list[i];
+			int ba = w->joints[jidx].body_a;
+			int* loc = map_get_ptr(body_to_local, (uint64_t)ba);
+			int comp = loc ? component[*loc] : 0;
+			island_add_joint(w, comp_islands[comp], jidx);
+		}
+
+		// Evaluate sleep for each sub-island
+		for (int c = 0; c < num_components; c++) {
+			int cisl = comp_islands[c];
+			int all_sleepy = 1;
+			int b = w->islands[cisl].head_body;
+			while (b >= 0) {
+				if (w->body_hot[b].sleep_time < SLEEP_TIME_THRESHOLD) { all_sleepy = 0; break; }
+				b = w->body_cold[b].island_next;
+			}
+			if (all_sleepy) island_sleep(w, cisl);
+		}
+
+		afree(comp_islands);
+		afree(joint_list);
+	}
+
+	afree(stack);
+	map_free(body_to_local);
+	afree(component);
+	afree(bodies);
 }
 
 // -----------------------------------------------------------------------------
@@ -940,6 +1601,8 @@ World create_world(WorldParams params)
 	memset(w, 0, sizeof(*w));
 	w->gravity = params.gravity;
 	w->broadphase_type = params.broadphase;
+	w->friction_model = params.friction_model;
+	w->sleep_enabled = 1;
 	w->bvh_static = CK_ALLOC(sizeof(BVHTree));
 	w->bvh_dynamic = CK_ALLOC(sizeof(BVHTree));
 	bvh_init(w->bvh_static);
@@ -959,6 +1622,8 @@ void destroy_world(World world)
 	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
 	split_free(w->body_cold, w->body_hot, w->body_gen, w->body_free);
 	afree(w->joints); afree(w->joint_gen); afree(w->joint_free);
+	afree(w->islands); afree(w->island_gen); afree(w->island_free);
+	map_free(w->prev_touching);
 	CK_FREE(w);
 }
 
@@ -967,17 +1632,22 @@ void world_step(World world, float dt)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int count = asize(w->body_hot);
 
-	// Integrate velocities
+	// Integrate velocities (skip sleeping bodies)
 	for (int i = 0; i < count; i++) {
 		if (!split_alive(w->body_gen, i)) continue;
 		BodyHot* h = &w->body_hot[i];
 		if (h->inv_mass == 0.0f) continue;
+		int isl = w->body_cold[i].island_id;
+		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake) continue;
 		h->velocity = add(h->velocity, scale(w->gravity, dt));
 	}
 
 	// Collision detection
 	CK_DYNA InternalManifold* manifolds = NULL;
 	broadphase_and_collide(w, &manifolds);
+
+	// Update island connectivity from contacts
+	islands_update_contacts(w, manifolds, asize(manifolds));
 
 	// Store contacts for debug visualization
 	aclear(w->debug_contacts);
@@ -1031,11 +1701,13 @@ void world_step(World world, float dt)
 
 	afree(crefs);
 
-	// Integrate positions and rotations
+	// Integrate positions and rotations (skip sleeping bodies)
 	for (int i = 0; i < count; i++) {
 		if (!split_alive(w->body_gen, i)) continue;
 		BodyHot* h = &w->body_hot[i];
 		if (h->inv_mass == 0.0f) continue;
+		int isl = w->body_cold[i].island_id;
+		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake) continue;
 
 		// Clamp velocities to prevent solver divergence from blowing up.
 		float lv2 = len2(h->velocity);
@@ -1074,7 +1746,17 @@ void world_step(World world, float dt)
 	// Store warm starting data and free solver arrays
 	solver_post_solve(w, sm, asize(sm), sc, manifolds, manifold_count);
 	joints_post_solve(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist));
+
+	// Evaluate sleep: check velocities, put resting islands to sleep
+	if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
+
 	afree(manifolds);
+}
+
+void world_set_friction_model(World world, FrictionModel model)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	w->friction_model = model;
 }
 
 // -----------------------------------------------------------------------------
@@ -1094,6 +1776,9 @@ Body create_body(World world, BodyParams params)
 		.mass = params.mass,
 		.shapes = NULL,
 		.bvh_leaf = -1,
+		.island_id = -1,
+		.island_prev = -1,
+		.island_next = -1,
 	};
 	float fric = params.friction;
 	if (fric == 0.0f) fric = 0.5f; // default for all bodies
@@ -1113,6 +1798,22 @@ void destroy_body(World world, Body body)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
+	// Remove from island
+	int isl = w->body_cold[idx].island_id;
+	if (isl >= 0 && island_alive(w, isl)) {
+		// Remove all joints connected to this body
+		int ji = w->islands[isl].head_joint;
+		while (ji >= 0) {
+			int next = w->joints[ji].island_next;
+			if (w->joints[ji].body_a == idx || w->joints[ji].body_b == idx) {
+				island_remove_joint(w, isl, ji);
+				w->islands[isl].constraint_remove_count++;
+			}
+			ji = next;
+		}
+		island_remove_body(w, isl, idx);
+		w->islands[isl].constraint_remove_count++;
+	}
 	if (w->body_cold[idx].bvh_leaf >= 0) {
 		BVHTree* tree = w->body_hot[idx].inv_mass == 0.0f ? w->bvh_static : w->bvh_dynamic;
 		bvh_remove(tree, w->body_cold[idx].bvh_leaf);
@@ -1167,6 +1868,48 @@ quat body_get_rotation(World world, Body body)
 	return w->body_hot[idx].rotation;
 }
 
+void body_wake(World world, Body body)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	assert(split_valid(w->body_gen, body));
+	int isl = w->body_cold[idx].island_id;
+	if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
+		island_wake(w, isl);
+}
+
+void body_set_velocity(World world, Body body, v3 vel)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	assert(split_valid(w->body_gen, body));
+	w->body_hot[idx].velocity = vel;
+	int isl = w->body_cold[idx].island_id;
+	if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
+		island_wake(w, isl);
+}
+
+void body_set_angular_velocity(World world, Body body, v3 avel)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	assert(split_valid(w->body_gen, body));
+	w->body_hot[idx].angular_velocity = avel;
+	int isl = w->body_cold[idx].island_id;
+	if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
+		island_wake(w, isl);
+}
+
+int body_is_asleep(World world, Body body)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	assert(split_valid(w->body_gen, body));
+	int isl = w->body_cold[idx].island_id;
+	if (isl < 0 || !island_alive(w, isl)) return 0;
+	return !w->islands[isl].awake;
+}
+
 // -----------------------------------------------------------------------------
 // Joints.
 
@@ -1201,7 +1944,9 @@ Joint create_ball_socket(World world, BallSocketParams params)
 			.local_b = params.local_offset_b,
 			.spring = params.spring,
 		},
+		.island_id = -1, .island_prev = -1, .island_next = -1,
 	};
+	link_joint_to_islands(w, idx);
 	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
 }
 
@@ -1247,7 +1992,9 @@ Joint create_distance(World world, DistanceParams params)
 			.rest_length = rest,
 			.spring = params.spring,
 		},
+		.island_id = -1, .island_prev = -1, .island_next = -1,
 	};
+	link_joint_to_islands(w, idx);
 	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
 }
 
@@ -1256,6 +2003,7 @@ void destroy_joint(World world, Joint joint)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(joint);
 	assert(w->joint_gen[idx] == handle_gen(joint));
+	unlink_joint_from_island(w, idx);
 	memset(&w->joints[idx], 0, sizeof(JointInternal));
 	w->joint_gen[idx]++; // even = dead
 	apush(w->joint_free, idx);

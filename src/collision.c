@@ -732,11 +732,10 @@ static int clip_to_plane(
 	return out_count;
 }
 
-// Reduce contact manifold to MAX_CONTACTS points.
-// 1) Two farthest points.
-// 2) Farthest from that segment.
-// 3) Maximal barycentric contributor (most outside triangle).
-// 4) Deepest remaining point.
+// Reduce contact manifold to MAX_CONTACTS (4) points.
+// 1) Two farthest points (span the patch).
+// 2) Farthest from that segment (adds width).
+// 3) Maximal barycentric contributor (most outside triangle, completes quad).
 static int reduce_contacts(Contact* contacts, int count)
 {
 	if (count <= MAX_CONTACTS) return count;
@@ -789,25 +788,11 @@ static int reduce_contacts(Contact* contacts, int count)
 		if (m < best_min) { best_min = m; i3 = i; }
 	}
 	sel[3] = i3;
-	used[i3] = 1;
-
-	// Step 4: deepest remaining point
-	float best_depth = -1e18f;
-	int i4 = -1;
-	for (int i = 0; i < count; i++) {
-		if (used[i]) continue;
-		if (contacts[i].penetration > best_depth) {
-			best_depth = contacts[i].penetration;
-			i4 = i;
-		}
-	}
-	int result = 4;
-	if (i4 >= 0) { sel[4] = i4; result = 5; }
 
 	Contact tmp[MAX_CONTACTS];
-	for (int i = 0; i < result; i++) tmp[i] = contacts[sel[i]];
-	for (int i = 0; i < result; i++) contacts[i] = tmp[i];
-	return result;
+	for (int i = 0; i < MAX_CONTACTS; i++) tmp[i] = contacts[sel[i]];
+	for (int i = 0; i < MAX_CONTACTS; i++) contacts[i] = tmp[i];
+	return MAX_CONTACTS;
 }
 
 // -----------------------------------------------------------------------------
@@ -918,15 +903,42 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 		assert(++guard < MAX_CLIP_VERTS && "collide_hull_hull: face edge loop didn't close");
 	} while (ei != start_e);
 
-	// Keep points below reference face, generate contacts with feature IDs.
+	// Snap clipped vertices near reference face corners to canonical corner IDs.
+	// A vertex at a corner sits on two side planes -- which plane's clip_edge it
+	// gets is FP-dependent and flickers between frames. Replacing the clip_edge
+	// with a deterministic corner tag (0xC0 | corner_index) stabilises the
+	// feature ID so warm starting can match it.
+	{
+		v3 corners[MAX_CLIP_VERTS];
+		int ncorners = 0;
+		int ce = start_e;
+		do {
+			corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[ce].origin, ref_sc)));
+			ce = ref_hull->edges[ce].next;
+		} while (ce != start_e);
+		float snap_tol2 = 1e-6f;
+		for (int i = 0; i < clip_count; i++) {
+			if (in_fid[i] == 0xFF) continue;
+			for (int c = 0; c < ncorners; c++) {
+				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) {
+					in_fid[i] = 0xC0 | (uint8_t)c;
+					break;
+				}
+			}
+		}
+	}
+
+	// Keep points within margin of reference face, generate contacts with feature IDs.
+	// Margin keeps contacts alive slightly before/after touching, preventing blink.
 	// Feature ID encodes: ref_face | (inc_face << 8) | (clip_edge << 16).
 	// flip bit: if ref was hull_b, swap the face roles so the ID is canonical.
+	float contact_margin = 0.01f;
 	v3 contact_n = flip ? neg(ref_plane.normal) : ref_plane.normal;
 	Contact tmp_contacts[MAX_CLIP_VERTS];
 	int cp = 0;
 	for (int i = 0; i < clip_count; i++) {
 		float depth = ref_plane.offset - dot(ref_plane.normal, in_buf[i]);
-		if (depth >= 0.0f) {
+		if (depth >= -contact_margin) {
 			uint32_t fid;
 			if (!flip)
 				fid = (uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16);
@@ -1055,6 +1067,9 @@ static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
 			if (!split_alive(w->body_gen, j)) continue;
 			if (asize(w->body_cold[j].shapes) == 0) continue;
 			if (w->body_hot[i].inv_mass == 0.0f && w->body_hot[j].inv_mass == 0.0f) continue;
+			// Skip sleeping-vs-sleeping pairs
+			int isl_i = w->body_cold[i].island_id, isl_j = w->body_cold[j].island_id;
+			if (isl_i >= 0 && isl_j >= 0 && (w->island_gen[isl_i] & 1) && (w->island_gen[isl_j] & 1) && !w->islands[isl_i].awake && !w->islands[isl_j].awake) continue;
 			narrowphase_pair(w, i, j, manifolds);
 		}
 	}

@@ -102,7 +102,7 @@ typedef struct Contact
 	uint32_t feature_id;
 } Contact;
 
-#define MAX_CONTACTS 5
+#define MAX_CONTACTS 4
 
 typedef struct Manifold
 {
@@ -172,10 +172,17 @@ typedef struct BodyParams
 
 typedef enum BroadphaseType { BROADPHASE_N2, BROADPHASE_BVH } BroadphaseType;
 
+typedef enum FrictionModel
+{
+	FRICTION_COULOMB,  // per-point Coulomb (2 tangent rows per contact)
+	FRICTION_PATCH,    // manifold-level 2D friction using patch area estimate
+} FrictionModel;
+
 typedef struct WorldParams
 {
 	v3 gravity;
 	BroadphaseType broadphase;
+	FrictionModel friction_model;
 } WorldParams;
 
 // -----------------------------------------------------------------------------
@@ -184,6 +191,7 @@ typedef struct WorldParams
 World create_world(WorldParams params);
 void destroy_world(World world);
 void world_step(World world, float dt);
+void world_set_friction_model(World world, FrictionModel model);
 
 Body create_body(World world, BodyParams params);
 void destroy_body(World world, Body body);
@@ -191,6 +199,11 @@ void body_add_shape(World world, Body body, ShapeParams params);
 
 v3 body_get_position(World world, Body body);
 quat body_get_rotation(World world, Body body);
+
+void body_wake(World world, Body body);
+void body_set_velocity(World world, Body body, v3 vel);
+void body_set_angular_velocity(World world, Body body, v3 avel);
+int body_is_asleep(World world, Body body);
 
 // Debug: contact points from last step. Returns count, *out valid until next step.
 int world_get_contacts(World world, const Contact** out);

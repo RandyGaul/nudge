@@ -3306,6 +3306,370 @@ static void test_feature_ids()
 	}
 }
 
+// ============================================================================
+// Island sleep system tests.
+
+// Helper: check if a body is in a sleeping island.
+static int body_is_sleeping(World w, Body body)
+{
+	WorldInternal* wi = (WorldInternal*)w.id;
+	int idx = handle_index(body);
+	int isl = wi->body_cold[idx].island_id;
+	if (isl < 0) return 0;
+	if (!(wi->island_gen[isl] & 1)) return 0;
+	return !wi->islands[isl].awake;
+}
+
+// Helper: get body's island id (-1 if none).
+static int body_island_id(World w, Body body)
+{
+	WorldInternal* wi = (WorldInternal*)w.id;
+	return wi->body_cold[handle_index(body)].island_id;
+}
+
+// Two boxes stacked on a floor should go to sleep after settling.
+static void test_sleep_stacked_boxes()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body box_a = create_body(w, (BodyParams){
+		.position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box_a, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+	Body box_b = create_body(w, (BodyParams){
+		.position = V3(0, 1.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box_b, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	// Run until settled (6 seconds)
+	step_n(w, 360);
+
+	TEST_BEGIN("sleep: stacked boxes form same island");
+	int isl_a = body_island_id(w, box_a);
+	int isl_b = body_island_id(w, box_b);
+	TEST_ASSERT(isl_a >= 0);
+	TEST_ASSERT(isl_a == isl_b);
+
+	TEST_BEGIN("sleep: stacked boxes go to sleep");
+	TEST_ASSERT(body_is_sleeping(w, box_a));
+	TEST_ASSERT(body_is_sleeping(w, box_b));
+
+	TEST_BEGIN("sleep: sleeping bodies have near-zero velocity");
+	WorldInternal* wi = (WorldInternal*)w.id;
+	float va = len(wi->body_hot[handle_index(box_a)].velocity);
+	float vb = len(wi->body_hot[handle_index(box_b)].velocity);
+	TEST_ASSERT(va < 1e-6f);
+	TEST_ASSERT(vb < 1e-6f);
+
+	destroy_world(w);
+}
+
+// Dropping a body onto a sleeping stack should wake it.
+static void test_sleep_wake_on_impact()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body resting = create_body(w, (BodyParams){
+		.position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, resting, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	// Let it settle and sleep
+	step_n(w, 360);
+	TEST_BEGIN("sleep wake: box is asleep before impact");
+	TEST_ASSERT(body_is_sleeping(w, resting));
+
+	// Drop another box from above
+	Body dropper = create_body(w, (BodyParams){
+		.position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, dropper, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	// Step a few frames so the dropper falls and collides
+	step_n(w, 60);
+
+	TEST_BEGIN("sleep wake: resting box wakes on impact");
+	TEST_ASSERT(!body_is_sleeping(w, resting));
+
+	destroy_world(w);
+}
+
+// body_wake API wakes a sleeping body's island.
+static void test_sleep_body_wake_api()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body box = create_body(w, (BodyParams){
+		.position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	step_n(w, 360);
+	TEST_BEGIN("sleep body_wake: box asleep before wake call");
+	TEST_ASSERT(body_is_sleeping(w, box));
+
+	body_wake(w, box);
+	TEST_BEGIN("sleep body_wake: box awake after wake call");
+	TEST_ASSERT(!body_is_sleeping(w, box));
+
+	destroy_world(w);
+}
+
+// body_set_velocity wakes a sleeping body.
+static void test_sleep_set_velocity_wakes()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body box = create_body(w, (BodyParams){
+		.position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	step_n(w, 360);
+	TEST_BEGIN("sleep set_velocity: box asleep");
+	TEST_ASSERT(body_is_sleeping(w, box));
+
+	body_set_velocity(w, box, V3(5, 0, 0));
+	TEST_BEGIN("sleep set_velocity: box awake after set_velocity");
+	TEST_ASSERT(!body_is_sleeping(w, box));
+
+	destroy_world(w);
+}
+
+// Static bodies never get island_id.
+static void test_sleep_static_no_island()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body box = create_body(w, (BodyParams){
+		.position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	step_n(w, 60);
+
+	TEST_BEGIN("sleep: static body has no island");
+	TEST_ASSERT(body_island_id(w, floor) == -1);
+
+	TEST_BEGIN("sleep: dynamic body touching static has island");
+	TEST_ASSERT(body_island_id(w, box) >= 0);
+
+	destroy_world(w);
+}
+
+// Destroying a body removes it from its island.
+static void test_sleep_destroy_body_removes_from_island()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body box_a = create_body(w, (BodyParams){
+		.position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box_a, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+	Body box_b = create_body(w, (BodyParams){
+		.position = V3(0, 1.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box_b, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	step_n(w, 60);
+	int isl = body_island_id(w, box_a);
+	TEST_BEGIN("sleep destroy: bodies share island before destroy");
+	TEST_ASSERT(isl >= 0);
+	TEST_ASSERT(body_island_id(w, box_b) == isl);
+
+	// Destroy one body; the other should still be in its island
+	destroy_body(w, box_b);
+
+	TEST_BEGIN("sleep destroy: remaining body still has island");
+	TEST_ASSERT(body_island_id(w, box_a) >= 0);
+
+	// Continue stepping -- should not crash
+	step_n(w, 60);
+
+	TEST_BEGIN("sleep destroy: simulation stable after body destroy");
+	v3 pos = body_get_position(w, box_a);
+	TEST_ASSERT(is_valid(pos));
+
+	destroy_world(w);
+}
+
+// Joint-connected bodies share an island; destroying the joint allows splitting.
+static void test_sleep_joint_creates_island()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body anchor = create_body(w, (BodyParams){
+		.position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, anchor, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
+	});
+	Body bob = create_body(w, (BodyParams){
+		.position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, bob, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.2f,
+	});
+
+	Joint j = create_ball_socket(w, (BallSocketParams){
+		.body_a = anchor, .body_b = bob,
+		.local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0, 0),
+	});
+
+	TEST_BEGIN("sleep joint: bob gets island from joint");
+	TEST_ASSERT(body_island_id(w, bob) >= 0);
+
+	TEST_BEGIN("sleep joint: static anchor has no island");
+	TEST_ASSERT(body_island_id(w, anchor) == -1);
+
+	// Destroy joint, step -- bob should still function
+	destroy_joint(w, j);
+	step_n(w, 60);
+
+	TEST_BEGIN("sleep joint: simulation stable after joint destroy");
+	v3 pos = body_get_position(w, bob);
+	TEST_ASSERT(is_valid(pos));
+
+	destroy_world(w);
+}
+
+// Two separate groups that never touch should be in different islands.
+static void test_sleep_separate_islands()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
+	});
+
+	// Group A: far left
+	Body a = create_body(w, (BodyParams){
+		.position = V3(-20, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, a, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	// Group B: far right
+	Body b = create_body(w, (BodyParams){
+		.position = V3(20, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, b, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	step_n(w, 360);
+
+	TEST_BEGIN("sleep separate: both bodies asleep");
+	TEST_ASSERT(body_is_sleeping(w, a));
+	TEST_ASSERT(body_is_sleeping(w, b));
+
+	TEST_BEGIN("sleep separate: bodies in different islands");
+	TEST_ASSERT(body_island_id(w, a) != body_island_id(w, b));
+
+	destroy_world(w);
+}
+
+// Waking one body in a sleeping island wakes all bodies in that island.
+static void test_sleep_wake_wakes_whole_island()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body box_a = create_body(w, (BodyParams){
+		.position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box_a, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+	Body box_b = create_body(w, (BodyParams){
+		.position = V3(0, 1.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box_b, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	step_n(w, 360);
+	TEST_BEGIN("sleep wake island: both asleep");
+	TEST_ASSERT(body_is_sleeping(w, box_a));
+	TEST_ASSERT(body_is_sleeping(w, box_b));
+
+	// Wake just one body -- both should wake
+	body_wake(w, box_a);
+	TEST_BEGIN("sleep wake island: waking one wakes both");
+	TEST_ASSERT(!body_is_sleeping(w, box_a));
+	TEST_ASSERT(!body_is_sleeping(w, box_b));
+
+	destroy_world(w);
+}
+
+static void run_sleep_tests()
+{
+	printf("--- nudge sleep system tests ---\n");
+	test_sleep_stacked_boxes();
+	test_sleep_wake_on_impact();
+	test_sleep_body_wake_api();
+	test_sleep_set_velocity_wakes();
+	test_sleep_static_no_island();
+	test_sleep_destroy_body_removes_from_island();
+	test_sleep_joint_creates_island();
+	test_sleep_separate_islands();
+	test_sleep_wake_wakes_whole_island();
+}
+
 static void run_tests()
 {
 	test_pass = 0;
@@ -3341,6 +3705,7 @@ static void run_tests()
 	run_solver_tests();
 	run_bvh_tests();
 	test_feature_ids();
+	run_sleep_tests();
 
 	printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	if (test_fail > 0) printf("*** FAILURES ***\n");

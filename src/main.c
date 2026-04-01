@@ -95,35 +95,57 @@ int main(int argc, char* argv[])
 }
 
 // -----------------------------------------------------------------------------
-// App implementation -- test scene with all shape types.
+// App implementation
 
 static World g_world;
-static Body g_floor;
-static Body g_sphere;
-static Body g_capsule;
-static Body g_box;
-static Body g_hull_body;
 static Hull* g_test_hull;
 static int g_mesh_capsule;
 static int g_mesh_hull;
 static bool g_show_contacts = true;
 static bool g_show_joints = true;
 static bool g_show_bvh = true;
+static bool g_show_sleep = true;
+static bool g_sleep_enabled = true;
+static int g_friction_model = FRICTION_PATCH;
 static bool g_paused = false;
 static bool g_step_once = false;
-
-// Pendulum chain (ball sockets)
-#define CHAIN_LEN 5
-static Body g_chain[CHAIN_LEN];
-
-// Spring pair (distance joint)
-static Body g_spring_a, g_spring_b;
 
 // Capsule rendering params (baked into mesh)
 static const float CAP_RADIUS = 0.3f;
 static const float CAP_HALF_H = 0.5f;
 
+// Scene system: each scene has a name, setup, and optional extra draw (joints etc.)
+typedef struct DrawEntry { Body body; int mesh; v3 scale; v3 color; } DrawEntry;
+static DrawEntry* g_draw_list; // ckit dynamic array
+
+typedef struct Scene {
+	const char* name;
+	void (*setup)();
+	void (*draw_extras)();
+} Scene;
+
+static int g_scene_index = 0;
+
+// Scene-specific globals (shape showcase)
+#define CHAIN_LEN 5
+static Body g_chain[CHAIN_LEN];
+static Body g_spring_a, g_spring_b;
+
+// Forward declarations
 static void setup_scene();
+static void scene_showcase_setup();
+static void scene_showcase_draw_extras();
+static void scene_pyramid_setup();
+static void scene_stacks_setup();
+static void scene_friction_setup();
+
+static Scene g_scenes[] = {
+	{ "Shape Showcase",  scene_showcase_setup,  scene_showcase_draw_extras },
+	{ "Box Pyramid",     scene_pyramid_setup,   NULL },
+	{ "Varied Stacks",   scene_stacks_setup,    NULL },
+	{ "Friction Test",   scene_friction_setup,  NULL },
+};
+#define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 
 // Maya-style orbit camera: yaw/pitch angles, quaternion rebuilt each frame.
 // Y-locked: up is always world (0,1,0), no roll.
@@ -217,67 +239,89 @@ void init()
 static void setup_scene()
 {
 	if (g_world.id) destroy_world(g_world);
+	aclear(g_draw_list);
 
 	g_world = create_world((WorldParams){
 		.gravity = V3(0, -9.81f, 0),
 		.broadphase = BROADPHASE_BVH,
 	});
 
-	// Static floor
-	g_floor = create_body(g_world, (BodyParams){
+	((WorldInternal*)g_world.id)->sleep_enabled = g_sleep_enabled;
+	world_set_friction_model(g_world, (FrictionModel)g_friction_model);
+	g_scenes[g_scene_index].setup();
+}
+
+// Helper: create floor and add to draw list
+static Body add_floor()
+{
+	Body floor = create_body(g_world, (BodyParams){
 		.position = V3(0, -1, 0),
 		.rotation = quat_identity(),
 		.mass = 0,
 	});
-	body_add_shape(g_world, g_floor, (ShapeParams){
+	body_add_shape(g_world, floor, (ShapeParams){
 		.type = SHAPE_BOX,
 		.box.half_extents = V3(10, 1, 10),
 	});
+	apush(g_draw_list, ((DrawEntry){ floor, MESH_BOX, V3(10, 1, 10), V3(0.4f, 0.4f, 0.45f) }));
+	return floor;
+}
+
+// ---------------------------------------------------------------------------
+// Scene: Shape Showcase (all shape types, chain, spring)
+// ---------------------------------------------------------------------------
+static void scene_showcase_setup()
+{
+	add_floor();
 
 	// Dynamic sphere (bouncy)
-	g_sphere = create_body(g_world, (BodyParams){
+	Body sphere = create_body(g_world, (BodyParams){
 		.position = V3(-3, 5, 0),
 		.rotation = quat_identity(),
 		.mass = 1.0f,
 		.restitution = 0.5f,
 	});
-	body_add_shape(g_world, g_sphere, (ShapeParams){
+	body_add_shape(g_world, sphere, (ShapeParams){
 		.type = SHAPE_SPHERE,
 		.sphere.radius = 0.5f,
 	});
+	apush(g_draw_list, ((DrawEntry){ sphere, MESH_SPHERE, V3(0.5f, 0.5f, 0.5f), V3(0.9f, 0.3f, 0.2f) }));
 
 	// Dynamic capsule
-	g_capsule = create_body(g_world, (BodyParams){
+	Body capsule = create_body(g_world, (BodyParams){
 		.position = V3(-1, 6, 0),
 		.rotation = quat_identity(),
 		.mass = 1.0f,
 	});
-	body_add_shape(g_world, g_capsule, (ShapeParams){
+	body_add_shape(g_world, capsule, (ShapeParams){
 		.type = SHAPE_CAPSULE,
 		.capsule = { .half_height = CAP_HALF_H, .radius = CAP_RADIUS },
 	});
+	apush(g_draw_list, ((DrawEntry){ capsule, g_mesh_capsule, V3(1, 1, 1), V3(0.2f, 0.8f, 0.3f) }));
 
 	// Dynamic box
-	g_box = create_body(g_world, (BodyParams){
+	Body box = create_body(g_world, (BodyParams){
 		.position = V3(1, 7, 0),
 		.rotation = quat_identity(),
 		.mass = 1.0f,
 	});
-	body_add_shape(g_world, g_box, (ShapeParams){
+	body_add_shape(g_world, box, (ShapeParams){
 		.type = SHAPE_BOX,
 		.box.half_extents = V3(0.4f, 0.4f, 0.4f),
 	});
+	apush(g_draw_list, ((DrawEntry){ box, MESH_BOX, V3(0.4f, 0.4f, 0.4f), V3(0.3f, 0.5f, 0.9f) }));
 
 	// Dynamic hull
-	g_hull_body = create_body(g_world, (BodyParams){
+	Body hull_body = create_body(g_world, (BodyParams){
 		.position = V3(3, 8, 0),
 		.rotation = quat_identity(),
 		.mass = 1.0f,
 	});
-	body_add_shape(g_world, g_hull_body, (ShapeParams){
+	body_add_shape(g_world, hull_body, (ShapeParams){
 		.type = SHAPE_HULL,
 		.hull = { .hull = g_test_hull, .scale = V3(1, 1, 1) },
 	});
+	apush(g_draw_list, ((DrawEntry){ hull_body, g_mesh_hull, V3(1, 1, 1), V3(0.9f, 0.7f, 0.2f) }));
 
 	// --- Pendulum chain (ball sockets) ---
 	Body anchor = create_body(g_world, (BodyParams){
@@ -308,6 +352,7 @@ static void setup_scene()
 			.local_offset_a = V3(0, -link_len * 0.5f, 0),
 			.local_offset_b = V3(0,  link_len * 0.5f, 0),
 		});
+		apush(g_draw_list, ((DrawEntry){ g_chain[i], MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.8f, 0.4f, 0.9f) }));
 		prev = g_chain[i];
 	}
 
@@ -336,6 +381,140 @@ static void setup_scene()
 		.rest_length = 0,
 		.spring = { .frequency = 3.0f, .damping_ratio = 0.3f },
 	});
+	apush(g_draw_list, ((DrawEntry){ g_spring_a, MESH_BOX, V3(0.3f, 0.3f, 0.3f), V3(0.2f, 0.7f, 0.9f) }));
+	apush(g_draw_list, ((DrawEntry){ g_spring_b, MESH_SPHERE, V3(0.15f, 0.15f, 0.15f), V3(0.7f, 0.7f, 0.7f) }));
+}
+
+static void scene_showcase_draw_extras()
+{
+	if (!g_show_joints) return;
+	v3 jcol = V3(1.0f, 0.4f, 0.1f);
+	for (int i = 0; i < CHAIN_LEN; i++) {
+		v3 p = body_get_position(g_world, g_chain[i]);
+		v3 above = i == 0 ? V3(0, 8, -4) : body_get_position(g_world, g_chain[i-1]);
+		render_debug_line(above, p, jcol);
+	}
+	v3 sa = body_get_position(g_world, g_spring_a);
+	v3 sb = body_get_position(g_world, g_spring_b);
+	render_debug_line(sa, sb, V3(0.1f, 0.9f, 1.0f));
+}
+
+// ---------------------------------------------------------------------------
+// Scene: Box Pyramid
+// ---------------------------------------------------------------------------
+static void scene_pyramid_setup()
+{
+	add_floor();
+
+	float box_size = 0.5f; // half-extent
+	float spacing = 1.05f;
+	int base = 5;
+	v3 colors[] = { V3(0.9f, 0.3f, 0.2f), V3(0.9f, 0.6f, 0.2f), V3(0.9f, 0.9f, 0.3f), V3(0.3f, 0.8f, 0.3f), V3(0.3f, 0.5f, 0.9f) };
+
+	for (int layer = 0; layer < base; layer++) {
+		int count = base - layer;
+		float offset = -(count - 1) * 0.5f * spacing;
+		float y = box_size + layer * spacing;
+		v3 col = colors[layer % 5];
+		for (int r = 0; r < count; r++) {
+			for (int c = 0; c < count; c++) {
+				Body b = create_body(g_world, (BodyParams){
+					.position = V3(offset + c * spacing, y, offset + r * spacing),
+					.rotation = quat_identity(),
+					.mass = 1.0f,
+				});
+				body_add_shape(g_world, b, (ShapeParams){
+					.type = SHAPE_BOX,
+					.box.half_extents = V3(box_size, box_size, box_size),
+				});
+				apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(box_size, box_size, box_size), col }));
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scene: Varied Stacks (columns of boxes with different heights)
+// ---------------------------------------------------------------------------
+static void scene_stacks_setup()
+{
+	add_floor();
+
+	v3 col_colors[] = { V3(0.9f, 0.3f, 0.2f), V3(0.2f, 0.8f, 0.3f), V3(0.3f, 0.5f, 0.9f), V3(0.9f, 0.7f, 0.2f), V3(0.8f, 0.3f, 0.8f) };
+	float col_x[] = { -4.0f, -2.0f, 0.0f, 2.0f, 4.0f };
+	float heights[][6] = {
+		{ 0.3f, 0.5f, 0.2f, 0.8f, 0.4f, 0.0f },
+		{ 0.6f, 0.3f, 0.6f, 0.3f, 0.0f, 0.0f },
+		{ 0.2f, 0.2f, 0.7f, 0.2f, 0.5f, 0.3f },
+		{ 0.8f, 0.4f, 0.4f, 0.0f, 0.0f, 0.0f },
+		{ 0.3f, 0.3f, 0.3f, 0.3f, 0.3f, 0.3f },
+	};
+	float half_w = 0.45f;
+
+	for (int col = 0; col < 5; col++) {
+		float y = 0.0f;
+		for (int row = 0; row < 6; row++) {
+			float h = heights[col][row];
+			if (h == 0.0f) break;
+			y += h; // y at center of this box
+			Body b = create_body(g_world, (BodyParams){
+				.position = V3(col_x[col], y, 0),
+				.rotation = quat_identity(),
+				.mass = 1.0f,
+			});
+			body_add_shape(g_world, b, (ShapeParams){
+				.type = SHAPE_BOX,
+				.box.half_extents = V3(half_w, h, half_w),
+			});
+			apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(half_w, h, half_w), col_colors[col] }));
+			y += h; // y at top of this box
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scene: Friction Test -- rows of boxes with varying initial velocities.
+// Row 0: linear slide (increasing speed along +X)
+// Row 1: spin-only (angular velocity around Y, no linear)
+// Row 2: combined linear + spin
+// ---------------------------------------------------------------------------
+static void scene_friction_setup()
+{
+	add_floor();
+
+	float half = 0.4f;
+	v3 colors[] = {
+		V3(0.9f, 0.4f, 0.2f), V3(0.8f, 0.6f, 0.2f), V3(0.6f, 0.8f, 0.2f),
+		V3(0.2f, 0.8f, 0.4f), V3(0.2f, 0.6f, 0.8f), V3(0.4f, 0.3f, 0.9f),
+	};
+	int ncols = 6;
+
+	for (int row = 0; row < 3; row++) {
+		float z = (row - 1) * 3.0f;
+		for (int col = 0; col < ncols; col++) {
+			float x = (col - (ncols - 1) * 0.5f) * 2.0f;
+			Body b = create_body(g_world, (BodyParams){
+				.position = V3(x, half, z),
+				.rotation = quat_identity(),
+				.mass = 1.0f,
+			});
+			body_add_shape(g_world, b, (ShapeParams){
+				.type = SHAPE_BOX,
+				.box.half_extents = V3(half, half, half),
+			});
+			apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(half, half, half), colors[col] }));
+
+			float speed = (col + 1) * 1.5f;
+			if (row == 0)
+				body_set_velocity(g_world, b, V3(speed, 0, 0));
+			else if (row == 1)
+				body_set_angular_velocity(g_world, b, V3(0, speed * 3.0f, 0));
+			else {
+				body_set_velocity(g_world, b, V3(speed, 0, 0));
+				body_set_angular_velocity(g_world, b, V3(0, speed * 2.0f, 0));
+			}
+		}
+	}
 }
 
 void update()
@@ -355,17 +534,59 @@ void update()
 
 	// Debug panel
 	ImGui_Begin("Debug", NULL, 0);
-	if (ImGui_Button("Restart scene")) setup_scene();
+
+	// Scene selector -- fixed-width name so > button doesn't shift
+	ImGui_SeparatorText("Scene");
+	if (ImGui_Button("<<")) { g_scene_index = (g_scene_index + SCENE_COUNT - 1) % SCENE_COUNT; setup_scene(); }
+	ImGui_SameLine();
+	ImGui_Text("%-18s", g_scenes[g_scene_index].name);
+	ImGui_SameLine();
+	if (ImGui_Button(">>")) { g_scene_index = (g_scene_index + 1) % SCENE_COUNT; setup_scene(); }
+	if (ImGui_Button("Restart")) setup_scene();
+	ImGui_SameLine();
 	ImGui_Checkbox("Pause", &g_paused);
-	if (g_paused && ImGui_Button("Step")) g_step_once = true;
-	ImGui_Checkbox("Show contacts", &g_show_contacts);
-	ImGui_Checkbox("Show joints", &g_show_joints);
-	ImGui_Checkbox("Show BVH", &g_show_bvh);
+	if (g_paused) { ImGui_SameLine(); if (ImGui_Button("Step")) g_step_once = true; }
+
+	// Resolve after scene buttons -- setup_scene() may destroy/recreate the world
+	WorldInternal* dbg_w = (WorldInternal*)g_world.id;
+
+	// Systems
+	ImGui_SeparatorText("Systems");
+	if (ImGui_Checkbox("Sleep", &g_sleep_enabled)) {
+		dbg_w->sleep_enabled = g_sleep_enabled;
+		if (!g_sleep_enabled) {
+			for (int i = 0; i < asize(dbg_w->islands); i++) {
+				if ((dbg_w->island_gen[i] & 1) && !dbg_w->islands[i].awake)
+					island_wake(dbg_w, i);
+			}
+		}
+	}
+	if (ImGui_Combo("Friction", &g_friction_model, "Coulomb\0Patch\0"))
+		world_set_friction_model(g_world, (FrictionModel)g_friction_model);
+
+	// Visualization
+	ImGui_SeparatorText("Visualization");
+	ImGui_Checkbox("Contacts", &g_show_contacts);
+	ImGui_Checkbox("Joints", &g_show_joints);
+	ImGui_Checkbox("BVH", &g_show_bvh);
+	ImGui_Checkbox("Sleeping bodies", &g_show_sleep);
+
+	// Stats
+	ImGui_SeparatorText("Stats");
 	const Contact* contacts;
 	int ncontacts = world_get_contacts(g_world, &contacts);
-	WorldInternal* dbg_w = (WorldInternal*)g_world.id;
 	ImGui_Text("Broadphase: %s", dbg_w->broadphase_type == BROADPHASE_BVH ? "BVH" : "N^2");
 	ImGui_Text("Contacts: %d", ncontacts);
+	{
+		int n_islands = 0, n_sleeping = 0;
+		for (int i = 0; i < asize(dbg_w->islands); i++) {
+			if (!(dbg_w->island_gen[i] & 1)) continue;
+			n_islands++;
+			if (!dbg_w->islands[i].awake) n_sleeping++;
+		}
+		ImGui_Text("Islands: %d (%d sleeping)", n_islands, n_sleeping);
+	}
+	ImGui_Text("Bodies: %d", asize(g_draw_list));
 	ImGui_End();
 }
 
@@ -373,7 +594,12 @@ static void draw_body_mesh(int mesh, Body body, v3 sc, v3 color)
 {
 	v3 pos = body_get_position(g_world, body);
 	quat rot = body_get_rotation(g_world, body);
-	render_push(mesh, mat4_trs(pos, rot, sc), color, 1.0f);
+	float opacity = 1.0f;
+	if (g_show_sleep && body_is_asleep(g_world, body)) {
+		color = V3(0.3f, 0.35f, 0.5f); // desaturated blue tint
+		opacity = 0.6f;
+	}
+	render_push(mesh, mat4_trs(pos, rot, sc), color, opacity);
 }
 
 static void draw_aabb_wireframe(v3 lo, v3 hi, v3 color)
@@ -427,36 +653,14 @@ void draw()
 		}
 	}
 
-	draw_body_mesh(MESH_BOX,      g_floor,     V3(10, 1, 10),           V3(0.4f, 0.4f, 0.45f));
-	draw_body_mesh(MESH_SPHERE,   g_sphere,    V3(0.5f, 0.5f, 0.5f),   V3(0.9f, 0.3f, 0.2f));
-	draw_body_mesh(g_mesh_capsule,g_capsule,   V3(1, 1, 1),            V3(0.2f, 0.8f, 0.3f));
-	draw_body_mesh(MESH_BOX,      g_box,       V3(0.4f, 0.4f, 0.4f),  V3(0.3f, 0.5f, 0.9f));
-	draw_body_mesh(g_mesh_hull,   g_hull_body, V3(1, 1, 1),            V3(0.9f, 0.7f, 0.2f));
-
-	// Pendulum chain bodies
-	for (int i = 0; i < CHAIN_LEN; i++)
-		draw_body_mesh(MESH_SPHERE, g_chain[i], V3(0.2f,0.2f,0.2f), V3(0.8f,0.4f,0.9f));
-
-	// Spring bodies
-	draw_body_mesh(MESH_BOX,    g_spring_a, V3(0.3f,0.3f,0.3f), V3(0.2f,0.7f,0.9f));
-	draw_body_mesh(MESH_SPHERE, g_spring_b, V3(0.15f,0.15f,0.15f), V3(0.7f,0.7f,0.7f));
-
-	// Joint visualization: lines between connected bodies
-	if (g_show_joints) {
-		v3 jcol = V3(1.0f, 0.4f, 0.1f);
-		// Chain links
-		for (int i = 0; i < CHAIN_LEN; i++) {
-			v3 p = body_get_position(g_world, g_chain[i]);
-			v3 above = i == 0
-				? V3(0, 8, -4) // static anchor position
-				: body_get_position(g_world, g_chain[i-1]);
-			render_debug_line(above, p, jcol);
-		}
-		// Distance spring
-		v3 sa = body_get_position(g_world, g_spring_a);
-		v3 sb = body_get_position(g_world, g_spring_b);
-		render_debug_line(sa, sb, V3(0.1f, 0.9f, 1.0f));
+	// Draw all bodies from scene draw list
+	for (int i = 0; i < asize(g_draw_list); i++) {
+		DrawEntry* e = &g_draw_list[i];
+		draw_body_mesh(e->mesh, e->body, e->scale, e->color);
 	}
+
+	// Scene-specific extras (joint lines, etc.)
+	if (g_scenes[g_scene_index].draw_extras) g_scenes[g_scene_index].draw_extras();
 
 	// Debug: contact points and normals
 	if (g_show_contacts) {
