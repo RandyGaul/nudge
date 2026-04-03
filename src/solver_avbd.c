@@ -8,6 +8,14 @@ static int avbd_body_is_sleeping(WorldInternal* w, int idx)
 	return isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake;
 }
 
+// Adaptive alpha: scale stabilization by constraint error magnitude.
+// Small error (drift): alpha_eff ≈ alpha (gentle correction, prevents jitter).
+// Large error (violated): alpha_eff → 0 (fast snap to satisfied).
+static float avbd_adaptive_alpha(float alpha, float err_magnitude)
+{
+	return alpha * fminf(1.0f, AVBD_STABLE_THRESH / fmaxf(err_magnitude, 1e-6f));
+}
+
 // Build separate CSR adjacency for contacts and joints (no type tag = no branch in inner loop).
 static void avbd_build_adjacency(WorldInternal* w, AVBD_Manifold* am, int am_count, int body_count, int** out_ct_start, AVBD_ContactAdj** out_ct_adj, int** out_jt_start, AVBD_JointAdj** out_jt_adj)
 {
@@ -75,7 +83,7 @@ static void avbd_build_adjacency(WorldInternal* w, AVBD_Manifold* am, int am_cou
 }
 
 // Build AVBD manifolds from collision output. Warm-start lambda/penalty from cache.
-static void avbd_pre_solve(WorldInternal* w, InternalManifold* manifolds, int count, AVBD_Manifold** out_am)
+static void avbd_pre_solve(WorldInternal* w, InternalManifold* manifolds, int count, AVBD_Manifold** out_am, float dt)
 {
 	CK_DYNA AVBD_Manifold* am = NULL;
 	float alpha = w->avbd_alpha;
@@ -115,30 +123,36 @@ static void avbd_pre_solve(WorldInternal* w, InternalManifold* manifolds, int co
 			v3 diff = sub(xA_world, xB_world);
 			ac->C0 = V3(dot(n, diff) + AVBD_MARGIN, dot(t1, diff), dot(t2, diff));
 
-			ac->penalty = V3(AVBD_PENALTY_MIN, AVBD_PENALTY_MIN, AVBD_PENALTY_MIN);
+			// Inertia-scaled initial penalty so first-frame forces are meaningful
+			float inv_m = fmaxf(a->inv_mass, b->inv_mass);
+			float pen_floor = inv_m > 0.0f ? 0.1f / (inv_m * dt * dt) : AVBD_PENALTY_MIN;
+			ac->penalty = V3(pen_floor, pen_floor, pen_floor);
 			ac->lambda = V3(0, 0, 0);
 			ac->stick = 0;
 
 			if (wm) {
-				int matched = 0;
-				for (int j = 0; j < wm->count && !matched; j++) {
-					if (ac->feature_id != 0 && ac->feature_id == wm->contacts[j].feature_id) {
-						ac->penalty = wm->contacts[j].penalty;
-						ac->lambda = wm->contacts[j].lambda;
-						ac->stick = wm->contacts[j].stick;
-						matched = 1;
-					}
+				int matched = -1;
+				for (int j = 0; j < wm->count && matched < 0; j++) {
+					if (ac->feature_id != 0 && ac->feature_id == wm->contacts[j].feature_id)
+						matched = j;
 				}
-				if (!matched) {
-					float best_d2 = 0.01f; int best = -1;
+				if (matched < 0) {
+					float best_d2 = 0.01f;
 					for (int j = 0; j < wm->count; j++) {
 						float d2 = len2(sub(ac->r_a, wm->contacts[j].r_a));
-						if (d2 < best_d2) { best_d2 = d2; best = j; }
+						if (d2 < best_d2) { best_d2 = d2; matched = j; }
 					}
-					if (best >= 0) {
-						ac->penalty = wm->contacts[best].penalty;
-						ac->lambda = wm->contacts[best].lambda;
-						ac->stick = wm->contacts[best].stick;
+				}
+				if (matched >= 0) {
+					AVBD_WarmContact* wc = &wm->contacts[matched];
+					ac->penalty = wc->penalty;
+					ac->lambda = wc->lambda;
+					ac->stick = wc->stick;
+					// Static friction: preserve contact geometry from previous frame
+					// so the contact anchor doesn't slide (Giles manifold.cpp pattern).
+					if (wc->stick) {
+						ac->r_a = wc->r_a;
+						ac->r_b = wc->r_b;
 					}
 				}
 				ac->lambda = scale(ac->lambda, alpha * gamma);
@@ -152,8 +166,9 @@ static void avbd_pre_solve(WorldInternal* w, InternalManifold* manifolds, int co
 	*out_am = am;
 }
 
-static void avbd_joints_pre_solve(WorldInternal* w, float alpha, float gamma)
+static void avbd_joints_pre_solve(WorldInternal* w, float alpha, float gamma, float dt)
 {
+	float dt2 = dt * dt;
 	int count = asize(w->joints);
 	for (int i = 0; i < count; i++) {
 		if (!split_alive(w->joint_gen, i)) continue;
@@ -175,10 +190,24 @@ static void avbd_joints_pre_solve(WorldInternal* w, float alpha, float gamma)
 			j->avbd_C0_lin = scale(axis, err);
 		}
 
+		// Inertia-scaled initial penalty: use lighter body's inertia as baseline.
+		// Ensures penalty is immediately meaningful vs body mass.
+		float inv_m = fmaxf(a->inv_mass, b->inv_mass); // lighter body dominates
+		float inertia_floor = inv_m > 0.0f ? 0.1f / (inv_m * dt2) : AVBD_PENALTY_MIN;
+
+		// Clamp penalty to material stiffness for spring joints (prevents over-stiffening).
+		// Rigid joints (frequency=0) have infinite stiffness — no cap.
+		float spring_freq = j->type == JOINT_BALL_SOCKET ? j->ball_socket.spring.frequency : j->distance.spring.frequency;
+		float stiffness_cap = AVBD_PENALTY_MAX;
+		if (spring_freq > 0.0f) {
+			float omega = 2.0f * 3.14159265f * spring_freq;
+			stiffness_cap = omega * omega;
+		}
+
 		j->avbd_lambda_lin = scale(j->avbd_lambda_lin, alpha * gamma);
-		j->avbd_penalty_lin.x = fmaxf(AVBD_PENALTY_MIN, fminf(j->avbd_penalty_lin.x * gamma, AVBD_PENALTY_MAX));
-		j->avbd_penalty_lin.y = fmaxf(AVBD_PENALTY_MIN, fminf(j->avbd_penalty_lin.y * gamma, AVBD_PENALTY_MAX));
-		j->avbd_penalty_lin.z = fmaxf(AVBD_PENALTY_MIN, fminf(j->avbd_penalty_lin.z * gamma, AVBD_PENALTY_MAX));
+		j->avbd_penalty_lin.x = fmaxf(inertia_floor, fminf(j->avbd_penalty_lin.x * gamma, stiffness_cap));
+		j->avbd_penalty_lin.y = fmaxf(inertia_floor, fminf(j->avbd_penalty_lin.y * gamma, stiffness_cap));
+		j->avbd_penalty_lin.z = fmaxf(inertia_floor, fminf(j->avbd_penalty_lin.z * gamma, stiffness_cap));
 	}
 }
 
@@ -193,7 +222,7 @@ static void avbd_post_solve(WorldInternal* w, AVBD_Manifold* am, int am_count)
 		for (int c = 0; c < m->contact_count; c++) {
 			AVBD_Contact* ac = &m->contacts[c];
 			wm.contacts[c] = (AVBD_WarmContact){
-				.feature_id = ac->feature_id, .r_a = ac->r_a,
+				.feature_id = ac->feature_id, .r_a = ac->r_a, .r_b = ac->r_b,
 				.penalty = ac->penalty, .lambda = ac->lambda, .stick = ac->stick,
 			};
 		}
@@ -268,6 +297,25 @@ static void avbd_stamp_contact(AVBD_Manifold* m, AVBD_Contact* ac, int is_body_a
 				lhsCross->m[ri*3+ci] += (&jA[r].x)[ri] * (&jL[r].x)[ci] * kk;
 			}
 	}
+
+	// Geometric stiffness for contacts (Sec 3.5): diagonal approximation of
+	// higher-order Hessian. Accounts for contact offset rotating with body.
+	{
+		v3 r = is_body_a ? rAW : neg(rBW);
+		float H[9] = {0};
+		for (int k = 0; k < 3; k++) {
+			float fk = F[k];
+			for (int ri = 0; ri < 3; ri++)
+				for (int ci = 0; ci < 3; ci++) {
+					float val = (ri == ci ? -(&r.x)[k] : 0.0f) + (ci == k ? (&r.x)[ri] : 0.0f);
+					H[ri*3+ci] += val * fk;
+				}
+		}
+		for (int ci = 0; ci < 3; ci++) {
+			float col_len = sqrtf(H[0*3+ci]*H[0*3+ci] + H[1*3+ci]*H[1*3+ci] + H[2*3+ci]*H[2*3+ci]);
+			lhsAng->m[ci*3+ci] += col_len;
+		}
+	}
 }
 
 // Stamp a ball-socket joint into the per-body 6x6 system.
@@ -277,8 +325,10 @@ static void avbd_stamp_ball_socket(JointInternal* j, BodyHot* a, BodyHot* b, int
 	v3 rBW = rotate(b->rotation, j->ball_socket.local_b);
 
 	v3 C_vec = sub(add(a->position, rAW), add(b->position, rBW));
-	if (j->ball_socket.spring.frequency <= 0.0f)
-		C_vec = sub(C_vec, scale(j->avbd_C0_lin, alpha));
+	if (j->ball_socket.spring.frequency <= 0.0f) {
+		float aa = avbd_adaptive_alpha(alpha, len(j->avbd_C0_lin));
+		C_vec = sub(C_vec, scale(j->avbd_C0_lin, aa));
+	}
 
 	v3 K = j->avbd_penalty_lin;
 	v3 F = add(hmul(K, C_vec), j->avbd_lambda_lin);
@@ -342,7 +392,8 @@ static void avbd_stamp_distance(JointInternal* j, BodyHot* a, BodyHot* b, int is
 	if (j->distance.spring.frequency <= 0.0f) {
 		float C0_scalar = len(j->avbd_C0_lin);
 		if (dot(j->avbd_C0_lin, axis) < 0) C0_scalar = -C0_scalar;
-		f_scalar = k * (err - alpha * C0_scalar) + j->avbd_lambda_lin.x;
+		float aa = avbd_adaptive_alpha(alpha, fabsf(C0_scalar));
+		f_scalar = k * (err - aa * C0_scalar) + j->avbd_lambda_lin.x;
 	}
 
 	v3 jLin_vec = is_body_a ? axis : neg(axis);
@@ -484,16 +535,23 @@ static void avbd_joints_dual_step(WorldInternal* w, float alpha)
 			// Lambda update and penalty ramp both use the stabilized C.
 			v3 C = sub(add(a->position, rotate(a->rotation, j->ball_socket.local_a)),
 			           add(b->position, rotate(b->rotation, j->ball_socket.local_b)));
-			if (j->ball_socket.spring.frequency <= 0.0f)
-				C = sub(C, scale(j->avbd_C0_lin, alpha)); // in-place stabilization
+			if (j->ball_socket.spring.frequency <= 0.0f) {
+				float aa = avbd_adaptive_alpha(alpha, len(j->avbd_C0_lin));
+				C = sub(C, scale(j->avbd_C0_lin, aa));
+			}
 			v3 F = add(hmul(j->avbd_penalty_lin, C), j->avbd_lambda_lin);
 			j->avbd_lambda_lin = F;
 
 			v3 absC = V3(fabsf(C.x), fabsf(C.y), fabsf(C.z));
+			float cap = AVBD_PENALTY_MAX;
+			if (j->ball_socket.spring.frequency > 0.0f) {
+				float om = 2.0f * 3.14159265f * j->ball_socket.spring.frequency;
+				cap = om * om;
+			}
 			j->avbd_penalty_lin = V3(
-				fminf(j->avbd_penalty_lin.x + beta_lin * absC.x, AVBD_PENALTY_MAX),
-				fminf(j->avbd_penalty_lin.y + beta_lin * absC.y, AVBD_PENALTY_MAX),
-				fminf(j->avbd_penalty_lin.z + beta_lin * absC.z, AVBD_PENALTY_MAX));
+				fminf(j->avbd_penalty_lin.x + beta_lin * absC.x, cap),
+				fminf(j->avbd_penalty_lin.y + beta_lin * absC.y, cap),
+				fminf(j->avbd_penalty_lin.z + beta_lin * absC.z, cap));
 		} else {
 			v3 d = sub(add(a->position, rotate(a->rotation, j->distance.local_a)),
 			          add(b->position, rotate(b->rotation, j->distance.local_b)));
@@ -504,12 +562,17 @@ static void avbd_joints_dual_step(WorldInternal* w, float alpha)
 				float C0_scalar = len(j->avbd_C0_lin);
 				v3 ax = dist > 1e-6f ? scale(d, 1.0f/dist) : V3(0,1,0);
 				if (dot(j->avbd_C0_lin, ax) < 0) C0_scalar = -C0_scalar;
-				err -= alpha * C0_scalar; // in-place!
+				float aa = avbd_adaptive_alpha(alpha, fabsf(C0_scalar));
+				err -= aa * C0_scalar;
 			}
 			float F = j->avbd_penalty_lin.x * err + j->avbd_lambda_lin.x;
 			j->avbd_lambda_lin.x = F;
-			// Penalty ramp uses stabilized err
-			j->avbd_penalty_lin.x = fminf(j->avbd_penalty_lin.x + beta_lin * fabsf(err), AVBD_PENALTY_MAX);
+			float cap = AVBD_PENALTY_MAX;
+			if (j->distance.spring.frequency > 0.0f) {
+				float om = 2.0f * 3.14159265f * j->distance.spring.frequency;
+				cap = om * om;
+			}
+			j->avbd_penalty_lin.x = fminf(j->avbd_penalty_lin.x + beta_lin * fabsf(err), cap);
 		}
 	}
 }
@@ -525,19 +588,29 @@ static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifo
 	avbd_warm_cache_age_and_evict(w);
 
 	CK_DYNA AVBD_Manifold* am = NULL;
-	avbd_pre_solve(w, manifolds, manifold_count, &am);
+	avbd_pre_solve(w, manifolds, manifold_count, &am, dt);
 	int am_count = asize(am);
 
-	avbd_joints_pre_solve(w, alpha, gamma);
+	avbd_joints_pre_solve(w, alpha, gamma, dt);
 
 	int *ct_start = NULL, *jt_start = NULL;
 	AVBD_ContactAdj* ct_adj = NULL;
 	AVBD_JointAdj* jt_adj = NULL;
 	avbd_build_adjacency(w, am, am_count, body_count, &ct_start, &ct_adj, &jt_start, &jt_adj);
 
+	// Ensure prev_velocity array is big enough
+	if (asize(w->avbd_prev_velocity) < body_count) {
+		afit(w->avbd_prev_velocity, body_count);
+		asetlen(w->avbd_prev_velocity, body_count);
+	}
+
 	CK_DYNA AVBD_BodyState* states = NULL;
 	afit_set(states, body_count);
 	memset(states, 0, body_count * sizeof(AVBD_BodyState));
+
+	float inv_dt = 1.0f / dt;
+	v3 grav = w->gravity;
+	float grav_len = len(grav);
 
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i)) continue;
@@ -548,10 +621,18 @@ static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifo
 		if (h->inv_mass == 0.0f) continue;
 		if (avbd_body_is_sleeping(w, i)) continue;
 
-		states[i].inertial_lin = add(add(h->position, scale(h->velocity, dt)), scale(w->gravity, dt * dt));
+		// Inertial position: y = x + v*dt + g*dt^2
+		states[i].inertial_lin = add(add(h->position, scale(h->velocity, dt)), scale(grav, dt * dt));
 		states[i].inertial_ang = quat_add_dw(h->rotation, scale(h->angular_velocity, dt));
 
-		h->position = add(h->position, scale(h->velocity, dt));
+		// Adaptive body warm-start (VBD paper): use acceleration from previous
+		// frame to predict gravity contribution, giving solver a better starting guess.
+		v3 prev_v = w->avbd_prev_velocity[i];
+		v3 accel = scale(sub(h->velocity, prev_v), inv_dt);
+		float accel_along_grav = grav_len > 0.0f ? dot(accel, scale(grav, 1.0f / grav_len)) : 0.0f;
+		float accel_weight = grav_len > 0.0f ? fmaxf(0.0f, fminf(accel_along_grav / grav_len, 1.0f)) : 0.0f;
+
+		h->position = add(h->position, add(scale(h->velocity, dt), scale(grav, accel_weight * dt * dt)));
 		h->rotation = quat_add_dw(h->rotation, scale(h->angular_velocity, dt));
 	}
 
@@ -561,12 +642,12 @@ static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifo
 		avbd_joints_dual_step(w, alpha);
 	}
 
-	float inv_dt = 1.0f / dt;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i)) continue;
 		BodyHot* h = &w->body_hot[i];
 		if (h->inv_mass == 0.0f) continue;
 		if (avbd_body_is_sleeping(w, i)) continue;
+		w->avbd_prev_velocity[i] = h->velocity; // save for next frame's adaptive warm-start
 		h->velocity = scale(sub(h->position, states[i].initial_lin), inv_dt);
 		h->angular_velocity = scale(quat_sub_angular(h->rotation, states[i].initial_ang), inv_dt);
 	}

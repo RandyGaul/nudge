@@ -51,6 +51,7 @@ void destroy_world(World world)
 	afree(w->debug_contacts);
 	map_free(w->warm_cache);
 	map_free(w->avbd_warm_cache);
+	afree(w->avbd_prev_velocity);
 	bvh_free(w->bvh_static); CK_FREE(w->bvh_static);
 	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
 	split_free(w->body_cold, w->body_hot, w->body_gen, w->body_free);

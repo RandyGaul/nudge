@@ -106,6 +106,7 @@ typedef struct WorldInternal
 	CK_DYNA Contact*     debug_contacts;
 	CK_MAP(WarmManifold) warm_cache;
 	CK_MAP(AVBD_WarmManifold) avbd_warm_cache;
+	CK_DYNA v3* avbd_prev_velocity; // per-body prev velocity for adaptive warm-start
 	// Joints
 	CK_DYNA JointInternal* joints;
 	CK_DYNA uint32_t*      joint_gen;
@@ -252,6 +253,7 @@ typedef struct ConstraintRef
 // -----------------------------------------------------------------------------
 // AVBD (Augmented Vertex Block Descent) solver types.
 
+#define AVBD_STABLE_THRESH 0.05f // adaptive alpha: below this error, use full stabilization
 #define AVBD_PENALTY_MIN  1.0f
 #define AVBD_PENALTY_MAX  1e10f
 #define AVBD_MARGIN       0.0f   // nudge contacts already have margin via LINEAR_SLOP
@@ -297,7 +299,8 @@ typedef struct AVBD_JointAdj
 typedef struct AVBD_WarmContact
 {
 	uint32_t feature_id;
-	v3 r_a;             // for spatial fallback matching
+	v3 r_a;             // body-local contact offset A (also used for spatial matching)
+	v3 r_b;             // body-local contact offset B
 	v3 penalty;
 	v3 lambda;
 	int stick;

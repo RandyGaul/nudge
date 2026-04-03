@@ -343,10 +343,10 @@ static void scene_showcase_setup()
 	float link_len = 1.0f;
 	Body prev = g_chain_anchor;
 	for (int i = 0; i < CHAIN_LEN; i++) {
-		// Hang vertically below anchor — zero initial joint error.
-		// Give a small horizontal push via offset so it swings.
+		// Spawn horizontally from anchor — zero initial joint error.
+		// Gravity swings the chain down.
 		g_chain[i] = create_body(g_world, (BodyParams){
-			.position = V3(0.1f, 8.0f - (i + 1) * link_len, -4),
+			.position = V3((i + 1) * link_len, 8, -4),
 			.rotation = quat_identity(),
 			.mass = 0.5f,
 		});
@@ -357,8 +357,8 @@ static void scene_showcase_setup()
 		create_ball_socket(g_world, (BallSocketParams){
 			.body_a = prev,
 			.body_b = g_chain[i],
-			.local_offset_a = V3(0, -link_len * 0.5f, 0),
-			.local_offset_b = V3(0, link_len * 0.5f, 0),
+			.local_offset_a = V3(link_len * 0.5f, 0, 0),
+			.local_offset_b = V3(-link_len * 0.5f, 0, 0),
 		});
 		apush(g_draw_list, ((DrawEntry){ g_chain[i], MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.8f, 0.4f, 0.9f) }));
 		prev = g_chain[i];
@@ -533,15 +533,15 @@ static void scene_mass_ratio_setup()
 {
 	add_floor();
 
-	float sizes[] = { 0.1f, 0.2f, 0.35f, 0.55f, 0.8f, 1.1f };
-	float masses[] = { 0.2f, 1.0f, 5.0f, 20.0f, 80.0f, 300.0f };
+	float sizes[] = { 0.15f, 0.25f, 0.4f, 0.55f, 0.75f };
+	float masses[] = { 0.5f, 2.0f, 8.0f, 30.0f, 100.0f };
 	v3 colors[] = {
 		V3(0.9f, 0.2f, 0.2f), V3(0.9f, 0.5f, 0.2f), V3(0.9f, 0.8f, 0.2f),
 		V3(0.4f, 0.8f, 0.3f), V3(0.3f, 0.5f, 0.9f), V3(0.5f, 0.3f, 0.9f),
 	};
 	float gap = 0.6f;
 	float y = 0.0f;
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < 5; i++) {
 		float h = sizes[i];
 		y += h + gap;
 		Body b = create_body(g_world, (BodyParams){

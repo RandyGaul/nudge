@@ -2665,6 +2665,109 @@ static void run_solver_tests()
 		TEST_ASSERT(y < 0.7f);
 		destroy_world(w);
 	}
+	// AVBD box-on-floor: test various masses and drop heights
+	{
+		float masses[] = { 0.1f, 0.5f, 1.0f, 5.0f, 10.0f, 50.0f };
+		float heights[] = { 2.0f, 5.0f, 10.0f };
+		float sizes[] = { 0.3f, 0.5f, 1.0f };
+		for (int mi = 0; mi < 6; mi++) {
+			for (int hi = 0; hi < 3; hi++) {
+				for (int si = 0; si < 3; si++) {
+					char buf[128];
+					snprintf(buf, sizeof(buf), "AVBD box settle m=%.1f h=%.0f s=%.1f", masses[mi], heights[hi], sizes[si]);
+					TEST_BEGIN(buf);
+					World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+					Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+					body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+					float hs = sizes[si];
+					Body box = create_body(w, (BodyParams){
+						.position = V3(0, heights[hi], 0), .rotation = quat_identity(), .mass = masses[mi] });
+					body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(hs, hs, hs) });
+					float dt = 1.0f / 60.0f;
+					for (int i = 0; i < 300; i++) world_step(w, dt);
+					float y = body_get_position(w, box).y;
+					if (y < -0.5f)
+						printf("  [AVBD FALL-THROUGH] m=%.1f h=%.0f s=%.1f y=%.3f\n", masses[mi], heights[hi], sizes[si], y);
+					TEST_ASSERT(y > -0.5f); // must not fall through floor
+					destroy_world(w);
+				}
+			}
+		}
+	}
+	// AVBD box stack: multiple boxes stacked
+	{
+		TEST_BEGIN("AVBD 5-box stack");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+		for (int i = 0; i < 5; i++) {
+			Body b = create_body(w, (BodyParams){
+				.position = V3(0, 0.5f + i * 1.1f, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+		}
+		float dt = 1.0f / 60.0f;
+		for (int i = 0; i < 600; i++) world_step(w, dt);
+		// Check all bodies above floor
+		WorldInternal* wi = (WorldInternal*)w.id;
+		int fallen = 0;
+		for (int i = 0; i < asize(wi->body_hot); i++) {
+			if (wi->body_hot[i].inv_mass == 0.0f) continue;
+			if (wi->body_hot[i].position.y < -2.0f) {
+				printf("  [AVBD STACK FAIL] body %d y=%.3f\n", i, wi->body_hot[i].position.y);
+				fallen++;
+			}
+		}
+		TEST_ASSERT(fallen == 0);
+		destroy_world(w);
+	}
+	// AVBD tilted box drop
+	{
+		TEST_BEGIN("AVBD tilted box drop");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+		// Drop a tilted box
+		Body b = create_body(w, (BodyParams){
+			.position = V3(0, 5, 0), .rotation = quat_axis_angle(V3(1,1,0), 0.7f), .mass = 1.0f });
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+		float dt = 1.0f / 60.0f;
+		for (int i = 0; i < 300; i++) world_step(w, dt);
+		float y = body_get_position(w, b).y;
+		if (y < -0.5f) printf("  [AVBD TILTED FAIL] y=%.3f\n", y);
+		TEST_ASSERT(y > -0.5f);
+		destroy_world(w);
+	}
+	// AVBD mass ratio stack (matching mass ratio scene)
+	{
+		TEST_BEGIN("AVBD mass ratio stack");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+		float sizes[] = { 0.15f, 0.25f, 0.4f, 0.55f, 0.75f };
+		float masses[] = { 0.5f, 2.0f, 8.0f, 30.0f, 100.0f };
+		float y = 0.0f;
+		for (int i = 0; i < 5; i++) {
+			float h = sizes[i];
+			y += h + 0.6f;
+			Body b = create_body(w, (BodyParams){
+				.position = V3(0, y, 0), .rotation = quat_identity(), .mass = masses[i] });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(h, h, h) });
+			y += h;
+		}
+		float dt = 1.0f / 60.0f;
+		for (int i = 0; i < 600; i++) world_step(w, dt);
+		WorldInternal* wi = (WorldInternal*)w.id;
+		int fallen = 0;
+		for (int i = 0; i < asize(wi->body_hot); i++) {
+			if (wi->body_hot[i].inv_mass == 0.0f) continue;
+			if (wi->body_hot[i].position.y < -2.0f) {
+				printf("  [AVBD MASS-RATIO FAIL] body %d y=%.3f m=%.1f\n", i, wi->body_hot[i].position.y, 1.0f/wi->body_hot[i].inv_mass);
+				fallen++;
+			}
+		}
+		TEST_ASSERT(fallen == 0);
+		destroy_world(w);
+	}
 	// AVBD ball-socket: horizontal chain swings down under gravity.
 	// Bodies spawn horizontally at anchor height — zero initial joint error,
 	// gravity makes the whole chain swing downward.
