@@ -84,6 +84,22 @@ static void avbd_build_adjacency(WorldInternal* w, AVBD_Manifold* am, int am_cou
 	*out_jt_start = jt_start; *out_jt_adj = jt_adj;
 }
 
+static float avbd_contact_restitution_bias(BodyHot* a, BodyHot* b, v3 rAW, v3 rBW, v3 n, float dt)
+{
+	float rest = fmaxf(a->restitution, b->restitution);
+	if (rest <= 0.0f) return 0.0f;
+
+	v3 vel_a = add(a->velocity, cross(a->angular_velocity, rAW));
+	v3 vel_b = add(b->velocity, cross(b->angular_velocity, rBW));
+	float vn = dot(sub(vel_a, vel_b), n);
+	if (-vn <= SOLVER_RESTITUTION_THRESH) return 0.0f;
+
+	// AVBD solves positions, so restitution is a one-frame displacement target.
+	// Only allow a negative shift: separating/newly resting contacts must not
+	// get a positive bias that weakens penetration recovery.
+	return fminf(rest * vn * dt, 0.0f);
+}
+
 // Build AVBD manifolds from collision output. Warm-start lambda/penalty from cache.
 static void avbd_pre_solve(WorldInternal* w, InternalManifold* manifolds, int count, AVBD_Manifold** out_am, float dt)
 {
@@ -111,6 +127,7 @@ static void avbd_pre_solve(WorldInternal* w, InternalManifold* manifolds, int co
 
 		uint64_t key = body_pair_key(m.body_a, m.body_b);
 		AVBD_WarmManifold* wm = map_get_ptr(w->avbd_warm_cache, key);
+		int entering_manifold = wm == NULL || !wm->touching;
 
 		for (int c = 0; c < m.contact_count; c++) {
 			Contact* ct = &im->m.contacts[c];
@@ -118,12 +135,15 @@ static void avbd_pre_solve(WorldInternal* w, InternalManifold* manifolds, int co
 
 			v3 xA_world = add(ct->point, scale(ct->normal, ct->penetration));
 			v3 xB_world = ct->point;
-			ac->r_a = rotate(inv(a->rotation), sub(xA_world, a->position));
-			ac->r_b = rotate(inv(b->rotation), sub(xB_world, b->position));
+			v3 rAW = sub(xA_world, a->position);
+			v3 rBW = sub(xB_world, b->position);
+			ac->r_a = rotate(inv(a->rotation), rAW);
+			ac->r_b = rotate(inv(b->rotation), rBW);
 			ac->feature_id = ct->feature_id;
 
 			v3 diff = sub(xA_world, xB_world);
 			ac->C0 = V3(dot(n, diff) + AVBD_MARGIN, dot(t1, diff), dot(t2, diff));
+			ac->normal_bias = 0.0f;
 
 			// Inertia-scaled initial penalty so first-frame forces are meaningful
 			float inv_m = fmaxf(a->inv_mass, b->inv_mass);
@@ -132,8 +152,8 @@ static void avbd_pre_solve(WorldInternal* w, InternalManifold* manifolds, int co
 			ac->lambda = V3(0, 0, 0);
 			ac->stick = 0;
 
+			int matched = -1;
 			if (wm) {
-				int matched = -1;
 				for (int j = 0; j < wm->count && matched < 0; j++) {
 					if (ac->feature_id != 0 && ac->feature_id == wm->contacts[j].feature_id)
 						matched = j;
@@ -162,6 +182,9 @@ static void avbd_pre_solve(WorldInternal* w, InternalManifold* manifolds, int co
 				ac->penalty.y = fmaxf(AVBD_PENALTY_MIN, fminf(ac->penalty.y * gamma, AVBD_PENALTY_MAX));
 				ac->penalty.z = fmaxf(AVBD_PENALTY_MIN, fminf(ac->penalty.z * gamma, AVBD_PENALTY_MAX));
 			}
+
+			if (entering_manifold)
+				ac->normal_bias = avbd_contact_restitution_bias(a, b, rAW, rBW, n, dt);
 		}
 		apush(am, m);
 	}
@@ -224,6 +247,8 @@ static void avbd_post_solve(WorldInternal* w, AVBD_Manifold* am, int am_count)
 		wm.stale = 0;
 		for (int c = 0; c < m->contact_count; c++) {
 			AVBD_Contact* ac = &m->contacts[c];
+			if (ac->C0.x < 0.0f || ac->lambda.x < -1e-5f)
+				wm.touching = 1;
 			wm.contacts[c] = (AVBD_WarmContact){
 				.feature_id = ac->feature_id, .r_a = ac->r_a, .r_b = ac->r_b,
 				.penalty = ac->penalty, .lambda = ac->lambda, .stick = ac->stick,
@@ -270,7 +295,7 @@ static void avbd_stamp_contact(AVBD_Manifold* m, AVBD_Contact* ac, int is_body_a
 	v3 jBAng[3] = { cross(rBW, jBLin[0]), cross(rBW, jBLin[1]), cross(rBW, jBLin[2]) };
 
 	float C[3];
-	C[0] = ac->C0.x*(1-alpha) + dot(jALin[0],dpA) + dot(jBLin[0],dpB) + dot(jAAng[0],daA) + dot(jBAng[0],daB);
+	C[0] = ac->C0.x*(1-alpha) + ac->normal_bias + dot(jALin[0],dpA) + dot(jBLin[0],dpB) + dot(jAAng[0],daA) + dot(jBAng[0],daB);
 	C[1] = ac->C0.y*(1-alpha) + dot(jALin[1],dpA) + dot(jBLin[1],dpB) + dot(jAAng[1],daA) + dot(jBAng[1],daB);
 	C[2] = ac->C0.z*(1-alpha) + dot(jALin[2],dpA) + dot(jBLin[2],dpB) + dot(jAAng[2],daA) + dot(jBAng[2],daB);
 
@@ -498,7 +523,7 @@ static void avbd_contacts_dual_step(WorldInternal* w, AVBD_Manifold* am, int am_
 			v3 jAAng[3] = { cross(rAW, b0), cross(rAW, b1), cross(rAW, b2) };
 			v3 jBAng[3] = { cross(rBW, nb0), cross(rBW, nb1), cross(rBW, nb2) };
 
-			float Cn = ac->C0.x*(1-alpha) + dot(b0,dpA) + dot(nb0,dpB) + dot(jAAng[0],daA) + dot(jBAng[0],daB);
+			float Cn = ac->C0.x*(1-alpha) + ac->normal_bias + dot(b0,dpA) + dot(nb0,dpB) + dot(jAAng[0],daA) + dot(jBAng[0],daB);
 			float Ct1 = ac->C0.y*(1-alpha) + dot(b1,dpA) + dot(nb1,dpB) + dot(jAAng[1],daA) + dot(jBAng[1],daB);
 			float Ct2 = ac->C0.z*(1-alpha) + dot(b2,dpA) + dot(nb2,dpB) + dot(jAAng[2],daA) + dot(jBAng[2],daB);
 
@@ -593,9 +618,12 @@ static void avbd_solve(WorldInternal* w, float dt)
 	avbd_warm_cache_age_and_evict(w);
 
 	// Ensure prev_velocity array is big enough
-	if (asize(w->avbd_prev_velocity) < body_count) {
+	int prev_count = asize(w->avbd_prev_velocity);
+	if (prev_count < body_count) {
 		afit(w->avbd_prev_velocity, body_count);
 		asetlen(w->avbd_prev_velocity, body_count);
+		for (int i = prev_count; i < body_count; i++)
+			w->avbd_prev_velocity[i] = split_alive(w->body_gen, i) ? w->body_hot[i].velocity : V3(0, 0, 0);
 	}
 
 	CK_DYNA AVBD_BodyState* states = NULL;

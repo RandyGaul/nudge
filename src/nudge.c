@@ -313,6 +313,8 @@ Body create_body(World world, BodyParams params)
 		.linear_damping = params.linear_damping,
 		.angular_damping = ang_damp,
 	};
+	if (idx < asize(w->avbd_prev_velocity))
+		w->avbd_prev_velocity[idx] = w->body_hot[idx].velocity;
 
 	return split_handle(Body, w->body_gen, idx);
 }
@@ -409,6 +411,8 @@ void body_set_velocity(World world, Body body, v3 vel)
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
 	w->body_hot[idx].velocity = vel;
+	if (idx < asize(w->avbd_prev_velocity))
+		w->avbd_prev_velocity[idx] = vel;
 	int isl = w->body_cold[idx].island_id;
 	if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
 		island_wake(w, isl);
