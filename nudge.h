@@ -2927,6 +2927,27 @@ typedef struct JointInternal
 
 typedef struct BVHTree BVHTree; // forward decl, defined in bvh.c
 
+// LDL direct solver types (used by solver_ldl.c).
+typedef struct LDL_Block
+{
+	int type;         // JOINT_BALL_SOCKET or JOINT_DISTANCE
+	int dof;          // 3 or 1
+	int row;          // row offset into the n x n system
+	int body_a, body_b;
+	int solver_idx;   // index into sol_bs[] or sol_dist[]
+} LDL_Block;
+
+typedef struct LDL_Cache
+{
+	CK_DYNA LDL_Block* blocks;
+	int joint_count;
+	int n;              // total DOFs
+	float* L;           // n*n, lower triangle after factorize
+	float* D;           // n diagonal pivots
+	int factored_frame; // frame number when L/D were last computed
+	int topo_version;   // world topo version when blocks were built
+} LDL_Cache;
+
 // Island: group of connected bodies that can sleep/wake together.
 typedef struct Island
 {
@@ -2934,6 +2955,7 @@ typedef struct Island
 	int head_joint, tail_joint, joint_count;
 	int constraint_remove_count;
 	int awake; // 1 = awake, 0 = sleeping
+	LDL_Cache ldl;
 } Island;
 
 #define SLEEP_VEL_THRESHOLD   0.01f  // squared velocity magnitude threshold
@@ -2966,6 +2988,8 @@ typedef struct WorldInternal
 	CK_DYNA int*        island_free;
 	CK_MAP(uint8_t)     prev_touching; // body_pair_key -> 1 for pairs touching last frame
 	int sleep_enabled; // 1 = island sleep active (default)
+	int ldl_enabled;   // 1 = LDL direct correction for joints (dual solvers only)
+	int ldl_topo_version; // incremented on joint create/destroy
 	FrictionModel friction_model;
 	SolverType solver_type;
 	int velocity_iters;
@@ -3101,7 +3125,7 @@ typedef struct ConstraintRef
 #define AVBD_STABLE_THRESH 0.05f // adaptive alpha: below this error, use full stabilization
 #define AVBD_PENALTY_MIN  1.0f
 #define AVBD_PENALTY_MAX  1e10f
-#define AVBD_MARGIN       0.01f  // rest offset: pushes equilibrium outward to prevent visible penetration
+#define AVBD_MARGIN       0.0f   // must be 0: nudge penetration is always positive, margin would hide it
 #define AVBD_STICK_THRESH 0.00001f
 
 typedef struct AVBD_Contact
@@ -3156,6 +3180,8 @@ typedef struct AVBD_WarmManifold
 	AVBD_WarmContact contacts[MAX_CONTACTS];
 	int count;
 	int stale;
+	m3x3 basis;         // cached [normal; tangent1; tangent2] for synthetic contacts
+	float friction;
 } AVBD_WarmManifold;
 
 // Per-body temporary state for AVBD (not stored in BodyHot)
@@ -3166,6 +3192,26 @@ typedef struct AVBD_BodyState
 	quat inertial_ang;
 	quat initial_ang;  // q- for angular velocity recovery
 } AVBD_BodyState;
+
+// -----------------------------------------------------------------------------
+// LDL debug visualization data (populated by solver_ldl.c, read by UI).
+
+#define LDL_MAX_DOF 128
+
+typedef struct LDL_DebugInfo
+{
+	int n;                    // total DOFs
+	int joint_count;
+	int bs_count, dist_count;
+	float A[LDL_MAX_DOF * LDL_MAX_DOF]; // constraint matrix snapshot
+	float D[LDL_MAX_DOF];               // diagonal pivots after factorization
+	float lambda_pgs[LDL_MAX_DOF];      // PGS lambdas before correction
+	float lambda_ldl[LDL_MAX_DOF];      // exact lambdas after LDL solve
+	int block_dofs[64];                  // per-joint DOF (3 or 1)
+	int block_rows[64];                  // per-joint row offset
+	int block_types[64];                 // JOINT_BALL_SOCKET or JOINT_DISTANCE
+	int valid;
+} LDL_DebugInfo;
 
 #endif // NUDGE_INTERNAL_H
 // See LICENSE for licensing info.
@@ -6171,12 +6217,14 @@ static int clip_to_plane(v3* in, uint8_t* in_fid, int in_count, v3 plane_n, floa
 			out_fid[out_count] = fid_prev;
 			out_count++;
 			if (d_cur > 0.0f) {
+				// Exiting clip plane: tag with 0x40 bit to distinguish from entry
 				float t = d_prev / (d_prev - d_cur);
 				out[out_count] = add(prev, scale(sub(cur, prev), t));
-				out_fid[out_count] = clip_edge; // new vertex from this clip plane
+				out_fid[out_count] = clip_edge | 0x40;
 				out_count++;
 			}
 		} else if (d_cur <= 0.0f) {
+			// Entering clip plane: plain clip_edge
 			float t = d_prev / (d_prev - d_cur);
 			out[out_count] = add(prev, scale(sub(cur, prev), t));
 			out_fid[out_count] = clip_edge;
@@ -6336,8 +6384,12 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 	v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
 	uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
 	int clip_count = hull_face_verts_world(inc_hull, inc_face, inc_pos, inc_rot, inc_sc, buf1);
-	// Initial feature: each incident vertex gets 0xFF (original, not clipped).
-	for (int i = 0; i < clip_count; i++) fid1[i] = 0xFF;
+	// Initial feature: each incident vertex gets a unique ID based on its
+	// position in the face winding. This ensures face-face contacts where no
+	// clipping or corner-snapping occurs still get distinct feature IDs for
+	// warm-start matching. Range 0x80..0xBF avoids collision with clip-edge
+	// indices (0..N) and corner-snap tags (0xC0..0xFF).
+	for (int i = 0; i < clip_count; i++) fid1[i] = 0x80 | (uint8_t)i;
 
 	// Clip against each side plane of the reference face.
 	v3* in_buf = buf1;   v3* out_buf = buf2;
@@ -6379,7 +6431,6 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 		} while (ce != start_e);
 		float snap_tol2 = 1e-6f;
 		for (int i = 0; i < clip_count; i++) {
-			if (in_fid[i] == 0xFF) continue;
 			for (int c = 0; c < ncorners; c++) {
 				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) {
 					in_fid[i] = 0xC0 | (uint8_t)c;
@@ -7665,6 +7716,419 @@ static void joints_post_solve(WorldInternal* w, SolverBallSocket* bs, int bs_cou
 	afree(bs);
 	afree(dist);
 }
+// solver_ldl.c -- Direct LDL joint correction for equality constraints.
+// Reference: Mizerski, "Improving an Iterative Physics Solver Using a Direct Method", GDC 2020.
+//
+// Per-island cached factorization:
+//   Topology rebuild: when joints are added/removed (topo_version mismatch)
+//   Factorize:        once per frame (first substep), builds A and factors LDL^T
+//   Solve:            every substep, O(n^2) forward/back-sub with cached L/D
+
+static LDL_DebugInfo g_ldl_debug_info;
+int g_ldl_debug_enabled;
+
+// -----------------------------------------------------------------------------
+// Diagonal block builders (K matrix, NOT inverted).
+
+static void ldl_ball_socket_K(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, float softness, float* out)
+{
+	float inv_m = a->inv_mass + b->inv_mass;
+	float K[6] = { inv_m, 0, 0, inv_m, 0, inv_m };
+
+	v3 ia = a->inv_inertia_local;
+	if (ia.x > 0 || ia.y > 0 || ia.z > 0) {
+		v3 e0 = inv_inertia_mul(a->rotation, ia, V3(0, -r_a.z, r_a.y));
+		v3 e1 = inv_inertia_mul(a->rotation, ia, V3(r_a.z, 0, -r_a.x));
+		v3 e2 = inv_inertia_mul(a->rotation, ia, V3(-r_a.y, r_a.x, 0));
+		K[0] += -r_a.z*e0.y + r_a.y*e0.z;
+		K[1] += -r_a.z*e1.y + r_a.y*e1.z;
+		K[2] += -r_a.z*e2.y + r_a.y*e2.z;
+		K[3] +=  r_a.z*e1.x - r_a.x*e1.z;
+		K[4] +=  r_a.z*e2.x - r_a.x*e2.z;
+		K[5] += -r_a.y*e2.x + r_a.x*e2.y;
+	}
+
+	v3 ib = b->inv_inertia_local;
+	if (ib.x > 0 || ib.y > 0 || ib.z > 0) {
+		v3 e0 = inv_inertia_mul(b->rotation, ib, V3(0, -r_b.z, r_b.y));
+		v3 e1 = inv_inertia_mul(b->rotation, ib, V3(r_b.z, 0, -r_b.x));
+		v3 e2 = inv_inertia_mul(b->rotation, ib, V3(-r_b.y, r_b.x, 0));
+		K[0] += -r_b.z*e0.y + r_b.y*e0.z;
+		K[1] += -r_b.z*e1.y + r_b.y*e1.z;
+		K[2] += -r_b.z*e2.y + r_b.y*e2.z;
+		K[3] +=  r_b.z*e1.x - r_b.x*e1.z;
+		K[4] +=  r_b.z*e2.x - r_b.x*e2.z;
+		K[5] += -r_b.y*e2.x + r_b.x*e2.y;
+	}
+
+	K[0] += softness; K[3] += softness; K[5] += softness;
+	for (int i = 0; i < 6; i++) out[i] = K[i];
+}
+
+static void ldl_write_sym3x3(float* A, int n, int r0, int c0, const float* K)
+{
+	A[(r0+0)*n + c0+0] += K[0]; A[(r0+0)*n + c0+1] += K[1]; A[(r0+0)*n + c0+2] += K[2];
+	A[(r0+1)*n + c0+0] += K[1]; A[(r0+1)*n + c0+1] += K[3]; A[(r0+1)*n + c0+2] += K[4];
+	A[(r0+2)*n + c0+0] += K[2]; A[(r0+2)*n + c0+1] += K[4]; A[(r0+2)*n + c0+2] += K[5];
+}
+
+// -----------------------------------------------------------------------------
+// Off-diagonal blocks.
+
+static void ldl_off_diag_bs_bs(float* A, int n, int r_i, int r_j, BodyHot* B, v3 ri, v3 rj, float sign)
+{
+	float inv_m = B->inv_mass;
+	v3 ib = B->inv_inertia_local;
+	v3 e0 = inv_inertia_mul(B->rotation, ib, V3(0, -rj.z, rj.y));
+	v3 e1 = inv_inertia_mul(B->rotation, ib, V3(rj.z, 0, -rj.x));
+	v3 e2 = inv_inertia_mul(B->rotation, ib, V3(-rj.y, rj.x, 0));
+
+	float block[9];
+	block[0] = sign * (inv_m + (-ri.z*e0.y + ri.y*e0.z));
+	block[1] = sign * (        (-ri.z*e1.y + ri.y*e1.z));
+	block[2] = sign * (        (-ri.z*e2.y + ri.y*e2.z));
+	block[3] = sign * (        ( ri.z*e0.x - ri.x*e0.z));
+	block[4] = sign * (inv_m + ( ri.z*e1.x - ri.x*e1.z));
+	block[5] = sign * (        ( ri.z*e2.x - ri.x*e2.z));
+	block[6] = sign * (        (-ri.y*e0.x + ri.x*e0.y));
+	block[7] = sign * (        (-ri.y*e1.x + ri.x*e1.y));
+	block[8] = sign * (inv_m + (-ri.y*e2.x + ri.x*e2.y));
+
+	for (int row = 0; row < 3; row++)
+		for (int col = 0; col < 3; col++) {
+			A[(r_i + row) * n + r_j + col] += block[row * 3 + col];
+			A[(r_j + col) * n + r_i + row] += block[row * 3 + col];
+		}
+}
+
+static void ldl_off_diag_bs_dist(float* A, int n, int r_i, int r_j, BodyHot* B, v3 ri, v3 rj, v3 axis, float sign)
+{
+	float inv_m = B->inv_mass;
+	v3 ib = B->inv_inertia_local;
+	v3 rj_x_axis = cross(rj, axis);
+	v3 Irj = inv_inertia_mul(B->rotation, ib, rj_x_axis);
+
+	float b0 = sign * (inv_m * axis.x + (-ri.z * Irj.y + ri.y * Irj.z));
+	float b1 = sign * (inv_m * axis.y + ( ri.z * Irj.x - ri.x * Irj.z));
+	float b2 = sign * (inv_m * axis.z + (-ri.y * Irj.x + ri.x * Irj.y));
+
+	A[(r_i + 0) * n + r_j] += b0; A[r_j * n + r_i + 0] += b0;
+	A[(r_i + 1) * n + r_j] += b1; A[r_j * n + r_i + 1] += b1;
+	A[(r_i + 2) * n + r_j] += b2; A[r_j * n + r_i + 2] += b2;
+}
+
+static void ldl_off_diag_dist_dist(float* A, int n, int r_i, int r_j, BodyHot* B, v3 ri, v3 rj, v3 axis_i, v3 axis_j, float sign)
+{
+	float inv_m = B->inv_mass;
+	v3 ib = B->inv_inertia_local;
+	v3 rj_x_aj = cross(rj, axis_j);
+	v3 Irj = inv_inertia_mul(B->rotation, ib, rj_x_aj);
+	v3 ri_x_ai = cross(ri, axis_i);
+	float val = sign * (inv_m * dot(axis_i, axis_j) + dot(ri_x_ai, Irj));
+
+	A[r_i * n + r_j] += val;
+	A[r_j * n + r_i] += val;
+}
+
+// -----------------------------------------------------------------------------
+// Dense LDL^T factorization and solve.
+
+static void ldl_factorize(float* A, float* D, int n)
+{
+	for (int j = 0; j < n; j++) {
+		float dj = A[j * n + j];
+		for (int k = 0; k < j; k++)
+			dj -= A[j * n + k] * A[j * n + k] * D[k];
+		D[j] = fabsf(dj) > 1e-12f ? dj : 1e-12f;
+		float inv_dj = 1.0f / D[j];
+		for (int i = j + 1; i < n; i++) {
+			float lij = A[i * n + j];
+			for (int k = 0; k < j; k++)
+				lij -= A[i * n + k] * A[j * n + k] * D[k];
+			A[i * n + j] = lij * inv_dj;
+		}
+	}
+}
+
+static void ldl_solve(float* L, float* D, float* b, float* x, int n)
+{
+	for (int i = 0; i < n; i++) {
+		float sum = b[i];
+		for (int k = 0; k < i; k++)
+			sum -= L[i * n + k] * x[k];
+		x[i] = sum;
+	}
+	for (int i = 0; i < n; i++)
+		x[i] /= D[i];
+	for (int i = n - 1; i >= 0; i--) {
+		float sum = x[i];
+		for (int k = i + 1; k < n; k++)
+			sum -= L[k * n + i] * x[k];
+		x[i] = sum;
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Cache management.
+
+static void ldl_cache_free(LDL_Cache* c)
+{
+	afree(c->blocks);
+	CK_FREE(c->L);
+	CK_FREE(c->D);
+	memset(c, 0, sizeof(*c));
+}
+
+// Build blocks for an island's joints. Returns number of joints found.
+static int ldl_cache_rebuild_blocks(LDL_Cache* c, WorldInternal* w, int island_idx, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count)
+{
+	afree(c->blocks);
+	c->blocks = NULL;
+	c->n = 0;
+	c->joint_count = 0;
+
+	// Walk island's joint linked list, match to solver arrays
+	Island* isl = &w->islands[island_idx];
+	int ji = isl->head_joint;
+	while (ji >= 0) {
+		JointInternal* j = &w->joints[ji];
+
+		if (j->type == JOINT_BALL_SOCKET) {
+			// Find in sol_bs by joint_idx
+			for (int i = 0; i < bs_count; i++) {
+				if (sol_bs[i].joint_idx == ji) {
+					LDL_Block blk = { .type = JOINT_BALL_SOCKET, .dof = 3, .row = c->n, .body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b, .solver_idx = i };
+					apush(c->blocks, blk);
+					c->n += 3;
+					c->joint_count++;
+					break;
+				}
+			}
+		} else if (j->type == JOINT_DISTANCE) {
+			for (int i = 0; i < dist_count; i++) {
+				if (sol_dist[i].joint_idx == ji) {
+					LDL_Block blk = { .type = JOINT_DISTANCE, .dof = 1, .row = c->n, .body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b, .solver_idx = i };
+					apush(c->blocks, blk);
+					c->n += 1;
+					c->joint_count++;
+					break;
+				}
+			}
+		}
+
+		ji = j->island_next;
+	}
+
+	// Realloc L/D for new size
+	CK_FREE(c->L);
+	CK_FREE(c->D);
+	c->L = NULL;
+	c->D = NULL;
+	if (c->n > 0) {
+		c->L = CK_ALLOC(c->n * c->n * sizeof(float));
+		c->D = CK_ALLOC(c->n * sizeof(float));
+	}
+	c->factored_frame = -1; // force refactorize
+	return c->joint_count;
+}
+
+// Build A matrix and factorize into cached L/D.
+static void ldl_cache_factorize(LDL_Cache* c, WorldInternal* w, SolverBallSocket* sol_bs, SolverDistance* sol_dist)
+{
+	int n = c->n;
+	int jc = c->joint_count;
+	memset(c->L, 0, n * n * sizeof(float));
+
+	// Diagonal blocks
+	for (int i = 0; i < jc; i++) {
+		LDL_Block* blk = &c->blocks[i];
+		if (blk->type == JOINT_BALL_SOCKET) {
+			SolverBallSocket* s = &sol_bs[blk->solver_idx];
+			float K[6];
+			ldl_ball_socket_K(&w->body_hot[s->body_a], &w->body_hot[s->body_b], s->r_a, s->r_b, s->softness, K);
+			ldl_write_sym3x3(c->L, n, blk->row, blk->row, K);
+		} else {
+			SolverDistance* s = &sol_dist[blk->solver_idx];
+			float k = s->eff_mass > 1e-20f ? 1.0f / s->eff_mass : 0.0f;
+			c->L[blk->row * n + blk->row] += k;
+		}
+	}
+
+	// Off-diagonal blocks via body adjacency
+	int body_count = asize(w->body_hot);
+	CK_DYNA int** body_adj = CK_ALLOC(body_count * sizeof(int*));
+	memset(body_adj, 0, body_count * sizeof(int*));
+	for (int i = 0; i < jc; i++) {
+		apush(body_adj[c->blocks[i].body_a], i);
+		apush(body_adj[c->blocks[i].body_b], i);
+	}
+
+	for (int b = 0; b < body_count; b++) {
+		int cnt = asize(body_adj[b]);
+		if (cnt < 2) continue;
+		BodyHot* B = &w->body_hot[b];
+		for (int ii = 0; ii < cnt; ii++) {
+			for (int jj = ii + 1; jj < cnt; jj++) {
+				int bi = body_adj[b][ii];
+				int bj = body_adj[b][jj];
+				LDL_Block* blk_i = &c->blocks[bi];
+				LDL_Block* blk_j = &c->blocks[bj];
+
+				float s_i = (b == blk_i->body_b) ? 1.0f : -1.0f;
+				float s_j = (b == blk_j->body_b) ? 1.0f : -1.0f;
+				float sign = s_i * s_j;
+
+				v3 ri, rj;
+				if (blk_i->type == JOINT_BALL_SOCKET) ri = (b == blk_i->body_b) ? sol_bs[blk_i->solver_idx].r_b : sol_bs[blk_i->solver_idx].r_a;
+				else ri = (b == blk_i->body_b) ? sol_dist[blk_i->solver_idx].r_b : sol_dist[blk_i->solver_idx].r_a;
+				if (blk_j->type == JOINT_BALL_SOCKET) rj = (b == blk_j->body_b) ? sol_bs[blk_j->solver_idx].r_b : sol_bs[blk_j->solver_idx].r_a;
+				else rj = (b == blk_j->body_b) ? sol_dist[blk_j->solver_idx].r_b : sol_dist[blk_j->solver_idx].r_a;
+
+				if (blk_i->type == JOINT_BALL_SOCKET && blk_j->type == JOINT_BALL_SOCKET) {
+					ldl_off_diag_bs_bs(c->L, n, blk_i->row, blk_j->row, B, ri, rj, sign);
+				} else if (blk_i->type == JOINT_BALL_SOCKET && blk_j->type == JOINT_DISTANCE) {
+					v3 axis_j = sol_dist[blk_j->solver_idx].axis;
+					ldl_off_diag_bs_dist(c->L, n, blk_i->row, blk_j->row, B, ri, rj, axis_j, sign);
+				} else if (blk_i->type == JOINT_DISTANCE && blk_j->type == JOINT_BALL_SOCKET) {
+					v3 axis_i = sol_dist[blk_i->solver_idx].axis;
+					ldl_off_diag_bs_dist(c->L, n, blk_j->row, blk_i->row, B, rj, ri, axis_i, sign);
+				} else {
+					v3 axis_i = sol_dist[blk_i->solver_idx].axis;
+					v3 axis_j = sol_dist[blk_j->solver_idx].axis;
+					ldl_off_diag_dist_dist(c->L, n, blk_i->row, blk_j->row, B, ri, rj, axis_i, axis_j, sign);
+				}
+			}
+		}
+	}
+
+	for (int b = 0; b < body_count; b++) afree(body_adj[b]);
+	CK_FREE(body_adj);
+
+	// Debug snapshot of A before factorize overwrites it
+	int dbg = g_ldl_debug_enabled && n <= LDL_MAX_DOF && jc <= 64;
+	if (dbg) memcpy(g_ldl_debug_info.A, c->L, n * n * sizeof(float));
+
+	ldl_factorize(c->L, c->D, n);
+
+	if (dbg) {
+		memcpy(g_ldl_debug_info.D, c->D, n * sizeof(float));
+		g_ldl_debug_info.n = n;
+		g_ldl_debug_info.joint_count = jc;
+		g_ldl_debug_info.bs_count = 0;
+		g_ldl_debug_info.dist_count = 0;
+		for (int i = 0; i < jc; i++) {
+			g_ldl_debug_info.block_dofs[i] = c->blocks[i].dof;
+			g_ldl_debug_info.block_rows[i] = c->blocks[i].row;
+			g_ldl_debug_info.block_types[i] = c->blocks[i].type;
+			if (c->blocks[i].type == JOINT_BALL_SOCKET) g_ldl_debug_info.bs_count++;
+			else g_ldl_debug_info.dist_count++;
+		}
+	}
+
+	c->factored_frame = w->frame;
+}
+
+// Solve one island: build RHS, forward/back-sub, apply lambdas.
+static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count)
+{
+	int n = c->n;
+	int jc = c->joint_count;
+
+	// Undo warm-start impulses
+	for (int i = 0; i < jc; i++) {
+		LDL_Block* blk = &c->blocks[i];
+		if (blk->type == JOINT_BALL_SOCKET) {
+			SolverBallSocket* s = &sol_bs[blk->solver_idx];
+			if (s->lambda.x != 0 || s->lambda.y != 0 || s->lambda.z != 0)
+				apply_impulse(&w->body_hot[s->body_a], &w->body_hot[s->body_b], s->r_a, s->r_b, neg(s->lambda));
+		} else {
+			SolverDistance* s = &sol_dist[blk->solver_idx];
+			if (s->lambda != 0)
+				apply_impulse(&w->body_hot[s->body_a], &w->body_hot[s->body_b], s->r_a, s->r_b, scale(s->axis, -s->lambda));
+		}
+	}
+
+	// Build RHS
+	float* rhs = CK_ALLOC(n * sizeof(float));
+	float* lambda = CK_ALLOC(n * sizeof(float));
+	for (int i = 0; i < jc; i++) {
+		LDL_Block* blk = &c->blocks[i];
+		if (blk->type == JOINT_BALL_SOCKET) {
+			SolverBallSocket* s = &sol_bs[blk->solver_idx];
+			BodyHot* a = &w->body_hot[s->body_a];
+			BodyHot* b = &w->body_hot[s->body_b];
+			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
+			v3 r = neg(add(dv, s->bias));
+			rhs[blk->row + 0] = r.x; rhs[blk->row + 1] = r.y; rhs[blk->row + 2] = r.z;
+		} else {
+			SolverDistance* s = &sol_dist[blk->solver_idx];
+			BodyHot* a = &w->body_hot[s->body_a];
+			BodyHot* b = &w->body_hot[s->body_b];
+			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
+			rhs[blk->row] = -dot(dv, s->axis) + s->bias;
+		}
+	}
+
+	// Solve with cached L/D
+	ldl_solve(c->L, c->D, rhs, lambda, n);
+
+	// Debug snapshot
+	int dbg = g_ldl_debug_enabled && n <= LDL_MAX_DOF;
+	if (dbg) memcpy(g_ldl_debug_info.lambda_ldl, lambda, n * sizeof(float));
+
+	// Apply exact lambdas
+	for (int i = 0; i < jc; i++) {
+		LDL_Block* blk = &c->blocks[i];
+		if (blk->type == JOINT_BALL_SOCKET) {
+			SolverBallSocket* s = &sol_bs[blk->solver_idx];
+			v3 new_lambda = V3(lambda[blk->row], lambda[blk->row + 1], lambda[blk->row + 2]);
+			s->lambda = new_lambda;
+			apply_impulse(&w->body_hot[s->body_a], &w->body_hot[s->body_b], s->r_a, s->r_b, new_lambda);
+		} else {
+			SolverDistance* s = &sol_dist[blk->solver_idx];
+			float new_lambda = lambda[blk->row];
+			s->lambda = new_lambda;
+			apply_impulse(&w->body_hot[s->body_a], &w->body_hot[s->body_b], s->r_a, s->r_b, scale(s->axis, new_lambda));
+		}
+	}
+
+	if (dbg) g_ldl_debug_info.valid = 1;
+
+	CK_FREE(rhs);
+	CK_FREE(lambda);
+}
+
+// -----------------------------------------------------------------------------
+// Top-level entry point. Iterates awake islands with joints.
+
+static void ldl_correction(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, int sub)
+{
+	if (bs_count == 0 && dist_count == 0) return;
+
+	int island_count = asize(w->islands);
+	for (int ii = 0; ii < island_count; ii++) {
+		if (!(w->island_gen[ii] & 1)) continue;
+		Island* isl = &w->islands[ii];
+		if (!isl->awake) continue;
+		if (isl->joint_count == 0) continue;
+
+		LDL_Cache* c = &isl->ldl;
+
+		// Phase 1: rebuild blocks on first substep (solver arrays rebuilt each frame)
+		if (sub == 0 || c->topo_version != w->ldl_topo_version) {
+			ldl_cache_rebuild_blocks(c, w, ii, sol_bs, bs_count, sol_dist, dist_count);
+			c->topo_version = w->ldl_topo_version;
+		}
+		if (c->n == 0) continue;
+
+		// Phase 2: factorize every substep (lever arms change after integrate_positions,
+		// making the cached A matrix stale). Block descriptors are reused.
+		ldl_cache_factorize(c, w, sol_bs, sol_dist);
+
+		// Phase 3: solve every substep
+		ldl_island_solve(c, w, sol_bs, bs_count, sol_dist, dist_count);
+	}
+}
 // islands.c -- island connectivity, sleep/wake management
 
 static int island_create(WorldInternal* w)
@@ -8138,6 +8602,8 @@ static void island_try_split(WorldInternal* w, int island_id)
 // Primal-dual position solver: per-body 6x6 Newton steps + augmented Lagrangian dual updates.
 // Reference: Ly, Narain et al. "Augmented VBD" SIGGRAPH 2025; Chris Giles' 3D demo.
 
+
+
 static int avbd_body_is_sleeping(WorldInternal* w, int idx)
 {
 	int isl = w->body_cold[idx].island_id;
@@ -8299,6 +8765,7 @@ static void avbd_pre_solve(WorldInternal* w, InternalManifold* manifolds, int co
 		}
 		apush(am, m);
 	}
+
 	*out_am = am;
 }
 
@@ -8362,6 +8829,8 @@ static void avbd_post_solve(WorldInternal* w, AVBD_Manifold* am, int am_count)
 				.penalty = ac->penalty, .lambda = ac->lambda, .stick = ac->stick,
 			};
 		}
+		wm.basis = m->basis;
+		wm.friction = m->friction;
 		map_set(w->avbd_warm_cache, key, wm);
 	}
 }
@@ -8372,7 +8841,7 @@ static void avbd_warm_cache_age_and_evict(WorldInternal* w)
 		w->avbd_warm_cache[i].stale++;
 	int i = 0;
 	while (i < map_size(w->avbd_warm_cache)) {
-		if (w->avbd_warm_cache[i].stale > 1)
+		if (w->avbd_warm_cache[i].stale > 2) // keep synthetic contacts short-lived
 			map_del(w->avbd_warm_cache, map_keys(w->avbd_warm_cache)[i]);
 		else i++;
 	}
@@ -8715,24 +9184,13 @@ static void avbd_joints_dual_step(WorldInternal* w, float alpha)
 
 // --- Top-level AVBD solver ---
 
-static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifold_count, float dt)
+static void avbd_solve(WorldInternal* w, float dt)
 {
 	int body_count = asize(w->body_hot);
 	float alpha = w->avbd_alpha;
 	float gamma = w->avbd_gamma;
 
 	avbd_warm_cache_age_and_evict(w);
-
-	CK_DYNA AVBD_Manifold* am = NULL;
-	avbd_pre_solve(w, manifolds, manifold_count, &am, dt);
-	int am_count = asize(am);
-
-	avbd_joints_pre_solve(w, alpha, gamma, dt);
-
-	int *ct_start = NULL, *jt_start = NULL;
-	AVBD_ContactAdj* ct_adj = NULL;
-	AVBD_JointAdj* jt_adj = NULL;
-	avbd_build_adjacency(w, am, am_count, body_count, &ct_start, &ct_adj, &jt_start, &jt_adj);
 
 	// Ensure prev_velocity array is big enough
 	if (asize(w->avbd_prev_velocity) < body_count) {
@@ -8748,6 +9206,7 @@ static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifo
 	v3 grav = w->gravity;
 	float grav_len = len(grav);
 
+	// Phase 1: Save initial state, compute inertial positions, warmstart body positions.
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i)) continue;
 		BodyHot* h = &w->body_hot[i];
@@ -8757,12 +9216,9 @@ static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifo
 		if (h->inv_mass == 0.0f) continue;
 		if (avbd_body_is_sleeping(w, i)) continue;
 
-		// Inertial position: y = x + v*dt + g*dt^2
 		states[i].inertial_lin = add(add(h->position, scale(h->velocity, dt)), scale(grav, dt * dt));
 		states[i].inertial_ang = quat_add_dw(h->rotation, scale(h->angular_velocity, dt));
 
-		// Adaptive body warm-start (VBD paper): use acceleration from previous
-		// frame to predict gravity contribution, giving solver a better starting guess.
 		v3 prev_v = w->avbd_prev_velocity[i];
 		v3 accel = scale(sub(h->velocity, prev_v), inv_dt);
 		float accel_along_grav = grav_len > 0.0f ? dot(accel, scale(grav, 1.0f / grav_len)) : 0.0f;
@@ -8772,6 +9228,31 @@ static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifo
 		h->rotation = quat_add_dw(h->rotation, scale(h->angular_velocity, dt));
 	}
 
+	// Phase 2: Collision detection at warmstarted positions.
+	CK_DYNA InternalManifold* manifolds = NULL;
+	broadphase_and_collide(w, &manifolds);
+	islands_update_contacts(w, manifolds, asize(manifolds));
+	int manifold_count = asize(manifolds);
+
+	// Update debug contacts for visualization
+	aclear(w->debug_contacts);
+	for (int i = 0; i < manifold_count; i++)
+		for (int c = 0; c < manifolds[i].m.count; c++)
+			apush(w->debug_contacts, manifolds[i].m.contacts[c]);
+
+	// Phase 3: Build solver data from contacts detected at warmstarted positions.
+	CK_DYNA AVBD_Manifold* am = NULL;
+	avbd_pre_solve(w, manifolds, manifold_count, &am, dt);
+	int am_count = asize(am);
+
+	avbd_joints_pre_solve(w, alpha, gamma, dt);
+
+	int *ct_start = NULL, *jt_start = NULL;
+	AVBD_ContactAdj* ct_adj = NULL;
+	AVBD_JointAdj* jt_adj = NULL;
+	avbd_build_adjacency(w, am, am_count, body_count, &ct_start, &ct_adj, &jt_start, &jt_adj);
+
+	// Phase 4: Solver iterations.
 	for (int it = 0; it < w->avbd_iterations; it++) {
 		avbd_primal_step(w, am, am_count, ct_start, ct_adj, jt_start, jt_adj, states, alpha, dt);
 		avbd_contacts_dual_step(w, am, am_count, states, alpha);
@@ -8794,6 +9275,7 @@ static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifo
 	afree(ct_adj); afree(ct_start);
 	afree(jt_adj); afree(jt_start);
 	afree(am);
+	afree(manifolds);
 }
 
 // -----------------------------------------------------------------------------
@@ -8840,6 +9322,7 @@ void destroy_world(World world)
 	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
 	split_free(w->body_cold, w->body_hot, w->body_gen, w->body_free);
 	afree(w->joints); afree(w->joint_gen); afree(w->joint_free);
+	for (int i = 0; i < asize(w->islands); i++) ldl_cache_free(&w->islands[i].ldl);
 	afree(w->islands); afree(w->island_gen); afree(w->island_free);
 	map_free(w->prev_touching);
 	CK_FREE(w);
@@ -8908,15 +9391,19 @@ void world_step(World world, float dt)
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
 
-	// Age warm cache once per frame (AVBD does its own in avbd_solve)
-	if (w->solver_type != SOLVER_AVBD)
-		warm_cache_age_and_evict(w);
+	// AVBD takes a completely different path — it does its own collision
+	// detection after warmstarting body positions (so contacts are found at
+	// predicted positions, preventing tunneling). Must branch before the
+	// shared collision detection to avoid double island updates.
+	if (w->solver_type == SOLVER_AVBD) {
+		avbd_solve(w, dt);
+		if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
+		return;
+	}
 
-	// --- Collision detection (once per frame) ---
-	// Dual solvers need velocity integration before collision for first substep.
-	// AVBD handles gravity internally via inertial position — skip.
-	if (w->solver_type != SOLVER_AVBD)
-		integrate_velocities(w, sub_dt);
+	// --- Dual solver path ---
+	warm_cache_age_and_evict(w);
+	integrate_velocities(w, sub_dt);
 
 	CK_DYNA InternalManifold* manifolds = NULL;
 	broadphase_and_collide(w, &manifolds);
@@ -8928,14 +9415,6 @@ void world_step(World world, float dt)
 			apush(w->debug_contacts, manifolds[i].m.contacts[c]);
 
 	int manifold_count = asize(manifolds);
-
-	// AVBD takes a completely different path (primal-dual position solver)
-	if (w->solver_type == SOLVER_AVBD) {
-		avbd_solve(w, manifolds, manifold_count, dt);
-		if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
-		afree(manifolds);
-		return;
-	}
 
 	// --- Pre-solve (once per frame, using sub_dt for softness/bias) ---
 	SolverManifold* sm = NULL;
@@ -8956,15 +9435,18 @@ void world_step(World world, float dt)
 			.body_a = sm[i].body_a, .body_b = sm[i].body_b };
 		apush(crefs, r);
 	}
-	for (int i = 0; i < asize(sol_bs); i++) {
-		ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
-			.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
-		apush(crefs, r);
-	}
-	for (int i = 0; i < asize(sol_dist); i++) {
-		ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
-			.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
-		apush(crefs, r);
+	// When LDL is enabled, joints are solved directly -- skip them in PGS.
+	if (!w->ldl_enabled) {
+		for (int i = 0; i < asize(sol_bs); i++) {
+			ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
+				.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
+			apush(crefs, r);
+		}
+		for (int i = 0; i < asize(sol_dist); i++) {
+			ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
+				.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
+			apush(crefs, r);
+		}
 	}
 
 	int cref_count = asize(crefs);
@@ -8985,18 +9467,51 @@ void world_step(World world, float dt)
 				for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
 					solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist);
 
+		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0))
+			ldl_correction(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub);
+
 		integrate_positions(w, sub_dt);
 
 		// Relax contacts: refresh separation/bias from updated positions
 		if (w->solver_type == SOLVER_SOFT_STEP || w->solver_type == SOLVER_BLOCK)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
-		// Zero rigid joint bias after first sub-step (position error is stale)
-		if (sub == 0) {
+		// After first sub-step, position error in bias is stale.
+		// PGS: zero bias (stale bias + iterative = instability).
+		// LDL: recompute bias from current positions (direct solver is exact).
+		if (sub == 0 && !w->ldl_enabled) {
 			for (int i = 0; i < asize(sol_bs); i++)
 				if (sol_bs[i].softness == 0.0f) sol_bs[i].bias = V3(0, 0, 0);
 			for (int i = 0; i < asize(sol_dist); i++)
 				if (sol_dist[i].softness == 0.0f) sol_dist[i].bias = 0.0f;
+		}
+		if (w->ldl_enabled) {
+			float ptv = sub_dt > 0.0f ? SOLVER_BAUMGARTE / sub_dt : 0.0f;
+			for (int i = 0; i < asize(sol_bs); i++) {
+				if (sol_bs[i].softness != 0.0f) continue;
+				SolverBallSocket* s = &sol_bs[i];
+				BodyHot* a = &w->body_hot[s->body_a];
+				BodyHot* b = &w->body_hot[s->body_b];
+				s->r_a = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
+				s->r_b = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
+				v3 anchor_a = add(a->position, s->r_a);
+				v3 anchor_b = add(b->position, s->r_b);
+				s->bias = scale(sub(anchor_b, anchor_a), ptv);
+			}
+			for (int i = 0; i < asize(sol_dist); i++) {
+				if (sol_dist[i].softness != 0.0f) continue;
+				SolverDistance* s = &sol_dist[i];
+				BodyHot* a = &w->body_hot[s->body_a];
+				BodyHot* b = &w->body_hot[s->body_b];
+				s->r_a = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
+				s->r_b = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
+				v3 anchor_a = add(a->position, s->r_a);
+				v3 anchor_b = add(b->position, s->r_b);
+				v3 delta = sub(anchor_b, anchor_a);
+				float dist_val = len(delta);
+				s->axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
+				s->bias = -ptv * (dist_val - w->joints[s->joint_idx].distance.rest_length);
+			}
 		}
 	}
 
@@ -9222,6 +9737,7 @@ Joint create_ball_socket(World world, BallSocketParams params)
 		.island_id = -1, .island_prev = -1, .island_next = -1,
 	};
 	link_joint_to_islands(w, idx);
+	w->ldl_topo_version++;
 	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
 }
 
@@ -9270,6 +9786,7 @@ Joint create_distance(World world, DistanceParams params)
 		.island_id = -1, .island_prev = -1, .island_next = -1,
 	};
 	link_joint_to_islands(w, idx);
+	w->ldl_topo_version++;
 	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
 }
 
@@ -9281,6 +9798,7 @@ void destroy_joint(World world, Joint joint)
 	unlink_joint_from_island(w, idx);
 	memset(&w->joints[idx], 0, sizeof(JointInternal));
 	w->joint_gen[idx]++; // even = dead
+	w->ldl_topo_version++;
 	apush(w->joint_free, idx);
 }
 

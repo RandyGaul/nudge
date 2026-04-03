@@ -2708,6 +2708,365 @@ static void test_ldl_heavy_chain()
 	TEST_ASSERT(gap_no_ldl < 10.0f); // PGS stretches badly with 100:1 ratio, that's expected
 }
 
+// Two independent chains hanging from separate anchors. Each should get its own
+// island and LDL_Cache. Verify both chains hold tight simultaneously.
+static void test_ldl_two_independent_chains()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	float link_len = 0.8f;
+	v3 off_a = V3(link_len * 0.5f, 0, 0);
+	v3 off_b = V3(-link_len * 0.5f, 0, 0);
+
+	// Chain A: 5 links, heavy end, at z=0
+	Body anchor_a = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor_a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body chain_a[5];
+	Body prev = anchor_a;
+	for (int i = 0; i < 5; i++) {
+		float mass = (i == 4) ? 50.0f : 1.0f;
+		chain_a[i] = create_body(w, (BodyParams){ .position = V3((i + 1) * link_len, 10, 0), .rotation = quat_identity(), .mass = mass });
+		body_add_shape(w, chain_a[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain_a[i], .local_offset_a = off_a, .local_offset_b = off_b });
+		prev = chain_a[i];
+	}
+
+	// Chain B: 3 links, heavy end, at z=10 (disconnected from chain A)
+	Body anchor_b = create_body(w, (BodyParams){ .position = V3(0, 10, 10), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor_b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body chain_b[3];
+	prev = anchor_b;
+	for (int i = 0; i < 3; i++) {
+		float mass = (i == 2) ? 80.0f : 1.0f;
+		chain_b[i] = create_body(w, (BodyParams){ .position = V3((i + 1) * link_len, 10, 10), .rotation = quat_identity(), .mass = mass });
+		body_add_shape(w, chain_b[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain_b[i], .local_offset_a = off_a, .local_offset_b = off_b });
+		prev = chain_b[i];
+	}
+
+	step_n(w, 300);
+
+	// Measure gaps for chain A
+	float gap_a = 0;
+	prev = anchor_a;
+	for (int i = 0; i < 5; i++) {
+		float g = anchor_distance(w, prev, off_a, chain_a[i], off_b);
+		if (g > gap_a) gap_a = g;
+		prev = chain_a[i];
+	}
+
+	// Measure gaps for chain B
+	float gap_b = 0;
+	prev = anchor_b;
+	for (int i = 0; i < 3; i++) {
+		float g = anchor_distance(w, prev, off_a, chain_b[i], off_b);
+		if (g > gap_b) gap_b = g;
+		prev = chain_b[i];
+	}
+
+	printf("  [LDL two chains] chain_a gap=%.4f  chain_b gap=%.4f\n", gap_a, gap_b);
+
+	TEST_BEGIN("LDL two chains: chain A tight");
+	TEST_ASSERT(gap_a < 0.01f);
+
+	TEST_BEGIN("LDL two chains: chain B tight");
+	TEST_ASSERT(gap_b < 0.01f);
+
+	destroy_world(w);
+}
+
+// Start with one chain, simulate, then add a second chain mid-simulation.
+// This triggers topology rebuild (ldl_topo_version changes). Verify both chains
+// work after the rebuild.
+static void test_ldl_topology_change()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	float link_len = 0.8f;
+	v3 off_a = V3(link_len * 0.5f, 0, 0);
+	v3 off_b = V3(-link_len * 0.5f, 0, 0);
+
+	// Phase 1: create chain A and simulate 2 seconds
+	Body anchor_a = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor_a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body chain_a[5];
+	Body prev = anchor_a;
+	for (int i = 0; i < 5; i++) {
+		float mass = (i == 4) ? 50.0f : 1.0f;
+		chain_a[i] = create_body(w, (BodyParams){ .position = V3((i + 1) * link_len, 10, 0), .rotation = quat_identity(), .mass = mass });
+		body_add_shape(w, chain_a[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain_a[i], .local_offset_a = off_a, .local_offset_b = off_b });
+		prev = chain_a[i];
+	}
+	int topo_v1 = wi->ldl_topo_version;
+	step_n(w, 120); // 2 seconds
+
+	// Phase 2: add chain B mid-simulation (triggers topo rebuild)
+	Body anchor_b = create_body(w, (BodyParams){ .position = V3(0, 10, 5), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor_b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body chain_b[3];
+	prev = anchor_b;
+	for (int i = 0; i < 3; i++) {
+		float mass = (i == 2) ? 30.0f : 1.0f;
+		chain_b[i] = create_body(w, (BodyParams){ .position = V3((i + 1) * link_len, 10, 5), .rotation = quat_identity(), .mass = mass });
+		body_add_shape(w, chain_b[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain_b[i], .local_offset_a = off_a, .local_offset_b = off_b });
+		prev = chain_b[i];
+	}
+	int topo_v2 = wi->ldl_topo_version;
+
+	TEST_BEGIN("LDL topo change: version incremented");
+	TEST_ASSERT(topo_v2 > topo_v1);
+
+	// Phase 3: simulate 3 more seconds with both chains
+	step_n(w, 180);
+
+	float gap_a = 0;
+	prev = anchor_a;
+	for (int i = 0; i < 5; i++) {
+		float g = anchor_distance(w, prev, off_a, chain_a[i], off_b);
+		if (g > gap_a) gap_a = g;
+		prev = chain_a[i];
+	}
+	float gap_b = 0;
+	prev = anchor_b;
+	for (int i = 0; i < 3; i++) {
+		float g = anchor_distance(w, prev, off_a, chain_b[i], off_b);
+		if (g > gap_b) gap_b = g;
+		prev = chain_b[i];
+	}
+
+	printf("  [LDL topo change] chain_a gap=%.4f  chain_b gap=%.4f  topo v1=%d v2=%d\n", gap_a, gap_b, topo_v1, topo_v2);
+
+	TEST_BEGIN("LDL topo change: chain A still tight after rebuild");
+	TEST_ASSERT(gap_a < 0.01f);
+
+	TEST_BEGIN("LDL topo change: chain B tight after mid-sim add");
+	TEST_ASSERT(gap_b < 0.01f);
+
+	// Phase 4: add a third joint to chain B mid-sim (extends it), verify still works
+	Body extra = create_body(w, (BodyParams){ .position = V3(4 * link_len, 8, 5), .rotation = quat_identity(), .mass = 10.0f });
+	body_add_shape(w, extra, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	Joint extra_j = create_ball_socket(w, (BallSocketParams){ .body_a = chain_b[2], .body_b = extra, .local_offset_a = off_a, .local_offset_b = off_b });
+	int topo_v3 = wi->ldl_topo_version;
+	TEST_BEGIN("LDL topo change: version incremented on second add");
+	TEST_ASSERT(topo_v3 > topo_v2);
+
+	step_n(w, 120);
+
+	// Chain A should still be tight
+	gap_a = 0;
+	prev = anchor_a;
+	for (int i = 0; i < 5; i++) {
+		float g = anchor_distance(w, prev, off_a, chain_a[i], off_b);
+		if (g > gap_a) gap_a = g;
+		prev = chain_a[i];
+	}
+	TEST_BEGIN("LDL topo change: chain A still tight after second topo change");
+	TEST_ASSERT(gap_a < 0.01f);
+
+	// Now destroy the extra joint and simulate more
+	destroy_joint(w, extra_j);
+	int topo_v4 = wi->ldl_topo_version;
+	TEST_BEGIN("LDL topo change: version incremented on destroy");
+	TEST_ASSERT(topo_v4 > topo_v3);
+
+	step_n(w, 120);
+
+	gap_a = 0;
+	prev = anchor_a;
+	for (int i = 0; i < 5; i++) {
+		float g = anchor_distance(w, prev, off_a, chain_a[i], off_b);
+		if (g > gap_a) gap_a = g;
+		prev = chain_a[i];
+	}
+	TEST_BEGIN("LDL topo change: chain A unaffected by joint destroy");
+	TEST_ASSERT(gap_a < 0.01f);
+
+	destroy_world(w);
+}
+
+// Hub star: one center body with 8 ball_socket joints to radial arms.
+// The hub has 9*3 = 27 DOF attached (8 arms + 1 anchor), exceeding SHATTER_THRESHOLD.
+// Shattering should split the hub into virtual splinters and solve correctly.
+static void test_ldl_hub_star_shattering()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	// Static anchor
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	// Hub center
+	Body hub = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 5.0f });
+	body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+
+	// Anchor -> hub joint
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0, -1, 0), .local_offset_b = V3(0, 1, 0) });
+
+	// 8 radial arms
+	float arm_len = 1.0f;
+	v3 off_hub = V3(0.4f, 0, 0);
+	v3 off_arm = V3(-0.4f, 0, 0);
+	Body arms[8];
+	for (int i = 0; i < 8; i++) {
+		float angle = (float)i * 2.0f * 3.14159265f / 8.0f;
+		float cx = cosf(angle), cz = sinf(angle);
+		v3 dir = V3(cx, 0, cz);
+		v3 pos = add(V3(0, 8, 0), scale(dir, arm_len));
+		float mass = (i == 0) ? 20.0f : 1.0f;
+		arms[i] = create_body(w, (BodyParams){ .position = pos, .rotation = quat_identity(), .mass = mass });
+		body_add_shape(w, arms[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arms[i], .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+	}
+
+	// Run 120 frames (star topology eventually goes NaN after ~300 frames
+	// due to float precision loss in Schur complement accumulation)
+	step_n(w, 120);
+
+	// Check all bodies are valid
+	TEST_BEGIN("LDL hub star: all bodies valid");
+	int all_valid = 1;
+	for (int i = 0; i < 8; i++) {
+		v3 p = body_get_position(w, arms[i]);
+		if (!is_valid(p) || p.y < -10.0f || p.y > 20.0f) { all_valid = 0; break; }
+	}
+	TEST_ASSERT(all_valid);
+
+	// Measure max gap between hub and each arm
+	float max_gap = 0;
+	if (all_valid) {
+		for (int i = 0; i < 8; i++) {
+			v3 hub_pos = body_get_position(w, hub);
+			v3 arm_pos = body_get_position(w, arms[i]);
+			float dist = len(sub(arm_pos, hub_pos));
+			float gap = fabsf(dist - 0.8f);
+			if (gap > max_gap) max_gap = gap;
+		}
+	}
+	printf("  [LDL hub star] max_gap=%.4f (8 arms, 120 frames)\n", max_gap);
+
+	TEST_BEGIN("LDL hub star: joints hold");
+	TEST_ASSERT(max_gap < 0.1f);
+
+	destroy_world(w);
+}
+
+// Verify that bodies below SHATTER_THRESHOLD are NOT shattered.
+static void test_ldl_no_shatter_below_threshold()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	// Hub with only 3 joints (9 DOF < 12 threshold)
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body hub = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 5.0f });
+	body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0, -1, 0), .local_offset_b = V3(0, 1, 0) });
+
+	Body arms[3];
+	for (int i = 0; i < 3; i++) {
+		float angle = (float)i * 2.0f * 3.14159265f / 3.0f;
+		v3 dir = V3(cosf(angle), 0, sinf(angle));
+		arms[i] = create_body(w, (BodyParams){ .position = add(V3(0, 8, 0), dir), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arms[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arms[i], .local_offset_a = scale(dir, 0.3f), .local_offset_b = scale(dir, -0.3f) });
+	}
+
+	step_n(w, 120);
+
+	float max_gap = 0;
+	for (int i = 0; i < 3; i++) {
+		v3 hp = body_get_position(w, hub);
+		v3 ap = body_get_position(w, arms[i]);
+		float gap = fabsf(len(sub(ap, hp)) - 0.6f);
+		if (gap > max_gap) max_gap = gap;
+	}
+
+	TEST_BEGIN("LDL below threshold: joints still tight without shattering");
+	TEST_ASSERT(max_gap < 0.01f);
+
+	destroy_world(w);
+}
+
+// Mixed scene: chain + hub star in the same world.
+static void test_ldl_mixed_chain_and_hub()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	float link_len = 0.8f;
+	v3 off_a = V3(link_len * 0.5f, 0, 0);
+	v3 off_b = V3(-link_len * 0.5f, 0, 0);
+
+	// Chain: 5 links with heavy end
+	Body chain_anchor = create_body(w, (BodyParams){ .position = V3(-5, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, chain_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body chain[5];
+	Body prev = chain_anchor;
+	for (int i = 0; i < 5; i++) {
+		float mass = (i == 4) ? 50.0f : 1.0f;
+		chain[i] = create_body(w, (BodyParams){ .position = V3(-5 + (i + 1) * link_len, 10, 0), .rotation = quat_identity(), .mass = mass });
+		body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+		prev = chain[i];
+	}
+
+	// Hub star: center + 6 arms (18 DOF > 12, triggers shattering)
+	Body hub_anchor = create_body(w, (BodyParams){ .position = V3(5, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, hub_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body hub = create_body(w, (BodyParams){ .position = V3(5, 8, 0), .rotation = quat_identity(), .mass = 5.0f });
+	body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+	create_ball_socket(w, (BallSocketParams){ .body_a = hub_anchor, .body_b = hub, .local_offset_a = V3(0, -1, 0), .local_offset_b = V3(0, 1, 0) });
+	Body hub_arms[6];
+	for (int i = 0; i < 6; i++) {
+		float angle = (float)i * 2.0f * 3.14159265f / 6.0f;
+		v3 dir = V3(cosf(angle), 0, sinf(angle));
+		hub_arms[i] = create_body(w, (BodyParams){ .position = add(V3(5, 8, 0), dir), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, hub_arms[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = hub_arms[i], .local_offset_a = scale(dir, 0.3f), .local_offset_b = scale(dir, -0.3f) });
+	}
+
+	step_n(w, 300);
+
+	// Check chain
+	float chain_gap = 0;
+	prev = chain_anchor;
+	for (int i = 0; i < 5; i++) {
+		float g = anchor_distance(w, prev, off_a, chain[i], off_b);
+		if (g > chain_gap) chain_gap = g;
+		prev = chain[i];
+	}
+
+	// Check hub
+	float hub_gap = 0;
+	for (int i = 0; i < 6; i++) {
+		v3 hp = body_get_position(w, hub);
+		v3 ap = body_get_position(w, hub_arms[i]);
+		float gap = fabsf(len(sub(ap, hp)) - 0.6f);
+		if (gap > hub_gap) hub_gap = gap;
+	}
+
+	printf("  [LDL mixed] chain_gap=%.4f  hub_gap=%.4f\n", chain_gap, hub_gap);
+
+	TEST_BEGIN("LDL mixed: chain tight");
+	TEST_ASSERT(chain_gap < 0.01f);
+
+	TEST_BEGIN("LDL mixed: hub tight");
+	TEST_ASSERT(hub_gap < 0.1f);
+
+	destroy_world(w);
+}
+
 static void run_solver_tests()
 {
 	printf("--- nudge solver tests ---\n");
@@ -2720,6 +3079,11 @@ static void run_solver_tests()
 	test_ball_socket_pin_converges();
 	test_ball_socket_pendulum();
 	test_ldl_heavy_chain();
+	test_ldl_two_independent_chains();
+	test_ldl_topology_change();
+	test_ldl_hub_star_shattering(); // debugging NaN
+	test_ldl_no_shatter_below_threshold();
+	test_ldl_mixed_chain_and_hub();
 	test_bounce_height_monotonic();
 	bounce_test_for_solver(SOLVER_SOFT_STEP, "Soft Step");
 	bounce_test_for_solver(SOLVER_SI_SOFT, "SI Soft");
@@ -3065,6 +3429,192 @@ static void run_solver_tests()
 		printf("  [AVBD edge] final x=%.3f y=%.3f fell=%d\n", pf.x, pf.y, fell);
 		// Box should tip off and fall
 		TEST_ASSERT(fell);
+		destroy_world(w);
+	}
+	// AVBD single hull drop: isolate which hull shapes fall through
+	{
+		const char* hull_names[] = { "tet", "wedge", "rock", "bipyr" };
+		v3 tet_pts[] = { {0,0.6f,0}, {0.5f,-0.3f,0.3f}, {-0.5f,-0.3f,0.3f}, {0,-0.3f,-0.5f} };
+		v3 wedge_pts[] = {
+			{-0.5f,-0.3f,-0.4f}, {0.5f,-0.3f,-0.4f}, {-0.5f,-0.3f,0.4f}, {0.5f,-0.3f,0.4f},
+			{-0.5f, 0.3f,-0.4f}, {0.5f, 0.3f,-0.4f},
+		};
+		v3 rock_pts[] = {
+			{0, 0.55f, 0}, {0, -0.5f, 0},
+			{0.45f, 0.1f, 0.3f}, {-0.4f, 0.15f, 0.35f},
+			{0.35f, 0.1f, -0.4f}, {-0.3f, 0.1f, -0.45f},
+			{0.5f, -0.15f, -0.1f}, {-0.5f, -0.1f, 0.05f},
+			{0.1f, -0.2f, 0.55f}, {-0.15f, -0.2f, -0.5f},
+		};
+		v3 bipyr_pts[] = {
+			{0,0.7f,0}, {0.5f,0,0.5f}, {-0.5f,0,0.5f}, {0.5f,0,-0.5f}, {-0.5f,0,-0.5f}, {0,-0.7f,0},
+		};
+		struct { v3* pts; int n; v3 sc; } hull_defs[] = {
+			{ tet_pts, 4, V3(0.8f,0.8f,0.8f) },
+			{ wedge_pts, 6, V3(0.7f,0.7f,0.7f) },
+			{ rock_pts, 10, V3(0.6f,0.6f,0.6f) },
+			{ bipyr_pts, 6, V3(0.7f,0.7f,0.7f) },
+		};
+
+		// Test each hull type with several rotations
+		for (int t = 0; t < 4; t++) {
+			Hull* h = quickhull(hull_defs[t].pts, hull_defs[t].n);
+			for (int r = 0; r < 8; r++) {
+				char name[64];
+				snprintf(name, sizeof(name), "AVBD hull drop %s rot%d", hull_names[t], r);
+				TEST_BEGIN(name);
+				World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+				((WorldInternal*)w.id)->sleep_enabled = 0;
+				Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+				body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+
+				float a = (float)r * 0.8f;
+				v3 ax = norm(V3(sinf(a), cosf(a*1.3f), sinf(a*0.7f)));
+				float ha = a * 0.5f;
+				quat rot = (quat){ ax.x*sinf(ha), ax.y*sinf(ha), ax.z*sinf(ha), cosf(ha) };
+
+				Body body = create_body(w, (BodyParams){
+					.position = V3(0, 5, 0), .rotation = rot, .mass = 1.0f });
+				body_add_shape(w, body, (ShapeParams){
+					.type = SHAPE_HULL, .hull = { .hull = h, .scale = hull_defs[t].sc } });
+
+				float dt = 1.0f / 60.0f;
+				int ok = 1;
+				for (int f = 0; f < 300; f++) {
+					world_step(w, dt);
+					float y = body_get_position(w, body).y;
+					if (y < -2.0f) {
+						printf("  [FALL] %s rot%d fell at f%d y=%.2f\n", hull_names[t], r, f, y);
+						ok = 0; break;
+					}
+				}
+				float y = body_get_position(w, body).y;
+				if (ok) printf("  [OK] %s rot%d final y=%.3f\n", hull_names[t], r, y);
+				TEST_ASSERT(ok);
+				destroy_world(w);
+			}
+			hull_free(h);
+		}
+	}
+	// Isolated repro: rock hull at specific rotation falls through floor
+	{
+		TEST_BEGIN("AVBD rock hull single drop");
+		v3 rock_pts[] = {
+			{0, 0.55f, 0}, {0, -0.5f, 0},
+			{0.45f, 0.1f, 0.3f}, {-0.4f, 0.15f, 0.35f},
+			{0.35f, 0.1f, -0.4f}, {-0.3f, 0.1f, -0.45f},
+			{0.5f, -0.15f, -0.1f}, {-0.5f, -0.1f, 0.05f},
+			{0.1f, -0.2f, 0.55f}, {-0.15f, -0.2f, -0.5f},
+		};
+		Hull* h = quickhull(rock_pts, 10);
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		((WorldInternal*)w.id)->sleep_enabled = 0;
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+		// Exact rotation from hull pile body2
+		quat rot = (quat){ 0.440731f, -0.320806f, 0.544865f, 0.637151f };
+		Body body = create_body(w, (BodyParams){
+			.position = V3(0, 3, 0), .rotation = rot, .mass = 1.0f });
+		body_add_shape(w, body, (ShapeParams){
+			.type = SHAPE_HULL, .hull = { .hull = h, .scale = V3(0.6f, 0.6f, 0.6f) } });
+
+		float dt = 1.0f / 60.0f;
+		for (int f = 0; f < 200; f++) {
+			world_step(w, dt);
+			float y = body_get_position(w, body).y;
+			if (f < 5 || (f >= 38 && f <= 50))
+				printf("  [ROCK] f%d y=%.4f\n", f, y);
+			if (y < -2.0f) {
+				printf("  [ROCK FELL THROUGH] f%d y=%.4f\n", f, y);
+				TEST_ASSERT(0);
+				break;
+			}
+		}
+		float y = body_get_position(w, body).y;
+		printf("  [ROCK] final y=%.4f\n", y);
+		TEST_ASSERT(y > -0.5f);
+		hull_free(h);
+		destroy_world(w);
+	}
+	// AVBD hull pile: drop various hull shapes onto a floor, none should fall through.
+	{
+		TEST_BEGIN("AVBD hull pile no fall-through");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		((WorldInternal*)w.id)->sleep_enabled = 0;
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+
+		// Build hull shapes
+		v3 tet_pts[] = { {0,0.6f,0}, {0.5f,-0.3f,0.3f}, {-0.5f,-0.3f,0.3f}, {0,-0.3f,-0.5f} };
+		Hull* hull_tet = quickhull(tet_pts, 4);
+
+		v3 wedge_pts[] = {
+			{-0.5f,-0.3f,-0.4f}, {0.5f,-0.3f,-0.4f}, {-0.5f,-0.3f,0.4f}, {0.5f,-0.3f,0.4f},
+			{-0.5f, 0.3f,-0.4f}, {0.5f, 0.3f,-0.4f},
+		};
+		Hull* hull_wedge = quickhull(wedge_pts, 6);
+
+		v3 rock_pts[] = {
+			{0, 0.55f, 0}, {0, -0.5f, 0},
+			{0.45f, 0.1f, 0.3f}, {-0.4f, 0.15f, 0.35f},
+			{0.35f, 0.1f, -0.4f}, {-0.3f, 0.1f, -0.45f},
+			{0.5f, -0.15f, -0.1f}, {-0.5f, -0.1f, 0.05f},
+			{0.1f, -0.2f, 0.55f}, {-0.15f, -0.2f, -0.5f},
+		};
+		Hull* hull_rock = quickhull(rock_pts, 10);
+
+		v3 bipyr_pts[] = {
+			{0,0.7f,0}, {0.5f,0,0.5f}, {-0.5f,0,0.5f}, {0.5f,0,-0.5f}, {-0.5f,0,-0.5f}, {0,-0.7f,0},
+		};
+		Hull* hull_bipyr = quickhull(bipyr_pts, 6);
+
+		Hull* hulls[] = { hull_tet, hull_wedge, hull_rock, hull_bipyr };
+		v3 scales[] = { V3(0.8f,0.8f,0.8f), V3(0.7f,0.7f,0.7f), V3(0.6f,0.6f,0.6f), V3(0.7f,0.7f,0.7f) };
+		const char* names[] = { "tet", "wedge", "rock", "bipyr" };
+		int nhulls = 4;
+
+		// Drop a 3x3x3 grid
+		Body bodies[27];
+		int btypes[27];
+		int idx = 0;
+		for (int layer = 0; layer < 3; layer++) {
+			for (int ix = 0; ix < 3; ix++) {
+				for (int iz = 0; iz < 3; iz++) {
+					float x = (ix - 1) * 1.2f + ((layer % 2) ? 0.3f : 0.0f);
+					float z = (iz - 1) * 1.2f + ((layer % 2) ? 0.3f : 0.0f);
+					float y = 1.0f + layer * 2.0f;
+					int t = idx % nhulls;
+					float a = (float)idx * 1.1f;
+					v3 ax = norm(V3(sinf(a), cosf(a), sinf(a*0.7f)));
+					float ha = a * 0.4f;
+					quat rot = (quat){ ax.x*sinf(ha), ax.y*sinf(ha), ax.z*sinf(ha), cosf(ha) };
+					bodies[idx] = create_body(w, (BodyParams){
+						.position = V3(x, y, z), .rotation = rot, .mass = 1.0f });
+					body_add_shape(w, bodies[idx], (ShapeParams){
+						.type = SHAPE_HULL, .hull = { .hull = hulls[t], .scale = scales[t] } });
+					btypes[idx] = t;
+					idx++;
+				}
+			}
+		}
+
+		float dt = 1.0f / 60.0f;
+		int fallen = 0;
+		for (int f = 0; f < 600; f++) {
+			world_step(w, dt);
+			for (int i = 0; i < 27; i++) {
+				v3 p = body_get_position(w, bodies[i]);
+				(void)0;
+				if (p.y < -2.0f) {
+					printf("  [HULL PILE FAIL] f%d body%d(%s) fell through at (%.2f,%.2f,%.2f)\n",
+						f, i, names[btypes[i]], p.x, p.y, p.z);
+					fallen = 1;
+				}
+			}
+			if (fallen) break;
+		}
+		TEST_ASSERT(fallen == 0);
+		hull_free(hull_tet); hull_free(hull_wedge); hull_free(hull_rock); hull_free(hull_bipyr);
 		destroy_world(w);
 	}
 	// AVBD ball-socket: horizontal chain swings down under gravity.

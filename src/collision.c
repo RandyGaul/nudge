@@ -4,6 +4,9 @@
 // Hull SAT with Gauss map pruning for edge-edge axis elimination.
 // Half-edge mesh enables efficient face/edge traversal for SAT queries.
 
+int g_hull_trace;
+
+
 // Types (HalfEdge, HullPlane, HullFace, Hull, ConvexHull) defined in nudge.h.
 
 // Support function: furthest vertex along a direction.
@@ -577,22 +580,33 @@ static int is_minkowski_face(v3 a, v3 b, v3 b_x_a, v3 c, v3 d, v3 d_x_c)
 }
 
 // Project edge pair: signed distance along cross(e1,e2) from p1 to p2.
-static float sat_edge_project(v3 p1, v3 e1, v3 p2, v3 e2, v3 c1)
+static float sat_edge_project_full(v3 e1, v3 e2, v3 c1,
+	const Hull* hull1, quat rel_rot, v3 scale1,
+	const Hull* hull2, v3 scale2)
 {
 	v3 e1_x_e2 = cross(e1, e2);
-	float len = len(e1_x_e2);
+	float l = len(e1_x_e2);
 
 	// Skip near-parallel edges
 	float tolerance = 0.005f;
-	if (len < tolerance * sqrtf(len2(e1) * len2(e2)))
+	if (l < tolerance * sqrtf(len2(e1) * len2(e2)))
 		return -1e18f;
 
-	v3 n = scale(e1_x_e2, 1.0f / len);
-	// Ensure consistent orientation (hull1 -> hull2)
-	if (dot(n, sub(p1, c1)) < 0.0f)
-		n = neg(n);
-
-	return dot(n, sub(p2, p1));
+	v3 n = scale(e1_x_e2, 1.0f / l);
+	// Orient n from hull1 toward hull2 by projecting ALL vertices of both hulls.
+	// This is O(V) per edge pair but robust for any scale/aspect ratio.
+	float max1 = -1e18f, min2 = 1e18f;
+	for (int i = 0; i < hull1->vert_count; i++) {
+		v3 v = add(c1, rotate(rel_rot, hull_vert_scaled(hull1, i, scale1)));
+		float d = dot(n, v);
+		if (d > max1) max1 = d;
+	}
+	for (int i = 0; i < hull2->vert_count; i++) {
+		v3 v = hull_vert_scaled(hull2, i, scale2);
+		float d = dot(n, v);
+		if (d < min2) min2 = d;
+	}
+	return min2 - max1;
 }
 
 // SAT: edge queries with Gauss map pruning.
@@ -641,7 +655,7 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 			if (!is_minkowski_face(u1, v1, neg(e1), neg(u2), neg(v2), neg(e2)))
 				continue;
 
-			float sep = sat_edge_project(p1, e1, p2, e2, c1_local);
+			float sep = sat_edge_project_full(e1, e2, c1_local, hull1, rel_rot, scale1, hull2, scale2);
 			if (sep > best.separation) {
 				best.index1 = i1;
 				best.index2 = i2;

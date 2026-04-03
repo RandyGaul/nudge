@@ -85,22 +85,50 @@ typedef struct BVHTree BVHTree; // forward decl, defined in bvh.c
 // LDL direct solver types (used by solver_ldl.c).
 typedef struct LDL_Block
 {
-	int type;         // JOINT_BALL_SOCKET or JOINT_DISTANCE
+	int type;         // JOINT_BALL_SOCKET or JOINT_DISTANCE (or -1 for synthetic)
 	int dof;          // 3 or 1
-	int row;          // row offset into the n x n system
-	int body_a, body_b;
-	int solver_idx;   // index into sol_bs[] or sol_dist[]
+	int body_a, body_b; // body indices (real or virtual)
+	int solver_idx;   // index into sol_bs[] or sol_dist[] (-1 for synthetic)
+	int is_synthetic;
 } LDL_Block;
+
+// Sparse block matrix: adjacency-list format per constraint node.
+// Each node i has a diagonal block (dof[i] x dof[i]) and off-diagonal
+// blocks to its neighbors. Stored as flat float arrays.
+#define LDL_MAX_NODES 128
+
+typedef struct LDL_Sparse
+{
+	int node_count;
+	int dof[LDL_MAX_NODES];          // DOF per node (3 or 1)
+	int row_offset[LDL_MAX_NODES+1]; // cumulative DOF offset
+	int n;                            // total scalar DOFs
+
+	// Diagonal blocks: diag_data[i] points to dof[i]*dof[i] floats.
+	float diag_data[LDL_MAX_NODES][9]; // max 3x3 per node
+	float diag_D[LDL_MAX_NODES][3];   // D pivots from block LDL (max 3 per 3x3 block)
+
+	// Off-diagonal: per-node neighbor list.
+	// adj[i][k] = neighbor node index, adj_data[i][k] = block data (dof[i]*dof[j] floats).
+	CK_DYNA int* adj[LDL_MAX_NODES];       // neighbor indices
+	CK_DYNA float* adj_data[LDL_MAX_NODES]; // packed block floats per neighbor
+
+	// Elimination ordering (symbolic phase output).
+	int elim_order[LDL_MAX_NODES]; // pivot sequence
+} LDL_Sparse;
 
 typedef struct LDL_Cache
 {
 	CK_DYNA LDL_Block* blocks;
 	int joint_count;
 	int n;              // total DOFs
-	float* L;           // n*n, lower triangle after factorize
-	float* D;           // n diagonal pivots
-	int factored_frame; // frame number when L/D were last computed
+	LDL_Sparse* sparse; // heap-allocated sparse matrix (NULL if no joints)
 	int topo_version;   // world topo version when blocks were built
+
+	// Shattering state
+	int virtual_body_count;          // number of virtual splinter bodies
+	CK_DYNA BodyHot* virtual_bodies; // temp velocity state for splinters
+	CK_DYNA int* body_remap;         // real_body_idx -> virtual_body_idx for shattered bodies
 } LDL_Cache;
 
 // Island: group of connected bodies that can sleep/wake together.

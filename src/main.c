@@ -146,6 +146,9 @@ static void scene_friction_setup();
 static void scene_mass_ratio_setup();
 static void scene_heavy_chain_setup();
 static void scene_heavy_chain_draw_extras();
+static void scene_hub_star_setup();
+static void scene_hub_star_draw_extras();
+static void scene_hull_pile_setup();
 
 static Scene g_scenes[] = {
 	{ "Shape Showcase",  scene_showcase_setup,  scene_showcase_draw_extras },
@@ -154,6 +157,8 @@ static Scene g_scenes[] = {
 	{ "Friction Test",   scene_friction_setup,  NULL },
 	{ "Mass Ratio",      scene_mass_ratio_setup, NULL },
 	{ "Heavy Chain",     scene_heavy_chain_setup, scene_heavy_chain_draw_extras },
+	{ "Hub Star",        scene_hub_star_setup,  scene_hub_star_draw_extras },
+	{ "Hull Pile",       scene_hull_pile_setup,  NULL },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 
@@ -593,6 +598,77 @@ static void scene_heavy_chain_draw_extras()
 	}
 }
 
+// --- Hub Star: central body with 8 radial joints (exercises body shattering) ---
+#define HUB_STAR_ARMS 8
+static Body g_hub_center;
+static Body g_hub_arms[HUB_STAR_ARMS];
+
+static void scene_hub_star_setup()
+{
+	// Central hub body (dynamic, moderate mass)
+	g_hub_center = create_body(g_world, (BodyParams){
+		.position = V3(0, 8, 0),
+		.rotation = quat_identity(),
+		.mass = 5.0f,
+	});
+	body_add_shape(g_world, g_hub_center, (ShapeParams){
+		.type = SHAPE_SPHERE,
+		.sphere.radius = 0.4f,
+	});
+	apush(g_draw_list, ((DrawEntry){ g_hub_center, MESH_SPHERE, V3(0.4f, 0.4f, 0.4f), V3(1, 0.8f, 0.2f) }));
+
+	// Static anchor above hub
+	Body anchor = create_body(g_world, (BodyParams){
+		.position = V3(0, 10, 0),
+		.rotation = quat_identity(),
+		.mass = 0,
+	});
+	body_add_shape(g_world, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	create_ball_socket(g_world, (BallSocketParams){
+		.body_a = anchor, .body_b = g_hub_center,
+		.local_offset_a = V3(0, -1, 0), .local_offset_b = V3(0, 1, 0),
+	});
+
+	// 8 radial arms
+	float arm_len = 1.5f;
+	for (int i = 0; i < HUB_STAR_ARMS; i++) {
+		float angle = (float)i * 2.0f * 3.14159265f / HUB_STAR_ARMS;
+		float cx = cosf(angle), cz = sinf(angle);
+		v3 dir = V3(cx, 0, cz);
+		v3 arm_pos = add(V3(0, 8, 0), scale(dir, arm_len));
+
+		float mass = (i == 0) ? 20.0f : 1.0f; // one heavy arm
+		float radius = (i == 0) ? 0.35f : 0.2f;
+		v3 color = (i == 0) ? V3(0.9f, 0.2f, 0.2f) : V3(0.4f, 0.7f, 0.9f);
+
+		g_hub_arms[i] = create_body(g_world, (BodyParams){
+			.position = arm_pos,
+			.rotation = quat_identity(),
+			.mass = mass,
+		});
+		body_add_shape(g_world, g_hub_arms[i], (ShapeParams){
+			.type = SHAPE_SPHERE,
+			.sphere.radius = radius,
+		});
+		create_ball_socket(g_world, (BallSocketParams){
+			.body_a = g_hub_center, .body_b = g_hub_arms[i],
+			.local_offset_a = scale(dir, 0.5f),
+			.local_offset_b = scale(dir, -arm_len + 0.5f),
+		});
+		apush(g_draw_list, ((DrawEntry){ g_hub_arms[i], MESH_SPHERE, V3(radius, radius, radius), color }));
+	}
+}
+
+static void scene_hub_star_draw_extras()
+{
+	if (!g_show_joints) return;
+	v3 hub_pos = body_get_position(g_world, g_hub_center);
+	for (int i = 0; i < HUB_STAR_ARMS; i++) {
+		v3 arm_pos = body_get_position(g_world, g_hub_arms[i]);
+		render_debug_line(hub_pos, arm_pos, V3(1, 1, 0));
+	}
+}
+
 // Scene: Mass Ratio -- tiny box at bottom, each box above is larger and heavier.
 // Stress test for solver stability under extreme mass ratios.
 // ---------------------------------------------------------------------------
@@ -622,6 +698,112 @@ static void scene_mass_ratio_setup()
 		});
 		apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(h, h, h), colors[i] }));
 		y += h;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scene: Hull Pile -- various convex hull shapes dropped in a heap.
+// Stress test for hull-hull collision and feature ID stability.
+// ---------------------------------------------------------------------------
+static Hull* g_hull_tet;
+static Hull* g_hull_wedge;
+static Hull* g_hull_rock;
+static int g_mesh_tet, g_mesh_wedge, g_mesh_rock;
+
+static void hull_pile_init_shapes()
+{
+	static int done = 0;
+	if (done) return;
+	done = 1;
+
+	// Tetrahedron
+	v3 tet[] = { {0,0.6f,0}, {0.5f,-0.3f,0.3f}, {-0.5f,-0.3f,0.3f}, {0,-0.3f,-0.5f} };
+	g_hull_tet = quickhull(tet, 4);
+	g_mesh_tet = render_create_hull_mesh(g_hull_tet, V3(1,1,1));
+
+	// Wedge / ramp shape
+	v3 wedge[] = {
+		{-0.5f,-0.3f,-0.4f}, {0.5f,-0.3f,-0.4f}, {-0.5f,-0.3f,0.4f}, {0.5f,-0.3f,0.4f},
+		{-0.5f, 0.3f,-0.4f}, {0.5f, 0.3f,-0.4f},
+	};
+	g_hull_wedge = quickhull(wedge, 6);
+	g_mesh_wedge = render_create_hull_mesh(g_hull_wedge, V3(1,1,1));
+
+	// Irregular rock (perturbed icosahedron-ish)
+	v3 rock[] = {
+		{0, 0.55f, 0}, {0, -0.5f, 0},
+		{0.45f, 0.1f, 0.3f}, {-0.4f, 0.15f, 0.35f},
+		{0.35f, 0.1f, -0.4f}, {-0.3f, 0.1f, -0.45f},
+		{0.5f, -0.15f, -0.1f}, {-0.5f, -0.1f, 0.05f},
+		{0.1f, -0.2f, 0.55f}, {-0.15f, -0.2f, -0.5f},
+	};
+	g_hull_rock = quickhull(rock, 10);
+	g_mesh_rock = render_create_hull_mesh(g_hull_rock, V3(1,1,1));
+}
+
+static void scene_hull_pile_setup()
+{
+	hull_pile_init_shapes();
+	add_floor();
+
+	// Hull type table: shape, mesh, scale, color
+	struct { Hull* hull; int mesh; v3 scale; v3 color; } types[] = {
+		{ g_hull_tet,   g_mesh_tet,   V3(0.8f,0.8f,0.8f), V3(0.9f,0.3f,0.2f) },
+		{ g_hull_wedge, g_mesh_wedge, V3(0.7f,0.7f,0.7f), V3(0.2f,0.8f,0.3f) },
+		{ g_hull_rock,  g_mesh_rock,  V3(0.6f,0.6f,0.6f), V3(0.3f,0.5f,0.9f) },
+		{ g_test_hull,  g_mesh_hull,  V3(0.7f,0.7f,0.7f), V3(0.9f,0.7f,0.2f) },
+	};
+	int ntypes = sizeof(types) / sizeof(types[0]);
+
+	// Drop a grid of hulls from various heights
+	int nx = 3, nz = 3, ny = 3;
+	float spacing = 1.2f;
+	int idx = 0;
+	for (int layer = 0; layer < ny; layer++) {
+		for (int ix = 0; ix < nx; ix++) {
+			for (int iz = 0; iz < nz; iz++) {
+				float x = (ix - nx/2) * spacing + ((layer % 2) ? 0.3f : 0.0f);
+				float z = (iz - nz/2) * spacing + ((layer % 2) ? 0.3f : 0.0f);
+				float y = 1.0f + layer * 2.0f;
+				int t = idx % ntypes;
+
+				// Slightly different rotation per body
+				float a = (float)idx * 1.1f;
+				v3 ax = norm(V3(sinf(a), cosf(a), sinf(a*0.7f)));
+				float ha = a * 0.4f;
+				quat rot = (quat){ ax.x*sinf(ha), ax.y*sinf(ha), ax.z*sinf(ha), cosf(ha) };
+
+				Body b = create_body(g_world, (BodyParams){
+					.position = V3(x, y, z),
+					.rotation = rot,
+					.mass = 1.0f,
+				});
+				body_add_shape(g_world, b, (ShapeParams){
+					.type = SHAPE_HULL,
+					.hull = { .hull = types[t].hull, .scale = types[t].scale },
+				});
+				apush(g_draw_list, ((DrawEntry){ b, types[t].mesh, types[t].scale, types[t].color }));
+				idx++;
+			}
+		}
+	}
+
+	// Toss a few boxes into the mix
+	for (int i = 0; i < 4; i++) {
+		float x = (i - 2) * 0.9f;
+		float y = 8.0f + i * 0.5f;
+		Body b = create_body(g_world, (BodyParams){
+			.position = V3(x, y, 0),
+			.rotation = quat_identity(),
+			.mass = 1.0f,
+		});
+		float h = 0.3f + i * 0.05f;
+		body_add_shape(g_world, b, (ShapeParams){
+			.type = SHAPE_BOX,
+			.box.half_extents = V3(h, h, h),
+		});
+		v3 col = V3(0.7f + i*0.05f, 0.4f, 0.8f - i*0.1f);
+		apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(h, h, h), col }));
 	}
 }
 
