@@ -2,6 +2,8 @@
 // Primal-dual position solver: per-body 6x6 Newton steps + augmented Lagrangian dual updates.
 // Reference: Ly, Narain et al. "Augmented VBD" SIGGRAPH 2025; Chris Giles' 3D demo.
 
+
+
 static int avbd_body_is_sleeping(WorldInternal* w, int idx)
 {
 	int isl = w->body_cold[idx].island_id;
@@ -163,6 +165,7 @@ static void avbd_pre_solve(WorldInternal* w, InternalManifold* manifolds, int co
 		}
 		apush(am, m);
 	}
+
 	*out_am = am;
 }
 
@@ -226,6 +229,8 @@ static void avbd_post_solve(WorldInternal* w, AVBD_Manifold* am, int am_count)
 				.penalty = ac->penalty, .lambda = ac->lambda, .stick = ac->stick,
 			};
 		}
+		wm.basis = m->basis;
+		wm.friction = m->friction;
 		map_set(w->avbd_warm_cache, key, wm);
 	}
 }
@@ -236,7 +241,7 @@ static void avbd_warm_cache_age_and_evict(WorldInternal* w)
 		w->avbd_warm_cache[i].stale++;
 	int i = 0;
 	while (i < map_size(w->avbd_warm_cache)) {
-		if (w->avbd_warm_cache[i].stale > 1)
+		if (w->avbd_warm_cache[i].stale > 2) // keep synthetic contacts short-lived
 			map_del(w->avbd_warm_cache, map_keys(w->avbd_warm_cache)[i]);
 		else i++;
 	}
@@ -579,24 +584,13 @@ static void avbd_joints_dual_step(WorldInternal* w, float alpha)
 
 // --- Top-level AVBD solver ---
 
-static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifold_count, float dt)
+static void avbd_solve(WorldInternal* w, float dt)
 {
 	int body_count = asize(w->body_hot);
 	float alpha = w->avbd_alpha;
 	float gamma = w->avbd_gamma;
 
 	avbd_warm_cache_age_and_evict(w);
-
-	CK_DYNA AVBD_Manifold* am = NULL;
-	avbd_pre_solve(w, manifolds, manifold_count, &am, dt);
-	int am_count = asize(am);
-
-	avbd_joints_pre_solve(w, alpha, gamma, dt);
-
-	int *ct_start = NULL, *jt_start = NULL;
-	AVBD_ContactAdj* ct_adj = NULL;
-	AVBD_JointAdj* jt_adj = NULL;
-	avbd_build_adjacency(w, am, am_count, body_count, &ct_start, &ct_adj, &jt_start, &jt_adj);
 
 	// Ensure prev_velocity array is big enough
 	if (asize(w->avbd_prev_velocity) < body_count) {
@@ -612,6 +606,7 @@ static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifo
 	v3 grav = w->gravity;
 	float grav_len = len(grav);
 
+	// Phase 1: Save initial state, compute inertial positions, warmstart body positions.
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i)) continue;
 		BodyHot* h = &w->body_hot[i];
@@ -621,12 +616,9 @@ static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifo
 		if (h->inv_mass == 0.0f) continue;
 		if (avbd_body_is_sleeping(w, i)) continue;
 
-		// Inertial position: y = x + v*dt + g*dt^2
 		states[i].inertial_lin = add(add(h->position, scale(h->velocity, dt)), scale(grav, dt * dt));
 		states[i].inertial_ang = quat_add_dw(h->rotation, scale(h->angular_velocity, dt));
 
-		// Adaptive body warm-start (VBD paper): use acceleration from previous
-		// frame to predict gravity contribution, giving solver a better starting guess.
 		v3 prev_v = w->avbd_prev_velocity[i];
 		v3 accel = scale(sub(h->velocity, prev_v), inv_dt);
 		float accel_along_grav = grav_len > 0.0f ? dot(accel, scale(grav, 1.0f / grav_len)) : 0.0f;
@@ -636,6 +628,31 @@ static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifo
 		h->rotation = quat_add_dw(h->rotation, scale(h->angular_velocity, dt));
 	}
 
+	// Phase 2: Collision detection at warmstarted positions.
+	CK_DYNA InternalManifold* manifolds = NULL;
+	broadphase_and_collide(w, &manifolds);
+	islands_update_contacts(w, manifolds, asize(manifolds));
+	int manifold_count = asize(manifolds);
+
+	// Update debug contacts for visualization
+	aclear(w->debug_contacts);
+	for (int i = 0; i < manifold_count; i++)
+		for (int c = 0; c < manifolds[i].m.count; c++)
+			apush(w->debug_contacts, manifolds[i].m.contacts[c]);
+
+	// Phase 3: Build solver data from contacts detected at warmstarted positions.
+	CK_DYNA AVBD_Manifold* am = NULL;
+	avbd_pre_solve(w, manifolds, manifold_count, &am, dt);
+	int am_count = asize(am);
+
+	avbd_joints_pre_solve(w, alpha, gamma, dt);
+
+	int *ct_start = NULL, *jt_start = NULL;
+	AVBD_ContactAdj* ct_adj = NULL;
+	AVBD_JointAdj* jt_adj = NULL;
+	avbd_build_adjacency(w, am, am_count, body_count, &ct_start, &ct_adj, &jt_start, &jt_adj);
+
+	// Phase 4: Solver iterations.
 	for (int it = 0; it < w->avbd_iterations; it++) {
 		avbd_primal_step(w, am, am_count, ct_start, ct_adj, jt_start, jt_adj, states, alpha, dt);
 		avbd_contacts_dual_step(w, am, am_count, states, alpha);
@@ -658,4 +675,5 @@ static void avbd_solve(WorldInternal* w, InternalManifold* manifolds, int manifo
 	afree(ct_adj); afree(ct_start);
 	afree(jt_adj); afree(jt_start);
 	afree(am);
+	afree(manifolds);
 }

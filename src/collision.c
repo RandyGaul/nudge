@@ -704,12 +704,14 @@ static int clip_to_plane(v3* in, uint8_t* in_fid, int in_count, v3 plane_n, floa
 			out_fid[out_count] = fid_prev;
 			out_count++;
 			if (d_cur > 0.0f) {
+				// Exiting clip plane: tag with 0x40 bit to distinguish from entry
 				float t = d_prev / (d_prev - d_cur);
 				out[out_count] = add(prev, scale(sub(cur, prev), t));
-				out_fid[out_count] = clip_edge; // new vertex from this clip plane
+				out_fid[out_count] = clip_edge | 0x40;
 				out_count++;
 			}
 		} else if (d_cur <= 0.0f) {
+			// Entering clip plane: plain clip_edge
 			float t = d_prev / (d_prev - d_cur);
 			out[out_count] = add(prev, scale(sub(cur, prev), t));
 			out_fid[out_count] = clip_edge;
@@ -869,8 +871,12 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 	v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
 	uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
 	int clip_count = hull_face_verts_world(inc_hull, inc_face, inc_pos, inc_rot, inc_sc, buf1);
-	// Initial feature: each incident vertex gets 0xFF (original, not clipped).
-	for (int i = 0; i < clip_count; i++) fid1[i] = 0xFF;
+	// Initial feature: each incident vertex gets a unique ID based on its
+	// position in the face winding. This ensures face-face contacts where no
+	// clipping or corner-snapping occurs still get distinct feature IDs for
+	// warm-start matching. Range 0x80..0xBF avoids collision with clip-edge
+	// indices (0..N) and corner-snap tags (0xC0..0xFF).
+	for (int i = 0; i < clip_count; i++) fid1[i] = 0x80 | (uint8_t)i;
 
 	// Clip against each side plane of the reference face.
 	v3* in_buf = buf1;   v3* out_buf = buf2;
@@ -912,7 +918,6 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 		} while (ce != start_e);
 		float snap_tol2 = 1e-6f;
 		for (int i = 0; i < clip_count; i++) {
-			if (in_fid[i] == 0xFF) continue;
 			for (int c = 0; c < ncorners; c++) {
 				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) {
 					in_fid[i] = 0xC0 | (uint8_t)c;

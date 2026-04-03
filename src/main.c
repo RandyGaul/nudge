@@ -108,6 +108,8 @@ static bool g_show_sleep = true;
 static bool g_sleep_enabled = true;
 static int g_friction_model = FRICTION_PATCH;
 static int g_solver_type = SOLVER_SOFT_STEP;
+static bool g_ldl_enabled = false;
+static bool g_ldl_debug = false;
 static bool g_paused = false;
 static bool g_step_once = false;
 
@@ -142,6 +144,8 @@ static void scene_stacks_setup();
 static void scene_friction_setup();
 
 static void scene_mass_ratio_setup();
+static void scene_heavy_chain_setup();
+static void scene_heavy_chain_draw_extras();
 
 static Scene g_scenes[] = {
 	{ "Shape Showcase",  scene_showcase_setup,  scene_showcase_draw_extras },
@@ -149,6 +153,7 @@ static Scene g_scenes[] = {
 	{ "Varied Stacks",   scene_stacks_setup,    NULL },
 	{ "Friction Test",   scene_friction_setup,  NULL },
 	{ "Mass Ratio",      scene_mass_ratio_setup, NULL },
+	{ "Heavy Chain",     scene_heavy_chain_setup, scene_heavy_chain_draw_extras },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 
@@ -245,6 +250,7 @@ static void setup_scene()
 {
 	if (g_world.id) destroy_world(g_world);
 	aclear(g_draw_list);
+	g_ldl_debug_info.valid = 0;
 
 	g_world = create_world((WorldParams){
 		.gravity = V3(0, -9.81f, 0),
@@ -252,6 +258,7 @@ static void setup_scene()
 	});
 
 	((WorldInternal*)g_world.id)->sleep_enabled = g_sleep_enabled;
+	((WorldInternal*)g_world.id)->ldl_enabled = g_ldl_enabled;
 	world_set_friction_model(g_world, (FrictionModel)g_friction_model);
 	world_set_solver_type(g_world, (SolverType)g_solver_type);
 	g_scenes[g_scene_index].setup();
@@ -526,6 +533,66 @@ static void scene_friction_setup()
 }
 
 // ---------------------------------------------------------------------------
+// --- Heavy Chain: long chain with massive weight on the end ---
+// PGS struggles with high mass ratio across many joints.
+// LDL should solve the joint system exactly.
+#define HEAVY_CHAIN_LEN 10
+static Body g_hchain[HEAVY_CHAIN_LEN];
+static Body g_hchain_anchor;
+
+static void scene_heavy_chain_setup()
+{
+
+	// Static anchor at top
+	g_hchain_anchor = create_body(g_world, (BodyParams){
+		.position = V3(0, 10, 0),
+		.rotation = quat_identity(),
+		.mass = 0,
+	});
+	body_add_shape(g_world, g_hchain_anchor, (ShapeParams){
+		.type = SHAPE_SPHERE,
+		.sphere.radius = 0.15f,
+	});
+
+	float link_len = 0.8f;
+	Body prev = g_hchain_anchor;
+	for (int i = 0; i < HEAVY_CHAIN_LEN; i++) {
+		int last = (i == HEAVY_CHAIN_LEN - 1);
+		float mass = last ? 100.0f : 1.0f;
+		float radius = last ? 0.5f : 0.15f;
+		v3 color = last ? V3(0.9f, 0.2f, 0.2f) : V3(0.6f, 0.6f, 0.9f);
+
+		g_hchain[i] = create_body(g_world, (BodyParams){
+			.position = V3((i + 1) * link_len, 10, 0),
+			.rotation = quat_identity(),
+			.mass = mass,
+		});
+		body_add_shape(g_world, g_hchain[i], (ShapeParams){
+			.type = SHAPE_SPHERE,
+			.sphere.radius = radius,
+		});
+		create_ball_socket(g_world, (BallSocketParams){
+			.body_a = prev,
+			.body_b = g_hchain[i],
+			.local_offset_a = V3(link_len * 0.5f, 0, 0),
+			.local_offset_b = V3(-link_len * 0.5f, 0, 0),
+		});
+		apush(g_draw_list, ((DrawEntry){ g_hchain[i], MESH_SPHERE, V3(radius, radius, radius), color }));
+		prev = g_hchain[i];
+	}
+}
+
+static void scene_heavy_chain_draw_extras()
+{
+	if (!g_show_joints) return;
+	v3 prev_pos = body_get_position(g_world, g_hchain_anchor);
+	for (int i = 0; i < HEAVY_CHAIN_LEN; i++) {
+		v3 pos = body_get_position(g_world, g_hchain[i]);
+		render_debug_line(prev_pos, pos, V3(1, 1, 0));
+		prev_pos = pos;
+	}
+}
+
 // Scene: Mass Ratio -- tiny box at bottom, each box above is larger and heavier.
 // Stress test for solver stability under extreme mass ratios.
 // ---------------------------------------------------------------------------
@@ -556,6 +623,210 @@ static void scene_mass_ratio_setup()
 		apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(h, h, h), colors[i] }));
 		y += h;
 	}
+}
+
+// --- LDL Debug Visualizer ---
+extern LDL_DebugInfo g_ldl_debug_info;
+extern int g_ldl_debug_enabled;
+
+static ImU32 ldl_heat_color(float val, float max_val)
+{
+	if (max_val < 1e-12f) return ImGui_GetColorU32ImVec4((ImVec4){0.1f, 0.1f, 0.1f, 1.0f});
+	float t = fabsf(val) / max_val;
+	if (t > 1.0f) t = 1.0f;
+	float r, g, b;
+	if (t < 0.33f) { float s = t / 0.33f; r = 0; g = 0; b = s; }
+	else if (t < 0.66f) { float s = (t - 0.33f) / 0.33f; r = s; g = 0; b = 1.0f - s; }
+	else { float s = (t - 0.66f) / 0.34f; r = 1.0f; g = s; b = 0; }
+	return ImGui_GetColorU32ImVec4((ImVec4){r, g, b, 1.0f});
+}
+
+// Build a short label for joint j (e.g. "BS0", "BS1", "D0").
+static void ldl_joint_label(LDL_DebugInfo* info, int j, char* buf, int bufsize)
+{
+	if (info->block_types[j] == JOINT_BALL_SOCKET)
+		snprintf(buf, bufsize, "BS%d", j);
+	else
+		snprintf(buf, bufsize, "D%d", j - info->bs_count);
+}
+
+// Find which joint owns a given DOF row index.
+static int ldl_joint_for_row(LDL_DebugInfo* info, int row)
+{
+	for (int j = info->joint_count - 1; j >= 0; j--)
+		if (row >= info->block_rows[j]) return j;
+	return 0;
+}
+
+// Help marker: gray "(?) " that shows tooltip on hover.
+static void ldl_help(const char* text)
+{
+	ImGui_SameLine();
+	ImGui_TextDisabled("(?)");
+	if (ImGui_IsItemHovered(0)) ImGui_SetTooltipUnformatted(text);
+}
+
+static void draw_ldl_debug()
+{
+	LDL_DebugInfo* info = &g_ldl_debug_info;
+	if (!info->valid) { ImGui_Begin("LDL Debug", NULL, 0); ImGui_Text("No data yet"); ImGui_End(); return; }
+
+	ImGui_Begin("LDL Debug", NULL, 0);
+	int n = info->n;
+
+	// --- Stats ---
+	ImGui_SeparatorText("Stats");
+	ImGui_Text("DOFs: %d  Joints: %d (BS:%d D:%d)", n, info->joint_count, info->bs_count, info->dist_count);
+	ldl_help("Total scalar degrees of freedom in the joint system.\nBS = ball socket (3 DOF each), D = distance (1 DOF each).");
+
+	float d_min = 1e18f, d_max = -1e18f;
+	for (int i = 0; i < n; i++) { if (info->D[i] < d_min) d_min = info->D[i]; if (info->D[i] > d_max) d_max = info->D[i]; }
+	float d_ratio = d_max / (d_min > 1e-12f ? d_min : 1e-12f);
+	ImGui_Text("Pivot D: min=%.4g  max=%.4g  ratio=%.1f", d_min, d_max, d_ratio);
+	ldl_help("Diagonal pivots from LDL^T factorization.\nHigh ratio = ill-conditioned system (large mass ratios\nor long chains). PGS struggles most when ratio is high.\nLDL solves exactly regardless of conditioning.");
+
+	float max_delta = 0, total_corr = 0;
+	for (int i = 0; i < n; i++) {
+		float d = fabsf(info->lambda_ldl[i] - info->lambda_pgs[i]);
+		if (d > max_delta) max_delta = d;
+		total_corr += d * d;
+	}
+	ImGui_Text("Max delta: %.4g  RMS correction: %.4g", max_delta, sqrtf(total_corr / (n > 0 ? n : 1)));
+	ldl_help("How much LDL changed the PGS result.\nSmall values = PGS was already accurate.\nLarge values = PGS was struggling, LDL is helping.");
+
+	// --- Matrix Heatmap ---
+	ImGui_SeparatorText("Constraint Matrix A");
+	ldl_help("A = J * M^-1 * J^T -- the joint coupling matrix.\nDiagonal blocks = each joint's effective mass.\nOff-diagonal = coupling between joints sharing a body.\nBrighter = larger magnitude. Hover cells for values.");
+
+	if (n > 0 && n <= LDL_MAX_DOF) {
+		float cell = 10.0f;
+		float margin = 30.0f; // space for labels
+		ImDrawList* dl = ImGui_GetWindowDrawList();
+		ImVec2 cursor = ImGui_GetCursorScreenPos();
+		float ox = cursor.x + margin; // matrix origin x (after labels)
+		float oy = cursor.y + margin; // matrix origin y (after labels)
+		ImU32 text_col = ImGui_GetColorU32ImVec4((ImVec4){0.7f, 0.7f, 0.7f, 1.0f});
+
+		// Find max magnitude for color scaling
+		float a_max = 0;
+		for (int i = 0; i < n * n; i++) { float v = fabsf(info->A[i]); if (v > a_max) a_max = v; }
+
+		// Top labels (one per joint block, centered over its columns)
+		for (int j = 0; j < info->joint_count; j++) {
+			char lbl[8]; ldl_joint_label(info, j, lbl, sizeof(lbl));
+			float bx = ox + info->block_rows[j] * cell + info->block_dofs[j] * cell * 0.5f - 8;
+			ImDrawList_AddText(dl, (ImVec2){bx, cursor.y}, text_col, lbl);
+		}
+		// Left labels (one per joint block, centered vertically)
+		for (int j = 0; j < info->joint_count; j++) {
+			char lbl[8]; ldl_joint_label(info, j, lbl, sizeof(lbl));
+			float by = oy + info->block_rows[j] * cell + info->block_dofs[j] * cell * 0.5f - 6;
+			ImDrawList_AddText(dl, (ImVec2){cursor.x, by}, text_col, lbl);
+		}
+
+		// Draw cells
+		int hover_row = -1, hover_col = -1;
+		ImVec2 mouse = ImGui_GetMousePos();
+		for (int row = 0; row < n; row++) {
+			for (int col = 0; col < n; col++) {
+				float x0 = ox + col * cell;
+				float y0 = oy + row * cell;
+				ImU32 c = ldl_heat_color(info->A[row * n + col], a_max);
+				ImDrawList_AddRectFilled(dl, (ImVec2){x0, y0}, (ImVec2){x0 + cell - 1, y0 + cell - 1}, c);
+				if (mouse.x >= x0 && mouse.x < x0 + cell && mouse.y >= y0 && mouse.y < y0 + cell) {
+					hover_row = row; hover_col = col;
+				}
+			}
+		}
+
+		// Block boundary lines
+		ImU32 line_col = ImGui_GetColorU32ImVec4((ImVec4){1, 1, 1, 0.3f});
+		for (int j = 0; j < info->joint_count; j++) {
+			float px = ox + info->block_rows[j] * cell;
+			float py = oy + info->block_rows[j] * cell;
+			ImDrawList_AddLine(dl, (ImVec2){px, oy}, (ImVec2){px, oy + n * cell}, line_col);
+			ImDrawList_AddLine(dl, (ImVec2){ox, py}, (ImVec2){ox + n * cell, py}, line_col);
+		}
+		// Outer border
+		ImDrawList_AddRect(dl, (ImVec2){ox, oy}, (ImVec2){ox + n * cell, oy + n * cell}, line_col);
+
+		ImGui_Dummy((ImVec2){margin + n * cell + 4, margin + n * cell + 4});
+
+		// Hover tooltip for matrix cell
+		if (hover_row >= 0 && ImGui_IsMouseHoveringRect((ImVec2){ox, oy}, (ImVec2){ox + n * cell, oy + n * cell})) {
+			int jr = ldl_joint_for_row(info, hover_row);
+			int jc = ldl_joint_for_row(info, hover_col);
+			char lr[8], lc[8];
+			ldl_joint_label(info, jr, lr, sizeof(lr));
+			ldl_joint_label(info, jc, lc, sizeof(lc));
+			int dr = hover_row - info->block_rows[jr];
+			int dc = hover_col - info->block_rows[jc];
+			const char* axes = "xyz";
+			if (ImGui_BeginTooltip()) {
+				ImGui_Text("A[%d,%d] = %.6g", hover_row, hover_col, (double)info->A[hover_row * n + hover_col]);
+				if (jr == jc)
+					ImGui_Text("Diagonal: %s (DOF %c,%c)", lr, axes[dr % 3], axes[dc % 3]);
+				else
+					ImGui_Text("Coupling: %s.%c <-> %s.%c (shared body)", lr, axes[dr % 3], lc, axes[dc % 3]);
+				ImGui_EndTooltip();
+			}
+		}
+
+		// Color legend
+		ImGui_TextDisabled("Color: black=0  blue=small  red=medium  yellow=large");
+	}
+
+	// --- Lambda Comparison ---
+	ImGui_SeparatorText("Lambda Impulses");
+	ldl_help("Accumulated constraint impulses per DOF.\nGreen = warm-start (previous frame).\nYellow = LDL exact result.\nLarge differences = system is changing rapidly.");
+
+	if (n > 0) {
+		float bar_h = 10.0f, bar_max_w = 150.0f, row_h = bar_h * 2 + 6, label_w = 50.0f, value_x = label_w + bar_max_w + 8;
+		ImDrawList* dl = ImGui_GetWindowDrawList();
+		ImVec2 cursor = ImGui_GetCursorScreenPos();
+
+		float l_max = 1e-6f;
+		for (int i = 0; i < n; i++) { float v = fabsf(info->lambda_pgs[i]); if (v > l_max) l_max = v; v = fabsf(info->lambda_ldl[i]); if (v > l_max) l_max = v; }
+
+		ImU32 pgs_col = ImGui_GetColorU32ImVec4((ImVec4){0.2f, 0.8f, 0.2f, 0.9f});
+		ImU32 ldl_col = ImGui_GetColorU32ImVec4((ImVec4){1.0f, 0.9f, 0.1f, 0.9f});
+		ImU32 text_col = ImGui_GetColorU32ImVec4((ImVec4){1, 1, 1, 1});
+		ImU32 dim_col = ImGui_GetColorU32ImVec4((ImVec4){0.5f, 0.5f, 0.5f, 1.0f});
+		int dof_idx = 0;
+		for (int j = 0; j < info->joint_count; j++) {
+			for (int d = 0; d < info->block_dofs[j]; d++) {
+				float y = cursor.y + dof_idx * row_h;
+				int ri = info->block_rows[j] + d;
+				char label[16];
+				if (info->block_types[j] == JOINT_BALL_SOCKET)
+					snprintf(label, sizeof(label), "BS%d.%c", j, "xyz"[d]);
+				else
+					snprintf(label, sizeof(label), "D%d", j - info->bs_count);
+				ImDrawList_AddText(dl, (ImVec2){cursor.x, y}, text_col, label);
+
+				// PGS bar (green)
+				float pgs_val = info->lambda_pgs[ri];
+				float pgs_w = (fabsf(pgs_val) / l_max) * bar_max_w;
+				ImDrawList_AddRectFilled(dl, (ImVec2){cursor.x + label_w, y}, (ImVec2){cursor.x + label_w + pgs_w, y + bar_h}, pgs_col);
+
+				// LDL bar (yellow)
+				float ldl_val = info->lambda_ldl[ri];
+				float ldl_w = (fabsf(ldl_val) / l_max) * bar_max_w;
+				ImDrawList_AddRectFilled(dl, (ImVec2){cursor.x + label_w, y + bar_h + 2}, (ImVec2){cursor.x + label_w + ldl_w, y + bar_h + 2 + bar_h}, ldl_col);
+
+				// Numeric values
+				char vals[32];
+				snprintf(vals, sizeof(vals), "%.3f", (double)ldl_val);
+				ImDrawList_AddText(dl, (ImVec2){cursor.x + value_x, y + bar_h * 0.5f - 4}, dim_col, vals);
+
+				dof_idx++;
+			}
+		}
+
+		ImGui_Dummy((ImVec2){value_x + 60, dof_idx * row_h + 4});
+	}
+
+	ImGui_End();
 }
 
 void update()
@@ -606,6 +877,23 @@ void update()
 		world_set_friction_model(g_world, (FrictionModel)g_friction_model);
 	if (ImGui_Combo("Solver", &g_solver_type, "Soft Step\0SI Soft\0SI\0Block\0AVBD\0"))
 		world_set_solver_type(g_world, (SolverType)g_solver_type);
+	if (g_solver_type != SOLVER_AVBD) {
+		if (ImGui_Checkbox("LDL Joints", &g_ldl_enabled))
+			dbg_w->ldl_enabled = g_ldl_enabled;
+		if (g_ldl_enabled) {
+			ImGui_SameLine();
+			ImGui_Checkbox("Debug##ldl", &g_ldl_debug);
+			g_ldl_debug_enabled = g_ldl_debug;
+		} else {
+			g_ldl_debug = false;
+			g_ldl_debug_enabled = 0;
+		}
+	} else {
+		g_ldl_enabled = false;
+		g_ldl_debug = false;
+		dbg_w->ldl_enabled = 0;
+		g_ldl_debug_enabled = 0;
+	}
 
 	// Visualization
 	ImGui_SeparatorText("Visualization");
@@ -631,6 +919,9 @@ void update()
 	}
 	ImGui_Text("Bodies: %d", asize(g_draw_list));
 	ImGui_End();
+
+	if (g_ldl_debug && g_ldl_enabled)
+		draw_ldl_debug();
 }
 
 static void draw_body_mesh(int mesh, Body body, v3 sc, v3 color)

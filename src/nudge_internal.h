@@ -82,6 +82,27 @@ typedef struct JointInternal
 
 typedef struct BVHTree BVHTree; // forward decl, defined in bvh.c
 
+// LDL direct solver types (used by solver_ldl.c).
+typedef struct LDL_Block
+{
+	int type;         // JOINT_BALL_SOCKET or JOINT_DISTANCE
+	int dof;          // 3 or 1
+	int row;          // row offset into the n x n system
+	int body_a, body_b;
+	int solver_idx;   // index into sol_bs[] or sol_dist[]
+} LDL_Block;
+
+typedef struct LDL_Cache
+{
+	CK_DYNA LDL_Block* blocks;
+	int joint_count;
+	int n;              // total DOFs
+	float* L;           // n*n, lower triangle after factorize
+	float* D;           // n diagonal pivots
+	int factored_frame; // frame number when L/D were last computed
+	int topo_version;   // world topo version when blocks were built
+} LDL_Cache;
+
 // Island: group of connected bodies that can sleep/wake together.
 typedef struct Island
 {
@@ -89,6 +110,7 @@ typedef struct Island
 	int head_joint, tail_joint, joint_count;
 	int constraint_remove_count;
 	int awake; // 1 = awake, 0 = sleeping
+	LDL_Cache ldl;
 } Island;
 
 #define SLEEP_VEL_THRESHOLD   0.01f  // squared velocity magnitude threshold
@@ -121,6 +143,8 @@ typedef struct WorldInternal
 	CK_DYNA int*        island_free;
 	CK_MAP(uint8_t)     prev_touching; // body_pair_key -> 1 for pairs touching last frame
 	int sleep_enabled; // 1 = island sleep active (default)
+	int ldl_enabled;   // 1 = LDL direct correction for joints (dual solvers only)
+	int ldl_topo_version; // incremented on joint create/destroy
 	FrictionModel friction_model;
 	SolverType solver_type;
 	int velocity_iters;
@@ -256,7 +280,7 @@ typedef struct ConstraintRef
 #define AVBD_STABLE_THRESH 0.05f // adaptive alpha: below this error, use full stabilization
 #define AVBD_PENALTY_MIN  1.0f
 #define AVBD_PENALTY_MAX  1e10f
-#define AVBD_MARGIN       0.0f   // nudge contacts already have margin via LINEAR_SLOP
+#define AVBD_MARGIN       0.0f   // must be 0: nudge penetration is always positive, margin would hide it
 #define AVBD_STICK_THRESH 0.00001f
 
 typedef struct AVBD_Contact
@@ -311,6 +335,8 @@ typedef struct AVBD_WarmManifold
 	AVBD_WarmContact contacts[MAX_CONTACTS];
 	int count;
 	int stale;
+	m3x3 basis;         // cached [normal; tangent1; tangent2] for synthetic contacts
+	float friction;
 } AVBD_WarmManifold;
 
 // Per-body temporary state for AVBD (not stored in BodyHot)
@@ -321,5 +347,25 @@ typedef struct AVBD_BodyState
 	quat inertial_ang;
 	quat initial_ang;  // q- for angular velocity recovery
 } AVBD_BodyState;
+
+// -----------------------------------------------------------------------------
+// LDL debug visualization data (populated by solver_ldl.c, read by UI).
+
+#define LDL_MAX_DOF 128
+
+typedef struct LDL_DebugInfo
+{
+	int n;                    // total DOFs
+	int joint_count;
+	int bs_count, dist_count;
+	float A[LDL_MAX_DOF * LDL_MAX_DOF]; // constraint matrix snapshot
+	float D[LDL_MAX_DOF];               // diagonal pivots after factorization
+	float lambda_pgs[LDL_MAX_DOF];      // PGS lambdas before correction
+	float lambda_ldl[LDL_MAX_DOF];      // exact lambdas after LDL solve
+	int block_dofs[64];                  // per-joint DOF (3 or 1)
+	int block_rows[64];                  // per-joint row offset
+	int block_types[64];                 // JOINT_BALL_SOCKET or JOINT_DISTANCE
+	int valid;
+} LDL_DebugInfo;
 
 #endif // NUDGE_INTERNAL_H

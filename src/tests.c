@@ -2623,6 +2623,91 @@ static void bounce_test_for_solver(SolverType solver, const char* name)
 	destroy_world(w);
 }
 
+// LDL heavy chain: 10-link chain with 100:1 mass ratio on the last link.
+// With LDL enabled, joint gaps should be much tighter than without.
+static void test_ldl_heavy_chain()
+{
+	int chain_len = 10;
+	float link_len = 0.8f;
+	v3 off_a = V3(link_len * 0.5f, 0, 0);
+	v3 off_b = V3(-link_len * 0.5f, 0, 0);
+
+	// Run once WITHOUT LDL, measure max joint gap
+	float gap_no_ldl = 0;
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 0;
+
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+		Body chain[10];
+		Body prev = anchor;
+		for (int i = 0; i < chain_len; i++) {
+			float mass = (i == chain_len - 1) ? 100.0f : 1.0f;
+			chain[i] = create_body(w, (BodyParams){ .position = V3((i + 1) * link_len, 10, 0), .rotation = quat_identity(), .mass = mass });
+			body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+			prev = chain[i];
+		}
+
+		step_n(w, 300); // 5 seconds
+
+		// Measure max gap
+		prev = anchor;
+		for (int i = 0; i < chain_len; i++) {
+			float gap = anchor_distance(w, prev, off_a, chain[i], off_b);
+			if (gap > gap_no_ldl) gap_no_ldl = gap;
+			prev = chain[i];
+		}
+		destroy_world(w);
+	}
+
+	// Run again WITH LDL, measure max joint gap
+	float gap_ldl = 0;
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+		Body chain[10];
+		Body prev = anchor;
+		for (int i = 0; i < chain_len; i++) {
+			float mass = (i == chain_len - 1) ? 100.0f : 1.0f;
+			chain[i] = create_body(w, (BodyParams){ .position = V3((i + 1) * link_len, 10, 0), .rotation = quat_identity(), .mass = mass });
+			body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+			prev = chain[i];
+		}
+
+		step_n(w, 300); // 5 seconds
+
+		prev = anchor;
+		for (int i = 0; i < chain_len; i++) {
+			float gap = anchor_distance(w, prev, off_a, chain[i], off_b);
+			if (gap > gap_ldl) gap_ldl = gap;
+			prev = chain[i];
+		}
+		destroy_world(w);
+	}
+
+	printf("  [LDL heavy chain] no_ldl max_gap=%.4f  ldl max_gap=%.4f\n", gap_no_ldl, gap_ldl);
+
+	TEST_BEGIN("LDL heavy chain: LDL joints tighter than PGS");
+	TEST_ASSERT(gap_ldl < gap_no_ldl);
+
+	TEST_BEGIN("LDL heavy chain: LDL max gap below 0.1");
+	TEST_ASSERT(gap_ldl < 0.1f);
+
+	TEST_BEGIN("LDL heavy chain: chain doesn't explode");
+	TEST_ASSERT(gap_ldl < 1.0f);
+	TEST_ASSERT(gap_no_ldl < 10.0f); // PGS stretches badly with 100:1 ratio, that's expected
+}
+
 static void run_solver_tests()
 {
 	printf("--- nudge solver tests ---\n");
@@ -2634,6 +2719,7 @@ static void run_solver_tests()
 	test_ball_socket_chain_stays_connected();
 	test_ball_socket_pin_converges();
 	test_ball_socket_pendulum();
+	test_ldl_heavy_chain();
 	test_bounce_height_monotonic();
 	bounce_test_for_solver(SOLVER_SOFT_STEP, "Soft Step");
 	bounce_test_for_solver(SOLVER_SI_SOFT, "SI Soft");
@@ -2660,6 +2746,8 @@ static void run_solver_tests()
 		float dt = 1.0f / 60.0f;
 		for (int i = 0; i < 600; i++) world_step(w, dt);
 		float y = body_get_position(w, ball).y;
+		float x = body_get_position(w, ball).x;
+		printf("  [AVBD sphere] y=%.4f x=%.4f\n", y, x);
 		// Ball should rest on floor top (y=0) + radius (0.5) = ~0.5
 		TEST_ASSERT(y > 0.3f);
 		TEST_ASSERT(y < 0.7f);
@@ -2766,6 +2854,217 @@ static void run_solver_tests()
 			}
 		}
 		TEST_ASSERT(fallen == 0);
+		destroy_world(w);
+	}
+	// AVBD first scene repro: sphere + capsule + box dropping simultaneously
+	{
+		TEST_BEGIN("AVBD showcase bodies settle");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+
+		Body sphere = create_body(w, (BodyParams){ .position = V3(-3, 5, 0), .rotation = quat_identity(), .mass = 1.0f, .restitution = 0.5f });
+		body_add_shape(w, sphere, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+		Body capsule = create_body(w, (BodyParams){ .position = V3(-1, 6, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, capsule, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.3f, .radius = 0.25f } });
+
+		Body box = create_body(w, (BodyParams){ .position = V3(1, 7, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
+
+		float dt = 1.0f / 60.0f;
+		for (int frame = 0; frame < 600; frame++) {
+			world_step(w, dt);
+			// Check each frame for fall-through
+			float ys = body_get_position(w, sphere).y;
+			float yc = body_get_position(w, capsule).y;
+			float yb = body_get_position(w, box).y;
+			if (ys < -2.0f || yc < -2.0f || yb < -2.0f) {
+				printf("  [AVBD SHOWCASE FAIL] frame=%d sphere=%.2f capsule=%.2f box=%.2f\n", frame, ys, yc, yb);
+				TEST_ASSERT(0); // fail
+				break;
+			}
+		}
+		destroy_world(w);
+	}
+	// AVBD pyramid: many boxes interacting
+	{
+		TEST_BEGIN("AVBD box pyramid");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+		// 4-layer pyramid
+		for (int row = 0; row < 4; row++)
+			for (int col = 0; col < 4 - row; col++) {
+				Body b = create_body(w, (BodyParams){
+					.position = V3(col * 1.05f + row * 0.5f - 1.5f, 0.5f + row * 1.05f, 0),
+					.rotation = quat_identity(), .mass = 1.0f });
+				body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+			}
+		float dt = 1.0f / 60.0f;
+		int fallen = 0;
+		for (int frame = 0; frame < 600; frame++) {
+			world_step(w, dt);
+			WorldInternal* wi = (WorldInternal*)w.id;
+			for (int i = 0; i < asize(wi->body_hot); i++) {
+				if (wi->body_hot[i].inv_mass == 0.0f) continue;
+				if (wi->body_hot[i].position.y < -3.0f) {
+					if (!fallen) printf("  [AVBD PYRAMID FAIL] frame=%d body=%d y=%.3f\n", frame, i, wi->body_hot[i].position.y);
+					fallen++;
+				}
+			}
+		}
+		TEST_ASSERT(fallen == 0);
+		destroy_world(w);
+	}
+	// AVBD solver switch: simulate with Soft Step, then switch to AVBD mid-sim
+	{
+		TEST_BEGIN("AVBD solver switch mid-sim");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_SOFT_STEP });
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+		Body b = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+		float dt = 1.0f / 60.0f;
+		// Run with Soft Step until box settles
+		for (int i = 0; i < 120; i++) world_step(w, dt);
+		float y_before = body_get_position(w, b).y;
+		// Switch to AVBD
+		world_set_solver_type(w, SOLVER_AVBD);
+		for (int i = 0; i < 300; i++) {
+			world_step(w, dt);
+			float y = body_get_position(w, b).y;
+			if (y < -2.0f) {
+				printf("  [AVBD SWITCH FAIL] frame=%d y=%.3f (was %.3f before switch)\n", i, y, y_before);
+				TEST_ASSERT(0);
+				break;
+			}
+		}
+		destroy_world(w);
+	}
+	// AVBD box penetration repro: exact showcase box, track sinking
+	{
+		TEST_BEGIN("AVBD box resting depth");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		((WorldInternal*)w.id)->sleep_enabled = 0; // disable sleep to isolate solver behavior
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+		// Match showcase: box at y=7, half_extents=0.4
+		Body box = create_body(w, (BodyParams){
+			.position = V3(1, 7, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
+		float dt = 1.0f / 60.0f;
+		// Track settling: print Y at key frames around impact and steady state
+		for (int i = 0; i < 600; i++) {
+			world_step(w, dt);
+			float y = body_get_position(w, box).y;
+			if (i >= 40 && i <= 110) // around impact through crash
+				printf("  [AVBD box] f%d y=%.4f\n", i, y);
+			if (i == 200 || i == 400 || i == 599)
+				printf("  [AVBD box] f%d y=%.4f pen=%.4f\n", i, y, 0.4f - y);
+		}
+		float y = body_get_position(w, box).y;
+		// Box should settle very close to y=0.4 (half-extent above floor).
+		TEST_ASSERT(y > 0.38f);
+		destroy_world(w);
+	}
+	// Also test with Soft Step for comparison
+	{
+		TEST_BEGIN("Soft Step box resting depth (reference)");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_SOFT_STEP });
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+		Body box = create_body(w, (BodyParams){
+			.position = V3(1, 7, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
+		float dt = 1.0f / 60.0f;
+		for (int i = 0; i < 600; i++) world_step(w, dt);
+		float y = body_get_position(w, box).y;
+		printf("  [SoftStep box depth] y=%.4f (expected ~0.4, penetration=%.4f)\n", y, 0.4f - y);
+		destroy_world(w);
+	}
+	// AVBD friction slide: box with lateral velocity slides off floor edge and falls
+	{
+		TEST_BEGIN("AVBD box slides off floor edge");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		((WorldInternal*)w.id)->sleep_enabled = 0;
+		// Small floor so box slides off the edge
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(3, 1, 3) });
+		// Box starts on floor with lateral velocity
+		Body box = create_body(w, (BodyParams){
+			.position = V3(0, 0.4f, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
+		body_set_velocity(w, box, V3(8, 0, 0));
+
+		float dt = 1.0f / 60.0f;
+		int fell = 0;
+		for (int i = 0; i < 300; i++) {
+			world_step(w, dt);
+			v3 p = body_get_position(w, box);
+			// Box should eventually slide off edge (x > 3) and fall (y < 0)
+			if (p.x > 4.0f && p.y < -1.0f) { fell = 1; break; }
+			// DEBUG: print key frames
+			if (i == 30 || i == 60 || i == 120 || i == 200)
+				printf("  [AVBD slide] f%d x=%.2f y=%.2f\n", i, p.x, p.y);
+		}
+		v3 pf = body_get_position(w, box);
+		printf("  [AVBD slide] final x=%.2f y=%.2f fell=%d\n", pf.x, pf.y, fell);
+		TEST_ASSERT(fell); // must fall off the edge, not float
+		destroy_world(w);
+	}
+	// Same test with Soft Step for reference
+	{
+		TEST_BEGIN("Soft Step box slides off floor edge (reference)");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_SOFT_STEP });
+		((WorldInternal*)w.id)->sleep_enabled = 0;
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(3, 1, 3) });
+		Body box = create_body(w, (BodyParams){
+			.position = V3(0, 0.4f, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
+		body_set_velocity(w, box, V3(8, 0, 0));
+
+		float dt = 1.0f / 60.0f;
+		int fell = 0;
+		for (int i = 0; i < 300; i++) {
+			world_step(w, dt);
+			v3 p = body_get_position(w, box);
+			if (p.x > 4.0f && p.y < -1.0f) { fell = 1; break; }
+			if (i == 30 || i == 60 || i == 120 || i == 200)
+				printf("  [SS slide] f%d x=%.2f y=%.2f\n", i, p.x, p.y);
+		}
+		v3 pf = body_get_position(w, box);
+		printf("  [SS slide] final x=%.2f y=%.2f fell=%d\n", pf.x, pf.y, fell);
+		// Soft Step friction stops the box before the edge — not a failure
+		destroy_world(w);
+	}
+	// AVBD edge straddle: box placed half-on, half-off the floor edge.
+	// Should tip and fall, not sink into the floor or hover.
+	{
+		TEST_BEGIN("AVBD box straddles floor edge");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		((WorldInternal*)w.id)->sleep_enabled = 0;
+		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(3, 1, 3) });
+		// Box center at x=3.0 — half on floor (edge at x=3), half off
+		Body box = create_body(w, (BodyParams){
+			.position = V3(3.0f, 0.4f, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
+
+		float dt = 1.0f / 60.0f;
+		int fell = 0;
+		for (int i = 0; i < 300; i++) {
+			world_step(w, dt);
+			v3 p = body_get_position(w, box);
+			if (i < 60 || i % 30 == 0)
+				printf("  [AVBD edge] f%d x=%.3f y=%.3f\n", i, p.x, p.y);
+			if (p.y < -2.0f) { fell = 1; break; }
+		}
+		v3 pf = body_get_position(w, box);
+		printf("  [AVBD edge] final x=%.3f y=%.3f fell=%d\n", pf.x, pf.y, fell);
+		// Box should tip off and fall
+		TEST_ASSERT(fell);
 		destroy_world(w);
 	}
 	// AVBD ball-socket: horizontal chain swings down under gravity.

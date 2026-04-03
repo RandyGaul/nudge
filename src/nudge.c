@@ -9,6 +9,7 @@
 #include "inertia.c"
 #include "solver.c"
 #include "joints.c"
+#include "solver_ldl.c"
 #include "islands.c"
 #include "solver_avbd.c"
 
@@ -56,6 +57,7 @@ void destroy_world(World world)
 	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
 	split_free(w->body_cold, w->body_hot, w->body_gen, w->body_free);
 	afree(w->joints); afree(w->joint_gen); afree(w->joint_free);
+	for (int i = 0; i < asize(w->islands); i++) ldl_cache_free(&w->islands[i].ldl);
 	afree(w->islands); afree(w->island_gen); afree(w->island_free);
 	map_free(w->prev_touching);
 	CK_FREE(w);
@@ -124,15 +126,19 @@ void world_step(World world, float dt)
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
 
-	// Age warm cache once per frame (AVBD does its own in avbd_solve)
-	if (w->solver_type != SOLVER_AVBD)
-		warm_cache_age_and_evict(w);
+	// AVBD takes a completely different path — it does its own collision
+	// detection after warmstarting body positions (so contacts are found at
+	// predicted positions, preventing tunneling). Must branch before the
+	// shared collision detection to avoid double island updates.
+	if (w->solver_type == SOLVER_AVBD) {
+		avbd_solve(w, dt);
+		if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
+		return;
+	}
 
-	// --- Collision detection (once per frame) ---
-	// Dual solvers need velocity integration before collision for first substep.
-	// AVBD handles gravity internally via inertial position — skip.
-	if (w->solver_type != SOLVER_AVBD)
-		integrate_velocities(w, sub_dt);
+	// --- Dual solver path ---
+	warm_cache_age_and_evict(w);
+	integrate_velocities(w, sub_dt);
 
 	CK_DYNA InternalManifold* manifolds = NULL;
 	broadphase_and_collide(w, &manifolds);
@@ -144,14 +150,6 @@ void world_step(World world, float dt)
 			apush(w->debug_contacts, manifolds[i].m.contacts[c]);
 
 	int manifold_count = asize(manifolds);
-
-	// AVBD takes a completely different path (primal-dual position solver)
-	if (w->solver_type == SOLVER_AVBD) {
-		avbd_solve(w, manifolds, manifold_count, dt);
-		if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
-		afree(manifolds);
-		return;
-	}
 
 	// --- Pre-solve (once per frame, using sub_dt for softness/bias) ---
 	SolverManifold* sm = NULL;
@@ -172,15 +170,18 @@ void world_step(World world, float dt)
 			.body_a = sm[i].body_a, .body_b = sm[i].body_b };
 		apush(crefs, r);
 	}
-	for (int i = 0; i < asize(sol_bs); i++) {
-		ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
-			.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
-		apush(crefs, r);
-	}
-	for (int i = 0; i < asize(sol_dist); i++) {
-		ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
-			.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
-		apush(crefs, r);
+	// When LDL is enabled, joints are solved directly -- skip them in PGS.
+	if (!w->ldl_enabled) {
+		for (int i = 0; i < asize(sol_bs); i++) {
+			ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
+				.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
+			apush(crefs, r);
+		}
+		for (int i = 0; i < asize(sol_dist); i++) {
+			ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
+				.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
+			apush(crefs, r);
+		}
 	}
 
 	int cref_count = asize(crefs);
@@ -201,18 +202,51 @@ void world_step(World world, float dt)
 				for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
 					solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist);
 
+		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0))
+			ldl_correction(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub);
+
 		integrate_positions(w, sub_dt);
 
 		// Relax contacts: refresh separation/bias from updated positions
 		if (w->solver_type == SOLVER_SOFT_STEP || w->solver_type == SOLVER_BLOCK)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
-		// Zero rigid joint bias after first sub-step (position error is stale)
-		if (sub == 0) {
+		// After first sub-step, position error in bias is stale.
+		// PGS: zero bias (stale bias + iterative = instability).
+		// LDL: recompute bias from current positions (direct solver is exact).
+		if (sub == 0 && !w->ldl_enabled) {
 			for (int i = 0; i < asize(sol_bs); i++)
 				if (sol_bs[i].softness == 0.0f) sol_bs[i].bias = V3(0, 0, 0);
 			for (int i = 0; i < asize(sol_dist); i++)
 				if (sol_dist[i].softness == 0.0f) sol_dist[i].bias = 0.0f;
+		}
+		if (w->ldl_enabled) {
+			float ptv = sub_dt > 0.0f ? SOLVER_BAUMGARTE / sub_dt : 0.0f;
+			for (int i = 0; i < asize(sol_bs); i++) {
+				if (sol_bs[i].softness != 0.0f) continue;
+				SolverBallSocket* s = &sol_bs[i];
+				BodyHot* a = &w->body_hot[s->body_a];
+				BodyHot* b = &w->body_hot[s->body_b];
+				s->r_a = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
+				s->r_b = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
+				v3 anchor_a = add(a->position, s->r_a);
+				v3 anchor_b = add(b->position, s->r_b);
+				s->bias = scale(sub(anchor_b, anchor_a), ptv);
+			}
+			for (int i = 0; i < asize(sol_dist); i++) {
+				if (sol_dist[i].softness != 0.0f) continue;
+				SolverDistance* s = &sol_dist[i];
+				BodyHot* a = &w->body_hot[s->body_a];
+				BodyHot* b = &w->body_hot[s->body_b];
+				s->r_a = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
+				s->r_b = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
+				v3 anchor_a = add(a->position, s->r_a);
+				v3 anchor_b = add(b->position, s->r_b);
+				v3 delta = sub(anchor_b, anchor_a);
+				float dist_val = len(delta);
+				s->axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
+				s->bias = -ptv * (dist_val - w->joints[s->joint_idx].distance.rest_length);
+			}
 		}
 	}
 
@@ -438,6 +472,7 @@ Joint create_ball_socket(World world, BallSocketParams params)
 		.island_id = -1, .island_prev = -1, .island_next = -1,
 	};
 	link_joint_to_islands(w, idx);
+	w->ldl_topo_version++;
 	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
 }
 
@@ -486,6 +521,7 @@ Joint create_distance(World world, DistanceParams params)
 		.island_id = -1, .island_prev = -1, .island_next = -1,
 	};
 	link_joint_to_islands(w, idx);
+	w->ldl_topo_version++;
 	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
 }
 
@@ -497,6 +533,7 @@ void destroy_joint(World world, Joint joint)
 	unlink_joint_from_island(w, idx);
 	memset(&w->joints[idx], 0, sizeof(JointInternal));
 	w->joint_gen[idx]++; // even = dead
+	w->ldl_topo_version++;
 	apush(w->joint_free, idx);
 }
 
