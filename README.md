@@ -3,17 +3,19 @@ Lightweight 3D physics engine for small games or prototyping
 
 ## Preview
 ```c
-World world = create_world(256); // max 256 bodies
-Body floor = create_body(world, (BodyParams){ .mode = STATIC });
-add_box(world, floor, (BoxParams){ .half_extents = {10, 0.5, 10} });
+World world = create_world((WorldParams){ .gravity = {0, -9.81f, 0} });
 
-Body ball = create_body(world, (BodyParams){ .mass = 1.0, .position = {0, 5, 0} });
-add_sphere(world, ball, (SphereParams){ .radius = 0.5 });
+Body floor = create_body(world, (BodyParams){ .mass = 0 }); // mass 0 = static
+body_add_shape(world, floor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = {10, 0.5, 10} });
+
+Body ball = create_body(world, (BodyParams){ .mass = 1.0f, .position = {0, 5, 0} });
+body_add_shape(world, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
 
 while (running) {
     world_step(world, 1.0f / 60.0f);
-    // read back body positions for rendering
+    v3 pos = body_get_position(world, ball);
 }
+destroy_world(world);
 ```
 
 ## Features/Vision

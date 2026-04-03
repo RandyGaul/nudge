@@ -2519,6 +2519,110 @@ static void test_ball_socket_pendulum()
 	destroy_world(w);
 }
 
+// Regression: ball must not bounce higher than the previous bounce.
+// Soft contact bias + restitution bounce were additive in the solver,
+// causing the penetration-recovery bias to inject extra energy on impact.
+static void test_bounce_height_monotonic()
+{
+	TEST_BEGIN("bounce height monotonically decreasing");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body floor_b = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor_b, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body ball = create_body(w, (BodyParams){
+		.position = V3(0, 5, 0), .rotation = quat_identity(),
+		.mass = 1.0f, .restitution = 0.5f,
+	});
+	body_add_shape(w, ball, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.5f,
+	});
+
+	float dt = 1.0f / 60.0f;
+	float prev_peak = 100.0f; // larger than any real peak
+	float y_prev = body_get_position(w, ball).y;
+	int going_up = 0;
+	int peaks_found = 0;
+
+	for (int i = 0; i < 600; i++) { // 10 seconds
+		world_step(w, dt);
+		float y = body_get_position(w, ball).y;
+
+		if (y > y_prev) {
+			going_up = 1;
+		} else if (going_up && y < y_prev) {
+			// Just passed a peak at y_prev
+			float peak = y_prev;
+			if (peaks_found > 0) {
+				if (peak > prev_peak + 0.01f) {
+					printf("  [FAIL] bounce %d: peak %.4f > prev peak %.4f\n",
+						peaks_found, peak, prev_peak);
+					TEST_ASSERT(peak <= prev_peak + 0.01f);
+				}
+			}
+			prev_peak = peak;
+			peaks_found++;
+			going_up = 0;
+		}
+		y_prev = y;
+	}
+	TEST_ASSERT(peaks_found >= 3); // should have at least 3 bounces
+	destroy_world(w);
+}
+
+// Helper: run a bounce test for a specific solver type.
+static void bounce_test_for_solver(SolverType solver, const char* name)
+{
+	char buf[128];
+	snprintf(buf, sizeof(buf), "%s bounce height monotonically decreasing", name);
+	TEST_BEGIN(buf);
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = solver });
+	Body floor_b = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor_b, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body ball = create_body(w, (BodyParams){
+		.position = V3(0, 5, 0), .rotation = quat_identity(),
+		.mass = 1.0f, .restitution = 0.5f,
+	});
+	body_add_shape(w, ball, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.5f,
+	});
+
+	float dt = 1.0f / 60.0f;
+	float prev_peak = 100.0f;
+	float y_prev = body_get_position(w, ball).y;
+	int going_up = 0;
+	int peaks_found = 0;
+
+	for (int i = 0; i < 600; i++) {
+		world_step(w, dt);
+		float y = body_get_position(w, ball).y;
+		if (y > y_prev) {
+			going_up = 1;
+		} else if (going_up && y < y_prev) {
+			float peak = y_prev;
+			if (peaks_found > 0) {
+				if (peak > prev_peak + 0.01f) {
+					printf("  [FAIL] %s bounce %d: peak %.4f > prev peak %.4f\n",
+						name, peaks_found, peak, prev_peak);
+					TEST_ASSERT(peak <= prev_peak + 0.01f);
+				}
+			}
+			prev_peak = peak;
+			peaks_found++;
+			going_up = 0;
+		}
+		y_prev = y;
+	}
+	TEST_ASSERT(peaks_found >= 3);
+	destroy_world(w);
+}
+
 static void run_solver_tests()
 {
 	printf("--- nudge solver tests ---\n");
@@ -2530,6 +2634,11 @@ static void run_solver_tests()
 	test_ball_socket_chain_stays_connected();
 	test_ball_socket_pin_converges();
 	test_ball_socket_pendulum();
+	test_bounce_height_monotonic();
+	bounce_test_for_solver(SOLVER_SOFT_STEP, "Soft Step");
+	bounce_test_for_solver(SOLVER_SI_SOFT, "SI Soft");
+	bounce_test_for_solver(SOLVER_SI, "SI");
+	bounce_test_for_solver(SOLVER_BLOCK, "Block");
 }
 
 // ============================================================================

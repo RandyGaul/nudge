@@ -1093,14 +1093,19 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 
 	// Incremental refinement: rebuild a subtree using binned SAH.
 	AABB* lut = bvh_build_lut(w->bvh_dynamic);
-	if (lut) { bvh_incremental_refine(w->bvh_dynamic, lut, 0.05f); CK_FREE(lut); }
+	if (lut) { bvh_incremental_refine(w->bvh_dynamic, lut); CK_FREE(lut); }
 
 	CK_DYNA BroadPair* pairs = NULL;
 	bvh_self_test(w->bvh_dynamic, &pairs);
 	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
 
-	for (int i = 0; i < asize(pairs); i++)
-		narrowphase_pair(w, pairs[i].a, pairs[i].b, manifolds);
+	for (int i = 0; i < asize(pairs); i++) {
+		int a = pairs[i].a, b = pairs[i].b;
+		if (w->body_hot[a].inv_mass == 0.0f && w->body_hot[b].inv_mass == 0.0f) continue;
+		int isl_a = w->body_cold[a].island_id, isl_b = w->body_cold[b].island_id;
+		if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
+		narrowphase_pair(w, a, b, manifolds);
+	}
 
 	afree(pairs);
 }

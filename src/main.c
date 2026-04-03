@@ -107,6 +107,7 @@ static bool g_show_bvh = true;
 static bool g_show_sleep = true;
 static bool g_sleep_enabled = true;
 static int g_friction_model = FRICTION_PATCH;
+static int g_solver_type = SOLVER_SOFT_STEP;
 static bool g_paused = false;
 static bool g_step_once = false;
 
@@ -248,6 +249,7 @@ static void setup_scene()
 
 	((WorldInternal*)g_world.id)->sleep_enabled = g_sleep_enabled;
 	world_set_friction_model(g_world, (FrictionModel)g_friction_model);
+	world_set_solver_type(g_world, (SolverType)g_solver_type);
 	g_scenes[g_scene_index].setup();
 }
 
@@ -563,6 +565,8 @@ void update()
 	}
 	if (ImGui_Combo("Friction", &g_friction_model, "Coulomb\0Patch\0"))
 		world_set_friction_model(g_world, (FrictionModel)g_friction_model);
+	if (ImGui_Combo("Solver", &g_solver_type, "Soft Step\0SI Soft\0SI\0Block\0"))
+		world_set_solver_type(g_world, (SolverType)g_solver_type);
 
 	// Visualization
 	ImGui_SeparatorText("Visualization");
