@@ -1,4 +1,12 @@
 // See LICENSE for licensing info.
+//
+// Credits and references
+// ----------------------
+// BEPUphysics v2 -- broadphase, soft constraints, memory layout ideas
+// Box2D -- GJK, sequential impulse solver reference
+// Dirk Gregorius -- SAT with Gauss map pruning, contact clipping, direct enumeration LCP block solver
+// Chris Giles -- Augmented Vertex Block Descent solver reference
+
 #ifndef NUDGE_H
 #define NUDGE_H
 
@@ -186,6 +194,7 @@ typedef enum SolverType
 	SOLVER_SI_SOFT,    // soft contacts, no relax between substeps
 	SOLVER_SI,         // hard constraints, NGS position correction
 	SOLVER_BLOCK,      // direct LCP enumeration for 2-4 contact normals
+	SOLVER_AVBD,       // augmented vertex block descent (primal-dual position solver)
 } SolverType;
 
 typedef struct WorldParams

@@ -52,6 +52,7 @@ typedef struct BodyHot
 } BodyHot;
 
 typedef struct WarmManifold WarmManifold; // forward decl for warm cache
+typedef struct AVBD_WarmManifold AVBD_WarmManifold;
 
 // Joint persistent storage (handle-based, parallel arrays like bodies).
 typedef enum JointType { JOINT_BALL_SOCKET, JOINT_DISTANCE } JointType;
@@ -69,6 +70,10 @@ typedef struct JointInternal
 		v3 warm_lambda3;   // ball socket (3 DOF)
 		float warm_lambda1; // distance (1 DOF)
 	};
+	// AVBD warm state (penalty/lambda for augmented Lagrangian)
+	v3 avbd_penalty_lin;
+	v3 avbd_lambda_lin;
+	v3 avbd_C0_lin;        // constraint error at x- for stabilization
 	// Island linked list fields.
 	int island_id;    // -1 = none
 	int island_prev;  // -1 = head
@@ -92,6 +97,7 @@ typedef struct Island
 
 typedef struct WorldInternal
 {
+	int frame;         // monotonically increasing frame counter
 	v3 gravity;
 	CK_DYNA BodyCold*    body_cold;
 	CK_DYNA BodyHot*     body_hot;
@@ -99,6 +105,7 @@ typedef struct WorldInternal
 	CK_DYNA int*         body_free;
 	CK_DYNA Contact*     debug_contacts;
 	CK_MAP(WarmManifold) warm_cache;
+	CK_MAP(AVBD_WarmManifold) avbd_warm_cache;
 	// Joints
 	CK_DYNA JointInternal* joints;
 	CK_DYNA uint32_t*      joint_gen;
@@ -121,6 +128,12 @@ typedef struct WorldInternal
 	float contact_damping_ratio;
 	float max_push_velocity;
 	int sub_steps;
+	// AVBD parameters
+	float avbd_alpha;       // stabilization (0.95-0.99)
+	float avbd_beta_lin;    // penalty ramp, linear constraints
+	float avbd_beta_ang;    // penalty ramp, angular constraints
+	float avbd_gamma;       // warm-start decay
+	int avbd_iterations;    // solver iterations
 } WorldInternal;
 
 // -----------------------------------------------------------------------------
@@ -235,5 +248,75 @@ typedef struct ConstraintRef
 	int index;
 	int body_a, body_b;
 } ConstraintRef;
+
+// -----------------------------------------------------------------------------
+// AVBD (Augmented Vertex Block Descent) solver types.
+
+#define AVBD_PENALTY_MIN  1.0f
+#define AVBD_PENALTY_MAX  1e10f
+#define AVBD_MARGIN       0.0f   // nudge contacts already have margin via LINEAR_SLOP
+#define AVBD_STICK_THRESH 0.00001f
+
+typedef struct AVBD_Contact
+{
+	v3 r_a, r_b;       // contact offsets in body-local space
+	v3 C0;             // constraint error at x- (normal, tangent1, tangent2)
+	v3 penalty;        // per-axis penalty parameters (ramp over iterations)
+	v3 lambda;         // accumulated dual variables (clamped force)
+	int stick;         // static friction flag
+	uint32_t feature_id;
+} AVBD_Contact;
+
+typedef struct AVBD_Manifold
+{
+	int body_a, body_b;
+	int contact_count;
+	float friction;
+	m3x3 basis;        // [normal; tangent1; tangent2] row-major
+	AVBD_Contact contacts[MAX_CONTACTS];
+} AVBD_Manifold;
+
+// CSR adjacency: separate arrays for contacts and joints.
+// body i's contact refs at ct_adj[ct_start[i]..ct_start[i+1]]
+// body i's joint refs at jt_adj[jt_start[i]..jt_start[i+1]]
+
+typedef struct AVBD_ContactAdj
+{
+	int manifold_idx;
+	int contact_idx;
+	int is_body_a;
+} AVBD_ContactAdj;
+
+typedef struct AVBD_JointAdj
+{
+	int joint_idx;
+	int is_body_a;
+} AVBD_JointAdj;
+
+// AVBD warm cache: persists penalty/lambda across frames (keyed by body pair).
+typedef struct AVBD_WarmContact
+{
+	uint32_t feature_id;
+	v3 r_a;             // for spatial fallback matching
+	v3 penalty;
+	v3 lambda;
+	int stick;
+} AVBD_WarmContact;
+
+typedef struct AVBD_WarmManifold
+{
+	AVBD_WarmContact contacts[MAX_CONTACTS];
+	int count;
+	int stale;
+} AVBD_WarmManifold;
+
+// Per-body temporary state for AVBD (not stored in BodyHot)
+typedef struct AVBD_BodyState
+{
+	v3 inertial_lin;
+	v3 initial_lin;    // x- for velocity recovery
+	quat inertial_ang;
+	quat initial_ang;  // q- for angular velocity recovery
+} AVBD_BodyState;
 
 #endif // NUDGE_INTERNAL_H

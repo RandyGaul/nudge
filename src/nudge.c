@@ -3,7 +3,6 @@
 
 #include "nudge_internal.h"
 #include "gjk.c"
-#include "gjk_gino.c"
 #include "quickhull.c"
 #include "bvh.c"
 #include "collision.c"
@@ -11,6 +10,7 @@
 #include "solver.c"
 #include "joints.c"
 #include "islands.c"
+#include "solver_avbd.c"
 
 // -----------------------------------------------------------------------------
 // World.
@@ -30,6 +30,11 @@ World create_world(WorldParams params)
 	w->contact_damping_ratio = params.contact_damping_ratio > 0.0f ? params.contact_damping_ratio : 3.0f;
 	w->max_push_velocity = params.max_push_velocity > 0.0f ? params.max_push_velocity : 3.0f;
 	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 4;
+	w->avbd_alpha = 0.99f;
+	w->avbd_beta_lin = 10000.0f;
+	w->avbd_beta_ang = 100.0f;
+	w->avbd_gamma = 0.999f;
+	w->avbd_iterations = 20;
 	w->bvh_static = CK_ALLOC(sizeof(BVHTree));
 	w->bvh_dynamic = CK_ALLOC(sizeof(BVHTree));
 	bvh_init(w->bvh_static);
@@ -45,6 +50,7 @@ void destroy_world(World world)
 	}
 	afree(w->debug_contacts);
 	map_free(w->warm_cache);
+	map_free(w->avbd_warm_cache);
 	bvh_free(w->bvh_static); CK_FREE(w->bvh_static);
 	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
 	split_free(w->body_cold, w->body_hot, w->body_gen, w->body_free);
@@ -113,14 +119,19 @@ static void integrate_positions(WorldInternal* w, float dt)
 void world_step(World world, float dt)
 {
 	WorldInternal* w = (WorldInternal*)world.id;
+	w->frame++;
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
 
-	// Age warm cache once per frame
-	warm_cache_age_and_evict(w);
+	// Age warm cache once per frame (AVBD does its own in avbd_solve)
+	if (w->solver_type != SOLVER_AVBD)
+		warm_cache_age_and_evict(w);
 
 	// --- Collision detection (once per frame) ---
-	integrate_velocities(w, sub_dt);
+	// Dual solvers need velocity integration before collision for first substep.
+	// AVBD handles gravity internally via inertial position — skip.
+	if (w->solver_type != SOLVER_AVBD)
+		integrate_velocities(w, sub_dt);
 
 	CK_DYNA InternalManifold* manifolds = NULL;
 	broadphase_and_collide(w, &manifolds);
@@ -131,8 +142,17 @@ void world_step(World world, float dt)
 		for (int c = 0; c < manifolds[i].m.count; c++)
 			apush(w->debug_contacts, manifolds[i].m.contacts[c]);
 
-	// --- Pre-solve (once per frame, using sub_dt for softness/bias) ---
 	int manifold_count = asize(manifolds);
+
+	// AVBD takes a completely different path (primal-dual position solver)
+	if (w->solver_type == SOLVER_AVBD) {
+		avbd_solve(w, manifolds, manifold_count, dt);
+		if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
+		afree(manifolds);
+		return;
+	}
+
+	// --- Pre-solve (once per frame, using sub_dt for softness/bias) ---
 	SolverManifold* sm = NULL;
 	SolverContact*  sc = NULL;
 	solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, sub_dt);

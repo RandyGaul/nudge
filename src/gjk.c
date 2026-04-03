@@ -4,7 +4,7 @@
 // -----------------------------------------------------------------------------
 // GJK types.
 
-typedef struct GjkVertex
+typedef struct GJK_Vertex
 {
 	v3 point1;   // support point on shape A (world space)
 	v3 point2;   // support point on shape B (world space)
@@ -12,37 +12,37 @@ typedef struct GjkVertex
 	float u;     // barycentric coordinate
 	int index1;  // support index on A
 	int index2;  // support index on B
-} GjkVertex;
+} GJK_Vertex;
 
-typedef struct GjkSimplex
+typedef struct GJK_Simplex
 {
-	GjkVertex v[4];
+	GJK_Vertex v[4];
 	float divisor;
 	int count;
-} GjkSimplex;
+} GJK_Simplex;
 
-typedef struct GjkResult
+typedef struct GJK_Result
 {
 	v3 point1;     // closest point on shape A
 	v3 point2;     // closest point on shape B
 	float distance;
 	int iterations;
-} GjkResult;
+} GJK_Result;
 
 // GJK shape: tagged union for support function dispatch.
 // Support operates on UNSCALED local-space vertices. The caller transforms
 // the result to world space. For hulls, scale is baked into the vertex lookup.
 enum { GJK_POINT, GJK_SEGMENT, GJK_HULL };
 
-typedef struct GjkShape
+typedef struct GJK_Shape
 {
 	int type;
 	int count;
 	const v3* verts;  // pointer to vertex array (local space)
 	v3 verts_buf[2];  // inline storage for point/segment
-} GjkShape;
+} GJK_Shape;
 
-static int gjk_get_support(const GjkShape* s, v3 dir)
+static int gjk_get_support(const GJK_Shape* s, v3 dir)
 {
 	int best = 0;
 	float best_d = dot(s->verts[0], dir);
@@ -53,19 +53,19 @@ static int gjk_get_support(const GjkShape* s, v3 dir)
 	return best;
 }
 
-// Positioned shape: GjkShape + transform for world-space queries.
-typedef struct GjkProxy
+// Positioned shape: GJK_Shape + transform for world-space queries.
+typedef struct GJK_Proxy
 {
-	GjkShape shape;
+	GJK_Shape shape;
 	v3 pos;
 	quat rot;
-} GjkProxy;
+} GJK_Proxy;
 
 // Proxy init functions: take output pointer to avoid dangling self-referential
 // pointers when returning structs by value (verts -> verts_buf).
-static void gjk_proxy_point(GjkProxy* pr, v3 p)
+static void gjk_proxy_point(GJK_Proxy* pr, v3 p)
 {
-	*pr = (GjkProxy){0};
+	*pr = (GJK_Proxy){0};
 	pr->shape.type = GJK_POINT;
 	pr->shape.count = 1;
 	pr->shape.verts_buf[0] = p;
@@ -74,9 +74,9 @@ static void gjk_proxy_point(GjkProxy* pr, v3 p)
 	pr->rot = quat_identity();
 }
 
-static void gjk_proxy_segment(GjkProxy* pr, v3 p, v3 q)
+static void gjk_proxy_segment(GJK_Proxy* pr, v3 p, v3 q)
 {
-	*pr = (GjkProxy){0};
+	*pr = (GJK_Proxy){0};
 	pr->shape.type = GJK_SEGMENT;
 	pr->shape.count = 2;
 	pr->shape.verts_buf[0] = p;
@@ -88,11 +88,11 @@ static void gjk_proxy_segment(GjkProxy* pr, v3 p, v3 q)
 
 // For hulls: pre-scale the vertices into a temp buffer, store as proxy.
 // Caller must keep scaled_verts alive for the duration of the GJK call.
-static void gjk_proxy_hull(GjkProxy* pr, const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts)
+static void gjk_proxy_hull(GJK_Proxy* pr, const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts)
 {
 	for (int i = 0; i < hull->vert_count; i++)
 		scaled_verts[i] = hmul(hull->verts[i], sc);
-	*pr = (GjkProxy){0};
+	*pr = (GJK_Proxy){0};
 	pr->shape.type = GJK_HULL;
 	pr->shape.count = hull->vert_count;
 	pr->shape.verts = scaled_verts;
@@ -100,14 +100,11 @@ static void gjk_proxy_hull(GjkProxy* pr, const Hull* hull, v3 pos, quat rot, v3 
 	pr->rot = rot;
 }
 
-// Legacy function pointer typedef kept for gjk_bench compatibility.
-typedef v3 (*GjkSupportFn)(const void* shape, v3 dir, int* out_index);
-
 // -----------------------------------------------------------------------------
 // Simplex solvers: find closest point on simplex to origin.
 // Ported directly from lm engine (lmSimplex::Solve2/3/4).
 
-static int gjk_solve2(GjkSimplex* s)
+static int gjk_solve2(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point;
 	float u = dot(b, sub(b, a));
@@ -120,7 +117,7 @@ static int gjk_solve2(GjkSimplex* s)
 	return 1;
 }
 
-static int gjk_solve3(GjkSimplex* s)
+static int gjk_solve3(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point;
 	float uAB = dot(b, sub(b, a)), vAB = dot(a, sub(a, b));
@@ -143,7 +140,7 @@ static int gjk_solve3(GjkSimplex* s)
 
 static inline float stp(v3 a, v3 b, v3 c) { return dot(a, cross(b, c)); }
 
-static int gjk_solve4(GjkSimplex* s)
+static int gjk_solve4(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point, d = s->v[3].point;
 
@@ -202,7 +199,7 @@ static int gjk_solve4(GjkSimplex* s)
 // -----------------------------------------------------------------------------
 // Closest point and witness points.
 
-static v3 gjk_closest_point(const GjkSimplex* s)
+static v3 gjk_closest_point(const GJK_Simplex* s)
 {
 	float inv = 1.0f / s->divisor;
 	switch (s->count) {
@@ -214,7 +211,7 @@ static v3 gjk_closest_point(const GjkSimplex* s)
 	return V3(0,0,0);
 }
 
-static void gjk_witness_points(const GjkSimplex* s, v3* p1, v3* p2)
+static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2)
 {
 	float inv = 1.0f / s->divisor;
 	*p1 = V3(0,0,0); *p2 = V3(0,0,0);
@@ -224,7 +221,7 @@ static void gjk_witness_points(const GjkSimplex* s, v3* p1, v3* p2)
 	}
 }
 
-static v3 gjk_search_dir(const GjkSimplex* s)
+static v3 gjk_search_dir(const GJK_Simplex* s)
 {
 	switch (s->count) {
 	case 1: return neg(s->v[0].point);
@@ -246,10 +243,10 @@ static v3 gjk_search_dir(const GjkSimplex* s)
 
 #define GJK_MAX_ITERS 20
 
-static GjkResult gjk_distance_ex(const GjkProxy* proxyA, const GjkProxy* proxyB)
+static GJK_Result gjk_distance_ex(const GJK_Proxy* proxyA, const GJK_Proxy* proxyB)
 {
-	GjkResult result = {0};
-	GjkSimplex simplex = {0};
+	GJK_Result result = {0};
+	GJK_Simplex simplex = {0};
 
 	// Initialize with first support point.
 	simplex.v[0].index1 = 0;
@@ -272,7 +269,7 @@ static GjkResult gjk_distance_ex(const GjkProxy* proxyA, const GjkProxy* proxyB)
 			save2[i] = simplex.v[i].index2;
 		}
 
-		GjkSimplex backup = simplex;
+		GJK_Simplex backup = simplex;
 		int solved = 1;
 		switch (simplex.count) {
 		case 1: break;
@@ -305,7 +302,7 @@ static GjkResult gjk_distance_ex(const GjkProxy* proxyA, const GjkProxy* proxyB)
 			if (iA == save1[i] && iB == save2[i]) { dup = 1; break; }
 		if (dup) break;
 
-		GjkVertex* v = &simplex.v[simplex.count];
+		GJK_Vertex* v = &simplex.v[simplex.count];
 		v->index1 = iA; v->point1 = sA;
 		v->index2 = iB; v->point2 = sB;
 		v->point = sub(sB, sA);

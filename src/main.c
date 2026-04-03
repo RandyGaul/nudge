@@ -130,6 +130,7 @@ static int g_scene_index = 0;
 // Scene-specific globals (shape showcase)
 #define CHAIN_LEN 5
 static Body g_chain[CHAIN_LEN];
+static Body g_chain_anchor;
 static Body g_spring_a, g_spring_b;
 
 // Forward declarations
@@ -140,11 +141,14 @@ static void scene_pyramid_setup();
 static void scene_stacks_setup();
 static void scene_friction_setup();
 
+static void scene_mass_ratio_setup();
+
 static Scene g_scenes[] = {
 	{ "Shape Showcase",  scene_showcase_setup,  scene_showcase_draw_extras },
 	{ "Box Pyramid",     scene_pyramid_setup,   NULL },
 	{ "Varied Stacks",   scene_stacks_setup,    NULL },
 	{ "Friction Test",   scene_friction_setup,  NULL },
+	{ "Mass Ratio",      scene_mass_ratio_setup, NULL },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 
@@ -326,21 +330,23 @@ static void scene_showcase_setup()
 	apush(g_draw_list, ((DrawEntry){ hull_body, g_mesh_hull, V3(1, 1, 1), V3(0.9f, 0.7f, 0.2f) }));
 
 	// --- Pendulum chain (ball sockets) ---
-	Body anchor = create_body(g_world, (BodyParams){
+	g_chain_anchor = create_body(g_world, (BodyParams){
 		.position = V3(0, 8, -4),
 		.rotation = quat_identity(),
 		.mass = 0,
 	});
-	body_add_shape(g_world, anchor, (ShapeParams){
+	body_add_shape(g_world, g_chain_anchor, (ShapeParams){
 		.type = SHAPE_SPHERE,
 		.sphere.radius = 0.15f,
 	});
 
 	float link_len = 1.0f;
-	Body prev = anchor;
+	Body prev = g_chain_anchor;
 	for (int i = 0; i < CHAIN_LEN; i++) {
+		// Hang vertically below anchor — zero initial joint error.
+		// Give a small horizontal push via offset so it swings.
 		g_chain[i] = create_body(g_world, (BodyParams){
-			.position = V3(0.6f * (i + 1), 7.0f - i * link_len, -4),
+			.position = V3(0.1f, 8.0f - (i + 1) * link_len, -4),
 			.rotation = quat_identity(),
 			.mass = 0.5f,
 		});
@@ -352,7 +358,7 @@ static void scene_showcase_setup()
 			.body_a = prev,
 			.body_b = g_chain[i],
 			.local_offset_a = V3(0, -link_len * 0.5f, 0),
-			.local_offset_b = V3(0,  link_len * 0.5f, 0),
+			.local_offset_b = V3(0, link_len * 0.5f, 0),
 		});
 		apush(g_draw_list, ((DrawEntry){ g_chain[i], MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.8f, 0.4f, 0.9f) }));
 		prev = g_chain[i];
@@ -393,7 +399,7 @@ static void scene_showcase_draw_extras()
 	v3 jcol = V3(1.0f, 0.4f, 0.1f);
 	for (int i = 0; i < CHAIN_LEN; i++) {
 		v3 p = body_get_position(g_world, g_chain[i]);
-		v3 above = i == 0 ? V3(0, 8, -4) : body_get_position(g_world, g_chain[i-1]);
+		v3 above = i == 0 ? body_get_position(g_world, g_chain_anchor) : body_get_position(g_world, g_chain[i-1]);
 		render_debug_line(above, p, jcol);
 	}
 	v3 sa = body_get_position(g_world, g_spring_a);
@@ -519,6 +525,39 @@ static void scene_friction_setup()
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Scene: Mass Ratio -- tiny box at bottom, each box above is larger and heavier.
+// Stress test for solver stability under extreme mass ratios.
+// ---------------------------------------------------------------------------
+static void scene_mass_ratio_setup()
+{
+	add_floor();
+
+	float sizes[] = { 0.1f, 0.2f, 0.35f, 0.55f, 0.8f, 1.1f };
+	float masses[] = { 0.2f, 1.0f, 5.0f, 20.0f, 80.0f, 300.0f };
+	v3 colors[] = {
+		V3(0.9f, 0.2f, 0.2f), V3(0.9f, 0.5f, 0.2f), V3(0.9f, 0.8f, 0.2f),
+		V3(0.4f, 0.8f, 0.3f), V3(0.3f, 0.5f, 0.9f), V3(0.5f, 0.3f, 0.9f),
+	};
+	float gap = 0.6f;
+	float y = 0.0f;
+	for (int i = 0; i < 6; i++) {
+		float h = sizes[i];
+		y += h + gap;
+		Body b = create_body(g_world, (BodyParams){
+			.position = V3(0, y, 0),
+			.rotation = quat_identity(),
+			.mass = masses[i],
+		});
+		body_add_shape(g_world, b, (ShapeParams){
+			.type = SHAPE_BOX,
+			.box.half_extents = V3(h, h, h),
+		});
+		apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(h, h, h), colors[i] }));
+		y += h;
+	}
+}
+
 void update()
 {
 	// Camera input (skip when imgui wants the mouse)
@@ -565,7 +604,7 @@ void update()
 	}
 	if (ImGui_Combo("Friction", &g_friction_model, "Coulomb\0Patch\0"))
 		world_set_friction_model(g_world, (FrictionModel)g_friction_model);
-	if (ImGui_Combo("Solver", &g_solver_type, "Soft Step\0SI Soft\0SI\0Block\0"))
+	if (ImGui_Combo("Solver", &g_solver_type, "Soft Step\0SI Soft\0SI\0Block\0AVBD\0"))
 		world_set_solver_type(g_world, (SolverType)g_solver_type);
 
 	// Visualization

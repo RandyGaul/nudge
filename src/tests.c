@@ -458,7 +458,7 @@ static void test_gjk_distance()
 	{
 		// Point outside +X face: distance should be 1.0
 		TEST_BEGIN("gjk point-box +X dist");
-		GjkResult r = gjk_query_point_hull(V3(2, 0, 0), unit_box);
+		GJK_Result r = gjk_query_point_hull(V3(2, 0, 0), unit_box);
 		TEST_ASSERT_FLOAT(r.distance, 1.0f, 0.01f);
 
 		// Point on +X face: distance ~0
@@ -488,7 +488,7 @@ static void test_gjk_distance()
 	{
 		// Vertical segment above box
 		TEST_BEGIN("gjk seg-box above");
-		GjkResult r = gjk_query_segment_hull(V3(0, 3, 0), V3(0, 5, 0), unit_box);
+		GJK_Result r = gjk_query_segment_hull(V3(0, 3, 0), V3(0, 5, 0), unit_box);
 		TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
 
 		// Segment crossing through box face
@@ -519,7 +519,7 @@ static void test_gjk_distance()
 		TEST_BEGIN("gjk box-box separated");
 		ConvexHull box_a = { box, V3(0,0,0), id, V3(1,1,1) };
 		ConvexHull box_b = { box, V3(3,0,0), id, V3(1,1,1) };
-		GjkResult r = gjk_query_hull_hull(box_a, box_b);
+		GJK_Result r = gjk_query_hull_hull(box_a, box_b);
 		TEST_ASSERT_FLOAT(r.distance, 1.0f, 0.01f);
 
 		// Two boxes touching on X
@@ -540,7 +540,7 @@ static void test_gjk_distance()
 		// Point above large floor box (half_extents 10,1,10)
 		TEST_BEGIN("gjk point-floor above");
 		ConvexHull floor = { box, V3(0,0,0), id, V3(10,1,10) };
-		GjkResult r = gjk_query_point_hull(V3(0, 2.5f, 0), floor);
+		GJK_Result r = gjk_query_point_hull(V3(0, 2.5f, 0), floor);
 		TEST_ASSERT_FLOAT(r.distance, 1.5f, 0.02f);
 
 		// Point just above floor surface
@@ -578,7 +578,7 @@ static void test_gjk_distance()
 	{
 		TEST_BEGIN("gjk witness point-box");
 		ConvexHull floor = { box, V3(0,0,0), id, V3(10,1,10) };
-		GjkResult r = gjk_query_point_hull(V3(0, 3, 0), floor);
+		GJK_Result r = gjk_query_point_hull(V3(0, 3, 0), floor);
 		// Witness on point should be the point itself
 		TEST_ASSERT_FLOAT(r.point1.y, 3.0f, 0.01f);
 		// Witness on hull should be on the +Y face (y=1)
@@ -599,7 +599,7 @@ static void test_gjk_distance()
 		quat rot45y = { 0, 0.3827f, 0, 0.9239f };
 		ConvexHull rbox = { box, V3(0,0,0), rot45y, V3(1,1,1) };
 		// After 45deg Y rotation, box corner is at x = sqrt(2) ≈ 1.414
-		GjkResult r = gjk_query_point_hull(V3(2, 0, 0), rbox);
+		GJK_Result r = gjk_query_point_hull(V3(2, 0, 0), rbox);
 		float corner = sqrtf(2.0f);
 		TEST_ASSERT_FLOAT(r.distance, 2.0f - corner, 0.05f);
 	}
@@ -620,7 +620,7 @@ static void test_contact_sanity()
 	{
 		Sphere s = { V3(0, 1.0f, 0), 0.5f };
 		m = (Manifold){0};
-		GjkResult r = gjk_query_point_hull(s.center, (ConvexHull){ hull_unit_box(), V3(0,0,0), quat_identity(), V3(10,1,10) });
+		GJK_Result r = gjk_query_point_hull(s.center, (ConvexHull){ hull_unit_box(), V3(0,0,0), quat_identity(), V3(10,1,10) });
 		int hit = collide_sphere_box(s, floor, &m);
 		printf("    [debug] sphere y=1.0: gjk_dist=%.6f hit=%d count=%d", r.distance, hit, m.count);
 		if (hit && m.count > 0) printf(" pen=%.4f n=(%.2f,%.2f,%.2f)", m.contacts[0].penetration, m.contacts[0].normal.x, m.contacts[0].normal.y, m.contacts[0].normal.z);
@@ -649,7 +649,7 @@ static void test_contact_sanity()
 		for (float tx = -5; tx <= 5; tx += 1) {
 			Sphere s = { V3(tx, 1.3f, 0), 0.5f };
 			m = (Manifold){0};
-			GjkResult r = gjk_query_point_hull(s.center, fl);
+			GJK_Result r = gjk_query_point_hull(s.center, fl);
 			int hit = collide_sphere_box(s, floor, &m);
 			printf("    [debug] x=%.0f y=1.3: gjk_dist=%.4f iters=%d hit=%d", tx, r.distance, r.iterations, hit);
 			if (hit && m.count > 0) printf(" pen=%.3f n=(%.2f,%.2f,%.2f)", m.contacts[0].penetration, m.contacts[0].normal.x, m.contacts[0].normal.y, m.contacts[0].normal.z);
@@ -2639,6 +2639,108 @@ static void run_solver_tests()
 	bounce_test_for_solver(SOLVER_SI_SOFT, "SI Soft");
 	bounce_test_for_solver(SOLVER_SI, "SI");
 	bounce_test_for_solver(SOLVER_BLOCK, "Block");
+	// AVBD is a position solver with no restitution — ball settles instead of bouncing.
+	// Test that the ball comes to rest on the floor at the correct height.
+	{
+		TEST_BEGIN("AVBD sphere settles on floor");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		Body floor_b = create_body(w, (BodyParams){
+			.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+		});
+		body_add_shape(w, floor_b, (ShapeParams){
+			.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+		});
+		Body ball = create_body(w, (BodyParams){
+			.position = V3(0, 5, 0), .rotation = quat_identity(),
+			.mass = 1.0f, .restitution = 0.5f,
+		});
+		body_add_shape(w, ball, (ShapeParams){
+			.type = SHAPE_SPHERE, .sphere.radius = 0.5f,
+		});
+		float dt = 1.0f / 60.0f;
+		for (int i = 0; i < 600; i++) world_step(w, dt);
+		float y = body_get_position(w, ball).y;
+		// Ball should rest on floor top (y=0) + radius (0.5) = ~0.5
+		TEST_ASSERT(y > 0.3f);
+		TEST_ASSERT(y < 0.7f);
+		destroy_world(w);
+	}
+	// AVBD ball-socket: horizontal chain swings down under gravity.
+	// Bodies spawn horizontally at anchor height — zero initial joint error,
+	// gravity makes the whole chain swing downward.
+	{
+		TEST_BEGIN("AVBD horizontal chain swings");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.15f, 0.15f, 0.15f) });
+
+		Body chain[5];
+		Body prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			// Horizontal: each body 1m to the right of the previous, same height
+			chain[i] = create_body(w, (BodyParams){
+				.position = V3((float)(i + 1), 8, 0), .rotation = quat_identity(), .mass = 0.5f });
+			body_add_shape(w, chain[i], (ShapeParams){
+				.type = SHAPE_BOX, .box.half_extents = V3(0.2f, 0.2f, 0.2f) });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i],
+				.local_offset_a = V3(0.5f, 0, 0), .local_offset_b = V3(-0.5f, 0, 0) });
+			prev = chain[i];
+		}
+
+		float dt = 1.0f / 60.0f;
+		float y_min = 100;
+		for (int i = 0; i < 300; i++) {
+			world_step(w, dt);
+			v3 p4 = body_get_position(w, chain[4]);
+			if (p4.y < y_min) y_min = p4.y;
+		}
+
+		v3 p0 = body_get_position(w, chain[0]);
+		v3 p4 = body_get_position(w, chain[4]);
+		float dist_01 = len(sub(body_get_position(w, chain[1]), p0));
+		printf("  [AVBD hchain] p0=(%.2f,%.2f) p4=(%.2f,%.2f) tip_min_y=%.2f d01=%.2f\n",
+			p0.x, p0.y, p4.x, p4.y, y_min, dist_01);
+		// Chain tip should have swung down significantly
+		TEST_ASSERT(y_min < 5.0f);
+		// Joints should hold (link distance ≈ 1.0)
+		TEST_ASSERT(dist_01 < 1.5f);
+		TEST_ASSERT(dist_01 > 0.5f);
+		destroy_world(w);
+	}
+	// AVBD ball-socket: pendulum swings from side, doesn't float or drift.
+	{
+		TEST_BEGIN("AVBD ball-socket pendulum swings");
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+		// Static anchor at origin
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		// Dynamic bob offset to the side so it swings
+		Body bob = create_body(w, (BodyParams){ .position = V3(2, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = bob,
+			.local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-2, 0, 0) });
+
+		float dt = 1.0f / 60.0f;
+		float y_min = 100, y_max = -100;
+		for (int i = 0; i < 300; i++) {
+			world_step(w, dt);
+			v3 p = body_get_position(w, bob);
+			if (p.y < y_min) y_min = p.y;
+			if (p.y > y_max) y_max = p.y;
+		}
+		v3 p = body_get_position(w, bob);
+		float dist = len(sub(p, V3(0, 5, 0)));
+		printf("  [AVBD pendulum] pos=(%.2f,%.2f,%.2f) dist=%.3f y_range=[%.2f,%.2f]\n",
+			p.x, p.y, p.z, dist, y_min, y_max);
+		// Bob should stay within rod length of anchor
+		TEST_ASSERT(dist < 3.0f);
+		// Should have swung downward (y < 5)
+		TEST_ASSERT(y_min < 4.0f);
+		// Joint should hold — bob shouldn't fall to floor
+		TEST_ASSERT(p.y > 2.0f);
+		destroy_world(w);
+	}
 }
 
 // ============================================================================

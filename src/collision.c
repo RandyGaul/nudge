@@ -306,28 +306,28 @@ int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
 // GJK query helpers. Hull proxies need a temp buffer for pre-scaled verts.
 #define MAX_HULL_VERTS 256
 
-static GjkResult gjk_query_point_hull(v3 pt, ConvexHull h)
+static GJK_Result gjk_query_point_hull(v3 pt, ConvexHull h)
 {
 	v3 scaled[MAX_HULL_VERTS];
-	GjkProxy pa, pb;
+	GJK_Proxy pa, pb;
 	gjk_proxy_point(&pa, pt);
 	gjk_proxy_hull(&pb, h.hull, h.center, h.rotation, h.scale, scaled);
 	return gjk_distance_ex(&pa, &pb);
 }
 
-static GjkResult gjk_query_segment_hull(v3 p, v3 q, ConvexHull h)
+static GJK_Result gjk_query_segment_hull(v3 p, v3 q, ConvexHull h)
 {
 	v3 scaled[MAX_HULL_VERTS];
-	GjkProxy pa, pb;
+	GJK_Proxy pa, pb;
 	gjk_proxy_segment(&pa, p, q);
 	gjk_proxy_hull(&pb, h.hull, h.center, h.rotation, h.scale, scaled);
 	return gjk_distance_ex(&pa, &pb);
 }
 
-static GjkResult gjk_query_hull_hull(ConvexHull a, ConvexHull b)
+static GJK_Result gjk_query_hull_hull(ConvexHull a, ConvexHull b)
 {
 	v3 sa[MAX_HULL_VERTS], sb[MAX_HULL_VERTS];
-	GjkProxy pa, pb;
+	GJK_Proxy pa, pb;
 	gjk_proxy_hull(&pa, a.hull, a.center, a.rotation, a.scale, sa);
 	gjk_proxy_hull(&pb, b.hull, b.center, b.rotation, b.scale, sb);
 	return gjk_distance_ex(&pa, &pb);
@@ -358,7 +358,7 @@ static v3 to_hull_local(v3 pt, v3 pos, quat rot, v3 sc)
 int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold)
 {
 	// GJK on the sphere CENTER (point) vs hull core.
-	GjkResult r = gjk_query_point_hull(a.center, b);
+	GJK_Result r = gjk_query_point_hull(a.center, b);
 
 	if (r.distance > a.radius) return 0; // separated
 
@@ -406,7 +406,7 @@ int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 // Capsule-hull: GJK shallow path, face/edge-search deep path.
 int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 {
-	GjkResult r = gjk_query_segment_hull(a.p, a.q, b);
+	GJK_Result r = gjk_query_segment_hull(a.p, a.q, b);
 
 	if (r.distance > a.radius) return 0;
 
@@ -534,9 +534,7 @@ typedef struct FaceQuery
 	float separation;
 } FaceQuery;
 
-static FaceQuery sat_query_faces(
-	const Hull* hull1, v3 pos1, quat rot1, v3 scale1,
-	const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
+static FaceQuery sat_query_faces(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
 {
 	// Transform from world to hull2 local: p_local = rot2^-1 * (p_world - pos2)
 	quat inv2 = inv(rot2);
@@ -605,9 +603,7 @@ typedef struct EdgeQuery
 	float separation;
 } EdgeQuery;
 
-static EdgeQuery sat_query_edges(
-	const Hull* hull1, v3 pos1, quat rot1, v3 scale1,
-	const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
+static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
 {
 	// All in local space of hull2.
 	quat inv2 = inv(rot2);
@@ -662,8 +658,7 @@ static EdgeQuery sat_query_edges(
 #define MAX_CLIP_VERTS 64
 
 // Collect face vertices in world space by walking the half-edge loop.
-static int hull_face_verts_world(
-	const Hull* hull, int face_idx, v3 pos, quat rot, v3 sc, v3* out)
+static int hull_face_verts_world(const Hull* hull, int face_idx, v3 pos, quat rot, v3 sc, v3* out)
 {
 	int start = hull->faces[face_idx].edge;
 	int e = start;
@@ -676,8 +671,7 @@ static int hull_face_verts_world(
 }
 
 // Find face on hull most anti-parallel to a world-space normal.
-static int find_incident_face(
-	const Hull* hull, v3 pos, quat rot, v3 sc, v3 ref_normal)
+static int find_incident_face(const Hull* hull, v3 pos, quat rot, v3 sc, v3 ref_normal)
 {
 	int best = 0;
 	float best_dot = 1e18f;
@@ -692,10 +686,7 @@ static int find_incident_face(
 // Sutherland-Hodgman: clip polygon against a single plane.
 // Keeps points on the negative side: dot(plane_n, p) - plane_d <= 0.
 // Tracks feature IDs: clip_edge is the side plane index that clips new verts.
-static int clip_to_plane(
-	v3* in, uint8_t* in_fid, int in_count,
-	v3 plane_n, float plane_d, uint8_t clip_edge,
-	v3* out, uint8_t* out_fid)
+static int clip_to_plane(v3* in, uint8_t* in_fid, int in_count, v3 plane_n, float plane_d, uint8_t clip_edge, v3* out, uint8_t* out_fid)
 {
 	if (in_count == 0) return 0;
 	int out_count = 0;

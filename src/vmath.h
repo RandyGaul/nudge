@@ -237,6 +237,20 @@ static inline m3x3 m3x3_mul(m3x3 a, m3x3 b)
 	return r;
 }
 
+static inline m3x3 m3x3_identity(void) { return (m3x3){{ 1,0,0, 0,1,0, 0,0,1 }}; }
+
+static inline m3x3 m3x3_neg(m3x3 a)
+{
+	m3x3 r;
+	for (int i = 0; i < 9; i++) r.m[i] = -a.m[i];
+	return r;
+}
+
+static inline m3x3 m3x3_transpose(m3x3 a)
+{
+	return (m3x3){{ a.m[0], a.m[3], a.m[6],  a.m[1], a.m[4], a.m[7],  a.m[2], a.m[5], a.m[8] }};
+}
+
 // Solve A*x = b via Cramer's rule. Returns zero vector if singular.
 static inline v3 solve(m3x3 a, v3 b)
 {
@@ -272,7 +286,8 @@ static inline v3 solve(m3x3 a, v3 b)
 #define scale(a, s)  _Generic((a), v3: v3_scale, m3x3: m3x3_scale)(a, s)
 #define dot(a, b)    _Generic((a), v3: v3_dot)(a, b)
 #define cross(a, b)  _Generic((a), v3: v3_cross)(a, b)
-#define neg(a)       _Generic((a), v3: v3_neg)(a)
+#define neg(a)       _Generic((a), v3: v3_neg, m3x3: m3x3_neg)(a)
+#define transpose(a) _Generic((a), m3x3: m3x3_transpose)(a)
 #define hmul(a, b)   _Generic((a), v3: v3_mul)(a, b)
 #define rcp(a)       _Generic((a), v3: v3_rcp)(a)
 #define norm(a)      _Generic((a), v3: v3_norm)(a)
@@ -286,5 +301,91 @@ static inline v3 solve(m3x3 a, v3 b)
 #define mul(a, b)    _Generic((a), mat4: mat4_mul, Transform: xform_mul, quat: quat_mul, m3x3: m3x3_mul)(a, b)
 #define rotate(q, v) quat_rotate(q, v)
 #define xform(t, p)  xform_apply(t, p)
+
+// -----------------------------------------------------------------------------
+// AVBD helpers: 6x6 LDL solve, quaternion small-angle ops.
+
+// Small angular update: q + 0.5*(0,dw)*q, normalized.
+static inline quat quat_add_dw(quat q, v3 dw)
+{
+	quat spin = { dw.x, dw.y, dw.z, 0.0f };
+	quat dq = quat_mul(spin, q);
+	quat r = { q.x + 0.5f*dq.x, q.y + 0.5f*dq.y, q.z + 0.5f*dq.z, q.w + 0.5f*dq.w };
+	float l = sqrtf(r.x*r.x + r.y*r.y + r.z*r.z + r.w*r.w);
+	if (l < 1e-15f) return q;
+	float s = 1.0f / l;
+	return (quat){ r.x*s, r.y*s, r.z*s, r.w*s };
+}
+
+// Angular velocity from quaternion difference: (a * inv(b)).xyz * 2
+static inline v3 quat_sub_angular(quat a, quat b)
+{
+	quat d = quat_mul(a, quat_inv(b));
+	return (v3){ d.x * 2.0f, d.y * 2.0f, d.z * 2.0f };
+}
+
+// Solve 6x6 SPD system via unrolled LDL^T decomposition.
+// System is [lhs_lin, lhs_cross^T; lhs_cross, lhs_ang] * [dx_lin; dx_ang] = [rhs_lin; rhs_ang]
+// Reference: Chris Giles, AVBD 3D demo (maths.h).
+static inline void solve_6x6_ldl(m3x3 aLin, m3x3 aAng, m3x3 aCross,
+                                  v3 bLin, v3 bAng, v3* xLin, v3* xAng)
+{
+	// m3x3 is row-major float[9]: m[row*3+col]
+	float A11 = aLin.m[0];
+	float A21 = aLin.m[3], A22 = aLin.m[4];
+	float A31 = aLin.m[6], A32 = aLin.m[7], A33 = aLin.m[8];
+	float A41 = aCross.m[0], A42 = aCross.m[1], A43 = aCross.m[2], A44 = aAng.m[0];
+	float A51 = aCross.m[3], A52 = aCross.m[4], A53 = aCross.m[5], A54 = aAng.m[3], A55 = aAng.m[4];
+	float A61 = aCross.m[6], A62 = aCross.m[7], A63 = aCross.m[8], A64 = aAng.m[6], A65 = aAng.m[7], A66 = aAng.m[8];
+
+	// LDL^T factorization
+	float D1 = A11;
+	if (D1 == 0.0f) D1 = 1e-12f;
+	float L21 = A21 / D1, L31 = A31 / D1, L41 = A41 / D1, L51 = A51 / D1, L61 = A61 / D1;
+
+	float D2 = A22 - L21*L21*D1;
+	if (D2 == 0.0f) D2 = 1e-12f;
+	float L32 = (A32 - L31*L21*D1) / D2;
+	float L42 = (A42 - L41*L21*D1) / D2;
+	float L52 = (A52 - L51*L21*D1) / D2;
+	float L62 = (A62 - L61*L21*D1) / D2;
+
+	float D3 = A33 - (L31*L31*D1 + L32*L32*D2);
+	if (D3 == 0.0f) D3 = 1e-12f;
+	float L43 = (A43 - L41*L31*D1 - L42*L32*D2) / D3;
+	float L53 = (A53 - L51*L31*D1 - L52*L32*D2) / D3;
+	float L63 = (A63 - L61*L31*D1 - L62*L32*D2) / D3;
+
+	float D4 = A44 - (L41*L41*D1 + L42*L42*D2 + L43*L43*D3);
+	if (D4 == 0.0f) D4 = 1e-12f;
+	float L54 = (A54 - L41*L51*D1 - L42*L52*D2 - L43*L53*D3) / D4;
+	float L64 = (A64 - L41*L61*D1 - L42*L62*D2 - L43*L63*D3) / D4;
+
+	float D5 = A55 - (L51*L51*D1 + L52*L52*D2 + L53*L53*D3 + L54*L54*D4);
+	if (D5 == 0.0f) D5 = 1e-12f;
+	float L65 = (A65 - L51*L61*D1 - L52*L62*D2 - L53*L63*D3 - L54*L64*D4) / D5;
+
+	float D6 = A66 - (L61*L61*D1 + L62*L62*D2 + L63*L63*D3 + L64*L64*D4 + L65*L65*D5);
+	if (D6 == 0.0f) D6 = 1e-12f;
+
+	// Forward substitution: Ly = b
+	float y1 = bLin.x;
+	float y2 = bLin.y - L21*y1;
+	float y3 = bLin.z - L31*y1 - L32*y2;
+	float y4 = bAng.x - L41*y1 - L42*y2 - L43*y3;
+	float y5 = bAng.y - L51*y1 - L52*y2 - L53*y3 - L54*y4;
+	float y6 = bAng.z - L61*y1 - L62*y2 - L63*y3 - L64*y4 - L65*y5;
+
+	// Diagonal solve: Dz = y
+	float z1 = y1/D1, z2 = y2/D2, z3 = y3/D3, z4 = y4/D4, z5 = y5/D5, z6 = y6/D6;
+
+	// Backward substitution: L^T x = z
+	xAng->z = z6;
+	xAng->y = z5 - L65*xAng->z;
+	xAng->x = z4 - L54*xAng->y - L64*xAng->z;
+	xLin->z = z3 - L43*xAng->x - L53*xAng->y - L63*xAng->z;
+	xLin->y = z2 - L32*xLin->z - L42*xAng->x - L52*xAng->y - L62*xAng->z;
+	xLin->x = z1 - L21*xLin->y - L31*xLin->z - L41*xAng->x - L51*xAng->y - L61*xAng->z;
+}
 
 #endif

@@ -106,6 +106,9 @@
 // afit: Ensure capacity for n elements. May reallocate.
 #define afit(a, n)    ((n) <= acap(a) ? 0 : (*(void**)&(a) = ck_agrow((a), (n), sizeof(*(a)))))
 
+// afit_set: Allocate and set size to exactly n elements. Combines afit + asetlen.
+#define afit_set(a, n) (afit((a), (n)), asetlen((a), (n)))
+
 // apush: Append element. May reallocate.
 #define apush(a, ...) (CK_ACANARY(a), afit((a), 1 + asize(a)), (a)[CK_AHDR(a)->size++] = (__VA_ARGS__))
 

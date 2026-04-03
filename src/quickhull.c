@@ -401,8 +401,7 @@ static void qh_delete_face_points(QH_State* s, int fi, int absorb, int* unclaime
 // -----------------------------------------------------------------------------
 // Recursive DFS from a visible face, marking visible faces DELETED.
 
-static void qh_calculate_horizon(QH_State* s, v3 eye, int edge0, int fi,
-                                  CK_DYNA int** horizon, int* unclaimed)
+static void qh_calculate_horizon(QH_State* s, v3 eye, int edge0, int fi, CK_DYNA int** horizon, int* unclaimed)
 {
 	qh_delete_face_points(s, fi, QH_INVALID, unclaimed);
 	s->faces[fi].mark = QH_DELETED;
@@ -664,8 +663,7 @@ static void qh_face_list_add(QH_State* s, QH_FaceList* list, int fi)
 	list->last = fi;
 }
 
-static void qh_add_new_faces(QH_State* s, QH_FaceList* nf, int eye,
-                              CK_DYNA int* horizon, int nh)
+static void qh_add_new_faces(QH_State* s, QH_FaceList* nf, int eye, CK_DYNA int* horizon, int nh)
 {
 	nf->first = nf->last = QH_INVALID;
 	int prev = QH_INVALID, begin = QH_INVALID;
