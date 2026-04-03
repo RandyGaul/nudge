@@ -105,6 +105,7 @@ static bool g_show_contacts = true;
 static bool g_show_joints = true;
 static bool g_show_bvh = true;
 static bool g_show_sleep = true;
+static bool g_show_shadows = true;
 static bool g_sleep_enabled = true;
 static int g_friction_model = FRICTION_PATCH;
 static int g_solver_type = SOLVER_SOFT_STEP;
@@ -1083,6 +1084,7 @@ void update()
 	ImGui_Checkbox("Joints", &g_show_joints);
 	ImGui_Checkbox("BVH", &g_show_bvh);
 	ImGui_Checkbox("Sleeping bodies", &g_show_sleep);
+	ImGui_Checkbox("Shadows", &g_show_shadows);
 
 	// Stats
 	ImGui_SeparatorText("Stats");
@@ -1156,6 +1158,7 @@ void draw()
 	mat4 view = cam_view_matrix();
 	mat4 vp = mul(proj, view);
 
+	render_set_shadows(g_show_shadows);
 	render_begin(vp);
 
 	// Ground grid (XZ plane, y=0)

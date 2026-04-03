@@ -118,6 +118,19 @@ static inline mat4 mat4_perspective(float fovy, float aspect, float znear, float
 	return r;
 }
 
+static inline mat4 mat4_ortho(float l, float r, float b, float t, float n, float f)
+{
+	mat4 m = {0};
+	m.m[0]  = 2.0f / (r - l);
+	m.m[5]  = 2.0f / (t - b);
+	m.m[10] = -2.0f / (f - n);
+	m.m[12] = -(r + l) / (r - l);
+	m.m[13] = -(t + b) / (t - b);
+	m.m[14] = -(f + n) / (f - n);
+	m.m[15] = 1.0f;
+	return m;
+}
+
 static inline mat4 mat4_look_at(v3 eye, v3 center, v3 up)
 {
 	v3 f = v3_norm(v3_sub(center, eye));

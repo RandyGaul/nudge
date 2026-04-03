@@ -17,6 +17,11 @@ typedef ptrdiff_t GLintptr;
 #define GL_COMPILE_STATUS         0x8B81
 #define GL_LINK_STATUS            0x8B82
 #define GL_INFO_LOG_LENGTH        0x8B84
+#define GL_FRAMEBUFFER            0x8D40
+#define GL_DEPTH_ATTACHMENT       0x8D00
+#define GL_CLAMP_TO_EDGE          0x812F
+#define GL_DEPTH_COMPONENT24      0x81A6
+#define GL_TEXTURE0               0x84C0
 
 #define GL_FUNCS \
 	X(GLuint,  CreateShader,           GLenum type) \
@@ -44,7 +49,13 @@ typedef ptrdiff_t GLintptr;
 	X(void,    VertexAttribPointer,    GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void* pointer) \
 	X(void,    EnableVertexAttribArray, GLuint index) \
 	X(void,    VertexAttribDivisor,    GLuint index, GLuint divisor) \
-	X(void,    DrawElementsInstanced,  GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount)
+	X(void,    DrawElementsInstanced,  GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount) \
+	X(void,    GenFramebuffers,       GLsizei n, GLuint* framebuffers) \
+	X(void,    BindFramebuffer,       GLenum target, GLuint framebuffer) \
+	X(void,    FramebufferTexture2D,  GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) \
+	X(void,    ActiveTexture,         GLenum texture) \
+	X(void,    Uniform1i,             GLint location, GLint v0) \
+	X(void,    Uniform1f,             GLint location, GLfloat v0)
 
 // Declare function pointers: gl_CreateShader, gl_ShaderSource, ...
 #define X(ret, name, ...) typedef ret (APIENTRY *PFN_gl##name)(__VA_ARGS__); static PFN_gl##name gl_##name;
@@ -71,28 +82,68 @@ static const char* s_vert_src =
 	"layout(location=5) in vec4 a_model_c3;\n"
 	"layout(location=6) in vec4 a_color;\n"
 	"uniform mat4 u_vp;\n"
+	"uniform mat4 u_light_vp;\n"
 	"out vec3 v_normal;\n"
 	"out vec4 v_color;\n"
+	"out vec4 v_light_pos;\n"
 	"void main() {\n"
 	"    mat4 model = mat4(a_model_c0, a_model_c1, a_model_c2, a_model_c3);\n"
-	"    gl_Position = u_vp * model * vec4(a_pos, 1.0);\n"
+	"    vec4 world = model * vec4(a_pos, 1.0);\n"
+	"    gl_Position = u_vp * world;\n"
 	"    v_normal = mat3(model) * a_normal;\n"
 	"    v_color = a_color;\n"
+	"    v_light_pos = u_light_vp * world;\n"
 	"}\n";
 
 static const char* s_frag_src =
 	"#version 330 core\n"
 	"in vec3 v_normal;\n"
 	"in vec4 v_color;\n"
+	"in vec4 v_light_pos;\n"
 	"out vec4 frag_color;\n"
 	"uniform vec3 u_light_dir;\n"
 	"uniform vec3 u_ambient;\n"
+	"uniform sampler2D u_shadow_map;\n"
+	"uniform float u_shadow_strength;\n"
 	"void main() {\n"
 	"    vec3 n = normalize(v_normal);\n"
 	"    float ndl = max(dot(n, u_light_dir), 0.0);\n"
-	"    vec3 lit = v_color.rgb * (u_ambient + (1.0 - u_ambient) * ndl);\n"
+	"    float shadow = 0.0;\n"
+	"    if (u_shadow_strength > 0.0) {\n"
+	"        vec3 proj = v_light_pos.xyz / v_light_pos.w * 0.5 + 0.5;\n"
+	"        if (proj.z < 1.0 && proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0) {\n"
+	"            float bias = max(0.005 * (1.0 - ndl), 0.001);\n"
+	"            vec2 texel = 1.0 / textureSize(u_shadow_map, 0);\n"
+	"            for (int x = -1; x <= 1; x++) {\n"
+	"                for (int y = -1; y <= 1; y++) {\n"
+	"                    float d = texture(u_shadow_map, proj.xy + vec2(x, y) * texel).r;\n"
+	"                    shadow += proj.z - bias > d ? 1.0 : 0.0;\n"
+	"                }\n"
+	"            }\n"
+	"            shadow = shadow / 9.0 * u_shadow_strength;\n"
+	"        }\n"
+	"    }\n"
+	"    vec3 lit = v_color.rgb * (u_ambient + (1.0 - u_ambient) * ndl * (1.0 - shadow));\n"
 	"    frag_color = vec4(lit * v_color.a, v_color.a);\n"
 	"}\n";
+
+// Shadow depth shaders (render scene from light, depth only).
+static const char* s_shadow_vert_src =
+	"#version 330 core\n"
+	"layout(location=0) in vec3 a_pos;\n"
+	"layout(location=2) in vec4 a_model_c0;\n"
+	"layout(location=3) in vec4 a_model_c1;\n"
+	"layout(location=4) in vec4 a_model_c2;\n"
+	"layout(location=5) in vec4 a_model_c3;\n"
+	"uniform mat4 u_light_vp;\n"
+	"void main() {\n"
+	"    mat4 model = mat4(a_model_c0, a_model_c1, a_model_c2, a_model_c3);\n"
+	"    gl_Position = u_light_vp * model * vec4(a_pos, 1.0);\n"
+	"}\n";
+
+static const char* s_shadow_frag_src =
+	"#version 330 core\n"
+	"void main() {}\n";
 
 static GLuint compile_shader(GLenum type, const char* src)
 {
@@ -557,6 +608,9 @@ static GLuint r_program;
 static GLint r_loc_vp;
 static GLint r_loc_light_dir;
 static GLint r_loc_ambient;
+static GLint r_loc_light_vp;
+static GLint r_loc_shadow_map;
+static GLint r_loc_shadow_strength;
 static Mesh r_meshes[MAX_MESH_TYPES];
 static int r_mesh_ready[MAX_MESH_TYPES];
 static RenderInstance* r_instances[MAX_MESH_TYPES]; // dynamic arrays, one per mesh type
@@ -564,6 +618,15 @@ static int r_mesh_count = MESH_BUILTIN_COUNT;
 static mat4 r_vp;
 static v3 r_light_dir;
 static v3 r_ambient;
+
+// Shadow map state.
+#define SHADOW_MAP_SIZE 2048
+static GLuint r_shadow_fbo;
+static GLuint r_shadow_tex;
+static GLuint r_shadow_program;
+static GLint r_shadow_loc_light_vp;
+static mat4 r_light_vp;
+static int r_shadows_enabled = 1;
 
 static Mesh* get_mesh(MeshType type)
 {
@@ -606,6 +669,9 @@ void render_init()
 	r_loc_vp = gl_GetUniformLocation(r_program, "u_vp");
 	r_loc_light_dir = gl_GetUniformLocation(r_program, "u_light_dir");
 	r_loc_ambient = gl_GetUniformLocation(r_program, "u_ambient");
+	r_loc_light_vp = gl_GetUniformLocation(r_program, "u_light_vp");
+	r_loc_shadow_map = gl_GetUniformLocation(r_program, "u_shadow_map");
+	r_loc_shadow_strength = gl_GetUniformLocation(r_program, "u_shadow_strength");
 	r_light_dir = norm(V3(0.3f, 1.0f, 0.5f));
 	r_ambient = V3(0.15f, 0.15f, 0.18f);
 
@@ -613,6 +679,26 @@ void render_init()
 	glEnable(GL_CULL_FACE);
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); // premultiplied alpha
+
+	// Shadow map
+	r_shadow_program = create_program(s_shadow_vert_src, s_shadow_frag_src);
+	r_shadow_loc_light_vp = gl_GetUniformLocation(r_shadow_program, "u_light_vp");
+
+	glGenTextures(1, &r_shadow_tex);
+	glBindTexture(GL_TEXTURE_2D, r_shadow_tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	gl_GenFramebuffers(1, &r_shadow_fbo);
+	gl_BindFramebuffer(GL_FRAMEBUFFER, r_shadow_fbo);
+	gl_FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, r_shadow_tex, 0);
+	glDrawBuffer(GL_NONE);
+	glReadBuffer(GL_NONE);
+	gl_BindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	// Background gradient
 	r_bg_program = create_program(s_bg_vert_src, s_bg_frag_src);
@@ -645,6 +731,11 @@ void render_set_ambient(v3 color)
 	r_ambient = color;
 }
 
+void render_set_shadows(int enabled)
+{
+	r_shadows_enabled = enabled;
+}
+
 void render_begin(mat4 vp)
 {
 	r_vp = vp;
@@ -664,22 +755,65 @@ void render_push(int type, mat4 model, v3 color, float opacity)
 
 void render_end()
 {
+	// Upload instance data once for both passes
+	for (int i = 0; i < r_mesh_count; i++) {
+		int count = asize(r_instances[i]);
+		if (count == 0) continue;
+		Mesh* m = get_mesh(i);
+		gl_BindBuffer(GL_ARRAY_BUFFER, m->instance_vbo);
+		gl_BufferSubData(GL_ARRAY_BUFFER, 0, count * sizeof(RenderInstance), r_instances[i]);
+	}
+
+	// Shadow pass: render depth from light's perspective
+	if (r_shadows_enabled) {
+		v3 up = fabsf(r_light_dir.y) > 0.99f ? V3(0, 0, 1) : V3(0, 1, 0);
+		mat4 light_view = mat4_look_at(v3_scale(r_light_dir, 30.0f), V3(0, 0, 0), up);
+		mat4 light_proj = mat4_ortho(-25, 25, -25, 25, 1.0f, 80.0f);
+		r_light_vp = mul(light_proj, light_view);
+
+		GLint saved_vp[4];
+		glGetIntegerv(GL_VIEWPORT, saved_vp);
+
+		gl_BindFramebuffer(GL_FRAMEBUFFER, r_shadow_fbo);
+		glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+		glClear(GL_DEPTH_BUFFER_BIT);
+
+		gl_UseProgram(r_shadow_program);
+		gl_UniformMatrix4fv(r_shadow_loc_light_vp, 1, GL_FALSE, r_light_vp.m);
+
+		for (int i = 0; i < r_mesh_count; i++) {
+			int count = asize(r_instances[i]);
+			if (count == 0) continue;
+			Mesh* m = get_mesh(i);
+			gl_BindVertexArray(m->vao);
+			gl_DrawElementsInstanced(GL_TRIANGLES, m->index_count, GL_UNSIGNED_SHORT, NULL, count);
+		}
+
+		gl_BindFramebuffer(GL_FRAMEBUFFER, 0);
+		glViewport(saved_vp[0], saved_vp[1], saved_vp[2], saved_vp[3]);
+	}
+
+	// Main pass
 	gl_UseProgram(r_program);
 	gl_UniformMatrix4fv(r_loc_vp, 1, GL_FALSE, r_vp.m);
 	gl_Uniform3f(r_loc_light_dir, r_light_dir.x, r_light_dir.y, r_light_dir.z);
 	gl_Uniform3f(r_loc_ambient, r_ambient.x, r_ambient.y, r_ambient.z);
 
+	if (r_shadows_enabled) {
+		gl_ActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, r_shadow_tex);
+		gl_Uniform1i(r_loc_shadow_map, 0);
+		gl_UniformMatrix4fv(r_loc_light_vp, 1, GL_FALSE, r_light_vp.m);
+		gl_Uniform1f(r_loc_shadow_strength, 1.0f);
+	} else {
+		gl_Uniform1f(r_loc_shadow_strength, 0.0f);
+	}
+
 	for (int i = 0; i < r_mesh_count; i++) {
 		int count = asize(r_instances[i]);
 		if (count == 0) continue;
-
 		Mesh* m = get_mesh(i);
 		gl_BindVertexArray(m->vao);
-
-		// Upload instance data
-		gl_BindBuffer(GL_ARRAY_BUFFER, m->instance_vbo);
-		gl_BufferSubData(GL_ARRAY_BUFFER, 0, count * sizeof(RenderInstance), r_instances[i]);
-
 		gl_DrawElementsInstanced(GL_TRIANGLES, m->index_count, GL_UNSIGNED_SHORT, NULL, count);
 	}
 

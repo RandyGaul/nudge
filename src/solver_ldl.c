@@ -877,8 +877,105 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 		}
 	}
 
-	// Solve
-	ldl_sparse_solve(sp, rhs, lambda);
+	// Solve: use dense fallback for now (sparse solve has numerical issues with star topologies)
+	// TODO: debug sparse solve for complete constraint graphs
+	{
+		// Rebuild dense A from the pre-factorize sparse structure
+		// (sp was already factorized, so we can't read A from it. Rebuild from scratch.)
+		float* A_dense = CK_ALLOC(n * n * sizeof(float));
+		memset(A_dense, 0, n * n * sizeof(float));
+
+		// Diagonal
+		for (int i = 0; i < jc; i++) {
+			LDL_Block* blk = &c->blocks[i];
+			int oi = sp->row_offset[i], di = sp->dof[i];
+			float K[9];
+			if (blk->is_synthetic) {
+				BodyHot* ba = ldl_get_body(w, c, blk->body_a);
+				BodyHot* bb = ldl_get_body(w, c, blk->body_b);
+				ldl_ball_socket_K(ba, bb, V3(0,0,0), V3(0,0,0), 0.0f, K);
+			} else if (blk->type == JOINT_BALL_SOCKET) {
+				SolverBallSocket* s = &sol_bs[blk->solver_idx];
+				BodyHot* ba = ldl_get_body(w, c, blk->body_a);
+				BodyHot* bb = ldl_get_body(w, c, blk->body_b);
+				ldl_ball_socket_K(ba, bb, s->r_a, s->r_b, s->softness, K);
+			} else {
+				SolverDistance* s = &sol_dist[blk->solver_idx];
+				BodyHot* ba = ldl_get_body(w, c, blk->body_a);
+				BodyHot* bb = ldl_get_body(w, c, blk->body_b);
+				float inv_m = ba->inv_mass + bb->inv_mass;
+				float k = inv_m + dot(cross(inv_inertia_mul(ba->rotation, ba->inv_inertia_local, cross(s->r_a, s->axis)), s->r_a), s->axis) + dot(cross(inv_inertia_mul(bb->rotation, bb->inv_inertia_local, cross(s->r_b, s->axis)), s->r_b), s->axis) + s->softness;
+				K[0] = k;
+			}
+			for (int r = 0; r < di; r++)
+				for (int cc = 0; cc < di; cc++)
+					A_dense[(oi+r)*n + oi+cc] = K[r*di + cc];
+		}
+
+		// Off-diagonal via body adjacency
+		int real_bc = asize(w->body_hot);
+		int total_bc = real_bc + c->virtual_body_count;
+		CK_DYNA int** ba2 = CK_ALLOC(total_bc * sizeof(int*));
+		memset(ba2, 0, total_bc * sizeof(int*));
+		for (int i = 0; i < jc; i++) { apush(ba2[c->blocks[i].body_a], i); apush(ba2[c->blocks[i].body_b], i); }
+		for (int b = 0; b < total_bc; b++) {
+			int cnt = asize(ba2[b]);
+			if (cnt < 2) continue;
+			BodyHot* B = ldl_get_body(w, c, b);
+			for (int ii = 0; ii < cnt; ii++) for (int jj2 = ii + 1; jj2 < cnt; jj2++) {
+				int bi = ba2[b][ii], bj = ba2[b][jj2];
+				LDL_Block* bi2 = &c->blocks[bi], *bj2 = &c->blocks[bj];
+				float si2 = (b == bi2->body_b) ? 1.0f : -1.0f;
+				float sj2 = (b == bj2->body_b) ? 1.0f : -1.0f;
+				float sign = si2 * sj2;
+				v3 ri = V3(0,0,0), rj2 = V3(0,0,0);
+				if (!bi2->is_synthetic) { if (bi2->type == JOINT_BALL_SOCKET) ri = (b == bi2->body_b) ? sol_bs[bi2->solver_idx].r_b : sol_bs[bi2->solver_idx].r_a; else ri = (b == bi2->body_b) ? sol_dist[bi2->solver_idx].r_b : sol_dist[bi2->solver_idx].r_a; }
+				if (!bj2->is_synthetic) { if (bj2->type == JOINT_BALL_SOCKET) rj2 = (b == bj2->body_b) ? sol_bs[bj2->solver_idx].r_b : sol_bs[bj2->solver_idx].r_a; else rj2 = (b == bj2->body_b) ? sol_dist[bj2->solver_idx].r_b : sol_dist[bj2->solver_idx].r_a; }
+				int di = sp->dof[bi], dj = sp->dof[bj];
+				int oi = sp->row_offset[bi], oj = sp->row_offset[bj];
+				if (di == 3 && dj == 3) {
+					float blk[9];
+					ldl_compute_off_diag_bs_bs(B, ri, rj2, sign, blk);
+					for (int r = 0; r < 3; r++) for (int cc = 0; cc < 3; cc++) { A_dense[(oi+r)*n+oj+cc] += blk[r*3+cc]; A_dense[(oj+cc)*n+oi+r] += blk[r*3+cc]; }
+				} else if (di == 3 && dj == 1) {
+					float blk[3];
+					ldl_compute_off_diag_bs_dist(B, ri, rj2, sol_dist[bj2->solver_idx].axis, sign, blk);
+					for (int r = 0; r < 3; r++) { A_dense[(oi+r)*n+oj] += blk[r]; A_dense[oj*n+oi+r] += blk[r]; }
+				} else if (di == 1 && dj == 3) {
+					float blk[3];
+					ldl_compute_off_diag_bs_dist(B, rj2, ri, sol_dist[bi2->solver_idx].axis, sign, blk);
+					for (int r = 0; r < 3; r++) { A_dense[(oj+r)*n+oi] += blk[r]; A_dense[oi*n+oj+r] += blk[r]; }
+				} else {
+					float val = ldl_compute_off_diag_dist_dist(B, ri, rj2, sol_dist[bi2->solver_idx].axis, sol_dist[bj2->solver_idx].axis, sign);
+					A_dense[oi*n+oj] += val; A_dense[oj*n+oi] += val;
+				}
+			}
+		}
+		for (int b = 0; b < total_bc; b++) afree(ba2[b]);
+		CK_FREE(ba2);
+
+		// Dense LDL solve
+		float* D_dense = CK_ALLOC(n * sizeof(float));
+		// In-place LDL on A_dense
+		for (int j = 0; j < n; j++) {
+			float dj = A_dense[j*n+j];
+			for (int k = 0; k < j; k++) dj -= A_dense[j*n+k]*A_dense[j*n+k]*D_dense[k];
+			D_dense[j] = fabsf(dj) > 1e-12f ? dj : 1e-12f;
+			float inv_dj = 1.0f / D_dense[j];
+			for (int i = j+1; i < n; i++) {
+				float lij = A_dense[i*n+j];
+				for (int k = 0; k < j; k++) lij -= A_dense[i*n+k]*A_dense[j*n+k]*D_dense[k];
+				A_dense[i*n+j] = lij * inv_dj;
+			}
+		}
+		// Solve
+		for (int i = 0; i < n; i++) { float s = rhs[i]; for (int k = 0; k < i; k++) s -= A_dense[i*n+k]*lambda[k]; lambda[i] = s; }
+		for (int i = 0; i < n; i++) lambda[i] /= D_dense[i];
+		for (int i = n-1; i >= 0; i--) { float s = lambda[i]; for (int k = i+1; k < n; k++) s -= A_dense[k*n+i]*lambda[k]; lambda[i] = s; }
+
+		CK_FREE(A_dense);
+		CK_FREE(D_dense);
+	}
 
 
 	// Debug
