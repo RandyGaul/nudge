@@ -1,21 +1,78 @@
-// nudge.h -- single-file 3D physics library (generated)
-// https://github.com/RandyGaul/nudge
-//
-// Do this in *one* C file:
-//   #define NUDGE_IMPLEMENTATION
-//   #include "nudge.h"
+/*
+   ------------------------------------------------------------------------------
+      Licensing information can be found at the end of the file.
+   ------------------------------------------------------------------------------
 
-#ifndef NUDGE_SINGLE_FILE_H
-#define NUDGE_SINGLE_FILE_H
+   nudge.h
+
+   To create implementation (the function definitions)
+      #define NUDGE_IMPLEMENTATION
+   in *one* C/CPP file (translation unit) that includes this file
+
+
+   SUMMARY
+
+      Nudge is a lightweight 3D rigid-body physics engine for games and
+      prototyping. Written in C23 with zero external dependencies (beyond the
+      C standard library). All bodies, shapes, joints, and the world are created
+      and controlled through simple opaque-handle APIs.
+
+
+   FEATURES
+
+      - Shape types: sphere, capsule, box, convex hull
+      - Collision detection: GJK distance, SAT with Gauss map pruning,
+        analytical sphere/capsule pairs, Sutherland-Hodgman contact clipping
+      - Multiple solver backends:
+          SOLVER_SOFT_STEP  -- soft contacts with sub-step relaxation (default)
+          SOLVER_SI         -- sequential impulse with NGS position correction
+          SOLVER_BLOCK      -- direct LCP enumeration for 2-4 contact normals
+          SOLVER_AVBD       -- augmented vertex block descent (position-level)
+      - Joints: ball-socket, distance (both rigid or spring-damper)
+      - BVH broadphase with 64-byte cache-line nodes and incremental SAH
+        refinement, plus sleep-aware dirty tracking
+      - Incremental island-based sleeping
+      - Warm starting with contact feature IDs
+      - Hot/cold data split for cache-friendly solver iteration
+
+
+   QUICK START
+
+      World world = create_world((WorldParams){ .gravity = {0, -9.81f, 0} });
+
+      Body floor = create_body(world, (BodyParams){ .mass = 0 });
+      body_add_shape(world, floor, (ShapeParams){
+          .type = SHAPE_BOX, .box.half_extents = {10, 0.5f, 10}
+      });
+
+      Body ball = create_body(world, (BodyParams){ .mass = 1, .position = {0,5,0} });
+      body_add_shape(world, ball, (ShapeParams){
+          .type = SHAPE_SPHERE, .sphere.radius = 0.5f
+      });
+
+      while (running) {
+          world_step(world, 1.0f / 60.0f);
+          v3 pos = body_get_position(world, ball);
+      }
+      destroy_world(world);
+
+
+   CREDITS
+
+      BEPUphysics v2 (Ross Nordby) -- broadphase, soft constraints, memory layout
+      Box2D (Erin Catto) -- GJK, sequential impulse, contact feature IDs
+      Dirk Gregorius -- SAT with Gauss map, contact clipping, block solver
+      Chris Giles -- AVBD solver reference
+*/
+
+#ifndef NUDGE_H
+#define NUDGE_H
 
 #include <stdint.h>
 #include <stddef.h>
 #include <math.h>
 #include <string.h>
 #include <assert.h>
-
-
-// ---- src/nudge.h ----
 
 // See LICENSE for licensing info.
 //
@@ -28,9 +85,6 @@
 
 #ifndef NUDGE_H
 #define NUDGE_H
-
-
-// ---- src/vmath.h ----
 
 // See LICENSE for licensing info.
 #ifndef VMATH_H
@@ -423,9 +477,6 @@ static inline void solve_6x6_ldl(m3x3 aLin, m3x3 aAng, m3x3 aCross,
 }
 
 #endif
-
-// ---- src/split_store.h ----
-
 // See LICENSE for licensing info.
 #ifndef SPLIT_STORE_H
 #define SPLIT_STORE_H
@@ -790,15 +841,11 @@ void world_debug_bvh(World world, BVHDebugFn fn, void* user);
 
 #endif
 
+// end of header -- implementation follows
 #ifdef NUDGE_IMPLEMENTATION
-
-// ---- src/nudge_amalg.c ----
 
 // Implementation seed for single-file header amalgamation.
 #define CKIT_IMPLEMENTATION
-
-// ---- src/ckit.h ----
-
 /*
     ckit -- A single-header kit of high-performance C essentials.
 
@@ -2737,14 +2784,8 @@ const uint16_t* ck_decode_UTF16(const uint16_t* s, int* codepoint)
 
 #endif // CKIT_IMPLEMENTATION_GUARD
 #endif // CKIT_IMPLEMENTATION
-
-// ---- src/nudge.c ----
-
 // See LICENSE for licensing info.
 // nudge.c -- physics world implementation
-
-
-// ---- src/nudge_internal.h ----
 
 // nudge_internal.h -- internal types for nudge physics engine (unity build)
 #ifndef NUDGE_INTERNAL_H
@@ -3004,7 +3045,7 @@ typedef struct ConstraintRef
 #define AVBD_STABLE_THRESH 0.05f // adaptive alpha: below this error, use full stabilization
 #define AVBD_PENALTY_MIN  1.0f
 #define AVBD_PENALTY_MAX  1e10f
-#define AVBD_MARGIN       0.0f   // nudge contacts already have margin via LINEAR_SLOP
+#define AVBD_MARGIN       0.01f  // rest offset: pushes equilibrium outward to prevent visible penetration
 #define AVBD_STICK_THRESH 0.00001f
 
 typedef struct AVBD_Contact
@@ -3071,9 +3112,6 @@ typedef struct AVBD_BodyState
 } AVBD_BodyState;
 
 #endif // NUDGE_INTERNAL_H
-
-// ---- src/gjk.c ----
-
 // See LICENSE for licensing info.
 // gjk.c -- GJK distance algorithm for 3D convex shapes.
 
@@ -3390,9 +3428,6 @@ static GJK_Result gjk_distance_ex(const GJK_Proxy* proxyA, const GJK_Proxy* prox
 	result.iterations = iter;
 	return result;
 }
-
-// ---- src/quickhull.c ----
-
 // See LICENSE for licensing info.
 #include <float.h>
 // quickhull.c -- 3D Quickhull convex hull algorithm.
@@ -4417,9 +4452,6 @@ Hull* quickhull(const v3* points, int count)
 	afree(state.verts); afree(state.edges); afree(state.faces);
 	return result;
 }
-
-// ---- src/bvh.c ----
-
 // See LICENSE for licensing info.
 // bvh.c -- binary BVH broadphase (Bepu-inspired, 64-byte cache-line nodes).
 
@@ -5377,9 +5409,6 @@ static void bvh_cross_test(BVHTree* ta, BVHTree* tb, CK_DYNA BroadPair** pairs)
 	BVHNode* rb = &tb->nodes[tb->root];
 	bvh_cross_nodes(ta, ra, tb, rb, pairs);
 }
-
-// ---- src/collision.c ----
-
 // See LICENSE for licensing info.
 // collision.c -- broadphase + narrowphase collision detection
 //
@@ -6488,9 +6517,6 @@ static void broadphase_and_collide(WorldInternal* w, InternalManifold** manifold
 	if (w->broadphase_type == BROADPHASE_BVH) broadphase_bvh(w, manifolds);
 	else broadphase_n2(w, manifolds);
 }
-
-// ---- src/inertia.c ----
-
 // inertia.c -- mass and inertia tensor computation
 
 // Multiply world-space inverse inertia tensor by a vector.
@@ -6650,9 +6676,6 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 
 	w->body_hot[idx].inv_inertia_local = inertia_to_inv(total);
 }
-
-// ---- src/solver.c ----
-
 // solver.c -- contact constraint solver
 
 static uint64_t body_pair_key(int a, int b)
@@ -7370,9 +7393,6 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 	case CTYPE_DISTANCE:    solve_distance(w, &dist[ref->index]); break;
 	}
 }
-
-// ---- src/joints.c ----
-
 // joints.c -- joint constraint solvers (ball socket, distance)
 
 // Symmetric 3x3 stored as 6 floats: [xx, xy, xz, yy, yz, zz].
@@ -7589,9 +7609,6 @@ static void joints_post_solve(WorldInternal* w, SolverBallSocket* bs, int bs_cou
 	afree(bs);
 	afree(dist);
 }
-
-// ---- src/islands.c ----
-
 // islands.c -- island connectivity, sleep/wake management
 
 static int island_create(WorldInternal* w)
@@ -8061,9 +8078,6 @@ static void island_try_split(WorldInternal* w, int island_id)
 	afree(component);
 	afree(bodies);
 }
-
-// ---- src/solver_avbd.c ----
-
 // solver_avbd.c -- Augmented Vertex Block Descent solver.
 // Primal-dual position solver: per-body 6x6 Newton steps + augmented Lagrangian dual updates.
 // Reference: Ly, Narain et al. "Augmented VBD" SIGGRAPH 2025; Chris Giles' 3D demo.
@@ -9240,4 +9254,11 @@ int world_get_contacts(World world, const Contact** out)
 }
 
 #endif // NUDGE_IMPLEMENTATION
-#endif // NUDGE_SINGLE_FILE_H
+
+/*
+   ------------------------------------------------------------------------------
+   This software is available under the public domain (Unlicense).
+   See LICENSE for details.
+   ------------------------------------------------------------------------------
+*/
+#endif // NUDGE_H

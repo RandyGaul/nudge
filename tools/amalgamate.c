@@ -8,7 +8,7 @@
 // Already-inlined files are skipped across both phases (dedup).
 //
 // Example (nudge):
-//   amalgamate -o nudge.h src/ckit.h src/nudge.h -- src/nudge.c
+//   amalgamate -o nudge.h src/nudge.h -- src/nudge_amalg.c
 
 #define CKIT_IMPLEMENTATION
 #include "../src/ckit.h"
@@ -43,8 +43,6 @@ static void process(FILE* out, const char* path)
 	if (!sl) sl = strrchr(path, '\\');
 	if (sl) { int len = (int)(sl - path); memcpy(dir, path, len); dir[len] = 0; }
 
-	fprintf(out, "\n// ---- %s ----\n\n", path);
-
 	char line[4096];
 	while (fgets(line, sizeof(line), f)) {
 		char inc[256];
@@ -58,6 +56,79 @@ static void process(FILE* out, const char* path)
 		}
 	}
 	fclose(f);
+}
+
+static void emit_preamble(FILE* out)
+{
+	fprintf(out,
+		"/*\n"
+		"   ------------------------------------------------------------------------------\n"
+		"      Licensing information can be found at the end of the file.\n"
+		"   ------------------------------------------------------------------------------\n"
+		"\n"
+		"   nudge.h\n"
+		"\n"
+		"   To create implementation (the function definitions)\n"
+		"      #define NUDGE_IMPLEMENTATION\n"
+		"   in *one* C/CPP file (translation unit) that includes this file\n"
+		"\n"
+		"\n"
+		"   SUMMARY\n"
+		"\n"
+		"      Nudge is a lightweight 3D rigid-body physics engine for games and\n"
+		"      prototyping. Written in C23 with zero external dependencies (beyond the\n"
+		"      C standard library). All bodies, shapes, joints, and the world are created\n"
+		"      and controlled through simple opaque-handle APIs.\n"
+		"\n"
+		"\n"
+		"   FEATURES\n"
+		"\n"
+		"      - Shape types: sphere, capsule, box, convex hull\n"
+		"      - Collision detection: GJK distance, SAT with Gauss map pruning,\n"
+		"        analytical sphere/capsule pairs, Sutherland-Hodgman contact clipping\n"
+		"      - Multiple solver backends:\n"
+		"          SOLVER_SOFT_STEP  -- soft contacts with sub-step relaxation (default)\n"
+		"          SOLVER_SI         -- sequential impulse with NGS position correction\n"
+		"          SOLVER_BLOCK      -- direct LCP enumeration for 2-4 contact normals\n"
+		"          SOLVER_AVBD       -- augmented vertex block descent (position-level)\n"
+		"      - Joints: ball-socket, distance (both rigid or spring-damper)\n"
+		"      - BVH broadphase with 64-byte cache-line nodes and incremental SAH\n"
+		"        refinement, plus sleep-aware dirty tracking\n"
+		"      - Incremental island-based sleeping\n"
+		"      - Warm starting with contact feature IDs\n"
+		"      - Hot/cold data split for cache-friendly solver iteration\n"
+		"\n"
+		"\n"
+		"   QUICK START\n"
+		"\n"
+		"      World world = create_world((WorldParams){ .gravity = {0, -9.81f, 0} });\n"
+		"\n"
+		"      Body floor = create_body(world, (BodyParams){ .mass = 0 });\n"
+		"      body_add_shape(world, floor, (ShapeParams){\n"
+		"          .type = SHAPE_BOX, .box.half_extents = {10, 0.5f, 10}\n"
+		"      });\n"
+		"\n"
+		"      Body ball = create_body(world, (BodyParams){ .mass = 1, .position = {0,5,0} });\n"
+		"      body_add_shape(world, ball, (ShapeParams){\n"
+		"          .type = SHAPE_SPHERE, .sphere.radius = 0.5f\n"
+		"      });\n"
+		"\n"
+		"      while (running) {\n"
+		"          world_step(world, 1.0f / 60.0f);\n"
+		"          v3 pos = body_get_position(world, ball);\n"
+		"      }\n"
+		"      destroy_world(world);\n"
+		"\n"
+		"\n"
+		"   CREDITS\n"
+		"\n"
+		"      BEPUphysics v2 (Ross Nordby) -- broadphase, soft constraints, memory layout\n"
+		"      Box2D (Erin Catto) -- GJK, sequential impulse, contact feature IDs\n"
+		"      Dirk Gregorius -- SAT with Gauss map, contact clipping, block solver\n"
+		"      Chris Giles -- AVBD solver reference\n"
+		"*/\n"
+		"\n"
+	);
 }
 
 int main(int argc, char** argv)
@@ -78,13 +149,9 @@ int main(int argc, char** argv)
 	FILE* out = outpath ? fopen(outpath, "w") : stdout;
 	if (!out) { fprintf(stderr, "amalgamate: can't write %s\n", outpath); return 1; }
 
-	fprintf(out, "// nudge.h -- single-file 3D physics library (generated)\n");
-	fprintf(out, "// https://github.com/RandyGaul/nudge\n");
-	fprintf(out, "//\n");
-	fprintf(out, "// Do this in *one* C file:\n");
-	fprintf(out, "//   #define NUDGE_IMPLEMENTATION\n");
-	fprintf(out, "//   #include \"nudge.h\"\n\n");
-	fprintf(out, "#ifndef NUDGE_SINGLE_FILE_H\n#define NUDGE_SINGLE_FILE_H\n\n");
+	emit_preamble(out);
+
+	fprintf(out, "#ifndef NUDGE_H\n#define NUDGE_H\n\n");
 	fprintf(out, "#include <stdint.h>\n");
 	fprintf(out, "#include <stddef.h>\n");
 	fprintf(out, "#include <math.h>\n");
@@ -93,10 +160,17 @@ int main(int argc, char** argv)
 
 	for (int i = 0; i < asize(hdrs); i++) process(out, hdrs[i]);
 
-	fprintf(out, "\n#ifdef NUDGE_IMPLEMENTATION\n");
+	fprintf(out, "\n// end of header -- implementation follows\n");
+	fprintf(out, "#ifdef NUDGE_IMPLEMENTATION\n\n");
 	for (int i = 0; i < asize(impl); i++) process(out, impl[i]);
 	fprintf(out, "\n#endif // NUDGE_IMPLEMENTATION\n");
-	fprintf(out, "#endif // NUDGE_SINGLE_FILE_H\n");
+	fprintf(out, "\n/*\n"
+		"   ------------------------------------------------------------------------------\n"
+		"   This software is available under the public domain (Unlicense).\n"
+		"   See LICENSE for details.\n"
+		"   ------------------------------------------------------------------------------\n"
+		"*/\n");
+	fprintf(out, "#endif // NUDGE_H\n");
 
 	if (outpath) fclose(out);
 	return 0;
