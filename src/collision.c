@@ -1125,3 +1125,168 @@ static void broadphase_and_collide(WorldInternal* w, InternalManifold** manifold
 	if (w->broadphase_type == BROADPHASE_BVH) broadphase_bvh(w, manifolds);
 	else broadphase_n2(w, manifolds);
 }
+
+// -----------------------------------------------------------------------------
+// Ray-shape intersection. Each returns 1 on hit, sets t_out and n_out.
+// Direction must be normalized. Rejects hits behind the origin (t < 0).
+
+static int ray_sphere(v3 ro, v3 rd, Sphere s, float max_t, float* t_out, v3* n_out)
+{
+	v3 oc = sub(ro, s.center);
+	float b = dot(oc, rd);
+	float c = dot(oc, oc) - s.radius * s.radius;
+	float disc = b * b - c;
+	if (disc < 0.0f) return 0;
+	float sq = sqrtf(disc);
+	float t = -b - sq;
+	if (t < 0.0f) t = -b + sq;
+	if (t < 0.0f || t > max_t) return 0;
+	*t_out = t;
+	*n_out = norm(sub(add(ro, scale(rd, t)), s.center));
+	return 1;
+}
+
+static int ray_capsule(v3 ro, v3 rd, Capsule cap, float max_t, float* t_out, v3* n_out)
+{
+	v3 ba = sub(cap.q, cap.p);
+	v3 oa = sub(ro, cap.p);
+	float baba = dot(ba, ba);
+	float bard = dot(ba, rd);
+	float baoa = dot(ba, oa);
+	float rdoa = dot(rd, oa);
+	float oaoa = dot(oa, oa);
+	float r2 = cap.radius * cap.radius;
+
+	// Infinite cylinder test.
+	float a = baba - bard * bard;
+	float b = baba * rdoa - baoa * bard;
+	float c = baba * oaoa - baoa * baoa - r2 * baba;
+	if (fabsf(a) > 1e-8f) {
+		float h = b * b - a * c;
+		if (h >= 0.0f) {
+			float t = (-b - sqrtf(h)) / a;
+			if (t >= 0.0f && t <= max_t) {
+				float y = baoa + t * bard;
+				if (y > 0.0f && y < baba) {
+					*t_out = t;
+					v3 hp = add(ro, scale(rd, t));
+					*n_out = norm(sub(hp, add(cap.p, scale(ba, y / baba))));
+					return 1;
+				}
+			}
+		}
+	}
+
+	// Hemisphere caps.
+	float best = max_t + 1.0f;
+	v3 best_n = {0};
+	int hit = 0;
+	for (int ci = 0; ci < 2; ci++) {
+		v3 center = ci == 0 ? cap.p : cap.q;
+		v3 oc2 = sub(ro, center);
+		float b2 = dot(oc2, rd);
+		float c2 = dot(oc2, oc2) - r2;
+		float d2 = b2 * b2 - c2;
+		if (d2 < 0.0f) continue;
+		float t = -b2 - sqrtf(d2);
+		if (t < 0.0f) t = -b2 + sqrtf(d2);
+		if (t < 0.0f || t >= best) continue;
+		float y = baoa + t * bard;
+		if (ci == 0 && y > 0.0f) continue;
+		if (ci == 1 && y < baba) continue;
+		best = t; hit = 1;
+		best_n = norm(sub(add(ro, scale(rd, t)), center));
+	}
+	if (hit && best <= max_t) { *t_out = best; *n_out = best_n; return 1; }
+	return 0;
+}
+
+static int ray_box(v3 ro, v3 rd, Box box, float max_t, float* t_out, v3* n_out)
+{
+	quat iq = inv(box.rotation);
+	v3 lo = rotate(iq, sub(ro, box.center));
+	v3 ld = rotate(iq, rd);
+	v3 e = box.half_extents;
+	float tmin = -1e30f, tmax = max_t;
+	v3 ln = {0};
+	float* lp = &lo.x, *dp = &ld.x, *ep = &e.x;
+	for (int ax = 0; ax < 3; ax++) {
+		if (fabsf(dp[ax]) < 1e-8f) {
+			if (lp[ax] < -ep[ax] || lp[ax] > ep[ax]) return 0;
+		} else {
+			float id = 1.0f / dp[ax];
+			float t1 = (-ep[ax] - lp[ax]) * id;
+			float t2 = ( ep[ax] - lp[ax]) * id;
+			int sw = t1 > t2;
+			if (sw) { float tmp = t1; t1 = t2; t2 = tmp; }
+			if (t1 > tmin) {
+				tmin = t1;
+				ln = V3(ax == 0 ? (sw ? 1.0f : -1.0f) : 0.0f,
+				        ax == 1 ? (sw ? 1.0f : -1.0f) : 0.0f,
+				        ax == 2 ? (sw ? 1.0f : -1.0f) : 0.0f);
+			}
+			tmax = fminf(tmax, t2);
+			if (tmin > tmax) return 0;
+		}
+	}
+	if (tmin < 0.0f) return 0;
+	*t_out = tmin;
+	*n_out = rotate(box.rotation, ln);
+	return 1;
+}
+
+static int ray_hull(v3 ro, v3 rd, ConvexHull ch, float max_t, float* t_out, v3* n_out)
+{
+	quat iq = inv(ch.rotation);
+	v3 inv_sc = rcp(ch.scale);
+	v3 lo = hmul(rotate(iq, sub(ro, ch.center)), inv_sc);
+	v3 ld = hmul(rotate(iq, rd), inv_sc);
+	const Hull* hull = ch.hull;
+	float t_enter = -1e30f, t_exit = max_t;
+	v3 enter_normal = {0};
+	for (int i = 0; i < hull->face_count; i++) {
+		v3 n = hull->planes[i].normal;
+		float d = hull->planes[i].offset;
+		float denom = dot(n, ld);
+		float num = d - dot(n, lo);
+		if (fabsf(denom) < 1e-8f) {
+			if (num < 0.0f) return 0;
+			continue;
+		}
+		float t = num / denom;
+		if (denom < 0.0f) {
+			if (t > t_enter) { t_enter = t; enter_normal = n; }
+		} else {
+			if (t < t_exit) t_exit = t;
+		}
+		if (t_enter > t_exit) return 0;
+	}
+	if (t_enter < 0.0f || t_enter > max_t) return 0;
+	*t_out = t_enter;
+	*n_out = norm(rotate(ch.rotation, hmul(enter_normal, inv_sc)));
+	return 1;
+}
+
+// Test a ray against all shapes on a body. Returns closest hit.
+static int ray_body(WorldInternal* w, int body_idx, v3 origin, v3 dir, float max_t, float* t_out, v3* n_out)
+{
+	BodyHot* bh = &w->body_hot[body_idx];
+	BodyCold* bc = &w->body_cold[body_idx];
+	float best_t = max_t;
+	v3 best_n = {0};
+	int found = 0;
+	for (int i = 0; i < asize(bc->shapes); i++) {
+		ShapeInternal* s = &bc->shapes[i];
+		float t; v3 n;
+		int hit = 0;
+		switch (s->type) {
+		case SHAPE_SPHERE:  hit = ray_sphere(origin, dir, make_sphere(bh, s), best_t, &t, &n); break;
+		case SHAPE_CAPSULE: hit = ray_capsule(origin, dir, make_capsule(bh, s), best_t, &t, &n); break;
+		case SHAPE_BOX:     hit = ray_box(origin, dir, make_box(bh, s), best_t, &t, &n); break;
+		case SHAPE_HULL:    hit = ray_hull(origin, dir, make_convex_hull(bh, s), best_t, &t, &n); break;
+		}
+		if (hit && t < best_t) { best_t = t; best_n = n; found = 1; }
+	}
+	if (found) { *t_out = best_t; *n_out = best_n; }
+	return found;
+}

@@ -561,3 +561,78 @@ int world_get_contacts(World world, const Contact** out)
 	*out = w->debug_contacts;
 	return asize(w->debug_contacts);
 }
+
+// -----------------------------------------------------------------------------
+// World queries.
+
+int world_query_aabb(World world, v3 lo, v3 hi, Body* results, int max_results)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	AABB query = { lo, hi };
+	CK_DYNA int* candidates = NULL;
+	if (w->broadphase_type == BROADPHASE_BVH) {
+		bvh_query_aabb(w->bvh_dynamic, query, &candidates);
+		bvh_query_aabb(w->bvh_static, query, &candidates);
+	} else {
+		int count = asize(w->body_hot);
+		for (int i = 0; i < count; i++) {
+			if (!split_alive(w->body_gen, i)) continue;
+			if (asize(w->body_cold[i].shapes) == 0) continue;
+			apush(candidates, i);
+		}
+	}
+	int total = 0;
+	for (int i = 0; i < asize(candidates); i++) {
+		int idx = candidates[i];
+		AABB b = body_aabb(&w->body_hot[idx], &w->body_cold[idx]);
+		if (!aabb_overlaps(query, b)) continue;
+		if (total < max_results)
+			results[total] = split_handle(Body, w->body_gen, idx);
+		total++;
+	}
+	afree(candidates);
+	return total;
+}
+
+int world_raycast(World world, v3 origin, v3 direction, float max_distance, RayHit* hit)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	float dl = len(direction);
+	if (dl < 1e-12f) return 0;
+	v3 dir = scale(direction, 1.0f / dl);
+	v3 inv_dir = V3(1.0f / dir.x, 1.0f / dir.y, 1.0f / dir.z);
+
+	CK_DYNA int* candidates = NULL;
+	if (w->broadphase_type == BROADPHASE_BVH) {
+		bvh_query_ray(w->bvh_dynamic, origin, inv_dir, max_distance, &candidates);
+		bvh_query_ray(w->bvh_static, origin, inv_dir, max_distance, &candidates);
+	} else {
+		int count = asize(w->body_hot);
+		for (int i = 0; i < count; i++) {
+			if (!split_alive(w->body_gen, i)) continue;
+			if (asize(w->body_cold[i].shapes) == 0) continue;
+			apush(candidates, i);
+		}
+	}
+
+	float best_t = max_distance;
+	v3 best_n = {0};
+	int best_idx = -1;
+	for (int i = 0; i < asize(candidates); i++) {
+		int idx = candidates[i];
+		float t; v3 n;
+		if (ray_body(w, idx, origin, dir, best_t, &t, &n)) {
+			best_t = t; best_n = n; best_idx = idx;
+		}
+	}
+	afree(candidates);
+
+	if (best_idx < 0) return 0;
+	if (hit) {
+		hit->body = split_handle(Body, w->body_gen, best_idx);
+		hit->point = add(origin, scale(dir, best_t));
+		hit->normal = best_n;
+		hit->distance = best_t;
+	}
+	return 1;
+}

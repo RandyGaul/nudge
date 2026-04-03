@@ -236,6 +236,26 @@ int body_is_asleep(World world, Body body);
 int world_get_contacts(World world, const Contact** out);
 
 // -----------------------------------------------------------------------------
+// World queries.
+
+typedef struct RayHit
+{
+	Body body;
+	v3 point;       // world-space hit point
+	v3 normal;      // surface normal at hit (outward)
+	float distance; // distance along ray
+} RayHit;
+
+// Find all bodies whose AABB overlaps the query box.
+// Writes up to max_results body handles into results[]. Returns total hit count
+// (may exceed max_results -- use to size a retry).
+int world_query_aabb(World world, v3 lo, v3 hi, Body* results, int max_results);
+
+// Cast a ray and find the closest body hit. Direction is normalized internally.
+// Returns nonzero on hit; fills *hit (may be NULL for boolean-only test).
+int world_raycast(World world, v3 origin, v3 direction, float max_distance, RayHit* hit);
+
+// -----------------------------------------------------------------------------
 // Joints.
 
 typedef struct Joint { uint64_t id; } Joint;

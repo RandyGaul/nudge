@@ -136,6 +136,14 @@ static Body g_chain[CHAIN_LEN];
 static Body g_chain_anchor;
 static Body g_spring_a, g_spring_b;
 
+// Mouse constraint state (right-click drag to interact with bodies)
+static Body g_mouse_body;         // body being dragged ({0} if none)
+static Body g_mouse_anchor;      // hidden static body at mouse target
+static Joint g_mouse_joint;      // soft ball-socket connecting anchor to body
+static v3 g_mouse_local_hit;     // hit point in body's local space
+static float g_mouse_ray_dist;   // camera distance at pick time
+static int g_mouse_dragging;     // 1 while right-click is held (even if no body hit)
+
 // Forward declarations
 static void setup_scene();
 static void scene_showcase_setup();
@@ -218,6 +226,125 @@ static void cam_zoom(float delta)
 	if (g_cam_dist > 200.0f) g_cam_dist = 200.0f;
 }
 
+// -----------------------------------------------------------------------------
+// Mouse constraint: right-click to pick and drag bodies.
+
+static void screen_to_ray(float mx, float my, v3* origin, v3* dir)
+{
+	float aspect = (float)g_width / (float)g_height;
+	quat rot = cam_orientation();
+	*origin = add(g_cam_focus, rotate(rot, V3(0, 0, g_cam_dist)));
+
+	v3 fwd = neg(rotate(rot, V3(0, 0, 1)));
+	v3 right = rotate(rot, V3(1, 0, 0));
+	v3 up = rotate(rot, V3(0, 1, 0));
+
+	float fov = 1.0f; // must match mat4_perspective call in draw()
+	float half_h = tanf(fov * 0.5f);
+	float half_w = half_h * aspect;
+
+	float ndc_x = 2.0f * mx / g_width - 1.0f;
+	float ndc_y = 1.0f - 2.0f * my / g_height;
+
+	*dir = norm(add(fwd, add(scale(right, ndc_x * half_w), scale(up, ndc_y * half_h))));
+}
+
+// Ray-sphere intersection, returns t >= 0 or -1 on miss.
+static float ray_sphere_simple(v3 origin, v3 dir, v3 center, float radius)
+{
+	v3 oc = sub(origin, center);
+	float b = dot(oc, dir);
+	float c = dot(oc, oc) - radius * radius;
+	float disc = b * b - c;
+	if (disc < 0) return -1.0f;
+	float t = -b - sqrtf(disc);
+	if (t < 0) t = -b + sqrtf(disc);
+	return t >= 0 ? t : -1.0f;
+}
+
+static void mouse_begin_drag(float mx, float my)
+{
+	v3 origin, dir;
+	screen_to_ray(mx, my, &origin, &dir);
+
+	WorldInternal* w = (WorldInternal*)g_world.id;
+	Body best = {0};
+	float best_t = 1e30f;
+
+	for (int i = 0; i < asize(g_draw_list); i++) {
+		DrawEntry* e = &g_draw_list[i];
+		int idx = handle_index(e->body);
+		if (w->body_hot[idx].inv_mass == 0.0f) continue; // skip static
+
+		v3 pos = body_get_position(g_world, e->body);
+		float radius = fmaxf(fmaxf(e->scale.x, e->scale.y), e->scale.z);
+		float t = ray_sphere_simple(origin, dir, pos, radius);
+		if (t >= 0 && t < best_t) {
+			best_t = t;
+			best = e->body;
+		}
+	}
+
+	if (!best.id) return;
+
+	g_mouse_body = best;
+	g_mouse_ray_dist = best_t;
+
+	v3 hit_world = add(origin, scale(dir, best_t));
+
+	// Compute hit point in body's local space
+	v3 body_pos = body_get_position(g_world, best);
+	quat body_rot = body_get_rotation(g_world, best);
+	g_mouse_local_hit = rotate(inv(body_rot), sub(hit_world, body_pos));
+
+	// Create hidden static anchor at hit point
+	g_mouse_anchor = create_body(g_world, (BodyParams){
+		.position = hit_world,
+		.rotation = quat_identity(),
+		.mass = 0,
+	});
+
+	// Soft ball-socket: pulls body toward anchor
+	g_mouse_joint = create_ball_socket(g_world, (BallSocketParams){
+		.body_a = g_mouse_anchor,
+		.body_b = g_mouse_body,
+		.local_offset_a = V3(0, 0, 0),
+		.local_offset_b = g_mouse_local_hit,
+		.spring = { .frequency = 5.0f, .damping_ratio = 0.7f },
+	});
+}
+
+static void mouse_update_drag(float mx, float my)
+{
+	if (!g_mouse_body.id) return;
+
+	v3 origin, dir;
+	screen_to_ray(mx, my, &origin, &dir);
+
+	v3 target = add(origin, scale(dir, g_mouse_ray_dist));
+
+	// Move anchor body to new target
+	WorldInternal* w = (WorldInternal*)g_world.id;
+	int anchor_idx = handle_index(g_mouse_anchor);
+	w->body_hot[anchor_idx].position = target;
+
+	// Keep dragged body's island awake
+	int joint_idx = handle_index(g_mouse_joint);
+	int island_id = w->joints[joint_idx].island_id;
+	if (island_id >= 0 && !w->islands[island_id].awake)
+		island_wake(w, island_id);
+}
+
+static void mouse_end_drag()
+{
+	if (!g_mouse_body.id) return;
+	destroy_joint(g_world, g_mouse_joint);
+	destroy_body(g_world, g_mouse_anchor);
+	g_mouse_body = (Body){0};
+	g_mouse_anchor = (Body){0};
+	g_mouse_joint = (Joint){0};
+}
+
 void init()
 {
 	AppSettings settings = {
@@ -254,6 +381,12 @@ void init()
 
 static void setup_scene()
 {
+	// Clear mouse drag state before destroying world
+	g_mouse_body = (Body){0};
+	g_mouse_anchor = (Body){0};
+	g_mouse_joint = (Joint){0};
+	g_mouse_dragging = 0;
+
 	if (g_world.id) destroy_world(g_world);
 	aclear(g_draw_list);
 	g_ldl_debug_info.valid = 0;
@@ -1017,12 +1150,29 @@ void update()
 	// Camera input (skip when imgui wants the mouse)
 	ImGuiIO* io = ImGui_GetIO();
 	if (!io->WantCaptureMouse) {
-		if (io->MouseDown[0])
+		if (io->MouseDown[0] && !g_mouse_dragging)
 			cam_orbit(io->MouseDelta.x, io->MouseDelta.y);
 		if (io->MouseDown[2])
 			cam_pan(io->MouseDelta.x, io->MouseDelta.y);
 		if (io->MouseWheel != 0.0f)
 			cam_zoom(io->MouseWheel);
+
+		// Mouse constraint: right-click drag
+		if (io->MouseDown[1]) {
+			if (!g_mouse_dragging) {
+				mouse_begin_drag(io->MousePos.x, io->MousePos.y);
+				g_mouse_dragging = 1;
+			} else {
+				mouse_update_drag(io->MousePos.x, io->MousePos.y);
+			}
+		} else if (g_mouse_dragging) {
+			mouse_end_drag();
+			g_mouse_dragging = 0;
+		}
+	} else if (g_mouse_dragging) {
+		// Release if mouse moves over UI while dragging
+		mouse_end_drag();
+		g_mouse_dragging = 0;
 	}
 
 	if (!g_paused || g_step_once) { world_step(g_world, 1.0f / 60.0f); g_step_once = false; }
@@ -1180,6 +1330,17 @@ void draw()
 
 	// Scene-specific extras (joint lines, etc.)
 	if (g_scenes[g_scene_index].draw_extras) g_scenes[g_scene_index].draw_extras();
+
+	// Mouse constraint visual
+	if (g_mouse_body.id) {
+		WorldInternal* w = (WorldInternal*)g_world.id;
+		int anchor_idx = handle_index(g_mouse_anchor);
+		v3 target = w->body_hot[anchor_idx].position;
+		v3 body_pos = body_get_position(g_world, g_mouse_body);
+		quat body_rot = body_get_rotation(g_world, g_mouse_body);
+		v3 attach = add(body_pos, rotate(body_rot, g_mouse_local_hit));
+		render_debug_line(target, attach, V3(1.0f, 0.5f, 0.0f));
+	}
 
 	// Debug: contact points and normals
 	if (g_show_contacts) {

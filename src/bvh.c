@@ -955,3 +955,70 @@ static void bvh_cross_test(BVHTree* ta, BVHTree* tb, CK_DYNA BroadPair** pairs)
 	BVHNode* rb = &tb->nodes[tb->root];
 	bvh_cross_nodes(ta, ra, tb, rb, pairs);
 }
+
+// -----------------------------------------------------------------------------
+// AABB query: collect body indices whose node AABB overlaps the query box.
+
+static void bvh_query_aabb_node(BVHTree* t, int ni, AABB query, CK_DYNA int** results)
+{
+	BVHNode* n = &t->nodes[ni];
+	for (int s = 0; s < 2; s++) {
+		BVHChild* c = bvh_child(n, s);
+		if (bvh_child_is_empty(c)) continue;
+		if (!aabb_overlaps(query, bvh_child_aabb(c))) continue;
+		if (bvh_child_is_leaf(c))
+			apush(*results, t->leaves[bvh_child_leaf_idx(c)].body_idx);
+		else
+			bvh_query_aabb_node(t, c->index, query, results);
+	}
+}
+
+static void bvh_query_aabb(BVHTree* t, AABB query, CK_DYNA int** results)
+{
+	if (t->root == -1) return;
+	bvh_query_aabb_node(t, t->root, query, results);
+}
+
+// -----------------------------------------------------------------------------
+// Ray query: collect body indices whose node AABB is hit by a ray.
+
+// Ray-AABB slab test. Returns 1 on hit, sets *t_out to entry distance (>= 0).
+static int ray_aabb(v3 origin, v3 inv_dir, AABB box, float max_t, float* t_out)
+{
+	float tx1 = (box.min.x - origin.x) * inv_dir.x;
+	float tx2 = (box.max.x - origin.x) * inv_dir.x;
+	float tmin = fminf(tx1, tx2);
+	float tmax = fmaxf(tx1, tx2);
+	float ty1 = (box.min.y - origin.y) * inv_dir.y;
+	float ty2 = (box.max.y - origin.y) * inv_dir.y;
+	tmin = fmaxf(tmin, fminf(ty1, ty2));
+	tmax = fminf(tmax, fmaxf(ty1, ty2));
+	float tz1 = (box.min.z - origin.z) * inv_dir.z;
+	float tz2 = (box.max.z - origin.z) * inv_dir.z;
+	tmin = fmaxf(tmin, fminf(tz1, tz2));
+	tmax = fminf(tmax, fmaxf(tz1, tz2));
+	if (tmax < 0.0f || tmin > tmax || tmin > max_t) return 0;
+	*t_out = fmaxf(tmin, 0.0f);
+	return 1;
+}
+
+static void bvh_query_ray_node(BVHTree* t, int ni, v3 origin, v3 inv_dir, float max_t, CK_DYNA int** results)
+{
+	BVHNode* n = &t->nodes[ni];
+	for (int s = 0; s < 2; s++) {
+		BVHChild* c = bvh_child(n, s);
+		if (bvh_child_is_empty(c)) continue;
+		float t_hit;
+		if (!ray_aabb(origin, inv_dir, bvh_child_aabb(c), max_t, &t_hit)) continue;
+		if (bvh_child_is_leaf(c))
+			apush(*results, t->leaves[bvh_child_leaf_idx(c)].body_idx);
+		else
+			bvh_query_ray_node(t, c->index, origin, inv_dir, max_t, results);
+	}
+}
+
+static void bvh_query_ray(BVHTree* t, v3 origin, v3 inv_dir, float max_t, CK_DYNA int** results)
+{
+	if (t->root == -1) return;
+	bvh_query_ray_node(t, t->root, origin, inv_dir, max_t, results);
+}

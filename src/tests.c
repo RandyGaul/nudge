@@ -2890,6 +2890,92 @@ static void test_ldl_topology_change()
 	destroy_world(w);
 }
 
+// Pure math test: build a small dense SPD system, solve with sparse block LDL,
+// compare against dense scalar LDL. Tests factorize + solve correctness.
+static void test_ldl_sparse_vs_dense_math()
+{
+	// Build a 3-node system (all dof=3, n=9). Fully connected = star topology.
+	// A = diag blocks + off-diagonal coupling.
+	// Use a known SPD matrix: A = B^T * B + epsilon*I for some random B.
+	int nc = 3, n = 9;
+	float A[81]; // 9x9
+	memset(A, 0, sizeof(A));
+	// Fill with a simple SPD matrix: each diagonal block = 10*I, off-diag = 1*I
+	for (int i = 0; i < n; i++) A[i*n + i] = 10.0f;
+	for (int i = 0; i < nc; i++)
+		for (int j = i + 1; j < nc; j++)
+			for (int d = 0; d < 3; d++) {
+				A[(i*3+d)*n + j*3+d] = 1.0f;
+				A[(j*3+d)*n + i*3+d] = 1.0f;
+			}
+
+	float rhs[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+	// Dense scalar LDL solve
+	float A_copy[81], D_dense[9], x_dense[9];
+	memcpy(A_copy, A, sizeof(A));
+	for (int j = 0; j < n; j++) {
+		float dj = A_copy[j*n+j];
+		for (int k = 0; k < j; k++) dj -= A_copy[j*n+k]*A_copy[j*n+k]*D_dense[k];
+		D_dense[j] = fabsf(dj) > 1e-12f ? dj : 1e-12f;
+		float inv_dj = 1.0f / D_dense[j];
+		for (int i = j+1; i < n; i++) {
+			float lij = A_copy[i*n+j];
+			for (int k = 0; k < j; k++) lij -= A_copy[i*n+k]*A_copy[j*n+k]*D_dense[k];
+			A_copy[i*n+j] = lij * inv_dj;
+		}
+	}
+	for (int i = 0; i < n; i++) { float s = rhs[i]; for (int k = 0; k < i; k++) s -= A_copy[i*n+k]*x_dense[k]; x_dense[i] = s; }
+	for (int i = 0; i < n; i++) x_dense[i] /= D_dense[i];
+	for (int i = n-1; i >= 0; i--) { float s = x_dense[i]; for (int k = i+1; k < n; k++) s -= A_copy[k*n+i]*x_dense[k]; x_dense[i] = s; }
+
+	// Sparse block LDL solve
+	LDL_Sparse sp;
+	ldl_sparse_init(&sp);
+	sp.node_count = nc;
+	sp.n = n;
+	for (int i = 0; i < nc; i++) { sp.dof[i] = 3; sp.row_offset[i] = i * 3; }
+	sp.row_offset[nc] = n;
+
+	// Fill diagonal blocks from A
+	for (int i = 0; i < nc; i++)
+		for (int r = 0; r < 3; r++)
+			for (int c = 0; c < 3; c++)
+				sp.diag_data[i][r*3+c] = A[(i*3+r)*n + i*3+c];
+
+	// Fill off-diagonal blocks
+	for (int i = 0; i < nc; i++)
+		for (int j = i + 1; j < nc; j++) {
+			float* eij = ldl_sparse_get_or_create_edge(&sp, i, j);
+			for (int r = 0; r < 3; r++)
+				for (int c = 0; c < 3; c++)
+					eij[r*3+c] = A[(i*3+r)*n + j*3+c];
+			float* eji = ldl_sparse_get_edge(&sp, j, i);
+			for (int r = 0; r < 3; r++)
+				for (int c = 0; c < 3; c++)
+					eji[r*3+c] = A[(j*3+r)*n + i*3+c];
+		}
+
+	ldl_sparse_min_degree_order(&sp);
+	ldl_sparse_factorize(&sp);
+	float x_sparse[9];
+	ldl_sparse_solve(&sp, rhs, x_sparse);
+
+	printf("  [LDL math] dense: ");
+	for (int i = 0; i < 9; i++) printf("%.4f ", (double)x_dense[i]);
+	printf("\n  [LDL math] sparse:");
+	for (int i = 0; i < 9; i++) printf("%.4f ", (double)x_sparse[i]);
+	printf("\n");
+
+	TEST_BEGIN("LDL sparse vs dense: 3-node star");
+	float max_err = 0;
+	for (int i = 0; i < n; i++) { float e = fabsf(x_sparse[i] - x_dense[i]); if (e > max_err) max_err = e; }
+	printf("  [LDL math] max_err=%.6g\n", (double)max_err);
+	TEST_ASSERT(max_err < 0.001f);
+
+	ldl_sparse_free(&sp);
+}
+
 // Hub star: one center body with 8 ball_socket joints to radial arms.
 // The hub has 9*3 = 27 DOF attached (8 arms + 1 anchor), exceeding SHATTER_THRESHOLD.
 // Shattering should split the hub into virtual splinters and solve correctly.
@@ -3085,7 +3171,8 @@ static void run_solver_tests()
 	test_ldl_heavy_chain();
 	test_ldl_two_independent_chains();
 	test_ldl_topology_change();
-	test_ldl_hub_star_shattering(); // debugging NaN
+	test_ldl_sparse_vs_dense_math();
+	test_ldl_hub_star_shattering();
 	test_ldl_no_shatter_below_threshold();
 	test_ldl_mixed_chain_and_hub();
 	test_bounce_height_monotonic();
@@ -4272,6 +4359,256 @@ static void run_bvh_tests()
 }
 
 // ============================================================================
+// World query tests: AABB overlap and raycast.
+
+static void test_query_aabb_basic()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+
+	// Floor at y=-1, sphere at (0,2,0), box at (5,1,0)
+	Body floor = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50) });
+
+	Body sphere = create_body(w, (BodyParams){ .position = V3(0, 2, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, sphere, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+	Body box = create_body(w, (BodyParams){ .position = V3(5, 1, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+
+	Body results[16];
+
+	// Query a box around the sphere -- should find sphere (and possibly floor)
+	TEST_BEGIN("aabb query: finds sphere");
+	int count = world_query_aabb(w, V3(-1, 1, -1), V3(1, 3, 1), results, 16);
+	TEST_ASSERT(count >= 1);
+	int found_sphere = 0;
+	for (int i = 0; i < count && i < 16; i++)
+		if (results[i].id == sphere.id) found_sphere = 1;
+	TEST_ASSERT(found_sphere);
+
+	// Query far away -- should find nothing
+	TEST_BEGIN("aabb query: miss far away");
+	count = world_query_aabb(w, V3(100, 100, 100), V3(101, 101, 101), results, 16);
+	TEST_ASSERT(count == 0);
+
+	// Query around the box at (5,1,0)
+	TEST_BEGIN("aabb query: finds box at (5,1,0)");
+	count = world_query_aabb(w, V3(4, 0, -1), V3(6, 2, 1), results, 16);
+	int found_box = 0;
+	for (int i = 0; i < count && i < 16; i++)
+		if (results[i].id == box.id) found_box = 1;
+	TEST_ASSERT(found_box);
+
+	// Query that covers everything
+	TEST_BEGIN("aabb query: large query finds all 3");
+	count = world_query_aabb(w, V3(-100, -100, -100), V3(100, 100, 100), results, 16);
+	TEST_ASSERT(count >= 3);
+
+	destroy_world(w);
+}
+
+static void test_query_aabb_n2()
+{
+	// Same test with N^2 broadphase fallback
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_N2 });
+
+	Body sphere = create_body(w, (BodyParams){ .position = V3(0, 2, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, sphere, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+	Body results[8];
+
+	TEST_BEGIN("aabb query n2: finds sphere");
+	int count = world_query_aabb(w, V3(-1, 1, -1), V3(1, 3, 1), results, 8);
+	TEST_ASSERT(count == 1);
+	TEST_ASSERT(results[0].id == sphere.id);
+
+	TEST_BEGIN("aabb query n2: miss");
+	count = world_query_aabb(w, V3(10, 10, 10), V3(11, 11, 11), results, 8);
+	TEST_ASSERT(count == 0);
+
+	destroy_world(w);
+}
+
+static void test_raycast_sphere()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+
+	Body sphere = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, sphere, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 1.0f });
+
+	RayHit hit;
+
+	// Ray from (0,5,0) downward -- should hit sphere at (0,1,0)
+	TEST_BEGIN("raycast sphere: hit from above");
+	int r = world_raycast(w, V3(0, 5, 0), V3(0, -1, 0), 100.0f, &hit);
+	TEST_ASSERT(r);
+	TEST_ASSERT(hit.body.id == sphere.id);
+	TEST_ASSERT_FLOAT(hit.distance, 4.0f, EPS);
+	TEST_ASSERT_FLOAT(hit.point.y, 1.0f, EPS);
+	TEST_ASSERT_FLOAT(hit.normal.y, 1.0f, EPS); // upward normal
+
+	// Ray from side
+	TEST_BEGIN("raycast sphere: hit from side");
+	r = world_raycast(w, V3(-5, 0, 0), V3(1, 0, 0), 100.0f, &hit);
+	TEST_ASSERT(r);
+	TEST_ASSERT_FLOAT(hit.distance, 4.0f, EPS);
+	TEST_ASSERT_FLOAT(hit.normal.x, -1.0f, EPS);
+
+	// Ray that misses
+	TEST_BEGIN("raycast sphere: miss");
+	r = world_raycast(w, V3(0, 5, 0), V3(1, 0, 0), 100.0f, &hit);
+	TEST_ASSERT(!r);
+
+	// Ray too short
+	TEST_BEGIN("raycast sphere: max_distance too short");
+	r = world_raycast(w, V3(0, 5, 0), V3(0, -1, 0), 2.0f, &hit);
+	TEST_ASSERT(!r);
+
+	destroy_world(w);
+}
+
+static void test_raycast_box()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+
+	Body box = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(1, 1, 1) });
+
+	RayHit hit;
+
+	TEST_BEGIN("raycast box: hit top face");
+	int r = world_raycast(w, V3(0, 5, 0), V3(0, -1, 0), 100.0f, &hit);
+	TEST_ASSERT(r);
+	TEST_ASSERT_FLOAT(hit.distance, 4.0f, EPS);
+	TEST_ASSERT_FLOAT(hit.point.y, 1.0f, EPS);
+	TEST_ASSERT_FLOAT(hit.normal.y, 1.0f, EPS);
+
+	TEST_BEGIN("raycast box: hit side face");
+	r = world_raycast(w, V3(5, 0, 0), V3(-1, 0, 0), 100.0f, &hit);
+	TEST_ASSERT(r);
+	TEST_ASSERT_FLOAT(hit.distance, 4.0f, EPS);
+	TEST_ASSERT_FLOAT(hit.normal.x, 1.0f, EPS);
+
+	destroy_world(w);
+}
+
+static void test_raycast_capsule()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+
+	// Capsule: along Y, half_height=1, radius=0.5 → endpoints at (0,-1,0) and (0,1,0)
+	Body cap = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, cap, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 1.0f, .radius = 0.5f } });
+
+	RayHit hit;
+
+	// Ray from side at midpoint -- should hit cylinder body
+	TEST_BEGIN("raycast capsule: hit cylinder body");
+	int r = world_raycast(w, V3(5, 0, 0), V3(-1, 0, 0), 100.0f, &hit);
+	TEST_ASSERT(r);
+	TEST_ASSERT_FLOAT(hit.distance, 4.5f, EPS);
+	TEST_ASSERT_FLOAT(hit.normal.x, 1.0f, EPS);
+
+	// Ray from above -- should hit top hemisphere
+	TEST_BEGIN("raycast capsule: hit top hemisphere");
+	r = world_raycast(w, V3(0, 5, 0), V3(0, -1, 0), 100.0f, &hit);
+	TEST_ASSERT(r);
+	TEST_ASSERT_FLOAT(hit.distance, 3.5f, EPS);
+	TEST_ASSERT_FLOAT(hit.normal.y, 1.0f, EPS);
+
+	destroy_world(w);
+}
+
+static void test_raycast_hull()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+
+	// Use unit box hull with scale (1,1,1) -- equivalent to a unit box
+	Body hull = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, hull, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = hull_unit_box(), .scale = V3(1, 1, 1) } });
+
+	RayHit hit;
+
+	TEST_BEGIN("raycast hull: hit from above");
+	int r = world_raycast(w, V3(0, 5, 0), V3(0, -1, 0), 100.0f, &hit);
+	TEST_ASSERT(r);
+	TEST_ASSERT_FLOAT(hit.distance, 4.0f, EPS);
+	TEST_ASSERT_FLOAT(hit.normal.y, 1.0f, EPS);
+
+	TEST_BEGIN("raycast hull: miss");
+	r = world_raycast(w, V3(5, 5, 0), V3(0, -1, 0), 100.0f, &hit);
+	TEST_ASSERT(!r);
+
+	destroy_world(w);
+}
+
+static void test_raycast_closest()
+{
+	// Two spheres in a line -- ray should hit the closer one
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+
+	Body near = create_body(w, (BodyParams){ .position = V3(3, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, near, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+	Body far = create_body(w, (BodyParams){ .position = V3(8, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, far, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+	RayHit hit;
+	TEST_BEGIN("raycast closest: picks nearer sphere");
+	int r = world_raycast(w, V3(0, 0, 0), V3(1, 0, 0), 100.0f, &hit);
+	TEST_ASSERT(r);
+	TEST_ASSERT(hit.body.id == near.id);
+	TEST_ASSERT_FLOAT(hit.distance, 2.5f, EPS);
+
+	destroy_world(w);
+}
+
+static void test_raycast_null_hit()
+{
+	// Boolean-only raycast (hit=NULL)
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+	Body s = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, s, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 1.0f });
+
+	TEST_BEGIN("raycast null hit: boolean mode");
+	int r = world_raycast(w, V3(0, 5, 0), V3(0, -1, 0), 100.0f, NULL);
+	TEST_ASSERT(r);
+	r = world_raycast(w, V3(0, 5, 0), V3(1, 0, 0), 100.0f, NULL);
+	TEST_ASSERT(!r);
+
+	destroy_world(w);
+}
+
+static void test_raycast_n2_fallback()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_N2 });
+	Body s = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, s, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 1.0f });
+
+	RayHit hit;
+	TEST_BEGIN("raycast n2: hit sphere");
+	int r = world_raycast(w, V3(0, 5, 0), V3(0, -1, 0), 100.0f, &hit);
+	TEST_ASSERT(r);
+	TEST_ASSERT_FLOAT(hit.distance, 4.0f, EPS);
+
+	destroy_world(w);
+}
+
+static void run_query_tests()
+{
+	printf("--- nudge query tests ---\n");
+	test_query_aabb_basic();
+	test_query_aabb_n2();
+	test_raycast_sphere();
+	test_raycast_box();
+	test_raycast_capsule();
+	test_raycast_hull();
+	test_raycast_closest();
+	test_raycast_null_hit();
+	test_raycast_n2_fallback();
+}
+
+// ============================================================================
 // Feature ID tests for warm starting.
 
 static void test_feature_ids()
@@ -4871,6 +5208,7 @@ static void run_tests()
 
 	run_solver_tests();
 	run_bvh_tests();
+	run_query_tests();
 	test_feature_ids();
 	run_sleep_tests();
 
