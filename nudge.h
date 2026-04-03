@@ -18,24 +18,6 @@
       and controlled through simple opaque-handle APIs.
 
 
-   FEATURES
-
-      - Shape types: sphere, capsule, box, convex hull
-      - Collision detection: GJK distance, SAT with Gauss map pruning,
-        analytical sphere/capsule pairs, Sutherland-Hodgman contact clipping
-      - Multiple solver backends:
-          SOLVER_SOFT_STEP  -- soft contacts with sub-step relaxation (default)
-          SOLVER_SI         -- sequential impulse with NGS position correction
-          SOLVER_BLOCK      -- direct LCP enumeration for 2-4 contact normals
-          SOLVER_AVBD       -- augmented vertex block descent (position-level)
-      - Joints: ball-socket, distance (both rigid or spring-damper)
-      - BVH broadphase with 64-byte cache-line nodes and incremental SAH
-        refinement, plus sleep-aware dirty tracking
-      - Incremental island-based sleeping
-      - Warm starting with contact feature IDs
-      - Hot/cold data split for cache-friendly solver iteration
-
-
    QUICK START
 
       World world = create_world((WorldParams){ .gravity = {0, -9.81f, 0} });
@@ -55,6 +37,80 @@
           v3 pos = body_get_position(world, ball);
       }
       destroy_world(world);
+
+
+   WORLD API
+
+      World  create_world(WorldParams params);
+      void   destroy_world(World world);
+      void   world_step(World world, float dt);
+      void   world_set_friction_model(World world, FrictionModel model);
+      void   world_set_solver_type(World world, SolverType type);
+
+
+   BODY API
+
+      Body   create_body(World world, BodyParams params);
+      void   destroy_body(World world, Body body);
+      void   body_add_shape(World world, Body body, ShapeParams params);
+      v3     body_get_position(World world, Body body);
+      quat   body_get_rotation(World world, Body body);
+      void   body_wake(World world, Body body);
+      void   body_set_velocity(World world, Body body, v3 vel);
+      void   body_set_angular_velocity(World world, Body body, v3 avel);
+      int    body_is_asleep(World world, Body body);
+
+
+   JOINTS
+
+      Joint  create_ball_socket(World world, BallSocketParams params);
+      Joint  create_distance(World world, DistanceParams params);
+      void   destroy_joint(World world, Joint joint);
+
+
+   SHAPES
+
+      enum ShapeType: SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_BOX, SHAPE_HULL
+
+      ShapeParams  -- type + union of { sphere, capsule, box, hull }
+      BodyParams   -- position, rotation, mass (0 = static), friction, restitution
+      WorldParams  -- gravity, broadphase, solver_type, iteration counts, sub-steps
+
+
+   COLLISION QUERIES (immediate mode, no world needed)
+
+      int collide_sphere_sphere(Sphere a, Sphere b, Manifold* m);
+      int collide_sphere_capsule(Sphere a, Capsule b, Manifold* m);
+      int collide_sphere_box(Sphere a, Box b, Manifold* m);
+      int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* m);
+      int collide_capsule_capsule(Capsule a, Capsule b, Manifold* m);
+      int collide_capsule_box(Capsule a, Box b, Manifold* m);
+      int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* m);
+      int collide_box_box(Box a, Box b, Manifold* m);
+      int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* m);
+
+      Pass manifold=NULL for boolean-only test. Normal points A -> B.
+
+
+   SOLVERS
+
+      SOLVER_SOFT_STEP  -- soft contacts, sub-step relaxation (default)
+      SOLVER_SI_SOFT    -- soft contacts, no relaxation between sub-steps
+      SOLVER_SI         -- hard constraints, NGS position correction
+      SOLVER_BLOCK      -- direct LCP enumeration for 2-4 contact normals
+      SOLVER_AVBD       -- augmented vertex block descent (position-level)
+
+
+   FEATURES
+
+      - Shape types: sphere, capsule, box, convex hull
+      - Collision detection: GJK distance, SAT with Gauss map pruning,
+        analytical sphere/capsule pairs, Sutherland-Hodgman contact clipping
+      - BVH broadphase with 64-byte cache-line nodes and incremental SAH
+        refinement, plus sleep-aware dirty tracking
+      - Incremental island-based sleeping
+      - Warm starting with contact feature IDs
+      - Hot/cold data split for cache-friendly solver iteration
 
 
    CREDITS
