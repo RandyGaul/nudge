@@ -2623,6 +2623,57 @@ static void bounce_test_for_solver(SolverType solver, const char* name)
 	destroy_world(w);
 }
 
+static void avbd_box_bounce_test()
+{
+	TEST_BEGIN("AVBD box bounce height monotonically decreasing");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
+	Body floor_b = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor_b, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body box = create_body(w, (BodyParams){
+		.position = V3(0, 5, 0), .rotation = quat_identity(),
+		.mass = 1.0f, .restitution = 0.5f,
+	});
+	body_add_shape(w, box, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	float dt = 1.0f / 60.0f;
+	float prev_peak = 100.0f;
+	float y_prev = body_get_position(w, box).y;
+	int going_up = 0;
+	int peaks_found = 0;
+
+	for (int i = 0; i < 600; i++) {
+		world_step(w, dt);
+		float y = body_get_position(w, box).y;
+		if (y > y_prev) {
+			going_up = 1;
+		} else if (going_up && y < y_prev) {
+			float peak = y_prev;
+			if (peaks_found > 0) {
+				if (peak > prev_peak + 0.01f) {
+					printf("  [FAIL] AVBD box bounce %d: peak %.4f > prev peak %.4f\n",
+						peaks_found, peak, prev_peak);
+					TEST_ASSERT(peak <= prev_peak + 0.01f);
+				}
+			}
+			prev_peak = peak;
+			peaks_found++;
+			going_up = 0;
+		}
+		y_prev = y;
+	}
+
+	if (peaks_found < 2)
+		printf("  [FAIL] AVBD box only found %d peaks\n", peaks_found);
+	TEST_ASSERT(peaks_found >= 2);
+	destroy_world(w);
+}
+
 // LDL heavy chain: 10-link chain with 100:1 mass ratio on the last link.
 // With LDL enabled, joint gaps should be much tighter than without.
 static void test_ldl_heavy_chain()
@@ -3180,10 +3231,11 @@ static void run_solver_tests()
 	bounce_test_for_solver(SOLVER_SI_SOFT, "SI Soft");
 	bounce_test_for_solver(SOLVER_SI, "SI");
 	bounce_test_for_solver(SOLVER_BLOCK, "Block");
-	// AVBD is a position solver with no restitution — ball settles instead of bouncing.
-	// Test that the ball comes to rest on the floor at the correct height.
+	bounce_test_for_solver(SOLVER_AVBD, "AVBD");
+	avbd_box_bounce_test();
+	// AVBD should still settle onto the floor after the bounce energy decays.
 	{
-		TEST_BEGIN("AVBD sphere settles on floor");
+		TEST_BEGIN("AVBD sphere settles after bouncing");
 		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
 		Body floor_b = create_body(w, (BodyParams){
 			.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,

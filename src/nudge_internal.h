@@ -315,6 +315,7 @@ typedef struct AVBD_Contact
 {
 	v3 r_a, r_b;       // contact offsets in body-local space
 	v3 C0;             // constraint error at x- (normal, tangent1, tangent2)
+	float normal_bias; // one-frame bias added directly to the normal C (restitution)
 	v3 penalty;        // per-axis penalty parameters (ramp over iterations)
 	v3 lambda;         // accumulated dual variables (clamped force)
 	int stick;         // static friction flag
@@ -363,6 +364,7 @@ typedef struct AVBD_WarmManifold
 	AVBD_WarmContact contacts[MAX_CONTACTS];
 	int count;
 	int stale;
+	int touching;       // previous frame had an active/touching contact in this pair
 	m3x3 basis;         // cached [normal; tangent1; tangent2] for synthetic contacts
 	float friction;
 } AVBD_WarmManifold;

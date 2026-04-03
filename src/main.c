@@ -444,6 +444,7 @@ static void scene_showcase_setup()
 		.position = V3(-1, 6, 0),
 		.rotation = quat_identity(),
 		.mass = 1.0f,
+		.restitution = 0.5f,
 	});
 	body_add_shape(g_world, capsule, (ShapeParams){
 		.type = SHAPE_CAPSULE,
@@ -456,6 +457,7 @@ static void scene_showcase_setup()
 		.position = V3(1, 7, 0),
 		.rotation = quat_identity(),
 		.mass = 1.0f,
+		.restitution = 0.5f,
 	});
 	body_add_shape(g_world, box, (ShapeParams){
 		.type = SHAPE_BOX,
@@ -468,6 +470,7 @@ static void scene_showcase_setup()
 		.position = V3(3, 8, 0),
 		.rotation = quat_identity(),
 		.mass = 1.0f,
+		.restitution = 0.5f,
 	});
 	body_add_shape(g_world, hull_body, (ShapeParams){
 		.type = SHAPE_HULL,
