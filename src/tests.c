@@ -4525,6 +4525,39 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// Zero gravity chain (5 links, tests drift without gravity restoring force)
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		Body prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3((i+1)*0.8f, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+			apush(bodies, b);
+			prev = b;
+		}
+		// Give tip a kick to create motion
+		((WorldInternal*)w.id)->body_hot[(int)bodies[4].id].velocity = V3(0, 2, 0);
+		float r = energy_growth(w, bodies, asize(bodies), 2000);
+		printf("  [energy-ldl] zero_gravity_chain: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Ultra-long endurance: chain_5 for 10000 frames
+	{
+		float r = energy_scenario_chain(5, 10000);
+		printf("  [energy-ldl] chain_5_endurance: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
