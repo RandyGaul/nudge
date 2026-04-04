@@ -3733,8 +3733,8 @@ static float energy_scenario_hub_chains(int arms, int tail_len, int frames)
 			v3 pos = add(base, scale(dir, (float)(j+1) * 0.8f));
 			Body b = create_body(w, (BodyParams){ .position = pos, .rotation = quat_identity(), .mass = 1.0f });
 			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
-			v3 off_a = (j == 0) ? scale(dir, 0.4f) : V3(0.4f, 0, 0);
-			v3 off_b = (j == 0) ? scale(dir, -0.4f) : V3(-0.4f, 0, 0);
+			v3 off_a = scale(dir, 0.4f);
+			v3 off_b = scale(dir, -0.4f);
 			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = off_a, .local_offset_b = off_b });
 			apush(bodies, b);
 			prev = b;
