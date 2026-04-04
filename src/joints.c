@@ -230,7 +230,7 @@ static void joints_split_impulse(WorldInternal* w, SolverBallSocket* bs, int bs_
 	for (int i = 0; i < dist_count; i++) { saved_dist_lambda[i] = dist[i].lambda; dist[i].lambda = 0; }
 
 	// Set bias from current position error and refresh effective mass
-	float ptv = 0.1f / dt; // SI gain: lower than NGS to avoid energy injection at fork bodies
+	float ptv = 0.1f / dt; // SI gain: 0.1 is stable for shattering; 0.15+ destabilizes hub_12
 	for (int i = 0; i < bs_count; i++) {
 		SolverBallSocket* s = &bs[i];
 		if (s->softness != 0.0f) continue;
