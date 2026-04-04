@@ -170,18 +170,17 @@ void world_step(World world, float dt)
 			.body_a = sm[i].body_a, .body_b = sm[i].body_b };
 		apush(crefs, r);
 	}
-	// When LDL is enabled, joints are solved directly -- skip them in PGS.
-	if (!w->ldl_enabled) {
-		for (int i = 0; i < asize(sol_bs); i++) {
-			ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
-				.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
-			apush(crefs, r);
-		}
-		for (int i = 0; i < asize(sol_dist); i++) {
-			ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
-				.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
-			apush(crefs, r);
-		}
+	// Joints always in PGS. When LDL is enabled, PGS provides warm-started
+	// iterative convergence, then LDL corrects the remaining residual.
+	for (int i = 0; i < asize(sol_bs); i++) {
+		ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
+			.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
+		apush(crefs, r);
+	}
+	for (int i = 0; i < asize(sol_dist); i++) {
+		ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
+			.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
+		apush(crefs, r);
 	}
 
 	int cref_count = asize(crefs);
