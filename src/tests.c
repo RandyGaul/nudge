@@ -4927,6 +4927,147 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// Moving drag: simulate interactive mouse drag on a chain (pull target moves each frame)
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		Body prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3(0, 10 - (i+1)*0.8f, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0,-0.4f,0), .local_offset_b = V3(0,0.4f,0) });
+			apush(bodies, b);
+			prev = b;
+		}
+		step_n(w, 120); // settle
+		// Create mouse joint on tip body
+		Body mouse_anchor = create_body(w, (BodyParams){ .position = body_get_position(w, bodies[4]), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, mouse_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+		Joint mouse_joint = create_ball_socket(w, (BallSocketParams){ .body_a = mouse_anchor, .body_b = bodies[4], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+		// Drag in a circle, moving the target each frame
+		for (int f = 0; f < 300; f++) {
+			float angle = (float)f * 0.05f;
+			float r_drag = 3.0f; // drag radius
+			v3 target = V3(r_drag * cosf(angle), 10 - 4*0.8f + r_drag * sinf(angle), 0);
+			wi->body_hot[(int)mouse_anchor.id].position = target;
+			world_step(w, 1.0f / 60.0f);
+		}
+		// Release and measure
+		destroy_joint(w, mouse_joint);
+		float r = energy_growth(w, bodies, asize(bodies), 200);
+		printf("  [energy-ldl] moving_drag: growth=%.4f\n", (double)r);
+		// Check all bodies valid
+		int all_valid = 1;
+		for (int i = 0; i < asize(bodies); i++) {
+			v3 p = body_get_position(w, bodies[i]);
+			if (!is_valid(p) || p.y < -100.0f) { all_valid = 0; break; }
+		}
+		printf("  [energy-ldl] moving_drag: valid=%d\n", all_valid);
+		if (!all_valid) { if (1000000000.0f > worst) worst = 1000000000.0f; }
+		else if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Hub star with moving drag: simulate mouse drag on hub arm in a circle
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		for (int i = 0; i < 8; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 8.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 10, 0), scale(dir, 1.0f)), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+			apush(bodies, arm);
+		}
+		step_n(w, 120);
+		// Drag arm[0] in aggressive circle
+		Body mouse_anchor = create_body(w, (BodyParams){ .position = body_get_position(w, bodies[1]), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, mouse_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+		Joint mouse_joint = create_ball_socket(w, (BallSocketParams){ .body_a = mouse_anchor, .body_b = bodies[1], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+		for (int f = 0; f < 300; f++) {
+			float angle = (float)f * 0.08f;
+			float r_drag = 5.0f;
+			v3 target = V3(r_drag * cosf(angle), 10 + r_drag * sinf(angle), 0);
+			wi->body_hot[(int)mouse_anchor.id].position = target;
+			world_step(w, 1.0f / 60.0f);
+		}
+		destroy_joint(w, mouse_joint);
+		float r = energy_growth(w, bodies, asize(bodies), 200);
+		printf("  [energy-ldl] hub_moving_drag: growth=%.4f\n", (double)r);
+		int all_valid = 1;
+		for (int i = 0; i < asize(bodies); i++) {
+			v3 p = body_get_position(w, bodies[i]);
+			if (!is_valid(p) || p.y < -100.0f) { all_valid = 0; break; }
+		}
+		printf("  [energy-ldl] hub_moving_drag: valid=%d\n", all_valid);
+		if (!all_valid) { if (1000000000.0f > worst) worst = 1000000000.0f; }
+		else if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Very aggressive hub drag: stiff spring (10Hz), large radius, fast movement
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		for (int i = 0; i < 8; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 8.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 10, 0), scale(dir, 1.0f)), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+			apush(bodies, arm);
+		}
+		step_n(w, 60);
+		Body mouse_anchor = create_body(w, (BodyParams){ .position = body_get_position(w, bodies[1]), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, mouse_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+		Joint mouse_joint = create_ball_socket(w, (BallSocketParams){ .body_a = mouse_anchor, .body_b = bodies[1], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .spring = { .frequency = 10.0f, .damping_ratio = 0.5f } });
+		for (int f = 0; f < 300; f++) {
+			float angle = (float)f * 0.15f; // fast rotation
+			float r_drag = 8.0f; // large radius
+			v3 target = V3(r_drag * cosf(angle), 10 + r_drag * sinf(angle), r_drag * sinf(angle * 0.7f));
+			wi->body_hot[(int)mouse_anchor.id].position = target;
+			world_step(w, 1.0f / 60.0f);
+		}
+		destroy_joint(w, mouse_joint);
+		float r = energy_growth(w, bodies, asize(bodies), 200);
+		int all_valid = 1;
+		for (int i = 0; i < asize(bodies); i++) {
+			v3 p = body_get_position(w, bodies[i]);
+			if (!is_valid(p) || p.y < -100.0f) { all_valid = 0; break; }
+		}
+		printf("  [energy-ldl] hub_aggressive_drag: growth=%.4f valid=%d\n", (double)r, all_valid);
+		if (!all_valid) { if (1000000000.0f > worst) worst = 1000000000.0f; }
+		else if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
