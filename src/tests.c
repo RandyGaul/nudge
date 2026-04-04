@@ -4558,6 +4558,86 @@ static void test_ldl_energy_comprehensive()
 		if (r > worst) worst = r;
 	}
 
+	// 3D spiral: chain in a helix (non-planar topology, exercises rotational coupling)
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 15, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		Body prev = anchor;
+		for (int i = 0; i < 8; i++) {
+			float angle = (float)i * 0.8f;
+			float y = 15 - (i + 1) * 0.5f;
+			v3 pos = V3(cosf(angle) * 0.8f, y, sinf(angle) * 0.8f);
+			Body b = create_body(w, (BodyParams){ .position = pos, .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+			v3 dir = norm(sub(pos, body_get_position(w, prev)));
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = scale(dir, 0.3f), .local_offset_b = scale(dir, -0.3f) });
+			apush(bodies, b);
+			prev = b;
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] spiral_3d: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Spinning initial conditions: chain starts with angular velocity
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		Body prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3((i+1)*0.8f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+			apush(bodies, b);
+			prev = b;
+		}
+		// Give all bodies angular velocity
+		for (int i = 0; i < 5; i++)
+			((WorldInternal*)w.id)->body_hot[(int)bodies[i].id].angular_velocity = V3(0, 5.0f, 0);
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] spinning_chain: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Asymmetric inertia: non-uniform boxes (tall, wide, deep) in a chain
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 0.1f, 0.1f) });
+		CK_DYNA Body* bodies = NULL;
+		Body prev = anchor;
+		v3 half_extents[] = { V3(0.05f, 0.3f, 0.05f), V3(0.3f, 0.05f, 0.05f), V3(0.05f, 0.05f, 0.3f), V3(0.2f, 0.2f, 0.02f) };
+		for (int i = 0; i < 4; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3(0, 12 - (i+1)*0.8f, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = half_extents[i] });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0,-0.4f,0), .local_offset_b = V3(0,0.4f,0) });
+			apush(bodies, b);
+			prev = b;
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] asymmetric_inertia: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
