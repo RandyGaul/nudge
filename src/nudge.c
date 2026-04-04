@@ -220,7 +220,11 @@ void world_step(World world, float dt)
 				if (sol_dist[i].softness == 0.0f) sol_dist[i].bias = 0.0f;
 		}
 		if (w->ldl_enabled) {
-			float ptv = sub_dt > 0.0f ? SOLVER_BAUMGARTE / sub_dt : 0.0f;
+			// LDL runs after PGS as a residual correction. Use a lower Baumgarte
+			// gain to prevent the direct solver from overshooting at hub bodies
+			// where many constraint corrections compound.
+			float ldl_baumgarte = 0.1f;
+			float ptv = sub_dt > 0.0f ? ldl_baumgarte / sub_dt : 0.0f;
 			for (int i = 0; i < asize(sol_bs); i++) {
 				if (sol_bs[i].softness != 0.0f) continue;
 				SolverBallSocket* s = &sol_bs[i];

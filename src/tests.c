@@ -3925,6 +3925,33 @@ static void test_ldl_energy_comprehensive()
 		if (r > worst) worst = r;
 	}
 
+	// Hub 12 PGS-only baseline for comparison
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 0;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		for (int i = 0; i < 12; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 12.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 10, 0), scale(dir, 1.0f)), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+			apush(bodies, arm);
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] hub_12_pgs_only: growth=%.4f\n", (double)r);
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	// Hub with 4 arms, tail length 5 (deeper chains)
 	{
 		float r = energy_scenario_hub_chains(4, 5, frames);
