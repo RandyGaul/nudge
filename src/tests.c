@@ -4287,6 +4287,90 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// Caterpillar: chain of 6 where every other body has an extra arm
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		Body prev = anchor;
+		for (int i = 0; i < 6; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3((i+1)*0.8f, 12, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+			apush(bodies, b);
+			if (i % 2 == 1) {
+				Body leg = create_body(w, (BodyParams){ .position = V3((i+1)*0.8f, 11, 0), .rotation = quat_identity(), .mass = 0.5f });
+				body_add_shape(w, leg, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+				create_ball_socket(w, (BallSocketParams){ .body_a = b, .body_b = leg, .local_offset_a = V3(0,-0.4f,0), .local_offset_b = V3(0,0.4f,0) });
+				apush(bodies, leg);
+			}
+			prev = b;
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] caterpillar: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Distance-only chain: 5 links connected only by distance joints
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		Body prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3(0, 10 - (i+1)*0.8f, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_distance(w, (DistanceParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0,-0.4f,0), .local_offset_b = V3(0,0.4f,0), .rest_length = 0.0f });
+			apush(bodies, b);
+			prev = b;
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] distance_chain: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Wide hub: 20 arms from a single hub (heavy shattering)
+	{
+		float r = energy_scenario_hub(20, frames);
+		printf("  [energy-ldl] hub_20: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+	}
+
+	// Extreme mass ratio: 10000:1 chain of 3
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body heavy = create_body(w, (BodyParams){ .position = V3(0.8f, 10, 0), .rotation = quat_identity(), .mass = 100.0f });
+		body_add_shape(w, heavy, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		Body light = create_body(w, (BodyParams){ .position = V3(1.6f, 10, 0), .rotation = quat_identity(), .mass = 0.01f });
+		body_add_shape(w, light, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = heavy, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+		create_ball_socket(w, (BallSocketParams){ .body_a = heavy, .body_b = light, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, heavy); apush(bodies, light);
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] extreme_mass_10000: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
