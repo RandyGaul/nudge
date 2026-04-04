@@ -3911,7 +3911,110 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// Pendulum: single long chain (15 links, 2000 frames)
+	{
+		float r = energy_scenario_chain(15, 2000);
+		printf("  [energy-ldl] chain_15_long: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+	}
+
+	// Hub with 12 arms (high fan-out, triggers heavy shattering)
+	{
+		float r = energy_scenario_hub(12, frames);
+		printf("  [energy-ldl] hub_12: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+	}
+
+	// Hub with 4 arms, tail length 5 (deeper chains)
+	{
+		float r = energy_scenario_hub_chains(4, 5, frames);
+		printf("  [energy-ldl] hub4_tail5: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+	}
+
+	// Short chain, long run (3 links, 3000 frames -- tests long-term stability)
+	{
+		float r = energy_scenario_chain(3, 3000);
+		printf("  [energy-ldl] chain_3_marathon: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+	}
+
+	// Chain with heavy tip (mass 50 at end)
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		Body prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			float mass = (i == 4) ? 50.0f : 1.0f;
+			Body b = create_body(w, (BodyParams){ .position = V3((i+1)*0.8f, 10, 0), .rotation = quat_identity(), .mass = mass });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+			apush(bodies, b);
+			prev = b;
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] chain_heavy_tip: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Star topology: single body connected to 6 free-hanging pendulums
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body center = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, center, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		for (int i = 0; i < 6; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 6.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			Body prev = center;
+			for (int j = 0; j < 4; j++) {
+				v3 pos = add(V3(0, 10, 0), add(scale(dir, (j+1)*0.6f), V3(0, -(j+1)*0.6f, 0)));
+				Body b = create_body(w, (BodyParams){ .position = pos, .rotation = quat_identity(), .mass = 1.0f });
+				body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+				v3 d = norm(V3(dir.x, -1, dir.z));
+				create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = scale(d, 0.3f), .local_offset_b = scale(d, -0.3f) });
+				apush(bodies, b);
+				prev = b;
+			}
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] star_pendulums: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Linear chain, 20 links, 500 frames
+	{
+		float r = energy_scenario_chain(20, 500);
+		printf("  [energy-ldl] chain_20_short: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+	}
+
+	int total_scenarios = 18;
+	int passing = 0;
+	if (r_chain5 <= 1.0f) passing++;
+	if (r_chain10 <= 1.0f) passing++;
+	if (r_hub6 <= 1.0f) passing++;
+	if (r_hub8 <= 1.0f) passing++;
+	if (r_hc <= 1.0f) passing++;
+	if (r_hc2 <= 1.0f) passing++;
+	if (r_cv5 <= 1.0f) passing++;
+	if (r_cv3 <= 1.0f) passing++;
+	if (worst <= 1.0f) passing = total_scenarios; // if worst passes, all pass
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
+	printf("  [energy-ldl] scenarios_passing=%d/%d\n", worst <= 1.0f ? total_scenarios : 0, total_scenarios);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
 	TEST_ASSERT(worst <= 1.05f);
