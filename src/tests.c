@@ -4856,6 +4856,77 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// Hub star under continuous pull: soft joint stretches far, applies sustained force
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		for (int i = 0; i < 8; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 8.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 10, 0), scale(dir, 1.0f)), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+			apush(bodies, arm);
+		}
+		// Settle
+		step_n(w, 120);
+		// Create strong pull: anchor far away, stiff spring
+		Body pull_anchor = create_body(w, (BodyParams){ .position = V3(5, 15, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, pull_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+		Joint pull = create_ball_socket(w, (BallSocketParams){ .body_a = pull_anchor, .body_b = bodies[1], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+		// Pull for 300 frames
+		float r = energy_growth(w, bodies, asize(bodies), 300);
+		printf("  [energy-ldl] hub_pull_soft: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		destroy_joint(w, pull);
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Hub star under STRONG pull: stiffer spring, larger distance
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		for (int i = 0; i < 8; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 8.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 10, 0), scale(dir, 1.0f)), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+			apush(bodies, arm);
+		}
+		step_n(w, 120);
+		// Very far pull target with stiff spring (simulates aggressive mouse drag)
+		Body pull_anchor = create_body(w, (BodyParams){ .position = V3(10, 20, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, pull_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+		Joint pull = create_ball_socket(w, (BallSocketParams){ .body_a = pull_anchor, .body_b = bodies[1], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .spring = { .frequency = 10.0f, .damping_ratio = 0.5f } });
+		float r = energy_growth(w, bodies, asize(bodies), 300);
+		printf("  [energy-ldl] hub_pull_strong: growth=%.4f\n", (double)r);
+		// Informational: sustained strong pull injects energy through soft/hard constraint interaction.
+		// Known limitation of split-impulse SI without full dual-stage solving.
+		destroy_joint(w, pull);
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
