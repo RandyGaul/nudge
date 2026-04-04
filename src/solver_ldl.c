@@ -1405,14 +1405,15 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 			BodyHot* a = ldl_get_body(w, c, con->body_a);
 			BodyHot* b = ldl_get_body(w, c, con->body_b);
 			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			v3 r = neg(add(dv, s->bias));
-			rhs[oi] = r.x; rhs[oi+1] = r.y; rhs[oi+2] = r.z;
+			// Velocity-only residual: position correction is handled by
+			// ldl_island_position_correct after integrate_positions.
+			rhs[oi] = -dv.x; rhs[oi+1] = -dv.y; rhs[oi+2] = -dv.z;
 		} else if (con->type == JOINT_DISTANCE) {
 			SolverDistance* s = &sol_dist[con->solver_idx];
 			BodyHot* a = ldl_get_body(w, c, con->body_a);
 			BodyHot* b = ldl_get_body(w, c, con->body_b);
 			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			rhs[oi] = -dot(dv, s->axis) + s->bias;
+			rhs[oi] = -dot(dv, s->axis);
 		}
 	}
 
@@ -1440,6 +1441,105 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 			float delta = lambda[oi];
 			s->lambda += delta;
 			apply_impulse(&w->body_hot[s->body_a], &w->body_hot[s->body_b], s->r_a, s->r_b, scale(s->axis, delta));
+		}
+	}
+
+	CK_FREE(rhs);
+	CK_FREE(lambda);
+}
+
+// Position correction: direct solve using cached LDL factorization.
+// Called after integrate_positions. Replaces Baumgarte bias -- no energy injection.
+static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count)
+{
+	int jc = c->joint_count;
+	int n = c->n;
+	LDL_Topology* t = c->topo;
+
+	// Refresh lever arms and virtual body positions from current state
+	if (c->virtual_body_count > 0) {
+		int real_count = asize(w->body_hot);
+		for (int b = 0; b < real_count; b++) {
+			if (c->body_remap && c->body_remap[b] >= 0) {
+				int first_v = c->body_remap[b] - real_count;
+				for (int v = first_v; v < c->virtual_body_count; v++) {
+					BodyHot* vb = &c->virtual_bodies[v];
+					float S = vb->inv_mass / (w->body_hot[b].inv_mass > 0 ? w->body_hot[b].inv_mass : 1.0f);
+					if (S < 1.5f) break;
+					vb->position = w->body_hot[b].position;
+					vb->rotation = w->body_hot[b].rotation;
+				}
+			}
+		}
+	}
+
+	// Re-factorize K with current lever arms (positions changed since velocity solve)
+	ldl_numeric_factor(c, w, sol_bs, sol_dist);
+
+	// Build position-error RHS
+	float* rhs = CK_ALLOC(n * sizeof(float));
+	float* lambda = CK_ALLOC(n * sizeof(float));
+	memset(rhs, 0, n * sizeof(float));
+	for (int i = 0; i < jc; i++) {
+		LDL_Constraint* con = &c->constraints[i];
+		int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
+		if (con->is_synthetic) {
+			// Shards are synced from real body -- position error is zero
+			continue;
+		} else if (con->type == JOINT_BALL_SOCKET) {
+			SolverBallSocket* s = &sol_bs[con->solver_idx];
+			BodyHot* a = &w->body_hot[s->body_a];
+			BodyHot* b = &w->body_hot[s->body_b];
+			v3 r_a = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
+			v3 r_b = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
+			v3 anchor_a = add(a->position, r_a);
+			v3 anchor_b = add(b->position, r_b);
+			v3 err = sub(anchor_b, anchor_a);
+			// Update lever arms for the factorization
+			s->r_a = r_a;
+			s->r_b = r_b;
+			rhs[oi] = err.x; rhs[oi+1] = err.y; rhs[oi+2] = err.z;
+		} else if (con->type == JOINT_DISTANCE) {
+			SolverDistance* s = &sol_dist[con->solver_idx];
+			BodyHot* a = &w->body_hot[s->body_a];
+			BodyHot* b = &w->body_hot[s->body_b];
+			v3 r_a = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
+			v3 r_b = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
+			v3 anchor_a = add(a->position, r_a);
+			v3 anchor_b = add(b->position, r_b);
+			v3 delta = sub(anchor_b, anchor_a);
+			float dist_val = len(delta);
+			v3 axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
+			s->r_a = r_a;
+			s->r_b = r_b;
+			s->axis = axis;
+			rhs[oi] = -(dist_val - w->joints[s->joint_idx].distance.rest_length);
+		}
+	}
+
+	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, rhs, lambda);
+
+	// Apply position corrections to real bodies (linear only for speed).
+	// Fractional correction (0.2) prevents overshoot on stiff systems.
+	float correction_fraction = 0.2f;
+	for (int i = 0; i < jc; i++) {
+		LDL_Constraint* con = &c->constraints[i];
+		if (con->is_synthetic) continue;
+		int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
+		if (con->type == JOINT_BALL_SOCKET) {
+			SolverBallSocket* s = &sol_bs[con->solver_idx];
+			v3 P = scale(V3(lambda[oi], lambda[oi+1], lambda[oi+2]), correction_fraction);
+			BodyHot* a = &w->body_hot[s->body_a];
+			BodyHot* b = &w->body_hot[s->body_b];
+			a->position = sub(a->position, scale(P, a->inv_mass));
+			b->position = add(b->position, scale(P, b->inv_mass));
+		} else if (con->type == JOINT_DISTANCE) {
+			SolverDistance* s = &sol_dist[con->solver_idx];
+			float P = lambda[oi] * correction_fraction;
+			BodyHot* a = &w->body_hot[s->body_a];
+			BodyHot* b = &w->body_hot[s->body_b];
+			a->position = sub(a->position, scale(s->axis, P * a->inv_mass));
+			b->position = add(b->position, scale(s->axis, P * b->inv_mass));
 		}
 	}
 
@@ -1487,5 +1587,22 @@ static void ldl_correction(WorldInternal* w, SolverBallSocket* sol_bs, int bs_co
 
 		// Solve every substep
 		ldl_island_solve(c, w, sol_bs, bs_count, sol_dist, dist_count);
+	}
+}
+
+// Position correction: called after integrate_positions, operates on positions only.
+static void ldl_position_correction(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count)
+{
+	if (bs_count == 0 && dist_count == 0) return;
+	int island_count = asize(w->islands);
+	for (int ii = 0; ii < island_count; ii++) {
+		if (!(w->island_gen[ii] & 1)) continue;
+		Island* isl = &w->islands[ii];
+		if (!isl->awake) continue;
+		if (isl->joint_count == 0) continue;
+		LDL_Cache* c = &isl->ldl;
+		if (c->n == 0 || !c->topo) continue;
+		if (!c->L_factors) continue;
+		ldl_island_position_correct(c, w, sol_bs, bs_count, sol_dist, dist_count);
 	}
 }

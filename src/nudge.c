@@ -206,50 +206,21 @@ void world_step(World world, float dt)
 
 		integrate_positions(w, sub_dt);
 
+		// LDL position correction: direct solve on position errors (replaces Baumgarte).
+		// No energy injection because it operates on positions, not velocities.
+		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0))
+			ldl_position_correction(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist));
+
 		// Relax contacts: refresh separation/bias from updated positions
 		if (w->solver_type == SOLVER_SOFT_STEP || w->solver_type == SOLVER_BLOCK)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
-		// After first sub-step, position error in bias is stale.
-		// PGS: zero bias (stale bias + iterative = instability).
-		// LDL: recompute bias from current positions (direct solver is exact).
-		if (sub == 0 && !w->ldl_enabled) {
+		// After first sub-step, position error in bias is stale -- zero it.
+		if (sub == 0) {
 			for (int i = 0; i < asize(sol_bs); i++)
 				if (sol_bs[i].softness == 0.0f) sol_bs[i].bias = V3(0, 0, 0);
 			for (int i = 0; i < asize(sol_dist); i++)
 				if (sol_dist[i].softness == 0.0f) sol_dist[i].bias = 0.0f;
-		}
-		if (w->ldl_enabled) {
-			// LDL runs after PGS as a residual correction. Use a lower Baumgarte
-			// gain to prevent the direct solver from overshooting at hub bodies
-			// where many constraint corrections compound.
-			float ldl_baumgarte = 0.1f;
-			float ptv = sub_dt > 0.0f ? ldl_baumgarte / sub_dt : 0.0f;
-			for (int i = 0; i < asize(sol_bs); i++) {
-				if (sol_bs[i].softness != 0.0f) continue;
-				SolverBallSocket* s = &sol_bs[i];
-				BodyHot* a = &w->body_hot[s->body_a];
-				BodyHot* b = &w->body_hot[s->body_b];
-				s->r_a = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
-				s->r_b = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
-				v3 anchor_a = add(a->position, s->r_a);
-				v3 anchor_b = add(b->position, s->r_b);
-				s->bias = scale(sub(anchor_b, anchor_a), ptv);
-			}
-			for (int i = 0; i < asize(sol_dist); i++) {
-				if (sol_dist[i].softness != 0.0f) continue;
-				SolverDistance* s = &sol_dist[i];
-				BodyHot* a = &w->body_hot[s->body_a];
-				BodyHot* b = &w->body_hot[s->body_b];
-				s->r_a = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
-				s->r_b = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
-				v3 anchor_a = add(a->position, s->r_a);
-				v3 anchor_b = add(b->position, s->r_b);
-				v3 delta = sub(anchor_b, anchor_a);
-				float dist_val = len(delta);
-				s->axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
-				s->bias = -ptv * (dist_val - w->joints[s->joint_idx].distance.rest_length);
-			}
 		}
 	}
 
