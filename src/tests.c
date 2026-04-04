@@ -5068,6 +5068,54 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// Sharp yank: mouse anchor teleports far each frame (simulates fast mouse swipe)
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		for (int i = 0; i < 8; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 8.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 10, 0), scale(dir, 1.0f)), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+			apush(bodies, arm);
+		}
+		step_n(w, 60);
+		// Grab arm[0] with mouse joint
+		Body mouse_anchor = create_body(w, (BodyParams){ .position = body_get_position(w, bodies[1]), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, mouse_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+		Joint mouse_joint = create_ball_socket(w, (BallSocketParams){ .body_a = mouse_anchor, .body_b = bodies[1], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+		// Sharp yanks: teleport target to random far positions each frame
+		for (int f = 0; f < 120; f++) {
+			float x = 10.0f * (((f * 7 + 3) % 13) / 6.5f - 1.0f);
+			float y = 10.0f + 10.0f * (((f * 11 + 5) % 17) / 8.5f - 1.0f);
+			float z = 10.0f * (((f * 13 + 7) % 19) / 9.5f - 1.0f);
+			wi->body_hot[(int)mouse_anchor.id].position = V3(x, y, z);
+			world_step(w, 1.0f / 60.0f);
+		}
+		destroy_joint(w, mouse_joint);
+		// Check bodies valid after release
+		int all_valid = 1;
+		for (int i = 0; i < asize(bodies); i++) {
+			v3 p = body_get_position(w, bodies[i]);
+			if (!is_valid(p) || p.y < -100.0f || len(p) > 1000.0f) { all_valid = 0; break; }
+		}
+		float r = all_valid ? energy_growth(w, bodies, asize(bodies), 200) : 1000000000.0f;
+		printf("  [energy-ldl] sharp_yank: growth=%.4f valid=%d\n", (double)r, all_valid);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
