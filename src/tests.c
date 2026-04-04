@@ -4206,6 +4206,87 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// Heavy-light chain marathon: alternating 10:1 for 3000 frames
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		Body prev = anchor;
+		for (int i = 0; i < 8; i++) {
+			float mass = (i % 2 == 0) ? 10.0f : 1.0f;
+			Body b = create_body(w, (BodyParams){ .position = V3((i+1)*0.8f, 12, 0), .rotation = quat_identity(), .mass = mass });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+			apush(bodies, b);
+			prev = b;
+		}
+		float r = energy_growth(w, bodies, asize(bodies), 3000);
+		printf("  [energy-ldl] heavy_light_marathon: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Diamond: 4 bodies forming a rigid diamond with diagonals
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body top = create_body(w, (BodyParams){ .position = V3(0, 11, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, top, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		Body left = create_body(w, (BodyParams){ .position = V3(-0.7f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, left, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		Body right = create_body(w, (BodyParams){ .position = V3(0.7f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, right, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		Body bot = create_body(w, (BodyParams){ .position = V3(0, 9, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, bot, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = top, .local_offset_a = V3(0,-0.5f,0), .local_offset_b = V3(0,0.5f,0) });
+		create_ball_socket(w, (BallSocketParams){ .body_a = top, .body_b = left, .local_offset_a = V3(-0.35f,-0.5f,0), .local_offset_b = V3(0.35f,0.5f,0) });
+		create_ball_socket(w, (BallSocketParams){ .body_a = top, .body_b = right, .local_offset_a = V3(0.35f,-0.5f,0), .local_offset_b = V3(-0.35f,0.5f,0) });
+		create_ball_socket(w, (BallSocketParams){ .body_a = left, .body_b = bot, .local_offset_a = V3(0.35f,-0.5f,0), .local_offset_b = V3(-0.35f,0.5f,0) });
+		create_ball_socket(w, (BallSocketParams){ .body_a = right, .body_b = bot, .local_offset_a = V3(-0.35f,-0.5f,0), .local_offset_b = V3(0.35f,0.5f,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, top); apush(bodies, left); apush(bodies, right); apush(bodies, bot);
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] diamond: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Chain with distance joint: mixed ball-socket + distance
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body a = create_body(w, (BodyParams){ .position = V3(0.8f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		Body b = create_body(w, (BodyParams){ .position = V3(1.6f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		Body c_body = create_body(w, (BodyParams){ .position = V3(2.4f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, c_body, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+		create_distance(w, (DistanceParams){ .body_a = a, .body_b = b, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0), .rest_length = 0.0f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = b, .body_b = c_body, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, a); apush(bodies, b); apush(bodies, c_body);
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] mixed_joint_chain: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
