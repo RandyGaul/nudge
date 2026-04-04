@@ -1,0 +1,3 @@
+--- nudge narrowphase tests ---
+  FAIL [quickhull soak_ico1336] C:\git\nudge\src\tests.c:1292: hull_check_euler(h)
+  FAIL [quickhull soak_ico1336] C:\git\nudge\src\tests.c:1293: hull_check_twins(h)

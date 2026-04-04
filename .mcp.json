@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "win-debugger": {
+      "command": "python",
+      "args": ["C:/git/mcp-win-debugger/src/server.py"]
+    }
+  }
+}

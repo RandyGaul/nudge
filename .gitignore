@@ -10,3 +10,4 @@ CLAUDE.md
 *.lib
 *.exp
 *.ilk
+autoresearch-results.tsv

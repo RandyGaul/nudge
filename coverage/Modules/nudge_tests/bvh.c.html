@@ -1,0 +1,813 @@
+﻿<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+	<head>
+        <meta charset="utf-8"/>
+	    <title>bvh.c</title>
+	    <link href="../../third-party/google-code-prettify/prettify-CppCoverage.css" type="text/css" rel="stylesheet" />
+	    <script type="text/javascript" src="../../third-party/google-code-prettify/prettify.js"></script>
+	</head>
+    <body onload="prettyPrint()">
+        <h4></h4>
+        <pre class="prettyprint lang-cpp linenums">
+// See LICENSE for licensing info.
+// bvh.c -- binary BVH broadphase (Bepu-inspired, 64-byte cache-line nodes).
+
+// -----------------------------------------------------------------------------
+// AABB type and helpers.
+
+typedef struct AABB { v3 min, max; } AABB;
+
+<span style = "background-color:#dfd">static AABB aabb_empty() { return (AABB){ V3(1e18f, 1e18f, 1e18f), V3(-1e18f, -1e18f, -1e18f) }; }</span>
+
+<span style = "background-color:#dfd">static AABB aabb_merge(AABB a, AABB b) { return (AABB){ v3_min(a.min, b.min), v3_max(a.max, b.max) }; }</span>
+
+<span style = "background-color:#fdd">static AABB aabb_from_point(v3 p) { return (AABB){ p, p }; }</span>
+
+<span style = "background-color:#dfd">static AABB aabb_expand(AABB a, float margin) { v3 m = V3(margin, margin, margin); return (AABB){ sub(a.min, m), add(a.max, m) }; }</span>
+
+<span style = "background-color:#dfd">static float aabb_surface_area(AABB a) { v3 d = sub(a.max, a.min); return d.x*d.y + d.y*d.z + d.z*d.x; }</span>
+
+<span style = "background-color:#dfd">static int aabb_overlaps(AABB a, AABB b) { return a.min.x &lt;= b.max.x &amp;&amp; a.max.x &gt;= b.min.x &amp;&amp; a.min.y &lt;= b.max.y &amp;&amp; a.max.y &gt;= b.min.y &amp;&amp; a.min.z &lt;= b.max.z &amp;&amp; a.max.z &gt;= b.min.z; }</span>
+
+// Compute world-space AABB for a single shape on a body.
+static AABB shape_aabb(BodyHot* h, ShapeInternal* s)
+<span style = "background-color:#dfd">{
+	v3 world_pos = add(h-&gt;position, rotate(h-&gt;rotation, s-&gt;local_pos));
+	switch (s-&gt;type) {</span>
+	case SHAPE_SPHERE: {
+<span style = "background-color:#dfd">		v3 r = V3(s-&gt;sphere.radius, s-&gt;sphere.radius, s-&gt;sphere.radius);
+		return (AABB){ sub(world_pos, r), add(world_pos, r) };</span>
+	}
+	case SHAPE_CAPSULE: {
+<span style = "background-color:#dfd">		v3 up = rotate(h-&gt;rotation, V3(0, s-&gt;capsule.half_height, 0));
+		v3 p = sub(world_pos, up), q = add(world_pos, up);
+		v3 r = V3(s-&gt;capsule.radius, s-&gt;capsule.radius, s-&gt;capsule.radius);
+		return (AABB){ sub(v3_min(p, q), r), add(v3_max(p, q), r) };</span>
+	}
+	case SHAPE_BOX: {
+		// OBB -&gt; AABB: project rotated half-extents onto each world axis.
+<span style = "background-color:#dfd">		v3 e = s-&gt;box.half_extents;
+		v3 ax = rotate(h-&gt;rotation, V3(e.x, 0, 0));
+		v3 ay = rotate(h-&gt;rotation, V3(0, e.y, 0));
+		v3 az = rotate(h-&gt;rotation, V3(0, 0, e.z));
+		v3 half = V3(fabsf(ax.x) + fabsf(ay.x) + fabsf(az.x), fabsf(ax.y) + fabsf(ay.y) + fabsf(az.y), fabsf(ax.z) + fabsf(ay.z) + fabsf(az.z));
+		return (AABB){ sub(world_pos, half), add(world_pos, half) };</span>
+	}
+	case SHAPE_HULL: {
+<span style = "background-color:#fdd">		const Hull* hull = s-&gt;hull.hull;
+		v3 sc = s-&gt;hull.scale;
+		AABB box = aabb_from_point(add(world_pos, rotate(h-&gt;rotation, V3(hull-&gt;verts[0].x*sc.x, hull-&gt;verts[0].y*sc.y, hull-&gt;verts[0].z*sc.z))));
+		for (int i = 1; i &lt; hull-&gt;vert_count; i++) {
+			v3 v = add(world_pos, rotate(h-&gt;rotation, V3(hull-&gt;verts[i].x*sc.x, hull-&gt;verts[i].y*sc.y, hull-&gt;verts[i].z*sc.z)));
+			box.min = v3_min(box.min, v);
+			box.max = v3_max(box.max, v);
+		}
+		return box;</span>
+	}
+	}
+<span style = "background-color:#fdd">	return aabb_empty();</span>
+<span style = "background-color:#dfd">}</span>
+
+// Compute world-space AABB for an entire body (union of all shapes).
+static AABB body_aabb(BodyHot* h, BodyCold* c)
+<span style = "background-color:#dfd">{
+	AABB box = shape_aabb(h, &amp;c-&gt;shapes[0]);
+	for (int i = 1; i &lt; asize(c-&gt;shapes); i++)</span>
+<span style = "background-color:#fdd">		box = aabb_merge(box, shape_aabb(h, &amp;c-&gt;shapes[i]));</span>
+<span style = "background-color:#dfd">	return box;
+}</span>
+
+// -----------------------------------------------------------------------------
+// BVH node layout: 64 bytes = one cache line.
+// Two children inline. Metadata (parent pointers) stored separately.
+
+typedef struct BVHChild
+{
+	v3 min;          // 12
+	int32_t index;   // 4 -- negative: encoded leaf (~idx), non-negative: child node
+	v3 max;          // 12
+	int32_t leaf_count; // 4 -- 0=empty, 1=leaf, &gt;1=internal subtree
+} BVHChild;          // 32 bytes
+
+typedef struct BVHNode
+{
+	BVHChild a; // 32
+	BVHChild b; // 32
+} BVHNode;      // 64 bytes
+
+typedef struct BVHMeta
+{
+	int parent;     // parent node index, -1 for root
+	int child_slot; // 0=A, 1=B
+} BVHMeta;
+
+typedef struct BVHLeaf
+{
+	int body_idx;
+	int node_idx;
+	int child_slot; // 0=A, 1=B
+	v3 fat_min, fat_max; // expanded AABB for motion threshold
+} BVHLeaf;
+
+typedef struct BVHTree
+{
+	CK_DYNA BVHNode* nodes;
+	CK_DYNA BVHMeta* meta;
+	CK_DYNA BVHLeaf* leaves;
+	CK_DYNA int* node_free;
+	CK_DYNA int* leaf_free;
+	int root; // -1 = empty
+} BVHTree;
+
+typedef struct BroadPair { int a, b; } BroadPair;
+
+#define BVH_AABB_MARGIN 0.05f
+#define BVH_FAT_MARGIN  0.2f
+
+// -----------------------------------------------------------------------------
+// Tree lifecycle.
+
+<span style = "background-color:#dfd">static void bvh_init(BVHTree* t) { memset(t, 0, sizeof(*t)); t-&gt;root = -1; }</span>
+
+<span style = "background-color:#dfd">static void bvh_free(BVHTree* t) { afree(t-&gt;nodes); afree(t-&gt;meta); afree(t-&gt;leaves); afree(t-&gt;node_free); afree(t-&gt;leaf_free); }</span>
+
+// Alloc/free with freelist.
+static int bvh_alloc_node(BVHTree* t)
+<span style = "background-color:#dfd">{</span>
+	int idx;
+<span style = "background-color:#dfd">	if (asize(t-&gt;node_free) &gt; 0) { idx = apop(t-&gt;node_free); }
+	else { idx = asize(t-&gt;nodes); BVHNode z = {0}; apush(t-&gt;nodes, z); BVHMeta zm = {-1, 0}; apush(t-&gt;meta, zm); }
+	t-&gt;nodes[idx] = (BVHNode){0};
+	t-&gt;meta[idx] = (BVHMeta){-1, 0};
+	return idx;
+}</span>
+
+<span style = "background-color:#dfd">static void bvh_free_node(BVHTree* t, int idx) { apush(t-&gt;node_free, idx); }</span>
+
+static int bvh_alloc_leaf(BVHTree* t)
+<span style = "background-color:#dfd">{</span>
+	int idx;
+<span style = "background-color:#dfd">	if (asize(t-&gt;leaf_free) &gt; 0) { idx = apop(t-&gt;leaf_free); }
+	else { idx = asize(t-&gt;leaves); BVHLeaf z = {0}; apush(t-&gt;leaves, z); }
+	return idx;
+}</span>
+
+<span style = "background-color:#dfd">static void bvh_free_leaf(BVHTree* t, int idx) { apush(t-&gt;leaf_free, idx); }</span>
+
+// -----------------------------------------------------------------------------
+// Child helpers.
+
+<span style = "background-color:#dfd">static BVHChild* bvh_child(BVHNode* n, int slot) { return slot == 0 ? &amp;n-&gt;a : &amp;n-&gt;b; }</span>
+
+<span style = "background-color:#dfd">static AABB bvh_child_aabb(BVHChild* c) { return (AABB){ c-&gt;min, c-&gt;max }; }</span>
+
+<span style = "background-color:#dfd">static void bvh_child_set_aabb(BVHChild* c, AABB box) { c-&gt;min = box.min; c-&gt;max = box.max; }</span>
+
+<span style = "background-color:#dfd">static void bvh_child_set_leaf(BVHChild* c, AABB box, int leaf_idx) { bvh_child_set_aabb(c, box); c-&gt;index = ~leaf_idx; c-&gt;leaf_count = 1; }</span>
+
+// Place a leaf with fat AABB. The node child stores the fat AABB for conservative overlap.
+static void bvh_place_leaf(BVHTree* t, int ni, int slot, AABB tight, int leaf_idx)
+<span style = "background-color:#dfd">{
+	AABB fat = aabb_expand(tight, BVH_FAT_MARGIN);
+	bvh_child_set_leaf(bvh_child(&amp;t-&gt;nodes[ni], slot), fat, leaf_idx);
+	t-&gt;leaves[leaf_idx].node_idx = ni;
+	t-&gt;leaves[leaf_idx].child_slot = slot;
+	t-&gt;leaves[leaf_idx].fat_min = fat.min;
+	t-&gt;leaves[leaf_idx].fat_max = fat.max;
+}</span>
+
+<span style = "background-color:#dfd">static void bvh_child_set_node(BVHChild* c, AABB box, int node_idx, int lcount) { bvh_child_set_aabb(c, box); c-&gt;index = node_idx; c-&gt;leaf_count = lcount; }</span>
+
+<span style = "background-color:#dfd">static void bvh_child_set_empty(BVHChild* c) { *c = (BVHChild){0}; }</span>
+
+<span style = "background-color:#dfd">static int bvh_child_is_leaf(BVHChild* c) { return c-&gt;leaf_count == 1; }
+static int bvh_child_is_internal(BVHChild* c) { return c-&gt;leaf_count &gt; 1; }
+static int bvh_child_is_empty(BVHChild* c) { return c-&gt;leaf_count == 0; }
+static int bvh_child_leaf_idx(BVHChild* c) { return ~c-&gt;index; }</span>
+
+static AABB bvh_node_aabb(BVHNode* n)
+<span style = "background-color:#dfd">{
+	if (n-&gt;a.leaf_count == 0) return bvh_child_aabb(&amp;n-&gt;b);
+	if (n-&gt;b.leaf_count == 0) return bvh_child_aabb(&amp;n-&gt;a);
+	return aabb_merge(bvh_child_aabb(&amp;n-&gt;a), bvh_child_aabb(&amp;n-&gt;b));
+}</span>
+
+// Count leaves reachable from a node (for validation).
+static int bvh_count_leaves(BVHTree* t, int ni)
+<span style = "background-color:#dfd">{
+	BVHNode* n = &amp;t-&gt;nodes[ni];
+	int count = 0;
+	for (int s = 0; s &lt; 2; s++) {
+		BVHChild* c = bvh_child(n, s);
+		if (bvh_child_is_empty(c)) continue;
+		if (bvh_child_is_leaf(c)) count++;
+		else count += bvh_count_leaves(t, c-&gt;index);
+	}
+	return count;
+}</span>
+
+// -----------------------------------------------------------------------------
+// Tree rotation: swap a grandchild with its uncle to reduce SAH cost.
+// Evaluates 4 candidates at a node and applies the best improvement.
+
+static void bvh_try_rotate(BVHTree* t, int ni)
+<span style = "background-color:#dfd">{
+	BVHNode* n = &amp;t-&gt;nodes[ni];
+	if (bvh_child_is_empty(&amp;n-&gt;a) || bvh_child_is_empty(&amp;n-&gt;b)) return;</span>
+
+<span style = "background-color:#dfd">	float base_cost = aabb_surface_area(bvh_child_aabb(&amp;n-&gt;a)) + aabb_surface_area(bvh_child_aabb(&amp;n-&gt;b));
+	float best_cost = base_cost;
+	int best_rot = -1; // 0-3: which rotation to apply</span>
+
+	// For each internal child, try swapping each of its grandchildren with the other child.
+<span style = "background-color:#dfd">	for (int side = 0; side &lt; 2; side++) {
+		BVHChild* parent_child = bvh_child(n, side);
+		BVHChild* uncle = bvh_child(n, 1 - side);
+		if (!bvh_child_is_internal(parent_child)) continue;</span>
+
+<span style = "background-color:#dfd">		BVHNode* pn = &amp;t-&gt;nodes[parent_child-&gt;index];
+		for (int gc = 0; gc &lt; 2; gc++) {
+			BVHChild* grandchild = bvh_child(pn, gc);
+			BVHChild* sibling = bvh_child(pn, 1 - gc);
+			if (bvh_child_is_empty(grandchild) || bvh_child_is_empty(sibling)) continue;</span>
+
+			// After rotation: parent_child would contain (sibling, uncle_old), uncle slot gets grandchild.
+<span style = "background-color:#dfd">			AABB new_parent_aabb = aabb_merge(bvh_child_aabb(sibling), bvh_child_aabb(uncle));
+			float new_parent_sa = aabb_surface_area(new_parent_aabb);
+			float new_uncle_sa = aabb_surface_area(bvh_child_aabb(grandchild));
+			float cost = new_parent_sa + new_uncle_sa;</span>
+
+<span style = "background-color:#dfd">			if (cost &lt; best_cost - 1e-6f) {
+				best_cost = cost;
+				best_rot = side * 2 + gc;</span>
+			}
+<span style = "background-color:#dfd">		}
+	}</span>
+
+<span style = "background-color:#dfd">	if (best_rot &lt; 0) return;</span>
+
+	// Apply the rotation.
+<span style = "background-color:#dfd">	int side = best_rot / 2;
+	int gc = best_rot % 2;
+	BVHChild* parent_child = bvh_child(n, side);
+	BVHChild* uncle_slot = bvh_child(n, 1 - side);
+	int pn_idx = parent_child-&gt;index;
+	BVHNode* pn = &amp;t-&gt;nodes[pn_idx];</span>
+
+	// Save grandchild and uncle.
+<span style = "background-color:#dfd">	BVHChild gc_saved = *bvh_child(pn, gc);
+	BVHChild uncle_saved = *uncle_slot;</span>
+
+	// Grandchild moves to uncle's slot in N.
+<span style = "background-color:#dfd">	*uncle_slot = gc_saved;</span>
+	// Uncle moves into grandchild's slot in parent_child's node.
+<span style = "background-color:#dfd">	*bvh_child(pn, gc) = uncle_saved;</span>
+
+	// Update parent_child's AABB and leaf_count in N.
+<span style = "background-color:#dfd">	bvh_child_set_aabb(parent_child, bvh_node_aabb(pn));
+	parent_child-&gt;leaf_count = pn-&gt;a.leaf_count + pn-&gt;b.leaf_count;</span>
+
+	// Fix back-pointers for the swapped children.
+	// The grandchild (now in uncle_slot at node ni):
+<span style = "background-color:#dfd">	if (bvh_child_is_leaf(uncle_slot)) {
+		t-&gt;leaves[bvh_child_leaf_idx(uncle_slot)].node_idx = ni;
+		t-&gt;leaves[bvh_child_leaf_idx(uncle_slot)].child_slot = 1 - side;
+	} else if (bvh_child_is_internal(uncle_slot)) {
+		t-&gt;meta[uncle_slot-&gt;index].parent = ni;
+		t-&gt;meta[uncle_slot-&gt;index].child_slot = 1 - side;</span>
+	}
+	// The uncle (now in pn at slot gc):
+<span style = "background-color:#dfd">	BVHChild* new_gc = bvh_child(pn, gc);
+	if (bvh_child_is_leaf(new_gc)) {
+		t-&gt;leaves[bvh_child_leaf_idx(new_gc)].node_idx = pn_idx;
+		t-&gt;leaves[bvh_child_leaf_idx(new_gc)].child_slot = gc;
+	} else if (bvh_child_is_internal(new_gc)) {
+		t-&gt;meta[new_gc-&gt;index].parent = pn_idx;
+		t-&gt;meta[new_gc-&gt;index].child_slot = gc;</span>
+	}
+<span style = "background-color:#dfd">}</span>
+
+// -----------------------------------------------------------------------------
+// Insertion: SAH-guided top-down.
+
+static int bvh_insert(BVHTree* t, int body_idx, AABB bounds)
+<span style = "background-color:#dfd">{
+	int li = bvh_alloc_leaf(t);
+	t-&gt;leaves[li] = (BVHLeaf){ .body_idx = body_idx };</span>
+
+	// Empty tree: create root with leaf in child A.
+<span style = "background-color:#dfd">	if (t-&gt;root == -1) {
+		int ni = bvh_alloc_node(t);
+		t-&gt;meta[ni] = (BVHMeta){-1, 0};
+		bvh_place_leaf(t, ni, 0, bounds, li);
+		t-&gt;root = ni;
+		return li;</span>
+	}
+
+	// Single leaf in tree: root has child A occupied and B empty (or vice versa).
+<span style = "background-color:#dfd">	BVHNode* root = &amp;t-&gt;nodes[t-&gt;root];
+	if (bvh_child_is_empty(&amp;root-&gt;b) &amp;&amp; bvh_child_is_leaf(&amp;root-&gt;a)) {
+		bvh_place_leaf(t, t-&gt;root, 1, bounds, li);
+		return li;</span>
+	}
+<span style = "background-color:#dfd">	if (bvh_child_is_empty(&amp;root-&gt;a) &amp;&amp; bvh_child_is_leaf(&amp;root-&gt;b)) {</span>
+<span style = "background-color:#fdd">		bvh_place_leaf(t, t-&gt;root, 0, bounds, li);
+		return li;</span>
+	}
+
+	// Walk tree from root to find best insertion point.
+<span style = "background-color:#dfd">	int cur = t-&gt;root;</span>
+	for (;;) {
+<span style = "background-color:#dfd">		BVHNode* node = &amp;t-&gt;nodes[cur];</span>
+		// Evaluate cost of inserting into child A vs B.
+<span style = "background-color:#dfd">		AABB ma = aabb_merge(bvh_child_aabb(&amp;node-&gt;a), bounds);
+		AABB mb = aabb_merge(bvh_child_aabb(&amp;node-&gt;b), bounds);
+		float cost_a = aabb_surface_area(ma) - aabb_surface_area(bvh_child_aabb(&amp;node-&gt;a));
+		float cost_b = aabb_surface_area(mb) - aabb_surface_area(bvh_child_aabb(&amp;node-&gt;b));</span>
+
+<span style = "background-color:#dfd">		int slot = cost_a &lt;= cost_b ? 0 : 1;
+		BVHChild* child = bvh_child(node, slot);</span>
+
+<span style = "background-color:#dfd">		if (bvh_child_is_leaf(child)) {</span>
+			// Split: create new node containing existing leaf + new leaf.
+<span style = "background-color:#dfd">			int existing_li = bvh_child_leaf_idx(child);
+			AABB existing_aabb = bvh_child_aabb(child);
+			AABB merged = slot == 0 ? ma : mb;</span>
+
+<span style = "background-color:#dfd">			int new_ni = bvh_alloc_node(t);</span>
+			// NOTE: alloc may realloc t-&gt;nodes, so re-fetch pointers.
+
+			// Existing leaf keeps its current (fat) AABB.
+<span style = "background-color:#dfd">			bvh_child_set_leaf(&amp;t-&gt;nodes[new_ni].a, existing_aabb, existing_li);
+			t-&gt;leaves[existing_li].node_idx = new_ni;
+			t-&gt;leaves[existing_li].child_slot = 0;</span>
+
+			// New leaf gets fat AABB.
+<span style = "background-color:#dfd">			bvh_place_leaf(t, new_ni, 1, bounds, li);</span>
+
+			// Replace child in parent with internal node pointer (re-fetch after alloc).
+<span style = "background-color:#dfd">			bvh_child_set_node(bvh_child(&amp;t-&gt;nodes[cur], slot), merged, new_ni, 2);
+			t-&gt;meta[new_ni] = (BVHMeta){ cur, slot };</span>
+
+			// Walk back up refitting bounds and applying rotations.
+<span style = "background-color:#dfd">			int ri = cur;
+			while (ri != -1) {
+				BVHNode* rn = &amp;t-&gt;nodes[ri];
+				if (bvh_child_is_internal(&amp;rn-&gt;a)) { BVHNode* cn = &amp;t-&gt;nodes[rn-&gt;a.index]; rn-&gt;a.leaf_count = cn-&gt;a.leaf_count + cn-&gt;b.leaf_count; bvh_child_set_aabb(&amp;rn-&gt;a, bvh_node_aabb(cn)); }
+				if (bvh_child_is_internal(&amp;rn-&gt;b)) { BVHNode* cn = &amp;t-&gt;nodes[rn-&gt;b.index]; rn-&gt;b.leaf_count = cn-&gt;a.leaf_count + cn-&gt;b.leaf_count; bvh_child_set_aabb(&amp;rn-&gt;b, bvh_node_aabb(cn)); }
+				bvh_try_rotate(t, ri);
+				ri = t-&gt;meta[ri].parent;
+			}
+			return li;</span>
+		}
+
+<span style = "background-color:#dfd">		if (bvh_child_is_internal(child)) {</span>
+			// Descend into the child subtree.
+<span style = "background-color:#dfd">			cur = child-&gt;index;
+			continue;</span>
+		}
+
+		// Empty slot: place leaf directly.
+<span style = "background-color:#fdd">		bvh_place_leaf(t, cur, slot, bounds, li);
+		return li;
+	}</span>
+<span style = "background-color:#dfd">}</span>
+
+// -----------------------------------------------------------------------------
+// Removal.
+
+static void bvh_remove(BVHTree* t, int leaf_idx)
+<span style = "background-color:#dfd">{
+	BVHLeaf* leaf = &amp;t-&gt;leaves[leaf_idx];
+	int ni = leaf-&gt;node_idx;
+	int slot = leaf-&gt;child_slot;</span>
+
+	// Clear the child slot.
+<span style = "background-color:#dfd">	bvh_child_set_empty(bvh_child(&amp;t-&gt;nodes[ni], slot));</span>
+
+	// Get the sibling.
+<span style = "background-color:#dfd">	int sib_slot = 1 - slot;
+	BVHChild sib = *bvh_child(&amp;t-&gt;nodes[ni], sib_slot);</span>
+
+<span style = "background-color:#dfd">	int parent = t-&gt;meta[ni].parent;
+	if (parent == -1) {</span>
+		// ni is root. If sibling is empty, tree becomes empty. Otherwise keep root with one child.
+<span style = "background-color:#dfd">		if (bvh_child_is_empty(&amp;sib)) { bvh_free_node(t, ni); t-&gt;root = -1; }</span>
+		// else: root has one child remaining, that's fine.
+<span style = "background-color:#dfd">	} else {</span>
+		// Replace ni in parent with sibling.
+<span style = "background-color:#dfd">		int parent_slot = t-&gt;meta[ni].child_slot;
+		BVHChild* pc = bvh_child(&amp;t-&gt;nodes[parent], parent_slot);
+		*pc = sib;</span>
+
+		// Update sibling's back-pointers.
+<span style = "background-color:#dfd">		if (bvh_child_is_leaf(pc)) {
+			int sib_li = bvh_child_leaf_idx(pc);
+			t-&gt;leaves[sib_li].node_idx = parent;
+			t-&gt;leaves[sib_li].child_slot = parent_slot;
+		} else if (bvh_child_is_internal(pc)) {
+			t-&gt;meta[pc-&gt;index].parent = parent;
+			t-&gt;meta[pc-&gt;index].child_slot = parent_slot;</span>
+		}
+
+<span style = "background-color:#dfd">		bvh_free_node(t, ni);</span>
+
+		// Refit upward.
+<span style = "background-color:#dfd">		int ri = parent;
+		while (ri != -1) {
+			BVHNode* rn = &amp;t-&gt;nodes[ri];
+			if (bvh_child_is_internal(&amp;rn-&gt;a)) { BVHNode* cn = &amp;t-&gt;nodes[rn-&gt;a.index]; rn-&gt;a.leaf_count = cn-&gt;a.leaf_count + cn-&gt;b.leaf_count; bvh_child_set_aabb(&amp;rn-&gt;a, bvh_node_aabb(cn)); }
+			if (bvh_child_is_internal(&amp;rn-&gt;b)) { BVHNode* cn = &amp;t-&gt;nodes[rn-&gt;b.index]; rn-&gt;b.leaf_count = cn-&gt;a.leaf_count + cn-&gt;b.leaf_count; bvh_child_set_aabb(&amp;rn-&gt;b, bvh_node_aabb(cn)); }
+			ri = t-&gt;meta[ri].parent;
+		}</span>
+	}
+
+<span style = "background-color:#dfd">	bvh_free_leaf(t, leaf_idx);
+}</span>
+
+// -----------------------------------------------------------------------------
+// Binned SAH builder: top-down build from a set of leaf indices.
+// lut maps leaf_index -&gt; AABB (indexed by leaf index, not array position).
+
+#define BVH_SAH_BINS 8
+
+// Build a subtree from lis[0..count-1]. Each element is a leaf index.
+// lut[leaf_idx] gives the AABB for that leaf.
+// If count==1, returns ~leaf_idx (encoded as a "leaf result"). Caller checks sign.
+// If count&gt;=2, returns a node index.
+static int bvh_binned_build(BVHTree* t, int* lis, AABB* lut, int count)
+<span style = "background-color:#dfd">{
+	assert(count &gt;= 2);</span>
+
+<span style = "background-color:#dfd">	if (count == 2) {
+		int ni = bvh_alloc_node(t);
+		bvh_child_set_leaf(&amp;t-&gt;nodes[ni].a, lut[lis[0]], lis[0]);
+		bvh_child_set_leaf(&amp;t-&gt;nodes[ni].b, lut[lis[1]], lis[1]);
+		t-&gt;leaves[lis[0]].node_idx = ni; t-&gt;leaves[lis[0]].child_slot = 0;
+		t-&gt;leaves[lis[1]].node_idx = ni; t-&gt;leaves[lis[1]].child_slot = 1;
+		return ni;</span>
+	}
+
+	// Compute centroid bounds.
+<span style = "background-color:#dfd">	v3 cmin = V3(1e18f, 1e18f, 1e18f), cmax = V3(-1e18f, -1e18f, -1e18f);
+	for (int i = 0; i &lt; count; i++) {
+		v3 c = scale(add(lut[lis[i]].min, lut[lis[i]].max), 0.5f);
+		cmin = v3_min(cmin, c); cmax = v3_max(cmax, c);
+	}</span>
+
+	// Find best split across all 3 axes.
+<span style = "background-color:#dfd">	float best_cost = 1e18f;
+	int best_axis = 0, best_split = 0;</span>
+
+<span style = "background-color:#dfd">	for (int axis = 0; axis &lt; 3; axis++) {
+		float amin = (&amp;cmin.x)[axis], amax = (&amp;cmax.x)[axis];
+		float extent = amax - amin;
+		if (extent &lt; 1e-7f) continue;</span>
+
+<span style = "background-color:#dfd">		int bin_count[BVH_SAH_BINS] = {0};</span>
+		AABB bin_aabb[BVH_SAH_BINS];
+<span style = "background-color:#dfd">		for (int b = 0; b &lt; BVH_SAH_BINS; b++) bin_aabb[b] = aabb_empty();</span>
+
+<span style = "background-color:#dfd">		float inv_ext = (float)BVH_SAH_BINS / extent;
+		for (int i = 0; i &lt; count; i++) {
+			v3 c = scale(add(lut[lis[i]].min, lut[lis[i]].max), 0.5f);
+			int b = (int)(((&amp;c.x)[axis] - amin) * inv_ext);
+			if (b &gt;= BVH_SAH_BINS) b = BVH_SAH_BINS - 1;
+			bin_count[b]++; bin_aabb[b] = aabb_merge(bin_aabb[b], lut[lis[i]]);
+		}</span>
+
+		// Prefix scan left and right.
+		AABB la[BVH_SAH_BINS - 1], ra[BVH_SAH_BINS - 1];
+		int lc[BVH_SAH_BINS - 1], rc[BVH_SAH_BINS - 1];
+<span style = "background-color:#dfd">		AABB run = aabb_empty(); int rn = 0;
+		for (int i = 0; i &lt; BVH_SAH_BINS - 1; i++) { run = aabb_merge(run, bin_aabb[i]); rn += bin_count[i]; la[i] = run; lc[i] = rn; }
+		run = aabb_empty(); rn = 0;
+		for (int i = BVH_SAH_BINS - 1; i &gt; 0; i--) { run = aabb_merge(run, bin_aabb[i]); rn += bin_count[i]; ra[i-1] = run; rc[i-1] = rn; }</span>
+
+<span style = "background-color:#dfd">		for (int i = 0; i &lt; BVH_SAH_BINS - 1; i++) {
+			if (lc[i] == 0 || rc[i] == 0) continue;
+			float cost = aabb_surface_area(la[i]) * lc[i] + aabb_surface_area(ra[i]) * rc[i];
+			if (cost &lt; best_cost) { best_cost = cost; best_axis = axis; best_split = i; }
+		}
+	}</span>
+
+	// Partition by best split.
+<span style = "background-color:#dfd">	float amin = (&amp;cmin.x)[best_axis], amax = (&amp;cmax.x)[best_axis];
+	float extent = amax - amin;
+	float inv_ext = extent &gt; 1e-7f ? (float)BVH_SAH_BINS / extent : 0.0f;</span>
+
+<span style = "background-color:#dfd">	int mid = 0;
+	for (int i = 0; i &lt; count; i++) {
+		v3 c = scale(add(lut[lis[i]].min, lut[lis[i]].max), 0.5f);
+		int b = inv_ext &gt; 0 ? (int)(((&amp;c.x)[best_axis] - amin) * inv_ext) : 0;
+		if (b &gt;= BVH_SAH_BINS) b = BVH_SAH_BINS - 1;
+		if (b &lt;= best_split) { int tmp = lis[mid]; lis[mid] = lis[i]; lis[i] = tmp; mid++; }
+	}
+	if (mid == 0 || mid == count) mid = count / 2;</span>
+
+	// Build children. Each half has count &gt;= 1.
+<span style = "background-color:#dfd">	int ni = bvh_alloc_node(t);</span>
+
+	// Left child.
+<span style = "background-color:#dfd">	if (mid == 1) {
+		bvh_child_set_leaf(&amp;t-&gt;nodes[ni].a, lut[lis[0]], lis[0]);
+		t-&gt;leaves[lis[0]].node_idx = ni; t-&gt;leaves[lis[0]].child_slot = 0;
+	} else {
+		int left = bvh_binned_build(t, lis, lut, mid);
+		BVHNode* ln = &amp;t-&gt;nodes[left];
+		bvh_child_set_node(&amp;t-&gt;nodes[ni].a, bvh_node_aabb(ln), left, ln-&gt;a.leaf_count + ln-&gt;b.leaf_count);
+		t-&gt;meta[left].parent = ni; t-&gt;meta[left].child_slot = 0;</span>
+	}
+
+	// Right child.
+<span style = "background-color:#dfd">	int rcount = count - mid;
+	if (rcount == 1) {</span>
+<span style = "background-color:#fdd">		bvh_child_set_leaf(&amp;t-&gt;nodes[ni].b, lut[lis[mid]], lis[mid]);
+		t-&gt;leaves[lis[mid]].node_idx = ni; t-&gt;leaves[lis[mid]].child_slot = 1;
+	} else {</span>
+<span style = "background-color:#dfd">		int right = bvh_binned_build(t, lis + mid, lut, rcount);
+		BVHNode* rnode = &amp;t-&gt;nodes[right];
+		bvh_child_set_node(&amp;t-&gt;nodes[ni].b, bvh_node_aabb(rnode), right, rnode-&gt;a.leaf_count + rnode-&gt;b.leaf_count);
+		t-&gt;meta[right].parent = ni; t-&gt;meta[right].child_slot = 1;</span>
+	}
+
+<span style = "background-color:#dfd">	return ni;
+}</span>
+
+// Collect all leaf indices reachable from node ni into lis array. Frees internal nodes.
+static void bvh_collect_and_free(BVHTree* t, int ni, CK_DYNA int** lis)
+<span style = "background-color:#dfd">{
+	BVHNode* n = &amp;t-&gt;nodes[ni];
+	for (int s = 0; s &lt; 2; s++) {
+		BVHChild* c = bvh_child(n, s);
+		if (bvh_child_is_empty(c)) continue;
+		if (bvh_child_is_leaf(c)) apush(*lis, bvh_child_leaf_idx(c));
+		else bvh_collect_and_free(t, c-&gt;index, lis);
+	}
+	bvh_free_node(t, ni);
+}</span>
+
+// Rebuild the subtree at node ni using binned SAH.
+// parent_ni and parent_slot describe where ni is attached (-1 for root).
+static void bvh_refine_subtree(BVHTree* t, int ni, AABB* lut)
+<span style = "background-color:#dfd">{
+	int parent_ni = t-&gt;meta[ni].parent;
+	int parent_slot = t-&gt;meta[ni].child_slot;</span>
+
+	// Collect leaves and free old internal nodes.
+<span style = "background-color:#dfd">	CK_DYNA int* lis = NULL;
+	bvh_collect_and_free(t, ni, &amp;lis);
+	int count = asize(lis);</span>
+
+<span style = "background-color:#dfd">	if (count &lt; 2) {</span>
+		// Edge case: 0 or 1 leaves. Just put the leaf back.
+<span style = "background-color:#fdd">		if (count == 1 &amp;&amp; parent_ni &gt;= 0) {
+			bvh_child_set_leaf(bvh_child(&amp;t-&gt;nodes[parent_ni], parent_slot), lut[lis[0]], lis[0]);
+			t-&gt;leaves[lis[0]].node_idx = parent_ni;
+			t-&gt;leaves[lis[0]].child_slot = parent_slot;</span>
+		}
+<span style = "background-color:#fdd">		afree(lis);
+		return;</span>
+	}
+
+	// Rebuild.
+<span style = "background-color:#dfd">	int new_root = bvh_binned_build(t, lis, lut, count);</span>
+
+	// Splice into parent.
+<span style = "background-color:#dfd">	if (parent_ni == -1) {
+		t-&gt;root = new_root;
+		t-&gt;meta[new_root].parent = -1;
+	} else {
+		BVHNode* cn = &amp;t-&gt;nodes[new_root];
+		AABB box = bvh_node_aabb(cn);
+		bvh_child_set_node(bvh_child(&amp;t-&gt;nodes[parent_ni], parent_slot), box, new_root, cn-&gt;a.leaf_count + cn-&gt;b.leaf_count);
+		t-&gt;meta[new_root].parent = parent_ni;
+		t-&gt;meta[new_root].child_slot = parent_slot;</span>
+	}
+
+<span style = "background-color:#dfd">	afree(lis);
+}</span>
+
+// Per-frame incremental refinement: rebuild ~fraction of the tree using binned SAH.
+static void bvh_incremental_refine(BVHTree* t, AABB* lut, float fraction)
+<span style = "background-color:#dfd">{
+	if (t-&gt;root == -1) return;
+	int total_leaves = bvh_count_leaves(t, t-&gt;root);
+	if (total_leaves &lt; 4) return; // too small to bother</span>
+
+<span style = "background-color:#dfd">	int target_size = (int)sqrtf((float)total_leaves);
+	if (target_size &lt; 2) target_size = 2;</span>
+
+	// Walk nodes to find a subtree near the target size.
+<span style = "background-color:#dfd">	int best_ni = -1, best_diff = 0x7fffffff;
+	for (int i = 0; i &lt; asize(t-&gt;nodes); i++) {
+		BVHNode* n = &amp;t-&gt;nodes[i];
+		int lc = n-&gt;a.leaf_count + n-&gt;b.leaf_count;
+		if (lc &lt; 2) continue;
+		int diff = abs(lc - target_size);
+		if (diff &lt; best_diff) { best_diff = diff; best_ni = i; }
+	}</span>
+
+<span style = "background-color:#dfd">	if (best_ni &gt;= 0) bvh_refine_subtree(t, best_ni, lut);</span>
+	(void)fraction;
+<span style = "background-color:#dfd">}</span>
+
+// -----------------------------------------------------------------------------
+// DFS cache reorder: compact live nodes into DFS traversal order for cache locality.
+
+static void bvh_dfs_collect(BVHTree* t, int ni, int* remap, BVHNode* dst_nodes, BVHMeta* dst_meta, int* cursor)
+<span style = "background-color:#dfd">{
+	int new_idx = (*cursor)++;
+	remap[ni] = new_idx;
+	dst_nodes[new_idx] = t-&gt;nodes[ni];
+	dst_meta[new_idx] = t-&gt;meta[ni];
+	BVHNode* n = &amp;t-&gt;nodes[ni];
+	if (bvh_child_is_internal(&amp;n-&gt;a)) bvh_dfs_collect(t, n-&gt;a.index, remap, dst_nodes, dst_meta, cursor);
+	if (bvh_child_is_internal(&amp;n-&gt;b)) bvh_dfs_collect(t, n-&gt;b.index, remap, dst_nodes, dst_meta, cursor);
+}</span>
+
+static void bvh_cache_reorder(BVHTree* t)
+<span style = "background-color:#dfd">{
+	if (t-&gt;root == -1) return;</span>
+
+<span style = "background-color:#dfd">	int cap = asize(t-&gt;nodes);
+	int* remap = CK_ALLOC(sizeof(int) * cap);
+	for (int i = 0; i &lt; cap; i++) remap[i] = -1;</span>
+
+<span style = "background-color:#dfd">	BVHNode* new_nodes = CK_ALLOC(sizeof(BVHNode) * cap);
+	BVHMeta* new_meta = CK_ALLOC(sizeof(BVHMeta) * cap);
+	int cursor = 0;</span>
+
+<span style = "background-color:#dfd">	bvh_dfs_collect(t, t-&gt;root, remap, new_nodes, new_meta, &amp;cursor);
+	int live_count = cursor;</span>
+
+	// Fix child indices in new_nodes.
+<span style = "background-color:#dfd">	for (int i = 0; i &lt; live_count; i++) {
+		BVHNode* n = &amp;new_nodes[i];
+		if (bvh_child_is_internal(&amp;n-&gt;a)) n-&gt;a.index = remap[n-&gt;a.index];
+		if (bvh_child_is_internal(&amp;n-&gt;b)) n-&gt;b.index = remap[n-&gt;b.index];
+	}</span>
+
+	// Fix parent indices in new_meta.
+<span style = "background-color:#dfd">	for (int i = 0; i &lt; live_count; i++) {
+		if (new_meta[i].parent &gt;= 0) new_meta[i].parent = remap[new_meta[i].parent];
+	}</span>
+
+	// Fix leaf back-pointers.
+<span style = "background-color:#dfd">	for (int i = 0; i &lt; asize(t-&gt;leaves); i++) {
+		if (remap[t-&gt;leaves[i].node_idx] &gt;= 0) t-&gt;leaves[i].node_idx = remap[t-&gt;leaves[i].node_idx];
+	}</span>
+
+	// Swap into the ckit dynamic arrays. Copy live nodes into t-&gt;nodes, resize to live_count.
+	// We can't just swap pointers because ckit tracks capacity in the array header.
+<span style = "background-color:#dfd">	aclear(t-&gt;nodes); aclear(t-&gt;meta);
+	for (int i = 0; i &lt; live_count; i++) { apush(t-&gt;nodes, new_nodes[i]); apush(t-&gt;meta, new_meta[i]); }</span>
+
+	// Rebuild freelist: empty since all slots are live and packed.
+<span style = "background-color:#dfd">	aclear(t-&gt;node_free);</span>
+
+<span style = "background-color:#dfd">	t-&gt;root = remap[t-&gt;root];</span>
+
+<span style = "background-color:#dfd">	CK_FREE(remap);
+	CK_FREE(new_nodes);
+	CK_FREE(new_meta);
+}</span>
+
+// -----------------------------------------------------------------------------
+// Refit: update all leaf AABBs from current body poses, propagate up.
+
+// Returns 1 if anything changed in this subtree, 0 if all leaves stayed within fat AABBs.
+static int bvh_refit_recurse(BVHTree* t, int ni, WorldInternal* w)
+<span style = "background-color:#dfd">{
+	BVHNode* n = &amp;t-&gt;nodes[ni];
+	int changed = 0;
+	for (int s = 0; s &lt; 2; s++) {
+		BVHChild* c = bvh_child(n, s);
+		if (bvh_child_is_empty(c)) continue;
+		if (bvh_child_is_leaf(c)) {
+			int li = bvh_child_leaf_idx(c);
+			int bi = t-&gt;leaves[li].body_idx;
+			AABB tight = aabb_expand(body_aabb(&amp;w-&gt;body_hot[bi], &amp;w-&gt;body_cold[bi]), BVH_AABB_MARGIN);</span>
+			// Check if tight AABB is still within fat AABB.
+<span style = "background-color:#dfd">			v3 fmin = t-&gt;leaves[li].fat_min, fmax = t-&gt;leaves[li].fat_max;
+			if (tight.min.x &gt;= fmin.x &amp;&amp; tight.min.y &gt;= fmin.y &amp;&amp; tight.min.z &gt;= fmin.z &amp;&amp; tight.max.x &lt;= fmax.x &amp;&amp; tight.max.y &lt;= fmax.y &amp;&amp; tight.max.z &lt;= fmax.z)
+				continue; // still within fat -- skip</span>
+			// Re-expand fat AABB.
+<span style = "background-color:#dfd">			AABB fat = aabb_expand(tight, BVH_FAT_MARGIN);
+			t-&gt;leaves[li].fat_min = fat.min;
+			t-&gt;leaves[li].fat_max = fat.max;
+			bvh_child_set_aabb(c, fat);
+			changed = 1;
+		} else {
+			int sub = bvh_refit_recurse(t, c-&gt;index, w);
+			if (sub) {</span>
+<span style = "background-color:#fdd">				BVHNode* cn = &amp;t-&gt;nodes[c-&gt;index];
+				bvh_child_set_aabb(c, bvh_node_aabb(cn));
+				c-&gt;leaf_count = cn-&gt;a.leaf_count + cn-&gt;b.leaf_count;
+				changed = 1;</span>
+			}
+		}
+<span style = "background-color:#dfd">	}
+	return changed;
+}</span>
+
+static void bvh_refit(BVHTree* t, WorldInternal* w)
+<span style = "background-color:#dfd">{
+	if (t-&gt;root == -1) return;
+	bvh_refit_recurse(t, t-&gt;root, w);
+	bvh_cache_reorder(t);
+}</span>
+
+// -----------------------------------------------------------------------------
+// Self-test: find all overlapping leaf pairs within a single tree.
+
+static void bvh_test_children(BVHTree* t, BVHChild* a, BVHChild* b, CK_DYNA BroadPair** pairs)
+<span style = "background-color:#dfd">{
+	if (bvh_child_is_empty(a) || bvh_child_is_empty(b)) return;
+	if (!aabb_overlaps(bvh_child_aabb(a), bvh_child_aabb(b))) return;</span>
+
+<span style = "background-color:#dfd">	if (bvh_child_is_leaf(a) &amp;&amp; bvh_child_is_leaf(b)) {
+		BroadPair p = { t-&gt;leaves[bvh_child_leaf_idx(a)].body_idx, t-&gt;leaves[bvh_child_leaf_idx(b)].body_idx };
+		apush(*pairs, p);
+		return;</span>
+	}
+
+	// Expand the larger child (by leaf count).
+<span style = "background-color:#dfd">	if (bvh_child_is_leaf(a) || (bvh_child_is_internal(b) &amp;&amp; b-&gt;leaf_count &gt; a-&gt;leaf_count)) {
+		BVHNode* bn = &amp;t-&gt;nodes[b-&gt;index];
+		bvh_test_children(t, a, &amp;bn-&gt;a, pairs);
+		bvh_test_children(t, a, &amp;bn-&gt;b, pairs);
+	} else {
+		BVHNode* an = &amp;t-&gt;nodes[a-&gt;index];
+		bvh_test_children(t, &amp;an-&gt;a, b, pairs);
+		bvh_test_children(t, &amp;an-&gt;b, b, pairs);</span>
+	}
+<span style = "background-color:#dfd">}</span>
+
+static void bvh_self_test_node(BVHTree* t, int ni, CK_DYNA BroadPair** pairs)
+<span style = "background-color:#dfd">{
+	BVHNode* n = &amp;t-&gt;nodes[ni];</span>
+	// Test child A vs child B.
+<span style = "background-color:#dfd">	bvh_test_children(t, &amp;n-&gt;a, &amp;n-&gt;b, pairs);</span>
+	// Recurse into internal children.
+<span style = "background-color:#dfd">	if (bvh_child_is_internal(&amp;n-&gt;a)) bvh_self_test_node(t, n-&gt;a.index, pairs);
+	if (bvh_child_is_internal(&amp;n-&gt;b)) bvh_self_test_node(t, n-&gt;b.index, pairs);
+}</span>
+
+static void bvh_self_test(BVHTree* t, CK_DYNA BroadPair** pairs)
+<span style = "background-color:#dfd">{
+	if (t-&gt;root == -1) return;
+	bvh_self_test_node(t, t-&gt;root, pairs);
+}</span>
+
+// -----------------------------------------------------------------------------
+// Cross-test: find all overlapping leaf pairs between two trees.
+
+static void bvh_cross_children(BVHTree* ta, BVHChild* a, BVHTree* tb, BVHChild* b, CK_DYNA BroadPair** pairs)
+<span style = "background-color:#dfd">{
+	if (bvh_child_is_empty(a) || bvh_child_is_empty(b)) return;
+	if (!aabb_overlaps(bvh_child_aabb(a), bvh_child_aabb(b))) return;</span>
+
+<span style = "background-color:#dfd">	if (bvh_child_is_leaf(a) &amp;&amp; bvh_child_is_leaf(b)) {
+		BroadPair p = { ta-&gt;leaves[bvh_child_leaf_idx(a)].body_idx, tb-&gt;leaves[bvh_child_leaf_idx(b)].body_idx };
+		apush(*pairs, p);
+		return;</span>
+	}
+
+<span style = "background-color:#fdd">	if (bvh_child_is_leaf(a) || (bvh_child_is_internal(b) &amp;&amp; b-&gt;leaf_count &gt; a-&gt;leaf_count)) {
+		BVHNode* bn = &amp;tb-&gt;nodes[b-&gt;index];
+		bvh_cross_children(ta, a, tb, &amp;bn-&gt;a, pairs);
+		bvh_cross_children(ta, a, tb, &amp;bn-&gt;b, pairs);
+	} else {
+		BVHNode* an = &amp;ta-&gt;nodes[a-&gt;index];
+		bvh_cross_children(ta, &amp;an-&gt;a, tb, b, pairs);
+		bvh_cross_children(ta, &amp;an-&gt;b, tb, b, pairs);</span>
+	}
+<span style = "background-color:#dfd">}</span>
+
+static void bvh_cross_test(BVHTree* ta, BVHTree* tb, CK_DYNA BroadPair** pairs)
+<span style = "background-color:#dfd">{
+	if (ta-&gt;root == -1 || tb-&gt;root == -1) return;
+	BVHNode* ra = &amp;ta-&gt;nodes[ta-&gt;root];
+	BVHNode* rb = &amp;tb-&gt;nodes[tb-&gt;root];</span>
+	// Test all 4 root child combinations.
+<span style = "background-color:#dfd">	bvh_cross_children(ta, &amp;ra-&gt;a, tb, &amp;rb-&gt;a, pairs);
+	bvh_cross_children(ta, &amp;ra-&gt;a, tb, &amp;rb-&gt;b, pairs);
+	bvh_cross_children(ta, &amp;ra-&gt;b, tb, &amp;rb-&gt;a, pairs);
+	bvh_cross_children(ta, &amp;ra-&gt;b, tb, &amp;rb-&gt;b, pairs);
+}</span></pre>
+        <hr />
+        <table width="100%">
+            <thead>
+                <tr>
+                    <th align="center">
+                        <small>Generated by</small>
+                        <a href="https://github.com/OpenCppCoverage/OpenCppCoverage/releases">
+                            <strong>OpenCppCoverage (Version: 0.9.9.0)</strong>
+                        </a>
+                    </th>
+                </tr>
+            </thead>
+        </table>
+    </body>
+</html>
