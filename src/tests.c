@@ -3616,6 +3616,209 @@ static void test_ldl_energy_stability()
 	destroy_world(w);
 }
 
+// Comprehensive LDL energy stability: run multiple joint topologies for 1000 frames
+// each and report the worst-case final kinetic energy. Catches energy blowup from
+// LDL correction injecting energy into the system.
+static float measure_system_ke(WorldInternal* wi, Body* bodies, int count)
+{
+	float ke = 0;
+	for (int i = 0; i < count; i++) {
+		int idx = handle_index(bodies[i]);
+		v3 v = wi->body_hot[idx].velocity;
+		v3 av = wi->body_hot[idx].angular_velocity;
+		float m = 1.0f / wi->body_hot[idx].inv_mass;
+		ke += 0.5f * m * dot(v, v);
+		ke += 0.5f * dot(av, av);
+	}
+	return ke;
+}
+
+// Returns energy growth ratio: peak_KE_late / peak_KE_early.
+// < 1 = dissipating, ~1 = stable, >1 = growing (bad), 1e9 = NaN blowup.
+// Early window: frames [frames/4, frames/2), late window: [3*frames/4, frames).
+static float energy_growth(World w, Body* bodies, int count, int frames)
+{
+	WorldInternal* wi = (WorldInternal*)w.id;
+	int early_start = frames / 4, early_end = frames / 2;
+	int late_start = 3 * frames / 4;
+	float early_peak = 0, late_peak = 0;
+	for (int f = 0; f < frames; f++) {
+		world_step(w, 1.0f / 60.0f);
+		float ke = measure_system_ke(wi, bodies, count);
+		if (f >= early_start && f < early_end && ke > early_peak) early_peak = ke;
+		if (f >= late_start && ke > late_peak) late_peak = ke;
+		if (!is_valid(body_get_position(w, bodies[0]))) return 1e9f;
+	}
+	if (early_peak < 1e-6f) return late_peak < 1e-6f ? 0.0f : 1e9f;
+	return late_peak / early_peak;
+}
+
+static float energy_scenario_chain(int chain_len, int frames)
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	CK_DYNA Body* bodies = NULL;
+	Body prev = anchor;
+	for (int i = 0; i < chain_len; i++) {
+		Body b = create_body(w, (BodyParams){ .position = V3((i+1)*0.8f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+		apush(bodies, b);
+		prev = b;
+	}
+
+	float ratio = energy_growth(w, bodies, asize(bodies), frames);
+	afree(bodies);
+	destroy_world(w);
+	return ratio;
+}
+
+static float energy_scenario_hub(int arm_count, int frames)
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body hub = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+	body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+
+	CK_DYNA Body* bodies = NULL;
+	apush(bodies, hub);
+	for (int i = 0; i < arm_count; i++) {
+		float angle = (float)i * 2.0f * 3.14159265f / (float)arm_count;
+		v3 dir = V3(cosf(angle), 0, sinf(angle));
+		v3 pos = add(V3(0, 10, 0), scale(dir, 1.0f));
+		Body arm = create_body(w, (BodyParams){ .position = pos, .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+		apush(bodies, arm);
+	}
+
+	float ratio = energy_growth(w, bodies, asize(bodies), frames);
+	afree(bodies);
+	destroy_world(w);
+	return ratio;
+}
+
+static float energy_scenario_hub_chains(int arms, int tail_len, int frames)
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 15, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body hub = create_body(w, (BodyParams){ .position = V3(0, 13, 0), .rotation = quat_identity(), .mass = 3.0f });
+	body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+
+	CK_DYNA Body* bodies = NULL;
+	apush(bodies, hub);
+	for (int i = 0; i < arms; i++) {
+		float angle = (float)i * 2.0f * 3.14159265f / (float)arms;
+		v3 dir = V3(cosf(angle), 0, sinf(angle));
+		Body prev = hub;
+		v3 base = V3(0, 13, 0);
+		for (int j = 0; j < tail_len; j++) {
+			v3 pos = add(base, scale(dir, (float)(j+1) * 0.8f));
+			Body b = create_body(w, (BodyParams){ .position = pos, .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			v3 off_a = (j == 0) ? scale(dir, 0.4f) : V3(0.4f, 0, 0);
+			v3 off_b = (j == 0) ? scale(dir, -0.4f) : V3(-0.4f, 0, 0);
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = off_a, .local_offset_b = off_b });
+			apush(bodies, b);
+			prev = b;
+		}
+	}
+
+	float ratio = energy_growth(w, bodies, asize(bodies), frames);
+	afree(bodies);
+	destroy_world(w);
+	return ratio;
+}
+
+// Chain where bodies start offset from their joint rest positions,
+// simulating a large constraint violation (like a yank).
+static float energy_scenario_chain_violated(int chain_len, int frames)
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	CK_DYNA Body* bodies = NULL;
+	Body prev = anchor;
+	for (int i = 0; i < chain_len; i++) {
+		// Offset each body by 2x the link length to create a large violation
+		float x = (float)(i+1) * 2.0f;
+		Body b = create_body(w, (BodyParams){ .position = V3(x, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+		apush(bodies, b);
+		prev = b;
+	}
+
+	float ratio = energy_growth(w, bodies, asize(bodies), frames);
+	afree(bodies);
+	destroy_world(w);
+	return ratio;
+}
+
+static void test_ldl_energy_comprehensive()
+{
+	int frames = 1000;
+	float worst = 0;
+
+	float r_chain5 = energy_scenario_chain(5, frames);
+	printf("  [energy-ldl] chain_5: growth=%.4f\n", (double)r_chain5);
+	if (r_chain5 > worst) worst = r_chain5;
+
+	float r_chain10 = energy_scenario_chain(10, frames);
+	printf("  [energy-ldl] chain_10: growth=%.4f\n", (double)r_chain10);
+	if (r_chain10 > worst) worst = r_chain10;
+
+	float r_hub6 = energy_scenario_hub(6, frames);
+	printf("  [energy-ldl] hub_6: growth=%.4f\n", (double)r_hub6);
+	if (r_hub6 > worst) worst = r_hub6;
+
+	float r_hub8 = energy_scenario_hub(8, frames);
+	printf("  [energy-ldl] hub_8: growth=%.4f\n", (double)r_hub8);
+	if (r_hub8 > worst) worst = r_hub8;
+
+	float r_hc = energy_scenario_hub_chains(4, 3, frames);
+	printf("  [energy-ldl] hub4_tail3: growth=%.4f\n", (double)r_hc);
+	if (r_hc > worst) worst = r_hc;
+
+	float r_hc2 = energy_scenario_hub_chains(6, 2, frames);
+	printf("  [energy-ldl] hub6_tail2: growth=%.4f\n", (double)r_hc2);
+	if (r_hc2 > worst) worst = r_hc2;
+
+	float r_cv5 = energy_scenario_chain_violated(5, frames);
+	printf("  [energy-ldl] chain_5_violated: growth=%.4f\n", (double)r_cv5);
+	if (r_cv5 > worst) worst = r_cv5;
+
+	float r_cv3 = energy_scenario_chain_violated(3, frames);
+	printf("  [energy-ldl] chain_3_violated: growth=%.4f\n", (double)r_cv3);
+	if (r_cv3 > worst) worst = r_cv3;
+
+	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
+
+	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
+	TEST_ASSERT(worst <= 1.05f);
+}
+
 // Mass ratio stress test: 1000:1 mass ratio chain.
 static void test_ldl_mass_ratio()
 {
@@ -3860,6 +4063,7 @@ static void run_solver_tests()
 	test_ldl_mixed_chain_and_hub();
 	test_ldl_sleep_cache();
 	test_ldl_energy_stability();
+	test_ldl_energy_comprehensive();
 	test_ldl_mass_ratio();
 	test_ldl_long_chain();
 	test_ldl_block_near_singular();
