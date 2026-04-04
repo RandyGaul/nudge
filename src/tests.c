@@ -4765,6 +4765,97 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// --- Contact + Joint interaction tests ---
+
+	// Chain resting on floor: 3 bodies connected by ball-sockets, resting on a static floor
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		// Static floor
+		Body floor_body = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 0.5f, 10) });
+		// Anchor on floor
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		// Chain hanging from anchor, bottom touches floor
+		CK_DYNA Body* bodies = NULL;
+		Body prev = anchor;
+		for (int i = 0; i < 4; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3(0, 3 - (i+1)*0.6f, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0,-0.3f,0), .local_offset_b = V3(0,0.3f,0) });
+			apush(bodies, b);
+			prev = b;
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] chain_on_floor: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Jointed boxes on floor: 3 boxes side-by-side connected by ball-sockets, resting on floor
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body floor_body = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 0.5f, 10) });
+		CK_DYNA Body* bodies = NULL;
+		Body prev = (Body){0};
+		for (int i = 0; i < 3; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3(i*1.0f, 1.0f, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) });
+			if (i > 0)
+				create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0.5f,0,0), .local_offset_b = V3(-0.5f,0,0) });
+			apush(bodies, b);
+			prev = b;
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] boxes_on_floor: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Mouse-like yank: soft joint suddenly applied and released mid-simulation
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		Body prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3(0, 10 - (i+1)*0.8f, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0,-0.4f,0), .local_offset_b = V3(0,0.4f,0) });
+			apush(bodies, b);
+			prev = b;
+		}
+		// Settle for 200 frames
+		step_n(w, 200);
+		// Create a mouse-like soft joint on the tip body
+		Body mouse_anchor = create_body(w, (BodyParams){ .position = V3(2, 8, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, mouse_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+		Joint mouse_joint = create_ball_socket(w, (BallSocketParams){ .body_a = mouse_anchor, .body_b = bodies[4], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+		// Yank for 60 frames
+		step_n(w, 60);
+		// Release
+		destroy_joint(w, mouse_joint);
+		// Run another 500 frames after release
+		float r = energy_growth(w, bodies, asize(bodies), 500);
+		printf("  [energy-ldl] mouse_yank: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
