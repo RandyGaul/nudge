@@ -1418,19 +1418,6 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 
 	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, rhs, lambda);
 
-	// Clamp delta impulse magnitude to prevent energy injection.
-	// The LDL solver is exact, but Baumgarte bias can produce oversized impulses
-	// in stiff or ill-conditioned topologies (hub+chain), causing positive feedback.
-	{
-		float max_lam = 0;
-		for (int i = 0; i < n; i++) { float a = fabsf(lambda[i]); if (a > max_lam) max_lam = a; }
-		float clamp_limit = 50.0f; // empirical: prevents energy injection without limiting accuracy
-		if (max_lam > clamp_limit) {
-			float s = clamp_limit / max_lam;
-			for (int i = 0; i < n; i++) lambda[i] *= s;
-		}
-	}
-
 	// Debug
 	int dbg = g_ldl_debug_enabled && n <= LDL_MAX_DOF;
 	if (dbg) { memcpy(g_ldl_debug_info.lambda_ldl, lambda, n * sizeof(float)); g_ldl_debug_info.valid = 1; }
