@@ -4638,6 +4638,88 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// Hub_12 with heavy arms (mass ratio + shattering)
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		for (int i = 0; i < 12; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 12.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			float mass = (i % 3 == 0) ? 5.0f : 0.5f;
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 10, 0), scale(dir, 1.0f)), .rotation = quat_identity(), .mass = mass });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+			apush(bodies, arm);
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] hub_12_mixed_mass: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Hub_12 endurance: 3000 frames (shattering long-term stability)
+	{
+		float r = energy_scenario_hub(12, 3000);
+		printf("  [energy-ldl] hub_12_endurance: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+	}
+
+	// Ragdoll-like: head + torso + 2 arms + 2 legs
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 14, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		Body head = create_body(w, (BodyParams){ .position = V3(0, 13, 0), .rotation = quat_identity(), .mass = 4.0f });
+		body_add_shape(w, head, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = head, .local_offset_a = V3(0,-0.5f,0), .local_offset_b = V3(0,0.5f,0) });
+		apush(bodies, head);
+		Body torso = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 10.0f });
+		body_add_shape(w, torso, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.4f, 0.15f) });
+		create_ball_socket(w, (BallSocketParams){ .body_a = head, .body_b = torso, .local_offset_a = V3(0,-0.5f,0), .local_offset_b = V3(0,0.5f,0) });
+		apush(bodies, torso);
+		// Arms
+		for (int side = 0; side < 2; side++) {
+			float x = side == 0 ? 0.5f : -0.5f;
+			Body upper = create_body(w, (BodyParams){ .position = V3(x, 12, 0), .rotation = quat_identity(), .mass = 2.0f });
+			body_add_shape(w, upper, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.12f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = torso, .body_b = upper, .local_offset_a = V3(x*0.6f, 0.3f, 0), .local_offset_b = V3(0, 0.3f, 0) });
+			Body lower = create_body(w, (BodyParams){ .position = V3(x, 11.2f, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, lower, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = upper, .body_b = lower, .local_offset_a = V3(0,-0.3f,0), .local_offset_b = V3(0,0.3f,0) });
+			apush(bodies, upper); apush(bodies, lower);
+		}
+		// Legs
+		for (int side = 0; side < 2; side++) {
+			float x = side == 0 ? 0.15f : -0.15f;
+			Body upper = create_body(w, (BodyParams){ .position = V3(x, 11, 0), .rotation = quat_identity(), .mass = 3.0f });
+			body_add_shape(w, upper, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.13f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = torso, .body_b = upper, .local_offset_a = V3(x, -0.4f, 0), .local_offset_b = V3(0, 0.4f, 0) });
+			Body lower = create_body(w, (BodyParams){ .position = V3(x, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+			body_add_shape(w, lower, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.12f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = upper, .body_b = lower, .local_offset_a = V3(0,-0.4f,0), .local_offset_b = V3(0,0.4f,0) });
+			apush(bodies, upper); apush(bodies, lower);
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] ragdoll: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
