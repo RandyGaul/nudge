@@ -4371,6 +4371,70 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// Very long chain (50 links, 500 frames)
+	{
+		float r = energy_scenario_chain(50, 500);
+		printf("  [energy-ldl] chain_50: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+	}
+
+	// Double-jointed pair: two bodies connected by BOTH ball-socket and distance
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body a = create_body(w, (BodyParams){ .position = V3(0.8f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		Body b = create_body(w, (BodyParams){ .position = V3(1.6f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+		// Both ball-socket and distance on same pair
+		create_ball_socket(w, (BallSocketParams){ .body_a = a, .body_b = b, .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+		create_distance(w, (DistanceParams){ .body_a = a, .body_b = b, .local_offset_a = V3(0,0.3f,0), .local_offset_b = V3(0,-0.3f,0), .rest_length = 0.0f });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, a); apush(bodies, b);
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] double_jointed: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Ladder: two parallel chains connected by rungs
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor_l = create_body(w, (BodyParams){ .position = V3(-0.5f, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor_l, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body anchor_r = create_body(w, (BodyParams){ .position = V3(0.5f, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor_r, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		Body prev_l = anchor_l, prev_r = anchor_r;
+		for (int i = 0; i < 4; i++) {
+			float y = 12 - (i+1)*0.8f;
+			Body bl = create_body(w, (BodyParams){ .position = V3(-0.5f, y, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, bl, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+			Body br = create_body(w, (BodyParams){ .position = V3(0.5f, y, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, br, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev_l, .body_b = bl, .local_offset_a = V3(0,-0.4f,0), .local_offset_b = V3(0,0.4f,0) });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev_r, .body_b = br, .local_offset_a = V3(0,-0.4f,0), .local_offset_b = V3(0,0.4f,0) });
+			// Rung connecting left and right
+			create_distance(w, (DistanceParams){ .body_a = bl, .body_b = br, .local_offset_a = V3(0.3f,0,0), .local_offset_b = V3(-0.3f,0,0), .rest_length = 0.4f });
+			apush(bodies, bl); apush(bodies, br);
+			prev_l = bl; prev_r = br;
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] ladder: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
