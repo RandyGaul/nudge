@@ -170,18 +170,18 @@ void world_step(World world, float dt)
 			.body_a = sm[i].body_a, .body_b = sm[i].body_b };
 		apush(crefs, r);
 	}
-	// Joints always in PGS. When LDL is enabled, it runs after PGS as a
-	// residual correction (Mizerski GDC 2020). PGS handles warm-starting
-	// and bias; LDL polishes the remaining constraint velocity error.
-	for (int i = 0; i < asize(sol_bs); i++) {
-		ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
-			.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
-		apush(crefs, r);
-	}
-	for (int i = 0; i < asize(sol_dist); i++) {
-		ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
-			.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
-		apush(crefs, r);
+	// When LDL is enabled, joints are solved directly -- skip them in PGS.
+	if (!w->ldl_enabled) {
+		for (int i = 0; i < asize(sol_bs); i++) {
+			ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
+				.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
+			apush(crefs, r);
+		}
+		for (int i = 0; i < asize(sol_dist); i++) {
+			ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
+				.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
+			apush(crefs, r);
+		}
 	}
 
 	int cref_count = asize(crefs);
@@ -212,14 +212,41 @@ void world_step(World world, float dt)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
 		// After first sub-step, position error in bias is stale.
-		// Zero bias for rigid constraints (stale bias + iterative = instability).
-		// LDL runs as a residual correction after PGS, using velocity-only RHS,
-		// so it doesn't need its own bias computation.
-		if (sub == 0) {
+		// PGS: zero bias (stale bias + iterative = instability).
+		// LDL: recompute bias from current positions (direct solver is exact).
+		if (sub == 0 && !w->ldl_enabled) {
 			for (int i = 0; i < asize(sol_bs); i++)
 				if (sol_bs[i].softness == 0.0f) sol_bs[i].bias = V3(0, 0, 0);
 			for (int i = 0; i < asize(sol_dist); i++)
 				if (sol_dist[i].softness == 0.0f) sol_dist[i].bias = 0.0f;
+		}
+		if (w->ldl_enabled) {
+			float ptv = sub_dt > 0.0f ? SOLVER_BAUMGARTE / sub_dt : 0.0f;
+			for (int i = 0; i < asize(sol_bs); i++) {
+				if (sol_bs[i].softness != 0.0f) continue;
+				SolverBallSocket* s = &sol_bs[i];
+				BodyHot* a = &w->body_hot[s->body_a];
+				BodyHot* b = &w->body_hot[s->body_b];
+				s->r_a = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
+				s->r_b = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
+				v3 anchor_a = add(a->position, s->r_a);
+				v3 anchor_b = add(b->position, s->r_b);
+				s->bias = scale(sub(anchor_b, anchor_a), ptv);
+			}
+			for (int i = 0; i < asize(sol_dist); i++) {
+				if (sol_dist[i].softness != 0.0f) continue;
+				SolverDistance* s = &sol_dist[i];
+				BodyHot* a = &w->body_hot[s->body_a];
+				BodyHot* b = &w->body_hot[s->body_b];
+				s->r_a = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
+				s->r_b = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
+				v3 anchor_a = add(a->position, s->r_a);
+				v3 anchor_b = add(b->position, s->r_b);
+				v3 delta = sub(anchor_b, anchor_a);
+				float dist_val = len(delta);
+				s->axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
+				s->bias = -ptv * (dist_val - w->joints[s->joint_idx].distance.rest_length);
+			}
 		}
 	}
 
