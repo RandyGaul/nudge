@@ -5239,6 +5239,95 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// Exact app hub star: hub mass 5, one arm mass 20, rest mass 1, arm_len 1.5
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 5.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		float arm_len = 1.5f;
+		for (int i = 0; i < 8; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 8.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			float mass = (i == 0) ? 20.0f : 1.0f;
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 8, 0), scale(dir, arm_len)), .rotation = quat_identity(), .mass = mass });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = (i == 0) ? 0.35f : 0.2f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.5f), .local_offset_b = scale(dir, -arm_len + 0.5f) });
+			apush(bodies, arm);
+		}
+		step_n(w, 120);
+		// Pull the heavy arm sharply
+		Body mouse_anchor = create_body(w, (BodyParams){ .position = V3(5, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, mouse_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+		Joint mouse_joint = create_ball_socket(w, (BallSocketParams){ .body_a = mouse_anchor, .body_b = bodies[1], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+		// Move pull target around aggressively
+		for (int f = 0; f < 300; f++) {
+			float a = (float)f * 0.1f;
+			wi->body_hot[(int)mouse_anchor.id].position = V3(5*cosf(a), 8 + 5*sinf(a), 3*sinf(a*0.7f));
+			world_step(w, 1.0f / 60.0f);
+		}
+		destroy_joint(w, mouse_joint);
+		int all_valid = 1;
+		for (int i = 0; i < asize(bodies); i++) {
+			v3 p = body_get_position(w, bodies[i]);
+			if (!is_valid(p) || len(p) > 1000.0f) { all_valid = 0; break; }
+		}
+		float r = all_valid ? energy_growth(w, bodies, asize(bodies), 200) : 1000000000.0f;
+		printf("  [energy-ldl] app_hub_star_drag: growth=%.4f valid=%d\n", (double)r, all_valid);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Same but with direct velocity slam on heavy arm
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 5.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		float arm_len = 1.5f;
+		for (int i = 0; i < 8; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 8.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			float mass = (i == 0) ? 20.0f : 1.0f;
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 8, 0), scale(dir, arm_len)), .rotation = quat_identity(), .mass = mass });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = (i == 0) ? 0.35f : 0.2f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.5f), .local_offset_b = scale(dir, -arm_len + 0.5f) });
+			apush(bodies, arm);
+		}
+		step_n(w, 120);
+		// Slam the heavy arm
+		wi->body_hot[(int)bodies[1].id].velocity = V3(50, 30, 0);
+		int all_valid = 1;
+		for (int f = 0; f < 300; f++) {
+			world_step(w, 1.0f / 60.0f);
+			for (int i = 0; i < asize(bodies); i++) {
+				v3 p = body_get_position(w, bodies[i]);
+				if (!is_valid(p)) { all_valid = 0; break; }
+			}
+			if (!all_valid) { printf("  [energy-ldl] app_hub_star_slam: NaN at frame %d\n", f); break; }
+		}
+		float r = all_valid ? energy_growth(w, bodies, asize(bodies), 200) : 1000000000.0f;
+		printf("  [energy-ldl] app_hub_star_slam: growth=%.4f valid=%d\n", (double)r, all_valid);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
