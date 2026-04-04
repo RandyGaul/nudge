@@ -83,7 +83,7 @@ int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = non
 
 #define SHATTER_THRESHOLD 15 // DOF threshold: 6+ ball-sockets (18 DOF) triggers shattering
 #define SHARD_TARGET      6 // target DOF per shard
-#define LDL_COMPLIANCE    0.0f // regularization disabled for testing
+#define LDL_COMPLIANCE    1e-5f // regularization: compliance * trace(K) / dim on K diagonal + reg*lambda in RHS
 
 // -----------------------------------------------------------------------------
 // Small block math helpers (3x3 and 1x1 blocks stored as flat floats).
@@ -1417,14 +1417,16 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 			BodyHot* a = ldl_get_body(w, c, con->body_a);
 			BodyHot* b = ldl_get_body(w, c, con->body_b);
 			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			// No Baumgarte bias -- position correction via NGS.
-			rhs[oi] = -dv.x; rhs[oi+1] = -dv.y; rhs[oi+2] = -dv.z;
+			// Pure velocity residual with regularization damping: r = -dv - reg*lambda
+			rhs[oi] = -dv.x - LDL_COMPLIANCE * s->lambda.x;
+			rhs[oi+1] = -dv.y - LDL_COMPLIANCE * s->lambda.y;
+			rhs[oi+2] = -dv.z - LDL_COMPLIANCE * s->lambda.z;
 		} else if (con->type == JOINT_DISTANCE) {
 			SolverDistance* s = &sol_dist[con->solver_idx];
 			BodyHot* a = ldl_get_body(w, c, con->body_a);
 			BodyHot* b = ldl_get_body(w, c, con->body_b);
 			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			rhs[oi] = -dot(dv, s->axis);
+			rhs[oi] = -dot(dv, s->axis) - LDL_COMPLIANCE * s->lambda;
 		}
 	}
 
