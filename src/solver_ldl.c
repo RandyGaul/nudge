@@ -83,6 +83,7 @@ int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = non
 
 #define SHATTER_THRESHOLD 15 // DOF threshold: 6+ ball-sockets (18 DOF) triggers shattering
 #define SHARD_TARGET      6 // target DOF per shard
+#define LDL_COMPLIANCE    1e-5f // regularization: compliance * trace(K) / dim on hard constraint diagonals
 
 // -----------------------------------------------------------------------------
 // Small block math helpers (3x3 and 1x1 blocks stored as flat floats).
@@ -928,6 +929,17 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 				k += s->softness;
 				sub_K[0] = k;
 			}
+			// Trace-based regularization for genuine hard constraints.
+			// reg = compliance * trace(K) / dim. Virtual welds skip (already PD).
+			if (!con->is_synthetic) {
+				float soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : sol_dist[con->solver_idx].softness;
+				if (soft == 0.0f) {
+					float trace = 0;
+					for (int d = 0; d < dk; d++) trace += sub_K[d * dk + d];
+					float reg = LDL_COMPLIANCE * trace / dk;
+					for (int d = 0; d < dk; d++) sub_K[d * dk + d] += reg;
+				}
+			}
 			for (int r = 0; r < dk; r++) {
 				for (int col = 0; col < dk; col++) {
 					c->diag_data[bi][(off + r) * bdk + (off + col)] += sub_K[r * dk + col];
@@ -1405,14 +1417,14 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 			BodyHot* a = ldl_get_body(w, c, con->body_a);
 			BodyHot* b = ldl_get_body(w, c, con->body_b);
 			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			v3 r = neg(add(dv, s->bias));
-			rhs[oi] = r.x; rhs[oi+1] = r.y; rhs[oi+2] = r.z;
+			// No Baumgarte bias -- position correction via NGS.
+			rhs[oi] = -dv.x; rhs[oi+1] = -dv.y; rhs[oi+2] = -dv.z;
 		} else if (con->type == JOINT_DISTANCE) {
 			SolverDistance* s = &sol_dist[con->solver_idx];
 			BodyHot* a = ldl_get_body(w, c, con->body_a);
 			BodyHot* b = ldl_get_body(w, c, con->body_b);
 			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			rhs[oi] = -dot(dv, s->axis) + s->bias;
+			rhs[oi] = -dot(dv, s->axis);
 		}
 	}
 

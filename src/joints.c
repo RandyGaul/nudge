@@ -204,6 +204,150 @@ static void solve_distance(WorldInternal* w, SolverDistance* s)
 	apply_impulse(a, b, s->r_a, s->r_b, scale(s->axis, lambda));
 }
 
+// Split-impulse position correction for joints.
+// Runs a pseudo-velocity PGS solve targeting position error, integrates positions
+// with the corrective velocities, then restores real velocities. Prevents energy
+// injection because pseudo-velocities never enter the real velocity state.
+static void joints_split_impulse(WorldInternal* w, SolverBallSocket* bs, int bs_count, SolverDistance* dist, int dist_count, float dt, int iters)
+{
+	if (iters <= 0 || dt <= 0) return;
+	int body_count = asize(w->body_hot);
+
+	// Save real velocities and zero them for pseudo-velocity accumulation
+	v3* saved_vel = CK_ALLOC(body_count * sizeof(v3));
+	v3* saved_ang = CK_ALLOC(body_count * sizeof(v3));
+	for (int i = 0; i < body_count; i++) {
+		saved_vel[i] = w->body_hot[i].velocity;
+		saved_ang[i] = w->body_hot[i].angular_velocity;
+		w->body_hot[i].velocity = V3(0, 0, 0);
+		w->body_hot[i].angular_velocity = V3(0, 0, 0);
+	}
+
+	// Save lambda and zero for fresh pseudo-velocity accumulation
+	v3* saved_bs_lambda = CK_ALLOC(bs_count * sizeof(v3));
+	float* saved_dist_lambda = CK_ALLOC(dist_count * sizeof(float));
+	for (int i = 0; i < bs_count; i++) { saved_bs_lambda[i] = bs[i].lambda; bs[i].lambda = V3(0,0,0); }
+	for (int i = 0; i < dist_count; i++) { saved_dist_lambda[i] = dist[i].lambda; dist[i].lambda = 0; }
+
+	// Set bias from current position error and refresh effective mass
+	float ptv = SOLVER_POS_BAUMGARTE / dt;
+	for (int i = 0; i < bs_count; i++) {
+		SolverBallSocket* s = &bs[i];
+		if (s->softness != 0.0f) continue;
+		BodyHot* a = &w->body_hot[s->body_a];
+		BodyHot* b = &w->body_hot[s->body_b];
+		s->r_a = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
+		s->r_b = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
+		s->bias = scale(sub(add(b->position, s->r_b), add(a->position, s->r_a)), ptv);
+		ball_socket_eff_mass(a, b, s->r_a, s->r_b, 0.0f, s->eff_mass);
+	}
+	for (int i = 0; i < dist_count; i++) {
+		SolverDistance* s = &dist[i];
+		if (s->softness != 0.0f) continue;
+		BodyHot* a = &w->body_hot[s->body_a];
+		BodyHot* b = &w->body_hot[s->body_b];
+		s->r_a = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
+		s->r_b = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
+		v3 anchor_a = add(a->position, s->r_a);
+		v3 anchor_b = add(b->position, s->r_b);
+		v3 delta = sub(anchor_b, anchor_a);
+		float dist_val = len(delta);
+		s->axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
+		s->bias = -ptv * (dist_val - w->joints[s->joint_idx].distance.rest_length);
+		float inv_mass_sum = a->inv_mass + b->inv_mass;
+		float k = inv_mass_sum + dot(cross(inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(s->r_a, s->axis)), s->r_a), s->axis) + dot(cross(inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(s->r_b, s->axis)), s->r_b), s->axis);
+		s->eff_mass = k > 1e-12f ? 1.0f / k : 0.0f;
+	}
+
+	// PGS iterations on joints (pseudo-velocity solve)
+	for (int iter = 0; iter < iters; iter++) {
+		for (int i = 0; i < bs_count; i++) if (bs[i].softness == 0.0f) solve_ball_socket(w, &bs[i]);
+		for (int i = 0; i < dist_count; i++) if (dist[i].softness == 0.0f) solve_distance(w, &dist[i]);
+	}
+
+	// Integrate positions with pseudo-velocities
+	for (int i = 0; i < body_count; i++) {
+		BodyHot* h = &w->body_hot[i];
+		if (h->inv_mass == 0.0f || !split_alive(w->body_gen, i)) continue;
+		h->position = add(h->position, scale(h->velocity, dt));
+		v3 ww = h->angular_velocity;
+		if (ww.x != 0 || ww.y != 0 || ww.z != 0) {
+			quat spin = { ww.x, ww.y, ww.z, 0.0f };
+			quat dq = mul(spin, h->rotation);
+			h->rotation.x += 0.5f * dt * dq.x; h->rotation.y += 0.5f * dt * dq.y;
+			h->rotation.z += 0.5f * dt * dq.z; h->rotation.w += 0.5f * dt * dq.w;
+			float ql = sqrtf(h->rotation.x*h->rotation.x + h->rotation.y*h->rotation.y + h->rotation.z*h->rotation.z + h->rotation.w*h->rotation.w);
+			float inv_ql = 1.0f / (ql > 1e-15f ? ql : 1.0f);
+			h->rotation.x *= inv_ql; h->rotation.y *= inv_ql; h->rotation.z *= inv_ql; h->rotation.w *= inv_ql;
+		}
+	}
+
+	// Restore real velocities and lambda
+	for (int i = 0; i < body_count; i++) {
+		w->body_hot[i].velocity = saved_vel[i];
+		w->body_hot[i].angular_velocity = saved_ang[i];
+	}
+	for (int i = 0; i < bs_count; i++) bs[i].lambda = saved_bs_lambda[i];
+	for (int i = 0; i < dist_count; i++) dist[i].lambda = saved_dist_lambda[i];
+
+	// Zero bias for main velocity solve
+	for (int i = 0; i < bs_count; i++) if (bs[i].softness == 0.0f) bs[i].bias = V3(0, 0, 0);
+	for (int i = 0; i < dist_count; i++) if (dist[i].softness == 0.0f) dist[i].bias = 0;
+
+	CK_FREE(saved_vel);
+	CK_FREE(saved_ang);
+	CK_FREE(saved_bs_lambda);
+	CK_FREE(saved_dist_lambda);
+}
+
+// NGS position correction for joints. Operates on positions only, no velocity modification.
+// Mirrors solver_position_correct for contacts.
+static void joints_position_correct(WorldInternal* w, SolverBallSocket* bs, int bs_count, SolverDistance* dist, int dist_count, int iters)
+{
+	for (int iter = 0; iter < iters; iter++) {
+		for (int i = 0; i < bs_count; i++) {
+			SolverBallSocket* s = &bs[i];
+			if (s->softness != 0.0f) continue;
+			BodyHot* a = &w->body_hot[s->body_a];
+			BodyHot* b = &w->body_hot[s->body_b];
+			v3 r_a = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
+			v3 r_b = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
+			v3 error = sub(add(b->position, r_b), add(a->position, r_a));
+			float err_len = len(error);
+			if (err_len < 1e-6f) continue;
+			float inv_mass_sum = a->inv_mass + b->inv_mass;
+			if (inv_mass_sum <= 0) continue;
+			float correction = SOLVER_POS_BAUMGARTE * err_len;
+			if (correction > SOLVER_POS_MAX_CORRECTION) correction = SOLVER_POS_MAX_CORRECTION;
+			v3 n = scale(error, 1.0f / err_len);
+			float P = correction / inv_mass_sum;
+			a->position = add(a->position, scale(n, P * a->inv_mass));
+			b->position = sub(b->position, scale(n, P * b->inv_mass));
+		}
+		for (int i = 0; i < dist_count; i++) {
+			SolverDistance* s = &dist[i];
+			if (s->softness != 0.0f) continue;
+			BodyHot* a = &w->body_hot[s->body_a];
+			BodyHot* b = &w->body_hot[s->body_b];
+			v3 r_a = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
+			v3 r_b = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
+			v3 delta = sub(add(b->position, r_b), add(a->position, r_a));
+			float dist_val = len(delta);
+			if (dist_val < 1e-6f) continue;
+			v3 axis = scale(delta, 1.0f / dist_val);
+			float error = dist_val - w->joints[s->joint_idx].distance.rest_length;
+			if (fabsf(error) < 1e-6f) continue;
+			float inv_mass_sum = a->inv_mass + b->inv_mass;
+			if (inv_mass_sum <= 0) continue;
+			float correction = SOLVER_POS_BAUMGARTE * error;
+			if (fabsf(correction) > SOLVER_POS_MAX_CORRECTION) correction = correction > 0 ? SOLVER_POS_MAX_CORRECTION : -SOLVER_POS_MAX_CORRECTION;
+			float P = correction / inv_mass_sum;
+			a->position = add(a->position, scale(axis, P * a->inv_mass));
+			b->position = sub(b->position, scale(axis, P * b->inv_mass));
+		}
+	}
+}
+
 // Store joint accumulated impulses back to persistent storage.
 static void joints_post_solve(WorldInternal* w, SolverBallSocket* bs, int bs_count, SolverDistance* dist, int dist_count)
 {
