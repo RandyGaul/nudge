@@ -1466,11 +1466,7 @@ static void ldl_correction(WorldInternal* w, SolverBallSocket* sol_bs, int bs_co
 		// Rebuild blocks on first substep or topology change
 		if (sub == 0 || c->topo_version != w->ldl_topo_version) {
 			ldl_cache_rebuild_blocks(c, w, ii, sol_bs, bs_count, sol_dist, dist_count);
-			// Shattering disabled: the current implementation splits hub bodies into
-			// virtual shards with fractional mass, but the impulse correction path
-			// applies delta-lambda to real bodies without accounting for the mass
-			// difference, injecting energy that causes the system to explode.
-			// ldl_apply_shattering(c, w);
+			ldl_apply_shattering(c, w);
 			ldl_build_bundles(c);
 			ldl_build_topology(c, w);
 			c->topo_version = w->ldl_topo_version;
