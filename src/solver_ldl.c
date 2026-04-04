@@ -83,7 +83,7 @@ int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = non
 
 #define SHATTER_THRESHOLD 15 // DOF threshold: 6+ ball-sockets (18 DOF) triggers shattering
 #define SHARD_TARGET      6 // target DOF per shard
-#define LDL_COMPLIANCE    1e-5f // regularization: compliance * trace(K) / dim on hard constraint diagonals
+#define LDL_COMPLIANCE    0.0f // regularization disabled for testing
 
 // -----------------------------------------------------------------------------
 // Small block math helpers (3x3 and 1x1 blocks stored as flat floats).

@@ -219,8 +219,6 @@ void world_step(World world, float dt)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
 		if (w->ldl_enabled) {
-			// Split-impulse position correction: pseudo-velocity solve targeting
-			// position error, then integrate positions. Does not contaminate real velocities.
 			joints_split_impulse(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub_dt, w->position_iters);
 		} else {
 			// PGS-only: zero bias after first sub-step (stale).
