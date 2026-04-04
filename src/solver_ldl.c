@@ -81,7 +81,7 @@ static LDL_DebugInfo g_ldl_debug_info;
 int g_ldl_debug_enabled;
 int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = none)
 
-#define SHATTER_THRESHOLD 40 // DOF threshold: 14+ ball-sockets (42 DOF) triggers shattering
+#define SHATTER_THRESHOLD 15 // DOF threshold: 6+ ball-sockets (18 DOF) triggers shattering
 #define SHARD_TARGET      6 // target DOF per shard
 
 // -----------------------------------------------------------------------------
