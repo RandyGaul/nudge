@@ -72,10 +72,11 @@
 //     delta_lambda is ADDED to bodies on top of PGS result.
 //     s->lambda accumulates PGS + LDL for next frame's warm-start.
 //
-//   Body shattering (currently disabled):
+//   Body shattering:
 //     Splits hub bodies into virtual shards connected by synthetic rigid joints
-//     to reduce fill-in during factorization. Needs greedy bin-packing, wrap-around
-//     chain topology, and velocity sync averaging before re-enabling.
+//     to reduce fill-in during factorization. Uses greedy bin-packing, wrap-around
+//     chain topology. Requires correct mass-scaling of impulses when mapping
+//     virtual shard results back to real bodies.
 
 static LDL_DebugInfo g_ldl_debug_info;
 int g_ldl_debug_enabled;
@@ -1405,14 +1406,15 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 			BodyHot* a = ldl_get_body(w, c, con->body_a);
 			BodyHot* b = ldl_get_body(w, c, con->body_b);
 			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			v3 r = neg(add(dv, s->bias));
-			rhs[oi] = r.x; rhs[oi+1] = r.y; rhs[oi+2] = r.z;
+			// Velocity-only residual: no bias. PGS already applied Baumgarte
+			// correction; LDL only corrects the remaining velocity error.
+			rhs[oi] = -dv.x; rhs[oi+1] = -dv.y; rhs[oi+2] = -dv.z;
 		} else if (con->type == JOINT_DISTANCE) {
 			SolverDistance* s = &sol_dist[con->solver_idx];
 			BodyHot* a = ldl_get_body(w, c, con->body_a);
 			BodyHot* b = ldl_get_body(w, c, con->body_b);
 			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			rhs[oi] = -dot(dv, s->axis) + s->bias;
+			rhs[oi] = -dot(dv, s->axis);
 		}
 	}
 
