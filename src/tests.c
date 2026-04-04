@@ -5116,6 +5116,129 @@ static void test_ldl_energy_comprehensive()
 		destroy_world(w);
 	}
 
+	// Direct velocity kick on hub body mid-simulation
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		for (int i = 0; i < 8; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 8.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 10, 0), scale(dir, 1.0f)), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+			apush(bodies, arm);
+		}
+		step_n(w, 120);
+		// Slam hub with huge velocity
+		wi->body_hot[(int)hub.id].velocity = V3(50, 100, 30);
+		wi->body_hot[(int)hub.id].angular_velocity = V3(20, 20, 20);
+		int all_valid = 1;
+		for (int f = 0; f < 300; f++) {
+			world_step(w, 1.0f / 60.0f);
+			for (int i = 0; i < asize(bodies); i++) {
+				v3 p = body_get_position(w, bodies[i]);
+				if (!is_valid(p)) { all_valid = 0; break; }
+			}
+			if (!all_valid) break;
+		}
+		float r = all_valid ? energy_growth(w, bodies, asize(bodies), 200) : 1000000000.0f;
+		printf("  [energy-ldl] hub_velocity_slam: growth=%.4f valid=%d\n", (double)r, all_valid);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Slam an arm body instead of hub
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		for (int i = 0; i < 8; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 8.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 10, 0), scale(dir, 1.0f)), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+			apush(bodies, arm);
+		}
+		step_n(w, 120);
+		// Slam arm[0] with huge velocity
+		wi->body_hot[(int)bodies[1].id].velocity = V3(100, 50, 0);
+		int all_valid = 1;
+		for (int f = 0; f < 300; f++) {
+			world_step(w, 1.0f / 60.0f);
+			for (int i = 0; i < asize(bodies); i++) {
+				v3 p = body_get_position(w, bodies[i]);
+				if (!is_valid(p)) { all_valid = 0; break; }
+			}
+			if (!all_valid) break;
+		}
+		float r = all_valid ? energy_growth(w, bodies, asize(bodies), 200) : 1000000000.0f;
+		printf("  [energy-ldl] arm_velocity_slam: growth=%.4f valid=%d\n", (double)r, all_valid);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
+	// Repeated impulse kicks every 10 frames
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body hub = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+		CK_DYNA Body* bodies = NULL;
+		apush(bodies, hub);
+		for (int i = 0; i < 8; i++) {
+			float angle = (float)i * 2.0f * 3.14159265f / 8.0f;
+			v3 dir = V3(cosf(angle), 0, sinf(angle));
+			Body arm = create_body(w, (BodyParams){ .position = add(V3(0, 10, 0), scale(dir, 1.0f)), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arm, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+			apush(bodies, arm);
+		}
+		step_n(w, 60);
+		int all_valid = 1;
+		for (int f = 0; f < 600; f++) {
+			if (f % 10 == 0) {
+				int target = 1 + (f / 10) % 8;
+				wi->body_hot[(int)bodies[target].id].velocity = add(wi->body_hot[(int)bodies[target].id].velocity, V3(20, 10, 0));
+			}
+			world_step(w, 1.0f / 60.0f);
+			for (int i = 0; i < asize(bodies); i++) {
+				v3 p = body_get_position(w, bodies[i]);
+				if (!is_valid(p)) { all_valid = 0; break; }
+			}
+			if (!all_valid) break;
+		}
+		float r = all_valid ? energy_growth(w, bodies, asize(bodies), 200) : 1000000000.0f;
+		printf("  [energy-ldl] repeated_kicks: growth=%.4f valid=%d\n", (double)r, all_valid);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
+
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
