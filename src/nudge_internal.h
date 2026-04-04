@@ -83,14 +83,24 @@ typedef struct JointInternal
 typedef struct BVHTree BVHTree; // forward decl, defined in bvh.c
 
 // LDL direct solver types (used by solver_ldl.c).
-typedef struct LDL_Block
+typedef struct LDL_Constraint
 {
 	int type;         // JOINT_BALL_SOCKET or JOINT_DISTANCE (or -1 for synthetic)
 	int dof;          // 3 or 1
 	int body_a, body_b; // body indices (real or virtual)
 	int solver_idx;   // index into sol_bs[] or sol_dist[] (-1 for synthetic)
 	int is_synthetic;
-} LDL_Block;
+	int bundle_idx;   // which bundle this constraint belongs to
+	int bundle_offset; // local DOF offset within its bundle's DOF space
+} LDL_Constraint;
+
+// Group of constraints between the same body pair, forming one graph node.
+typedef struct LDL_Bundle
+{
+	int body_a, body_b;     // body pair
+	int dof;                // total DOF (sum of constituent constraints)
+	int start, count;       // range into LDL_Cache.constraints[]
+} LDL_Bundle;
 
 // Sparse block matrix: adjacency-list format per constraint node.
 // Each node i has a diagonal block (dof[i] x dof[i]) and off-diagonal
@@ -115,14 +125,86 @@ typedef struct LDL_Sparse
 
 	// Elimination ordering (symbolic phase output).
 	int elim_order[LDL_MAX_NODES]; // pivot sequence
+	int inv_order[LDL_MAX_NODES];  // inv_order[node] = elimination step
 } LDL_Sparse;
+
+// Precomputed neighbor for forward/back substitution in solve phase.
+typedef struct LDL_Neighbor
+{
+	int node;       // neighbor node index
+	int dn;         // neighbor DOF
+	int on;         // neighbor row_offset
+	int L_offset;   // offset into L_factors for the L block
+} LDL_Neighbor;
+
+// Schur complement update during numeric factorization.
+typedef struct LDL_Schur
+{
+	int i, j;           // target nodes being updated
+	int Lik_offset;     // L_factors offset for L_{i,k}
+	int Ljk_offset;     // L_factors offset for L_{j,k}
+	int target_offset;  // L_factors offset for target edge (i,j) (-1 = diagonal)
+	int target_offset_rev; // L_factors offset for reverse edge (j,i) (-1 if diagonal or same)
+	int target_node;    // diagonal node index when target_offset == -1
+	int di, dk, dj;     // block dimensions
+} LDL_Schur;
+
+// Non-eliminated neighbor for L-block computation during factorization.
+typedef struct LDL_Column
+{
+	int node;       // non-eliminated neighbor
+	int dn;         // its DOF
+	int L_offset;   // where to write L_{node,pivot} in L_factors
+} LDL_Column;
+
+// Per-pivot precomputed index ranges.
+typedef struct LDL_Pivot
+{
+	int node, dk, ok;                      // node index, DOF, row_offset
+	int fwd_start, fwd_count;             // forward-sub neighbors (eliminated before)
+	int back_start, back_count;           // back-sub neighbors (eliminated after)
+	int col_start, col_count;             // L-column entries for factorization
+	int schur_start, schur_count;         // Schur complement updates for this pivot
+} LDL_Pivot;
+
+// K-edge fill instruction: maps shared body to off-diagonal L_factors offsets.
+typedef struct LDL_Coupling
+{
+	int body;                              // shared body index (real or virtual)
+	int block_i, block_j;                 // constraint node indices
+	int L_offset_ij, L_offset_ji;         // L_factors offsets for both directions
+} LDL_Coupling;
+
+// Cached constraint system topology: computed once per topology change,
+// reused across substeps. Stores elimination ordering, sparsity pattern,
+// and precomputed memory offsets into L_factors.
+typedef struct LDL_Topology
+{
+	int node_count, n;
+	int dof[LDL_MAX_NODES];
+	int row_offset[LDL_MAX_NODES + 1];
+	int elim_order[LDL_MAX_NODES];
+	int inv_order[LDL_MAX_NODES];
+	LDL_Pivot pivots[LDL_MAX_NODES];
+	CK_DYNA LDL_Neighbor* fwd_neighbors;
+	CK_DYNA LDL_Neighbor* back_neighbors;
+	CK_DYNA LDL_Column* columns;
+	CK_DYNA LDL_Schur* schurs;
+	CK_DYNA LDL_Coupling* couplings;
+	int L_factors_size;                    // total floats in L_factors
+} LDL_Topology;
 
 typedef struct LDL_Cache
 {
-	CK_DYNA LDL_Block* blocks;
+	CK_DYNA LDL_Constraint* constraints;
 	int joint_count;
+	CK_DYNA LDL_Bundle* bundles;
+	int bundle_count;
 	int n;              // total DOFs
-	LDL_Sparse* sparse; // heap-allocated sparse matrix (NULL if no joints)
+	LDL_Topology* topo; // cached topology (NULL until built)
+	CK_DYNA float* L_factors; // contiguous off-diagonal L-factor blocks
+	float diag_data[LDL_MAX_NODES][36]; // diagonal blocks (max 6x6)
+	float diag_D[LDL_MAX_NODES][6];    // D pivots (max 6 per block)
 	int topo_version;   // world topo version when blocks were built
 
 	// Shattering state

@@ -168,6 +168,7 @@ static void island_sleep(WorldInternal* w, int island_id)
 {
 	Island* isl = &w->islands[island_id];
 	isl->awake = 0;
+	ldl_cache_sleep(&isl->ldl);
 	int bi = isl->head_body;
 	while (bi >= 0) {
 		w->body_hot[bi].velocity = V3(0, 0, 0);

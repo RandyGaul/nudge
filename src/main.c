@@ -111,6 +111,9 @@ static int g_friction_model = FRICTION_PATCH;
 static int g_solver_type = SOLVER_SOFT_STEP;
 static bool g_ldl_enabled = false;
 static bool g_ldl_debug = false;
+static int g_ldl_inspect_island = -1;   // selected island for LDL inspector (-1 = none)
+static int g_ldl_inspect_step = 0;      // factorization step slider
+static int g_ldl_hover_body = -1;       // body highlighted by matrix hover (-1 = none)
 static bool g_paused = false;
 static bool g_step_once = false;
 
@@ -944,9 +947,549 @@ static void scene_hull_pile_setup()
 	}
 }
 
-// --- LDL Debug Visualizer ---
+// --- LDL Inspector ---
 extern LDL_DebugInfo g_ldl_debug_info;
 extern int g_ldl_debug_enabled;
+
+static const char* ldl_constraint_type_name(int type)
+{
+	if (type == JOINT_BALL_SOCKET) return "BS";
+	if (type == JOINT_DISTANCE) return "Dist";
+	return "Weld";
+}
+
+static void draw_ldl_overview(WorldInternal* w, Island* isl, LDL_Cache* c)
+{
+	LDL_Topology* t = c->topo;
+
+	if (ImGui_TreeNodeEx("System", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui_Text("DOFs: %d  Nodes: %d  Constraints: %d", t ? t->n : 0, c->bundle_count, c->joint_count);
+		ImGui_Text("Topo version: %d  L_factors: %d floats", c->topo_version, t ? t->L_factors_size : 0);
+		if (c->virtual_body_count > 0) {
+			ImGui_Text("Shattered: %d virtual bodies", c->virtual_body_count);
+		}
+		ImGui_TreePop();
+	}
+
+	if (ImGui_TreeNodeEx("Bodies", 0)) {
+		int bi = isl->head_body;
+		while (bi >= 0) {
+			float mass = w->body_hot[bi].inv_mass > 0 ? 1.0f / w->body_hot[bi].inv_mass : 0;
+			if (w->body_hot[bi].inv_mass == 0) {
+				ImGui_Text("  [%d] static", bi);
+			} else {
+				v3 inv_I = w->body_hot[bi].inv_inertia_local;
+				ImGui_Text("  [%d] mass=%.1f  inv_I=(%.2f, %.2f, %.2f)", bi, (double)mass, (double)inv_I.x, (double)inv_I.y, (double)inv_I.z);
+			}
+			if (ImGui_IsItemHovered(0)) {
+				g_ldl_hover_body = bi;
+			}
+			bi = w->body_cold[bi].island_next;
+		}
+		ImGui_TreePop();
+	}
+
+	if (c->virtual_body_count > 0 && c->body_remap && ImGui_TreeNodeEx("Shattering", ImGuiTreeNodeFlags_DefaultOpen)) {
+		int real_count = asize(w->body_hot);
+		int bi = isl->head_body;
+		while (bi >= 0) {
+			if (c->body_remap[bi] >= 0) {
+				int first_v = c->body_remap[bi] - real_count;
+				// Count shards for this body
+				int shard_n = 0;
+				for (int v = first_v; v < c->virtual_body_count; v++) {
+					float S = c->virtual_bodies[v].inv_mass / (w->body_hot[bi].inv_mass > 0 ? w->body_hot[bi].inv_mass : 1.0f);
+					if (S < 1.5f) break;
+					shard_n++;
+				}
+				float real_mass = w->body_hot[bi].inv_mass > 0 ? 1.0f / w->body_hot[bi].inv_mass : 0;
+				ImGui_Text("  Body %d (mass=%.1f) -> %d shards", bi, (double)real_mass, shard_n);
+				if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+					ImGui_Text("Hub body %d was shattered into %d virtual shards.", bi, shard_n);
+					ImGui_Text("Total DOF on this body exceeded %d.", SHATTER_THRESHOLD);
+					ImGui_Separator();
+					ImGui_Text("Each shard has mass = %.1f * %d = %.1f (inv_mass scaled up)", (double)real_mass, shard_n, (double)(real_mass * shard_n));
+					ImGui_Text("Shards are connected by synthetic 6-DOF weld joints");
+					ImGui_Text("in a wrap-around ring: s0-s1-s2-...-sN-s0");
+					ImGui_Separator();
+					ImGui_Text("Virtual body indices:");
+					for (int v = 0; v < shard_n; v++) {
+						int vid = c->body_remap[bi] + v;
+						ImGui_Text("  shard %d = virtual body %d", v, vid);
+					}
+					ImGui_Separator();
+					ImGui_Text("Real constraints were distributed across shards");
+					ImGui_Text("using greedy bin-packing (largest DOF first).");
+					ImGui_EndTooltip();
+				}
+				if (ImGui_IsItemHovered(0)) {
+					g_ldl_hover_body = bi;
+				}
+			}
+			bi = w->body_cold[bi].island_next;
+		}
+
+		// Show which constraints got redirected to which shards
+		int synth_count = 0, real_redirected = 0;
+		for (int i = 0; i < c->joint_count; i++) {
+			if (c->constraints[i].is_synthetic) synth_count++;
+			else if (c->constraints[i].body_a >= real_count || c->constraints[i].body_b >= real_count) real_redirected++;
+		}
+		ImGui_Text("  %d real constraints redirected to shards", real_redirected);
+		ImGui_Text("  %d synthetic weld joints between shards", synth_count);
+		ImGui_TreePop();
+	}
+
+	if (ImGui_TreeNodeEx("Constraints", 0)) {
+		for (int i = 0; i < c->joint_count; i++) {
+			LDL_Constraint* con = &c->constraints[i];
+			if (con->is_synthetic) {
+				ImGui_Text("  [%d] Weld (synthetic)  body %d <-> %d  dof=%d  bundle %d", i, con->body_a, con->body_b, con->dof, con->bundle_idx);
+			} else {
+				ImGui_Text("  [%d] %s  body %d <-> %d  dof=%d  bundle %d", i, ldl_constraint_type_name(con->type), con->body_a, con->body_b, con->dof, con->bundle_idx);
+			}
+			if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+				ImGui_Text("Constraint %d", i);
+				ImGui_Text("Type: %s  DOF: %d", con->is_synthetic ? "Synthetic weld" : ldl_constraint_type_name(con->type), con->dof);
+				ImGui_Text("Bodies: %d <-> %d", con->body_a, con->body_b);
+				ImGui_Text("Bundle: %d  offset: %d", con->bundle_idx, con->bundle_offset);
+				if (con->is_synthetic) {
+					ImGui_Separator();
+					ImGui_Text("Synthetic 6-DOF weld between virtual shards.");
+					ImGui_Text("Constrains: v_b - v_a = 0 (linear, 3 DOF)");
+					ImGui_Text("            w_b - w_a = 0 (angular, 3 DOF)");
+					ImGui_Text("Forces shards to move as one rigid body.");
+				} else {
+					ImGui_Text("Solver index: %d", con->solver_idx);
+				}
+				ImGui_EndTooltip();
+			}
+		}
+		ImGui_TreePop();
+	}
+
+	if (ImGui_TreeNodeEx("Bundles", 0)) {
+		for (int i = 0; i < c->bundle_count; i++) {
+			LDL_Bundle* b = &c->bundles[i];
+			ImGui_Text("  [%d] body(%d,%d)  dof=%d  constraints=%d", i, b->body_a, b->body_b, b->dof, b->count);
+			if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+				ImGui_Text("Bundle %d (graph node)", i);
+				ImGui_Text("Body pair: %d <-> %d", b->body_a, b->body_b);
+				ImGui_Text("Total DOF: %d  from %d constraint(s)", b->dof, b->count);
+				ImGui_Text("Constraint range: [%d..%d)", b->start, b->start + b->count);
+				ImGui_EndTooltip();
+			}
+		}
+		ImGui_TreePop();
+	}
+
+	if (t && ImGui_TreeNodeEx("Elimination Order", 0)) {
+		for (int s = 0; s < t->node_count; s++) {
+			LDL_Pivot* pv = &t->pivots[s];
+			ImGui_Text("  step %d: node %d (dof %d)  fwd=%d back=%d col=%d schur=%d", s, pv->node, pv->dk, pv->fwd_count, pv->back_count, pv->col_count, pv->schur_count);
+			if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+				ImGui_Text("Elimination step %d", s);
+				ImGui_Text("Eliminates node %d (bundle %d)", pv->node, pv->node);
+				ImGui_Text("DOF: %d  Row offset: %d", pv->dk, pv->ok);
+				ImGui_Separator();
+				ImGui_Text("Forward-sub neighbors: %d (eliminated before this)", pv->fwd_count);
+				ImGui_Text("Back-sub neighbors: %d (eliminated after this)", pv->back_count);
+				ImGui_Text("L-column entries: %d (L blocks computed)", pv->col_count);
+				ImGui_Text("Schur updates: %d (S -= L*N*L^T ops)", pv->schur_count);
+				ImGui_EndTooltip();
+			}
+		}
+		ImGui_TreePop();
+	}
+}
+
+static ImU32 ldl_heat(float val, float max_val)
+{
+	if (max_val < 1e-12f) return ImGui_GetColorU32ImVec4((ImVec4){0.1f, 0.1f, 0.1f, 1.0f});
+	float t = fabsf(val) / max_val;
+	if (t > 1.0f) t = 1.0f;
+	float r, g, b;
+	if (t < 0.33f) { float s = t / 0.33f; r = 0; g = 0; b = s; }
+	else if (t < 0.66f) { float s = (t - 0.33f) / 0.33f; r = s; g = 0; b = 1.0f - s; }
+	else { float s = (t - 0.66f) / 0.34f; r = 1.0f; g = s; b = 0; }
+	return ImGui_GetColorU32ImVec4((ImVec4){r, g, b, 1.0f});
+}
+
+static void draw_ldl_matrix(WorldInternal* w, Island* isl, LDL_Cache* c)
+{
+	LDL_Topology* t = c->topo;
+	LDL_DebugInfo* info = &g_ldl_debug_info;
+	if (!t || !info->valid || info->n == 0) {
+		ImGui_Text("No matrix data (island may be sleeping)");
+		return;
+	}
+	int n = info->n;
+	int nc = t->node_count;
+	if (n > LDL_MAX_DOF) { ImGui_Text("System too large to display (%d DOFs)", n); return; }
+
+	float cell = 10.0f;
+	float margin = 40.0f;
+	ImDrawList* dl = ImGui_GetWindowDrawList();
+	ImVec2 cursor = ImGui_GetCursorScreenPos();
+	float ox = cursor.x + margin, oy = cursor.y + margin;
+	ImU32 text_col = ImGui_GetColorU32ImVec4((ImVec4){0.7f, 0.7f, 0.7f, 1.0f});
+
+	float a_max = 0;
+	for (int i = 0; i < n * n; i++) {
+		float v = fabsf(info->A[i]);
+		if (v > a_max) a_max = v;
+	}
+
+	// Node labels (top and left). Synthetic weld nodes shown in cyan.
+	ImU32 synth_col = ImGui_GetColorU32ImVec4((ImVec4){0.0f, 0.8f, 1.0f, 1.0f});
+	for (int j = 0; j < nc; j++) {
+		char lbl[16];
+		LDL_Bundle* bun = &c->bundles[j];
+		int is_synth = (bun->count == 1 && c->constraints[bun->start].is_synthetic);
+		if (is_synth) {
+			snprintf(lbl, sizeof(lbl), "W%d", j);
+		} else if (bun->count == 1) {
+			snprintf(lbl, sizeof(lbl), "%s%d", ldl_constraint_type_name(c->constraints[bun->start].type), j);
+		} else {
+			snprintf(lbl, sizeof(lbl), "B%d", j);
+		}
+		ImU32 lbl_col = is_synth ? synth_col : text_col;
+		float bx = ox + t->row_offset[j] * cell + t->dof[j] * cell * 0.5f - 8;
+		ImDrawList_AddText(dl, (ImVec2){bx, cursor.y}, lbl_col, lbl);
+		float by = oy + t->row_offset[j] * cell + t->dof[j] * cell * 0.5f - 6;
+		ImDrawList_AddText(dl, (ImVec2){cursor.x, by}, lbl_col, lbl);
+	}
+
+	// Draw cells
+	int hover_row = -1, hover_col = -1;
+	ImVec2 mouse = ImGui_GetMousePos();
+	for (int row = 0; row < n; row++) {
+		for (int col = 0; col < n; col++) {
+			float x0 = ox + col * cell, y0 = oy + row * cell;
+			ImU32 clr = ldl_heat(info->A[row * n + col], a_max);
+			ImDrawList_AddRectFilled(dl, (ImVec2){x0, y0}, (ImVec2){x0 + cell - 1, y0 + cell - 1}, clr);
+			if (mouse.x >= x0 && mouse.x < x0 + cell && mouse.y >= y0 && mouse.y < y0 + cell) {
+				hover_row = row; hover_col = col;
+			}
+		}
+	}
+
+	// Block boundary lines
+	ImU32 line_col = ImGui_GetColorU32ImVec4((ImVec4){1, 1, 1, 0.3f});
+	for (int j = 0; j < nc; j++) {
+		float px = ox + t->row_offset[j] * cell;
+		float py = oy + t->row_offset[j] * cell;
+		ImDrawList_AddLine(dl, (ImVec2){px, oy}, (ImVec2){px, oy + n * cell}, line_col);
+		ImDrawList_AddLine(dl, (ImVec2){ox, py}, (ImVec2){ox + n * cell, py}, line_col);
+	}
+	ImDrawList_AddRect(dl, (ImVec2){ox, oy}, (ImVec2){ox + n * cell, oy + n * cell}, line_col);
+	ImGui_Dummy((ImVec2){margin + n * cell + 4, margin + n * cell + 4});
+
+	// Matrix hover tooltip with physics explanation
+	if (hover_row >= 0 && ImGui_IsMouseHoveringRect((ImVec2){ox, oy}, (ImVec2){ox + n * cell, oy + n * cell})) {
+		// Find which bundle owns each row/col
+		int br = -1, bc_idx = -1;
+		for (int j = nc - 1; j >= 0; j--) {
+			if (hover_row >= t->row_offset[j]) { br = j; break; }
+		}
+		for (int j = nc - 1; j >= 0; j--) {
+			if (hover_col >= t->row_offset[j]) { bc_idx = j; break; }
+		}
+		if (br >= 0 && bc_idx >= 0 && ImGui_BeginTooltip()) {
+			float val = info->A[hover_row * n + hover_col];
+			ImGui_Text("A[%d,%d] = %.6g", hover_row, hover_col, (double)val);
+			ImGui_Separator();
+			LDL_Bundle* bun_r = &c->bundles[br];
+			LDL_Bundle* bun_c = &c->bundles[bc_idx];
+			int r_synth = (bun_r->count == 1 && c->constraints[bun_r->start].is_synthetic);
+			int c_synth = (bun_c->count == 1 && c->constraints[bun_c->start].is_synthetic);
+			if (br == bc_idx) {
+				if (r_synth) {
+					ImGui_Text("Diagonal block: node %d (synthetic weld)", br);
+					ImGui_Text("K = diag(inv_m_sum * I_3, inv_I_sum)");
+					ImGui_TextDisabled("6-DOF weld between virtual shards %d, %d", bun_r->body_a, bun_r->body_b);
+					ImGui_TextDisabled("Top-left 3x3: linear coupling (mass)");
+					ImGui_TextDisabled("Bottom-right 3x3: angular coupling (inertia)");
+				} else {
+					ImGui_Text("Diagonal block: node %d", br);
+					ImGui_Text("K_ii = J_i * M^-1 * J_i^T");
+					ImGui_TextDisabled("Effective mass of constraint through bodies %d, %d", bun_r->body_a, bun_r->body_b);
+				}
+			} else {
+				// Find shared body between the two bundles
+				int shared = -1;
+				if (bun_r->body_a == bun_c->body_a || bun_r->body_a == bun_c->body_b) shared = bun_r->body_a;
+				else if (bun_r->body_b == bun_c->body_a || bun_r->body_b == bun_c->body_b) shared = bun_r->body_b;
+				if (shared >= 0) {
+					ImGui_Text("Off-diagonal: node %d <-> node %d", br, bc_idx);
+					ImGui_Text("K_ij = J_i * M_%d^-1 * J_j^T", shared);
+					ImGui_TextDisabled("Coupling through shared body %d", shared);
+					g_ldl_hover_body = shared;
+				} else if (fabsf(val) > 1e-12f) {
+					ImGui_Text("Fill-in block: node %d <-> node %d", br, bc_idx);
+					ImGui_TextDisabled("No direct body sharing (created by elimination)");
+				} else {
+					ImGui_Text("Zero block: node %d, node %d", br, bc_idx);
+					ImGui_TextDisabled("No coupling (no shared body)");
+				}
+			}
+			ImGui_EndTooltip();
+		}
+	}
+
+	// Color legend
+	{
+		ImVec2 lc = ImGui_GetCursorScreenPos();
+		ImDrawList* ldl = ImGui_GetWindowDrawList();
+		float lw = 200.0f, lh = 12.0f;
+		for (int i = 0; i < (int)lw; i++) {
+			float t = (float)i / lw;
+			ImU32 clr = ldl_heat(t, 1.0f);
+			ImDrawList_AddRectFilled(ldl, (ImVec2){lc.x + i, lc.y}, (ImVec2){lc.x + i + 1, lc.y + lh}, clr);
+		}
+		ImU32 tc = ImGui_GetColorU32ImVec4((ImVec4){0.7f, 0.7f, 0.7f, 1.0f});
+		ImDrawList_AddText(ldl, (ImVec2){lc.x, lc.y + lh + 2}, tc, "0");
+		char maxlbl[16]; snprintf(maxlbl, sizeof(maxlbl), "%.3g", (double)a_max);
+		ImDrawList_AddText(ldl, (ImVec2){lc.x + lw - 30, lc.y + lh + 2}, tc, maxlbl);
+		ImGui_Dummy((ImVec2){lw, lh + 16});
+	}
+	if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+		ImGui_Text("|A[r,c]| mapped to color");
+		ImGui_Text("Black = zero (no coupling)");
+		ImGui_Text("Blue = small magnitude");
+		ImGui_Text("Red = medium magnitude");
+		ImGui_Text("Yellow = large magnitude (max = %.3g)", (double)a_max);
+		ImGui_EndTooltip();
+	}
+
+	// D pivots
+	ImGui_SeparatorText("D Pivots (LDL^T diagonal)");
+	if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+		ImGui_Text("K = L * D * L^T");
+		ImGui_Text("D contains the diagonal pivots from factorization.");
+		ImGui_Text("Large ratio = ill-conditioned system.");
+		ImGui_Text("PGS struggles with high ratios; LDL solves exactly.");
+		ImGui_EndTooltip();
+	}
+	float d_min = 1e18f, d_max = -1e18f;
+	for (int i = 0; i < n; i++) {
+		float d = info->D[i];
+		if (d < d_min) d_min = d;
+		if (d > d_max) d_max = d;
+	}
+	float ratio = d_max / (d_min > 1e-12f ? d_min : 1e-12f);
+	ImGui_Text("min=%.4g  max=%.4g  ratio=%.1f", (double)d_min, (double)d_max, (double)ratio);
+}
+
+static void draw_ldl_factorization(WorldInternal* w, Island* isl, LDL_Cache* c)
+{
+	LDL_Topology* t = c->topo;
+	if (!t || t->node_count == 0) { ImGui_Text("No topology"); return; }
+
+	int nc = t->node_count;
+	if (g_ldl_inspect_step >= nc) g_ldl_inspect_step = nc - 1;
+	if (g_ldl_inspect_step < 0) g_ldl_inspect_step = 0;
+
+	ImGui_Text("Step %d / %d", g_ldl_inspect_step + 1, nc);
+	ImGui_SameLine();
+	if (ImGui_Button("<##fwd")) { if (g_ldl_inspect_step > 0) g_ldl_inspect_step--; }
+	ImGui_SameLine();
+	if (ImGui_Button(">##back")) { if (g_ldl_inspect_step < nc - 1) g_ldl_inspect_step++; }
+
+	int step = g_ldl_inspect_step;
+	LDL_Pivot* pv = &t->pivots[step];
+	int node = pv->node;
+
+	ImGui_Separator();
+
+	// Node info
+	LDL_Bundle* bun = &c->bundles[node];
+	ImGui_Text("Eliminating: node %d  (%s, dof=%d)", node, bun->count == 1 ? ldl_constraint_type_name(c->constraints[bun->start].type) : "bundle", pv->dk);
+	if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+		ImGui_Text("Gaussian elimination on the constraint graph.");
+		ImGui_Text("Node %d is removed. Its neighbors become", node);
+		ImGui_Text("connected to each other (fill-in edges).");
+		ImGui_Text("L blocks are computed: L_{j,%d} = E_{j,%d} * K_%d^-1", node, node, node);
+		ImGui_EndTooltip();
+	}
+
+	// D pivots for this node
+	ImGui_Text("Pivot D:");
+	ImGui_SameLine();
+	for (int d = 0; d < pv->dk; d++) {
+		ImGui_SameLine();
+		ImGui_Text("%.3g", (double)c->diag_D[node][d]);
+	}
+	if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+		ImGui_Text("Diagonal pivots from block LDL factorization");
+		ImGui_Text("of this node's effective mass matrix.");
+		ImGui_Text("Small pivots indicate near-singularity.");
+		ImGui_EndTooltip();
+	}
+
+	// L columns
+	if (pv->col_count > 0 && ImGui_TreeNodeEx("L columns", ImGuiTreeNodeFlags_DefaultOpen)) {
+		for (int ci = 0; ci < pv->col_count; ci++) {
+			LDL_Column* col = &t->columns[pv->col_start + ci];
+			ImGui_Text("  L_{%d,%d}: %dx%d block at L_factors[%d]", col->node, node, col->dn, pv->dk, col->L_offset);
+			if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+				ImGui_Text("L_{%d,%d} = E_{%d,%d} * K_%d^-1", col->node, node, col->node, node, node);
+				ImGui_Text("This block of the lower-triangular factor L");
+				ImGui_Text("encodes how constraint %d depends on %d.", col->node, node);
+				ImGui_EndTooltip();
+			}
+		}
+		ImGui_TreePop();
+	}
+
+	// Schur updates
+	if (pv->schur_count > 0 && ImGui_TreeNodeEx("Schur updates", ImGuiTreeNodeFlags_DefaultOpen)) {
+		for (int si = 0; si < pv->schur_count; si++) {
+			LDL_Schur* op = &t->schurs[pv->schur_start + si];
+			if (op->target_offset < 0) {
+				ImGui_Text("  S_{%d,%d} -= L_{%d,%d} * N_%d * L_{%d,%d}^T  (diagonal)", op->i, op->j, op->i, node, node, op->j, node);
+			} else {
+				ImGui_Text("  S_{%d,%d} -= L_{%d,%d} * N_%d * L_{%d,%d}^T", op->i, op->j, op->i, node, node, op->j, node);
+			}
+			if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+				ImGui_Text("Schur complement update");
+				ImGui_Text("When node %d is eliminated, nodes %d and %d", node, op->i, op->j);
+				if (op->i == op->j) {
+					ImGui_Text("get their diagonal block reduced.");
+				} else {
+					ImGui_Text("become coupled (fill-in if they weren't already).");
+				}
+				ImGui_Text("N_%d = original diagonal of node %d before factoring.", node, node);
+				ImGui_EndTooltip();
+			}
+		}
+		ImGui_TreePop();
+	}
+}
+
+static void draw_ldl_solve(WorldInternal* w, Island* isl, LDL_Cache* c)
+{
+	LDL_Topology* t = c->topo;
+	LDL_DebugInfo* info = &g_ldl_debug_info;
+	if (!t || !info->valid) { ImGui_Text("No solve data"); return; }
+	int n = info->n;
+
+	if (ImGui_TreeNodeEx("RHS (constraint violations)", ImGuiTreeNodeFlags_DefaultOpen)) {
+		for (int i = 0; i < c->bundle_count; i++) {
+			LDL_Bundle* bun = &c->bundles[i];
+			int oi = t->row_offset[i];
+			char lbl[16];
+			if (bun->count == 1) {
+				snprintf(lbl, sizeof(lbl), "%s%d", ldl_constraint_type_name(c->constraints[bun->start].type), i);
+			} else {
+				snprintf(lbl, sizeof(lbl), "B%d", i);
+			}
+			if (bun->dof == 3) {
+				ImGui_Text("  %s: (%.4f, %.4f, %.4f)", lbl, (double)info->lambda_pgs[oi], (double)info->lambda_pgs[oi+1], (double)info->lambda_pgs[oi+2]);
+			} else if (bun->dof == 1) {
+				ImGui_Text("  %s: %.4f", lbl, (double)info->lambda_pgs[oi]);
+			} else {
+				ImGui_Text("  %s: [%d DOF]", lbl, bun->dof);
+			}
+			if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+				ImGui_Text("Right-hand side: b = -(J*v + bias)");
+				ImGui_Text("Measures how much this constraint is violated.");
+				ImGui_Text("Zero = constraint perfectly satisfied.");
+				ImGui_EndTooltip();
+			}
+		}
+		ImGui_TreePop();
+	}
+
+	if (ImGui_TreeNodeEx("Lambda (exact impulses)", ImGuiTreeNodeFlags_DefaultOpen)) {
+		for (int i = 0; i < c->bundle_count; i++) {
+			LDL_Bundle* bun = &c->bundles[i];
+			int oi = t->row_offset[i];
+			char lbl[16];
+			if (bun->count == 1) {
+				snprintf(lbl, sizeof(lbl), "%s%d", ldl_constraint_type_name(c->constraints[bun->start].type), i);
+			} else {
+				snprintf(lbl, sizeof(lbl), "B%d", i);
+			}
+			if (bun->dof == 3) {
+				ImGui_Text("  %s: (%.4f, %.4f, %.4f)", lbl, (double)info->lambda_ldl[oi], (double)info->lambda_ldl[oi+1], (double)info->lambda_ldl[oi+2]);
+			} else if (bun->dof == 1) {
+				ImGui_Text("  %s: %.4f", lbl, (double)info->lambda_ldl[oi]);
+			} else {
+				ImGui_Text("  %s: [%d DOF]", lbl, bun->dof);
+			}
+			if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+				ImGui_Text("Lambda = K^-1 * b");
+				ImGui_Text("Exact constraint impulses from LDL solve.");
+				ImGui_Text("Applied to bodies to correct velocity errors.");
+				ImGui_EndTooltip();
+			}
+		}
+		ImGui_TreePop();
+	}
+
+	ImGui_SeparatorText("Correction Quality");
+	if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
+		ImGui_Text("How much did LDL improve over PGS?");
+		ImGui_Text("Small delta = PGS was accurate.");
+		ImGui_Text("Large delta = PGS was struggling.");
+		ImGui_EndTooltip();
+	}
+	float max_delta = 0, rms = 0;
+	for (int i = 0; i < n; i++) {
+		float d = fabsf(info->lambda_ldl[i] - info->lambda_pgs[i]);
+		if (d > max_delta) max_delta = d;
+		rms += d * d;
+	}
+	rms = sqrtf(rms / (n > 0 ? n : 1));
+	ImGui_Text("Max delta: %.4g  RMS: %.4g", (double)max_delta, (double)rms);
+}
+
+static void draw_ldl_inspector()
+{
+	g_ldl_hover_body = -1; // reset each frame
+
+	if (g_ldl_inspect_island < 0) return;
+	WorldInternal* w = (WorldInternal*)g_world.id;
+	if (!(w->island_gen[g_ldl_inspect_island] & 1)) { g_ldl_inspect_island = -1; return; }
+
+	Island* isl = &w->islands[g_ldl_inspect_island];
+	LDL_Cache* c = &isl->ldl;
+
+	ImGui_Begin("LDL Inspector", NULL, 0);
+
+	ImGui_Text("Island %d: %d bodies, %d joints, %s", g_ldl_inspect_island, isl->body_count, isl->joint_count, isl->awake ? "awake" : "sleeping");
+	ImGui_SameLine();
+	if (ImGui_Button("Deselect")) { g_ldl_inspect_island = -1; ImGui_End(); return; }
+
+	if (!c->topo) {
+		ImGui_Text("No LDL data (island has no joints or is sleeping)");
+		ImGui_End();
+		return;
+	}
+
+	if (ImGui_BeginTabBar("ldl_tabs", 0)) {
+		if (ImGui_BeginTabItem("Overview", NULL, 0)) {
+			draw_ldl_overview(w, isl, c);
+			ImGui_EndTabItem();
+		}
+		if (ImGui_BeginTabItem("Matrix", NULL, 0)) {
+			draw_ldl_matrix(w, isl, c);
+			ImGui_EndTabItem();
+		}
+		if (ImGui_BeginTabItem("Factorization", NULL, 0)) {
+			draw_ldl_factorization(w, isl, c);
+			ImGui_EndTabItem();
+		}
+		if (ImGui_BeginTabItem("Solve", NULL, 0)) {
+			draw_ldl_solve(w, isl, c);
+			ImGui_EndTabItem();
+		}
+		ImGui_EndTabBar();
+	}
+
+	ImGui_End();
+}
 
 static ImU32 ldl_heat_color(float val, float max_val)
 {
@@ -960,17 +1503,20 @@ static ImU32 ldl_heat_color(float val, float max_val)
 	return ImGui_GetColorU32ImVec4((ImVec4){r, g, b, 1.0f});
 }
 
-// Build a short label for joint j (e.g. "BS0", "BS1", "D0").
-static void ldl_joint_label(LDL_DebugInfo* info, int j, char* buf, int bufsize)
+// Build a short label for node j (e.g. "BS0", "D1", "B2" for multi-constraint bundle).
+static void ldl_node_label(LDL_DebugInfo* info, int j, char* buf, int bufsize)
 {
-	if (info->block_types[j] == JOINT_BALL_SOCKET)
+	if (info->block_types[j] == JOINT_BALL_SOCKET) {
 		snprintf(buf, bufsize, "BS%d", j);
-	else
-		snprintf(buf, bufsize, "D%d", j - info->bs_count);
+	} else if (info->block_types[j] == JOINT_DISTANCE) {
+		snprintf(buf, bufsize, "D%d", j);
+	} else {
+		snprintf(buf, bufsize, "B%d", j); // bundled node
+	}
 }
 
 // Find which joint owns a given DOF row index.
-static int ldl_joint_for_row(LDL_DebugInfo* info, int row)
+static int ldl_node_for_row(LDL_DebugInfo* info, int row)
 {
 	for (int j = info->joint_count - 1; j >= 0; j--)
 		if (row >= info->block_rows[j]) return j;
@@ -995,8 +1541,8 @@ static void draw_ldl_debug()
 
 	// --- Stats ---
 	ImGui_SeparatorText("Stats");
-	ImGui_Text("DOFs: %d  Joints: %d (BS:%d D:%d)", n, info->joint_count, info->bs_count, info->dist_count);
-	ldl_help("Total scalar degrees of freedom in the joint system.\nBS = ball socket (3 DOF each), D = distance (1 DOF each).");
+	ImGui_Text("DOFs: %d  Nodes: %d  Constraints: %d", n, info->joint_count, info->bs_count);
+	ldl_help("Total scalar degrees of freedom in the constraint system.\nNodes = graph nodes (bundles of same-body-pair constraints).\nConstraints = individual joints within bundles.");
 
 	float d_min = 1e18f, d_max = -1e18f;
 	for (int i = 0; i < n; i++) { if (info->D[i] < d_min) d_min = info->D[i]; if (info->D[i] > d_max) d_max = info->D[i]; }
@@ -1032,13 +1578,13 @@ static void draw_ldl_debug()
 
 		// Top labels (one per joint block, centered over its columns)
 		for (int j = 0; j < info->joint_count; j++) {
-			char lbl[8]; ldl_joint_label(info, j, lbl, sizeof(lbl));
+			char lbl[8]; ldl_node_label(info, j, lbl, sizeof(lbl));
 			float bx = ox + info->block_rows[j] * cell + info->block_dofs[j] * cell * 0.5f - 8;
 			ImDrawList_AddText(dl, (ImVec2){bx, cursor.y}, text_col, lbl);
 		}
 		// Left labels (one per joint block, centered vertically)
 		for (int j = 0; j < info->joint_count; j++) {
-			char lbl[8]; ldl_joint_label(info, j, lbl, sizeof(lbl));
+			char lbl[8]; ldl_node_label(info, j, lbl, sizeof(lbl));
 			float by = oy + info->block_rows[j] * cell + info->block_dofs[j] * cell * 0.5f - 6;
 			ImDrawList_AddText(dl, (ImVec2){cursor.x, by}, text_col, lbl);
 		}
@@ -1073,11 +1619,11 @@ static void draw_ldl_debug()
 
 		// Hover tooltip for matrix cell
 		if (hover_row >= 0 && ImGui_IsMouseHoveringRect((ImVec2){ox, oy}, (ImVec2){ox + n * cell, oy + n * cell})) {
-			int jr = ldl_joint_for_row(info, hover_row);
-			int jc = ldl_joint_for_row(info, hover_col);
+			int jr = ldl_node_for_row(info, hover_row);
+			int jc = ldl_node_for_row(info, hover_col);
 			char lr[8], lc[8];
-			ldl_joint_label(info, jr, lr, sizeof(lr));
-			ldl_joint_label(info, jc, lc, sizeof(lc));
+			ldl_node_label(info, jr, lr, sizeof(lr));
+			ldl_node_label(info, jc, lc, sizeof(lc));
 			int dr = hover_row - info->block_rows[jr];
 			int dc = hover_col - info->block_rows[jc];
 			const char* axes = "xyz";
@@ -1117,10 +1663,9 @@ static void draw_ldl_debug()
 				float y = cursor.y + dof_idx * row_h;
 				int ri = info->block_rows[j] + d;
 				char label[16];
-				if (info->block_types[j] == JOINT_BALL_SOCKET)
-					snprintf(label, sizeof(label), "BS%d.%c", j, "xyz"[d]);
-				else
-					snprintf(label, sizeof(label), "D%d", j - info->bs_count);
+				char node_lbl[8];
+				ldl_node_label(info, j, node_lbl, sizeof(node_lbl));
+				snprintf(label, sizeof(label), "%s.%d", node_lbl, d);
 				ImDrawList_AddText(dl, (ImVec2){cursor.x, y}, text_col, label);
 
 				// PGS bar (green)
@@ -1153,7 +1698,7 @@ void update()
 	// Camera input (skip when imgui wants the mouse)
 	ImGuiIO* io = ImGui_GetIO();
 	if (!io->WantCaptureMouse) {
-		if (io->MouseDown[0] && !g_mouse_dragging)
+		if (io->MouseDown[0] && !g_mouse_dragging && !io->KeyCtrl)
 			cam_orbit(io->MouseDelta.x, io->MouseDelta.y);
 		if (io->MouseDown[2])
 			cam_pan(io->MouseDelta.x, io->MouseDelta.y);
@@ -1176,6 +1721,36 @@ void update()
 		// Release if mouse moves over UI while dragging
 		mouse_end_drag();
 		g_mouse_dragging = 0;
+	}
+
+	// LDL Inspector: Ctrl+left-click picks island
+	if (!io->WantCaptureMouse && io->KeyCtrl && ImGui_IsMouseClicked(0)) {
+		v3 origin, dir;
+		screen_to_ray(io->MousePos.x, io->MousePos.y, &origin, &dir);
+		WorldInternal* w = (WorldInternal*)g_world.id;
+		int best_body = -1;
+		float best_t = 1e30f;
+		for (int i = 0; i < asize(g_draw_list); i++) {
+			DrawEntry* e = &g_draw_list[i];
+			int idx = handle_index(e->body);
+			v3 pos = body_get_position(g_world, e->body);
+			float radius = fmaxf(fmaxf(e->scale.x, e->scale.y), e->scale.z);
+			if (radius < 0.3f) radius = 0.3f; // minimum pick radius for small bodies
+			float t = ray_sphere_simple(origin, dir, pos, radius);
+			if (t >= 0 && t < best_t) {
+				best_t = t;
+				best_body = idx;
+			}
+		}
+		if (best_body >= 0) {
+			int isl = w->body_cold[best_body].island_id;
+			if (isl >= 0 && (w->island_gen[isl] & 1)) {
+				g_ldl_inspect_island = isl;
+				g_ldl_inspect_step = 0;
+			}
+		} else {
+			g_ldl_inspect_island = -1;
+		}
 	}
 
 	if (!g_paused || g_step_once) { world_step(g_world, 1.0f / 60.0f); g_step_once = false; }
@@ -1216,17 +1791,12 @@ void update()
 	if (g_solver_type != SOLVER_AVBD) {
 		if (ImGui_Checkbox("LDL Joints", &g_ldl_enabled))
 			dbg_w->ldl_enabled = g_ldl_enabled;
-		if (g_ldl_enabled) {
-			ImGui_SameLine();
-			ImGui_Checkbox("Debug##ldl", &g_ldl_debug);
-			g_ldl_debug_enabled = g_ldl_debug;
-		} else {
-			g_ldl_debug = false;
-			g_ldl_debug_enabled = 0;
+		if (!g_ldl_enabled) {
+			g_ldl_inspect_island = -1;
 		}
 	} else {
 		g_ldl_enabled = false;
-		g_ldl_debug = false;
+		g_ldl_inspect_island = -1;
 		dbg_w->ldl_enabled = 0;
 		g_ldl_debug_enabled = 0;
 	}
@@ -1255,10 +1825,18 @@ void update()
 		ImGui_Text("Islands: %d (%d sleeping)", n_islands, n_sleeping);
 	}
 	ImGui_Text("Bodies: %d", asize(g_draw_list));
+	if (g_ldl_inspect_island >= 0) {
+		ImGui_TextDisabled("Inspecting island %d", g_ldl_inspect_island);
+	} else {
+		ImGui_TextDisabled("Ctrl+click body to inspect island");
+	}
 	ImGui_End();
 
-	if (g_ldl_debug && g_ldl_enabled)
-		draw_ldl_debug();
+	{
+		extern int g_ldl_debug_island;
+		g_ldl_debug_island = (g_ldl_enabled && g_ldl_inspect_island >= 0) ? g_ldl_inspect_island : -1;
+		draw_ldl_inspector();
+	}
 }
 
 static void draw_body_mesh(int mesh, Body body, v3 sc, v3 color)
@@ -1325,10 +1903,40 @@ void draw()
 		}
 	}
 
-	// Draw all bodies from scene draw list
+	// Draw all bodies from scene draw list (with island highlighting)
+	WorldInternal* draw_w = (WorldInternal*)g_world.id;
 	for (int i = 0; i < asize(g_draw_list); i++) {
 		DrawEntry* e = &g_draw_list[i];
-		draw_body_mesh(e->mesh, e->body, e->scale, e->color);
+		v3 color = e->color;
+		if (g_ldl_inspect_island >= 0) {
+			int idx = handle_index(e->body);
+			int isl = draw_w->body_cold[idx].island_id;
+			if (isl == g_ldl_inspect_island) {
+				// Warm orange tint for selected island
+				color.x = color.x * 0.6f + 1.0f * 0.4f;
+				color.y = color.y * 0.6f + 0.6f * 0.4f;
+				color.z = color.z * 0.6f + 0.1f * 0.4f;
+				// Cyan override for hovered body (from matrix tooltip)
+				if (idx == g_ldl_hover_body) {
+					color = V3(0.0f, 0.9f, 1.0f);
+				}
+			}
+		}
+		draw_body_mesh(e->mesh, e->body, e->scale, color);
+	}
+
+	// Draw joint lines for selected island
+	if (g_ldl_inspect_island >= 0 && (draw_w->island_gen[g_ldl_inspect_island] & 1)) {
+		Island* isl = &draw_w->islands[g_ldl_inspect_island];
+		int ji = isl->head_joint;
+		while (ji >= 0) {
+			JointInternal* j = &draw_w->joints[ji];
+			int ba = j->body_a, bb = j->body_b;
+			v3 pa = draw_w->body_hot[ba].position;
+			v3 pb = draw_w->body_hot[bb].position;
+			render_debug_line(pa, pb, V3(1.0f, 0.7f, 0.2f));
+			ji = j->island_next;
+		}
 	}
 
 	// Scene-specific extras (joint lines, etc.)

@@ -873,6 +873,26 @@ int body_is_asleep(World world, Body body);
 int world_get_contacts(World world, const Contact** out);
 
 // -----------------------------------------------------------------------------
+// World queries.
+
+typedef struct RayHit
+{
+	Body body;
+	v3 point;       // world-space hit point
+	v3 normal;      // surface normal at hit (outward)
+	float distance; // distance along ray
+} RayHit;
+
+// Find all bodies whose AABB overlaps the query box.
+// Writes up to max_results body handles into results[]. Returns total hit count
+// (may exceed max_results -- use to size a retry).
+int world_query_aabb(World world, v3 lo, v3 hi, Body* results, int max_results);
+
+// Cast a ray and find the closest body hit. Direction is normalized internally.
+// Returns nonzero on hit; fills *hit (may be NULL for boolean-only test).
+int world_raycast(World world, v3 origin, v3 direction, float max_distance, RayHit* hit);
+
+// -----------------------------------------------------------------------------
 // Joints.
 
 typedef struct Joint { uint64_t id; } Joint;
@@ -5552,6 +5572,73 @@ static void bvh_cross_test(BVHTree* ta, BVHTree* tb, CK_DYNA BroadPair** pairs)
 	BVHNode* rb = &tb->nodes[tb->root];
 	bvh_cross_nodes(ta, ra, tb, rb, pairs);
 }
+
+// -----------------------------------------------------------------------------
+// AABB query: collect body indices whose node AABB overlaps the query box.
+
+static void bvh_query_aabb_node(BVHTree* t, int ni, AABB query, CK_DYNA int** results)
+{
+	BVHNode* n = &t->nodes[ni];
+	for (int s = 0; s < 2; s++) {
+		BVHChild* c = bvh_child(n, s);
+		if (bvh_child_is_empty(c)) continue;
+		if (!aabb_overlaps(query, bvh_child_aabb(c))) continue;
+		if (bvh_child_is_leaf(c))
+			apush(*results, t->leaves[bvh_child_leaf_idx(c)].body_idx);
+		else
+			bvh_query_aabb_node(t, c->index, query, results);
+	}
+}
+
+static void bvh_query_aabb(BVHTree* t, AABB query, CK_DYNA int** results)
+{
+	if (t->root == -1) return;
+	bvh_query_aabb_node(t, t->root, query, results);
+}
+
+// -----------------------------------------------------------------------------
+// Ray query: collect body indices whose node AABB is hit by a ray.
+
+// Ray-AABB slab test. Returns 1 on hit, sets *t_out to entry distance (>= 0).
+static int ray_aabb(v3 origin, v3 inv_dir, AABB box, float max_t, float* t_out)
+{
+	float tx1 = (box.min.x - origin.x) * inv_dir.x;
+	float tx2 = (box.max.x - origin.x) * inv_dir.x;
+	float tmin = fminf(tx1, tx2);
+	float tmax = fmaxf(tx1, tx2);
+	float ty1 = (box.min.y - origin.y) * inv_dir.y;
+	float ty2 = (box.max.y - origin.y) * inv_dir.y;
+	tmin = fmaxf(tmin, fminf(ty1, ty2));
+	tmax = fminf(tmax, fmaxf(ty1, ty2));
+	float tz1 = (box.min.z - origin.z) * inv_dir.z;
+	float tz2 = (box.max.z - origin.z) * inv_dir.z;
+	tmin = fmaxf(tmin, fminf(tz1, tz2));
+	tmax = fminf(tmax, fmaxf(tz1, tz2));
+	if (tmax < 0.0f || tmin > tmax || tmin > max_t) return 0;
+	*t_out = fmaxf(tmin, 0.0f);
+	return 1;
+}
+
+static void bvh_query_ray_node(BVHTree* t, int ni, v3 origin, v3 inv_dir, float max_t, CK_DYNA int** results)
+{
+	BVHNode* n = &t->nodes[ni];
+	for (int s = 0; s < 2; s++) {
+		BVHChild* c = bvh_child(n, s);
+		if (bvh_child_is_empty(c)) continue;
+		float t_hit;
+		if (!ray_aabb(origin, inv_dir, bvh_child_aabb(c), max_t, &t_hit)) continue;
+		if (bvh_child_is_leaf(c))
+			apush(*results, t->leaves[bvh_child_leaf_idx(c)].body_idx);
+		else
+			bvh_query_ray_node(t, c->index, origin, inv_dir, max_t, results);
+	}
+}
+
+static void bvh_query_ray(BVHTree* t, v3 origin, v3 inv_dir, float max_t, CK_DYNA int** results)
+{
+	if (t->root == -1) return;
+	bvh_query_ray_node(t, t->root, origin, inv_dir, max_t, results);
+}
 // See LICENSE for licensing info.
 // collision.c -- broadphase + narrowphase collision detection
 //
@@ -6679,6 +6766,171 @@ static void broadphase_and_collide(WorldInternal* w, InternalManifold** manifold
 	if (w->broadphase_type == BROADPHASE_BVH) broadphase_bvh(w, manifolds);
 	else broadphase_n2(w, manifolds);
 }
+
+// -----------------------------------------------------------------------------
+// Ray-shape intersection. Each returns 1 on hit, sets t_out and n_out.
+// Direction must be normalized. Rejects hits behind the origin (t < 0).
+
+static int ray_sphere(v3 ro, v3 rd, Sphere s, float max_t, float* t_out, v3* n_out)
+{
+	v3 oc = sub(ro, s.center);
+	float b = dot(oc, rd);
+	float c = dot(oc, oc) - s.radius * s.radius;
+	float disc = b * b - c;
+	if (disc < 0.0f) return 0;
+	float sq = sqrtf(disc);
+	float t = -b - sq;
+	if (t < 0.0f) t = -b + sq;
+	if (t < 0.0f || t > max_t) return 0;
+	*t_out = t;
+	*n_out = norm(sub(add(ro, scale(rd, t)), s.center));
+	return 1;
+}
+
+static int ray_capsule(v3 ro, v3 rd, Capsule cap, float max_t, float* t_out, v3* n_out)
+{
+	v3 ba = sub(cap.q, cap.p);
+	v3 oa = sub(ro, cap.p);
+	float baba = dot(ba, ba);
+	float bard = dot(ba, rd);
+	float baoa = dot(ba, oa);
+	float rdoa = dot(rd, oa);
+	float oaoa = dot(oa, oa);
+	float r2 = cap.radius * cap.radius;
+
+	// Infinite cylinder test.
+	float a = baba - bard * bard;
+	float b = baba * rdoa - baoa * bard;
+	float c = baba * oaoa - baoa * baoa - r2 * baba;
+	if (fabsf(a) > 1e-8f) {
+		float h = b * b - a * c;
+		if (h >= 0.0f) {
+			float t = (-b - sqrtf(h)) / a;
+			if (t >= 0.0f && t <= max_t) {
+				float y = baoa + t * bard;
+				if (y > 0.0f && y < baba) {
+					*t_out = t;
+					v3 hp = add(ro, scale(rd, t));
+					*n_out = norm(sub(hp, add(cap.p, scale(ba, y / baba))));
+					return 1;
+				}
+			}
+		}
+	}
+
+	// Hemisphere caps.
+	float best = max_t + 1.0f;
+	v3 best_n = {0};
+	int hit = 0;
+	for (int ci = 0; ci < 2; ci++) {
+		v3 center = ci == 0 ? cap.p : cap.q;
+		v3 oc2 = sub(ro, center);
+		float b2 = dot(oc2, rd);
+		float c2 = dot(oc2, oc2) - r2;
+		float d2 = b2 * b2 - c2;
+		if (d2 < 0.0f) continue;
+		float t = -b2 - sqrtf(d2);
+		if (t < 0.0f) t = -b2 + sqrtf(d2);
+		if (t < 0.0f || t >= best) continue;
+		float y = baoa + t * bard;
+		if (ci == 0 && y > 0.0f) continue;
+		if (ci == 1 && y < baba) continue;
+		best = t; hit = 1;
+		best_n = norm(sub(add(ro, scale(rd, t)), center));
+	}
+	if (hit && best <= max_t) { *t_out = best; *n_out = best_n; return 1; }
+	return 0;
+}
+
+static int ray_box(v3 ro, v3 rd, Box box, float max_t, float* t_out, v3* n_out)
+{
+	quat iq = inv(box.rotation);
+	v3 lo = rotate(iq, sub(ro, box.center));
+	v3 ld = rotate(iq, rd);
+	v3 e = box.half_extents;
+	float tmin = -1e30f, tmax = max_t;
+	v3 ln = {0};
+	float* lp = &lo.x, *dp = &ld.x, *ep = &e.x;
+	for (int ax = 0; ax < 3; ax++) {
+		if (fabsf(dp[ax]) < 1e-8f) {
+			if (lp[ax] < -ep[ax] || lp[ax] > ep[ax]) return 0;
+		} else {
+			float id = 1.0f / dp[ax];
+			float t1 = (-ep[ax] - lp[ax]) * id;
+			float t2 = ( ep[ax] - lp[ax]) * id;
+			int sw = t1 > t2;
+			if (sw) { float tmp = t1; t1 = t2; t2 = tmp; }
+			if (t1 > tmin) {
+				tmin = t1;
+				ln = V3(ax == 0 ? (sw ? 1.0f : -1.0f) : 0.0f,
+				        ax == 1 ? (sw ? 1.0f : -1.0f) : 0.0f,
+				        ax == 2 ? (sw ? 1.0f : -1.0f) : 0.0f);
+			}
+			tmax = fminf(tmax, t2);
+			if (tmin > tmax) return 0;
+		}
+	}
+	if (tmin < 0.0f) return 0;
+	*t_out = tmin;
+	*n_out = rotate(box.rotation, ln);
+	return 1;
+}
+
+static int ray_hull(v3 ro, v3 rd, ConvexHull ch, float max_t, float* t_out, v3* n_out)
+{
+	quat iq = inv(ch.rotation);
+	v3 inv_sc = rcp(ch.scale);
+	v3 lo = hmul(rotate(iq, sub(ro, ch.center)), inv_sc);
+	v3 ld = hmul(rotate(iq, rd), inv_sc);
+	const Hull* hull = ch.hull;
+	float t_enter = -1e30f, t_exit = max_t;
+	v3 enter_normal = {0};
+	for (int i = 0; i < hull->face_count; i++) {
+		v3 n = hull->planes[i].normal;
+		float d = hull->planes[i].offset;
+		float denom = dot(n, ld);
+		float num = d - dot(n, lo);
+		if (fabsf(denom) < 1e-8f) {
+			if (num < 0.0f) return 0;
+			continue;
+		}
+		float t = num / denom;
+		if (denom < 0.0f) {
+			if (t > t_enter) { t_enter = t; enter_normal = n; }
+		} else {
+			if (t < t_exit) t_exit = t;
+		}
+		if (t_enter > t_exit) return 0;
+	}
+	if (t_enter < 0.0f || t_enter > max_t) return 0;
+	*t_out = t_enter;
+	*n_out = norm(rotate(ch.rotation, hmul(enter_normal, inv_sc)));
+	return 1;
+}
+
+// Test a ray against all shapes on a body. Returns closest hit.
+static int ray_body(WorldInternal* w, int body_idx, v3 origin, v3 dir, float max_t, float* t_out, v3* n_out)
+{
+	BodyHot* bh = &w->body_hot[body_idx];
+	BodyCold* bc = &w->body_cold[body_idx];
+	float best_t = max_t;
+	v3 best_n = {0};
+	int found = 0;
+	for (int i = 0; i < asize(bc->shapes); i++) {
+		ShapeInternal* s = &bc->shapes[i];
+		float t; v3 n;
+		int hit = 0;
+		switch (s->type) {
+		case SHAPE_SPHERE:  hit = ray_sphere(origin, dir, make_sphere(bh, s), best_t, &t, &n); break;
+		case SHAPE_CAPSULE: hit = ray_capsule(origin, dir, make_capsule(bh, s), best_t, &t, &n); break;
+		case SHAPE_BOX:     hit = ray_box(origin, dir, make_box(bh, s), best_t, &t, &n); break;
+		case SHAPE_HULL:    hit = ray_hull(origin, dir, make_convex_hull(bh, s), best_t, &t, &n); break;
+		}
+		if (hit && t < best_t) { best_t = t; best_n = n; found = 1; }
+	}
+	if (found) { *t_out = best_t; *n_out = best_n; }
+	return found;
+}
 // inertia.c -- mass and inertia tensor computation
 
 // Multiply world-space inverse inertia tensor by a vector.
@@ -7782,7 +8034,7 @@ static void joints_post_solve(WorldInternal* w, SolverBallSocket* bs, int bs_cou
 static LDL_DebugInfo g_ldl_debug_info;
 int g_ldl_debug_enabled;
 
-#define SHATTER_THRESHOLD 9999 // shattering disabled pending star topology NaN debug
+#define SHATTER_THRESHOLD 9999 // TODO: shattering layer has velocity application bugs, debug separately
 #define SPLINTER_TARGET   6  // target DOF per splinter
 
 // =============================================================================
@@ -8045,6 +8297,7 @@ static void ldl_sparse_min_degree_order(LDL_Sparse* s)
 static void ldl_sparse_factorize(LDL_Sparse* s)
 {
 	int nc = s->node_count;
+	int eliminated[LDL_MAX_NODES] = {0};
 
 	for (int step = 0; step < nc; step++) {
 		int k = s->elim_order[step];
@@ -8062,13 +8315,13 @@ static void ldl_sparse_factorize(LDL_Sparse* s)
 			s->diag_D[k][0] = Dk[0];
 		}
 
-		// For each neighbor i of k: compute L_{i,k} = E_{i,k} * D_k^{-1}
+		// For each non-eliminated neighbor i of k: compute L_{i,k} = E_{i,k} * N_k^{-1}
 		int cnt_k = asize(s->adj[k]);
 		for (int ai = 0; ai < cnt_k; ai++) {
 			int i = s->adj[k][ai];
+			if (eliminated[i]) continue;
 			int di = s->dof[i];
 
-			// Get E_{i,k} (stored in adj[i]'s entry for k)
 			float* Eik = ldl_sparse_get_edge(s, i, k);
 			if (!Eik) continue;
 
@@ -8105,41 +8358,61 @@ static void ldl_sparse_factorize(LDL_Sparse* s)
 			}
 		}
 
-		// Schur complement: for each pair (i, j) of remaining neighbors of k:
-		// off(i,j) -= L_{i,k} * D_k * L_{j,k}^T
+		// Save original E_{i,k} before it was overwritten with L_{i,k}.
+		// We need E for the Schur complement: S_{i,j} -= E_{i,k} * L_{j,k}^T
+		// (since L_{i,k} = E_{i,k} * N_k^{-1}, so L_{i,k} * N_k * L_{j,k}^T = E_{i,k} * L_{j,k}^T)
+		// However E was already overwritten. Recover: E_{i,k} = L_{i,k} * N_k.
+		// For 1x1: E = L * D. For 3x3: E = L * (L_kk * diag(Dk) * L_kk^T).
+		// Simpler: use the identity S -= L_{i,k} * diag(Dk) * L_{j,k}^T ONLY when
+		// the diagonal block is truly diagonal (all 1x1 systems). For 3x3 blocks,
+		// we need: S -= L * (L_kk * diag(Dk) * L_kk^T) * L^T = L * N_k * L^T.
+		// But L * N_k = E. So the correct formula is S -= E * L^T, or equivalently
+		// S -= L * N_k * L^T. Let's compute N_k = L_kk * diag(Dk) * L_kk^T and use that.
+
+		// Reconstruct N_k from the factored form
+		float Nk[9]; // dk x dk
+		if (dk == 1) {
+			Nk[0] = Dk[0];
+		} else {
+			// N_k = L_kk * diag(Dk) * L_kk^T
+			// L_kk is in diag_data[k] lower triangle with unit diagonal
+			float Lkk[9] = {1, 0, 0, s->diag_data[k][3], 1, 0, s->diag_data[k][6], s->diag_data[k][7], 1};
+			// LDk = L * diag(Dk)
+			float LDk[9];
+			for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) LDk[r*3+c] = Lkk[r*3+c] * Dk[c];
+			// Nk = LDk * L^T
+			float LkkT[9];
+			block_transpose(Lkk, 3, 3, LkkT);
+			block_mul(LDk, 3, 3, LkkT, 3, Nk);
+		}
+
 		for (int ai = 0; ai < cnt_k; ai++) {
 			int i = s->adj[k][ai];
+			if (eliminated[i]) continue;
 			int di = s->dof[i];
 			float* Lik = ldl_sparse_get_edge(s, i, k);
 			if (!Lik) continue;
 
-			// L_{i,k} * D_k: multiply each column of L_{i,k} by corresponding D_k element
-			float LikDk[9]; // di x dk
-			memcpy(LikDk, Lik, di * dk * sizeof(float));
-			if (dk == 1) {
-				for (int r = 0; r < di; r++) LikDk[r] *= Dk[0];
-			} else {
-				for (int r = 0; r < di; r++)
-					for (int c = 0; c < dk; c++)
-						LikDk[r * dk + c] *= Dk[c];
-			}
+			// Compute L_{i,k} * N_k  (= E_{i,k} original)
+			float LikNk[9]; // di x dk
+			block_mul(Lik, di, dk, Nk, dk, LikNk);
 
 			for (int aj = ai; aj < cnt_k; aj++) {
 				int j = s->adj[k][aj];
+				if (eliminated[j]) continue;
 				int dj = s->dof[j];
 				float* Ljk = ldl_sparse_get_edge(s, j, k);
 				if (!Ljk) continue;
 
-				// product = L_{i,k} * D_k * L_{j,k}^T   (di x dj)
+				// product = E_{i,k} * L_{j,k}^T = LikNk * Ljk^T   (di x dj)
 				float LjkT[9];
 				block_transpose(Ljk, dj, dk, LjkT);
 				float product[9];
-				block_mul(LikDk, di, dk, LjkT, dj, product);
+				block_mul(LikNk, di, dk, LjkT, dj, product);
 
 				if (i == j) {
 					block_sub(s->diag_data[i], product, di, di);
 				} else {
-					// Update both (i,j) and (j,i) directions
 					float* Sij = ldl_sparse_get_or_create_edge(s, i, j);
 					block_sub(Sij, product, di, dj);
 					float* Sji = ldl_sparse_get_edge(s, j, i);
@@ -8151,6 +8424,8 @@ static void ldl_sparse_factorize(LDL_Sparse* s)
 				}
 			}
 		}
+
+		eliminated[k] = 1;
 	}
 }
 
@@ -8657,105 +8932,7 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 		}
 	}
 
-	// Solve: use dense fallback for now (sparse solve has numerical issues with star topologies)
-	// TODO: debug sparse solve for complete constraint graphs
-	{
-		// Rebuild dense A from the pre-factorize sparse structure
-		// (sp was already factorized, so we can't read A from it. Rebuild from scratch.)
-		float* A_dense = CK_ALLOC(n * n * sizeof(float));
-		memset(A_dense, 0, n * n * sizeof(float));
-
-		// Diagonal
-		for (int i = 0; i < jc; i++) {
-			LDL_Block* blk = &c->blocks[i];
-			int oi = sp->row_offset[i], di = sp->dof[i];
-			float K[9];
-			if (blk->is_synthetic) {
-				BodyHot* ba = ldl_get_body(w, c, blk->body_a);
-				BodyHot* bb = ldl_get_body(w, c, blk->body_b);
-				ldl_ball_socket_K(ba, bb, V3(0,0,0), V3(0,0,0), 0.0f, K);
-			} else if (blk->type == JOINT_BALL_SOCKET) {
-				SolverBallSocket* s = &sol_bs[blk->solver_idx];
-				BodyHot* ba = ldl_get_body(w, c, blk->body_a);
-				BodyHot* bb = ldl_get_body(w, c, blk->body_b);
-				ldl_ball_socket_K(ba, bb, s->r_a, s->r_b, s->softness, K);
-			} else {
-				SolverDistance* s = &sol_dist[blk->solver_idx];
-				BodyHot* ba = ldl_get_body(w, c, blk->body_a);
-				BodyHot* bb = ldl_get_body(w, c, blk->body_b);
-				float inv_m = ba->inv_mass + bb->inv_mass;
-				float k = inv_m + dot(cross(inv_inertia_mul(ba->rotation, ba->inv_inertia_local, cross(s->r_a, s->axis)), s->r_a), s->axis) + dot(cross(inv_inertia_mul(bb->rotation, bb->inv_inertia_local, cross(s->r_b, s->axis)), s->r_b), s->axis) + s->softness;
-				K[0] = k;
-			}
-			for (int r = 0; r < di; r++)
-				for (int cc = 0; cc < di; cc++)
-					A_dense[(oi+r)*n + oi+cc] = K[r*di + cc];
-		}
-
-		// Off-diagonal via body adjacency
-		int real_bc = asize(w->body_hot);
-		int total_bc = real_bc + c->virtual_body_count;
-		CK_DYNA int** ba2 = CK_ALLOC(total_bc * sizeof(int*));
-		memset(ba2, 0, total_bc * sizeof(int*));
-		for (int i = 0; i < jc; i++) { apush(ba2[c->blocks[i].body_a], i); apush(ba2[c->blocks[i].body_b], i); }
-		for (int b = 0; b < total_bc; b++) {
-			int cnt = asize(ba2[b]);
-			if (cnt < 2) continue;
-			BodyHot* B = ldl_get_body(w, c, b);
-			for (int ii = 0; ii < cnt; ii++) for (int jj2 = ii + 1; jj2 < cnt; jj2++) {
-				int bi = ba2[b][ii], bj = ba2[b][jj2];
-				LDL_Block* bi2 = &c->blocks[bi], *bj2 = &c->blocks[bj];
-				float si2 = (b == bi2->body_b) ? 1.0f : -1.0f;
-				float sj2 = (b == bj2->body_b) ? 1.0f : -1.0f;
-				float sign = si2 * sj2;
-				v3 ri = V3(0,0,0), rj2 = V3(0,0,0);
-				if (!bi2->is_synthetic) { if (bi2->type == JOINT_BALL_SOCKET) ri = (b == bi2->body_b) ? sol_bs[bi2->solver_idx].r_b : sol_bs[bi2->solver_idx].r_a; else ri = (b == bi2->body_b) ? sol_dist[bi2->solver_idx].r_b : sol_dist[bi2->solver_idx].r_a; }
-				if (!bj2->is_synthetic) { if (bj2->type == JOINT_BALL_SOCKET) rj2 = (b == bj2->body_b) ? sol_bs[bj2->solver_idx].r_b : sol_bs[bj2->solver_idx].r_a; else rj2 = (b == bj2->body_b) ? sol_dist[bj2->solver_idx].r_b : sol_dist[bj2->solver_idx].r_a; }
-				int di = sp->dof[bi], dj = sp->dof[bj];
-				int oi = sp->row_offset[bi], oj = sp->row_offset[bj];
-				if (di == 3 && dj == 3) {
-					float blk[9];
-					ldl_compute_off_diag_bs_bs(B, ri, rj2, sign, blk);
-					for (int r = 0; r < 3; r++) for (int cc = 0; cc < 3; cc++) { A_dense[(oi+r)*n+oj+cc] += blk[r*3+cc]; A_dense[(oj+cc)*n+oi+r] += blk[r*3+cc]; }
-				} else if (di == 3 && dj == 1) {
-					float blk[3];
-					ldl_compute_off_diag_bs_dist(B, ri, rj2, sol_dist[bj2->solver_idx].axis, sign, blk);
-					for (int r = 0; r < 3; r++) { A_dense[(oi+r)*n+oj] += blk[r]; A_dense[oj*n+oi+r] += blk[r]; }
-				} else if (di == 1 && dj == 3) {
-					float blk[3];
-					ldl_compute_off_diag_bs_dist(B, rj2, ri, sol_dist[bi2->solver_idx].axis, sign, blk);
-					for (int r = 0; r < 3; r++) { A_dense[(oj+r)*n+oi] += blk[r]; A_dense[oi*n+oj+r] += blk[r]; }
-				} else {
-					float val = ldl_compute_off_diag_dist_dist(B, ri, rj2, sol_dist[bi2->solver_idx].axis, sol_dist[bj2->solver_idx].axis, sign);
-					A_dense[oi*n+oj] += val; A_dense[oj*n+oi] += val;
-				}
-			}
-		}
-		for (int b = 0; b < total_bc; b++) afree(ba2[b]);
-		CK_FREE(ba2);
-
-		// Dense LDL solve
-		float* D_dense = CK_ALLOC(n * sizeof(float));
-		// In-place LDL on A_dense
-		for (int j = 0; j < n; j++) {
-			float dj = A_dense[j*n+j];
-			for (int k = 0; k < j; k++) dj -= A_dense[j*n+k]*A_dense[j*n+k]*D_dense[k];
-			D_dense[j] = fabsf(dj) > 1e-12f ? dj : 1e-12f;
-			float inv_dj = 1.0f / D_dense[j];
-			for (int i = j+1; i < n; i++) {
-				float lij = A_dense[i*n+j];
-				for (int k = 0; k < j; k++) lij -= A_dense[i*n+k]*A_dense[j*n+k]*D_dense[k];
-				A_dense[i*n+j] = lij * inv_dj;
-			}
-		}
-		// Solve
-		for (int i = 0; i < n; i++) { float s = rhs[i]; for (int k = 0; k < i; k++) s -= A_dense[i*n+k]*lambda[k]; lambda[i] = s; }
-		for (int i = 0; i < n; i++) lambda[i] /= D_dense[i];
-		for (int i = n-1; i >= 0; i--) { float s = lambda[i]; for (int k = i+1; k < n; k++) s -= A_dense[k*n+i]*lambda[k]; lambda[i] = s; }
-
-		CK_FREE(A_dense);
-		CK_FREE(D_dense);
-	}
+	ldl_sparse_solve(sp, rhs, lambda);
 
 
 	// Debug
@@ -10544,6 +10721,81 @@ int world_get_contacts(World world, const Contact** out)
 	WorldInternal* w = (WorldInternal*)world.id;
 	*out = w->debug_contacts;
 	return asize(w->debug_contacts);
+}
+
+// -----------------------------------------------------------------------------
+// World queries.
+
+int world_query_aabb(World world, v3 lo, v3 hi, Body* results, int max_results)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	AABB query = { lo, hi };
+	CK_DYNA int* candidates = NULL;
+	if (w->broadphase_type == BROADPHASE_BVH) {
+		bvh_query_aabb(w->bvh_dynamic, query, &candidates);
+		bvh_query_aabb(w->bvh_static, query, &candidates);
+	} else {
+		int count = asize(w->body_hot);
+		for (int i = 0; i < count; i++) {
+			if (!split_alive(w->body_gen, i)) continue;
+			if (asize(w->body_cold[i].shapes) == 0) continue;
+			apush(candidates, i);
+		}
+	}
+	int total = 0;
+	for (int i = 0; i < asize(candidates); i++) {
+		int idx = candidates[i];
+		AABB b = body_aabb(&w->body_hot[idx], &w->body_cold[idx]);
+		if (!aabb_overlaps(query, b)) continue;
+		if (total < max_results)
+			results[total] = split_handle(Body, w->body_gen, idx);
+		total++;
+	}
+	afree(candidates);
+	return total;
+}
+
+int world_raycast(World world, v3 origin, v3 direction, float max_distance, RayHit* hit)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	float dl = len(direction);
+	if (dl < 1e-12f) return 0;
+	v3 dir = scale(direction, 1.0f / dl);
+	v3 inv_dir = V3(1.0f / dir.x, 1.0f / dir.y, 1.0f / dir.z);
+
+	CK_DYNA int* candidates = NULL;
+	if (w->broadphase_type == BROADPHASE_BVH) {
+		bvh_query_ray(w->bvh_dynamic, origin, inv_dir, max_distance, &candidates);
+		bvh_query_ray(w->bvh_static, origin, inv_dir, max_distance, &candidates);
+	} else {
+		int count = asize(w->body_hot);
+		for (int i = 0; i < count; i++) {
+			if (!split_alive(w->body_gen, i)) continue;
+			if (asize(w->body_cold[i].shapes) == 0) continue;
+			apush(candidates, i);
+		}
+	}
+
+	float best_t = max_distance;
+	v3 best_n = {0};
+	int best_idx = -1;
+	for (int i = 0; i < asize(candidates); i++) {
+		int idx = candidates[i];
+		float t; v3 n;
+		if (ray_body(w, idx, origin, dir, best_t, &t, &n)) {
+			best_t = t; best_n = n; best_idx = idx;
+		}
+	}
+	afree(candidates);
+
+	if (best_idx < 0) return 0;
+	if (hit) {
+		hit->body = split_handle(Body, w->body_gen, best_idx);
+		hit->point = add(origin, scale(dir, best_t));
+		hit->normal = best_n;
+		hit->distance = best_t;
+	}
+	return 1;
 }
 
 #endif // NUDGE_IMPLEMENTATION
