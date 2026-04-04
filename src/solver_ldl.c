@@ -1425,7 +1425,9 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 	// Apply delta correction to REAL bodies directly, bypassing virtual shards.
 	// Synthetic weld deltas are skipped -- they only exist to couple shards in the
 	// factorization and have no physical meaning for the real bodies.
-	// s->lambda accumulates both PGS + LDL for next frame's warm-start.
+	// LDL deltas are NOT accumulated into s->lambda (PGS warm-start).
+	// With shattering, the delta is computed on a mass-split system and would
+	// pollute the PGS warm-start, causing feedback instability.
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
 		if (con->is_synthetic) continue;
@@ -1433,12 +1435,10 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 		if (con->type == JOINT_BALL_SOCKET) {
 			SolverBallSocket* s = &sol_bs[con->solver_idx];
 			v3 delta = V3(lambda[oi], lambda[oi+1], lambda[oi+2]);
-			s->lambda = add(s->lambda, delta);
 			apply_impulse(&w->body_hot[s->body_a], &w->body_hot[s->body_b], s->r_a, s->r_b, delta);
 		} else if (con->type == JOINT_DISTANCE) {
 			SolverDistance* s = &sol_dist[con->solver_idx];
 			float delta = lambda[oi];
-			s->lambda += delta;
 			apply_impulse(&w->body_hot[s->body_a], &w->body_hot[s->body_b], s->r_a, s->r_b, scale(s->axis, delta));
 		}
 	}
