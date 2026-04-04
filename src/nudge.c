@@ -221,12 +221,7 @@ void world_step(World world, float dt)
 				if (sol_dist[i].softness == 0.0f) sol_dist[i].bias = 0.0f;
 		}
 		if (w->ldl_enabled) {
-			// LDL uses a lower Baumgarte gain than PGS. The direct solver applies
-			// the full bias correction in one shot per substep, so a gain of 0.2
-			// overshoots on topologies where impulses compound at shared bodies
-			// (hub+chain). 0.05 gives stable convergence across all topologies.
-			float ldl_baumgarte = 0.05f;
-			float ptv = sub_dt > 0.0f ? ldl_baumgarte / sub_dt : 0.0f;
+			float ptv = sub_dt > 0.0f ? SOLVER_BAUMGARTE / sub_dt : 0.0f;
 			for (int i = 0; i < asize(sol_bs); i++) {
 				if (sol_bs[i].softness != 0.0f) continue;
 				SolverBallSocket* s = &sol_bs[i];
