@@ -40,6 +40,7 @@ This is in early WIP state.
 - Swept physics step and collision detection
 - Serialize/inspect tool (maybe remote visualizer??)
 - Experiments! Different solvers, new constraint designs/formulations, new broadphase exploration, or CCD techniques
+- Rollback
 
 ## Building
 
