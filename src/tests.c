@@ -4028,20 +4028,42 @@ static void test_ldl_energy_comprehensive()
 		if (r > worst) worst = r;
 	}
 
-	int total_scenarios = 18;
-	int passing = 0;
-	if (r_chain5 <= 1.0f) passing++;
-	if (r_chain10 <= 1.0f) passing++;
-	if (r_hub6 <= 1.0f) passing++;
-	if (r_hub8 <= 1.0f) passing++;
-	if (r_hc <= 1.0f) passing++;
-	if (r_hc2 <= 1.0f) passing++;
-	if (r_cv5 <= 1.0f) passing++;
-	if (r_cv3 <= 1.0f) passing++;
-	if (worst <= 1.0f) passing = total_scenarios; // if worst passes, all pass
+	// Hub with 16 arms (very high fan-out)
+	{
+		float r = energy_scenario_hub(16, frames);
+		printf("  [energy-ldl] hub_16: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+	}
+
+	// Triple chain: 3 chains radiating from one anchor
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 12, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		CK_DYNA Body* bodies = NULL;
+		for (int ch = 0; ch < 3; ch++) {
+			float angle = (float)ch * 2.0f * 3.14159265f / 3.0f;
+			v3 dir = norm(V3(cosf(angle), -1, sinf(angle)));
+			Body prev = anchor;
+			for (int i = 0; i < 5; i++) {
+				Body b = create_body(w, (BodyParams){ .position = add(V3(0,12,0), scale(dir, (i+1)*0.8f)), .rotation = quat_identity(), .mass = 1.0f });
+				body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+				create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = b, .local_offset_a = scale(dir, 0.4f), .local_offset_b = scale(dir, -0.4f) });
+				apush(bodies, b);
+				prev = b;
+			}
+		}
+		float r = energy_growth(w, bodies, asize(bodies), frames);
+		printf("  [energy-ldl] triple_chain: growth=%.4f\n", (double)r);
+		if (r > worst) worst = r;
+		afree(bodies);
+		destroy_world(w);
+	}
 
 	printf("  [energy-ldl] worst_growth=%.4f\n", (double)worst);
-	printf("  [energy-ldl] scenarios_passing=%d/%d\n", worst <= 1.0f ? total_scenarios : 0, total_scenarios);
 
 	TEST_BEGIN("LDL energy: no energy growth (ratio <= 1.0)");
 	TEST_ASSERT(worst <= 1.05f);
