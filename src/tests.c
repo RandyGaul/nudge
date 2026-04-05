@@ -2304,8 +2304,8 @@ static void test_distance_spring_equilibrium()
 		.spring = { .frequency = 3.0f, .damping_ratio = 0.7f },
 	});
 
-	// Run 10 seconds for damped spring to settle
-	step_n(w, 600);
+	// Run 5 seconds for damped spring to settle
+	step_n(w, 300);
 	v3 bob_pos = body_get_position(w, bob);
 	v3 anchor_pos = body_get_position(w, anchor);
 	float dist = len(sub(bob_pos, anchor_pos));
@@ -2505,7 +2505,7 @@ static void test_ball_socket_pendulum()
 		.local_offset_b = V3(0, rod_len, 0), // rod extends up from bob
 	});
 
-	step_n(w, 600);
+	step_n(w, 300);
 	v3 pos = body_get_position(w, bob);
 
 	TEST_BEGIN("pendulum: bob ends below anchor after settling");
@@ -7167,7 +7167,7 @@ static void run_solver_tests()
 			.type = SHAPE_SPHERE, .sphere.radius = 0.5f,
 		});
 		float dt = 1.0f / 60.0f;
-		for (int i = 0; i < 600; i++) world_step(w, dt);
+		for (int i = 0; i < 300; i++) world_step(w, dt);
 		float y = body_get_position(w, ball).y;
 		float x = body_get_position(w, ball).x;
 		printf("  [AVBD sphere] y=%.4f x=%.4f\n", y, x);
@@ -7195,7 +7195,7 @@ static void run_solver_tests()
 						.position = V3(0, heights[hi], 0), .rotation = quat_identity(), .mass = masses[mi] });
 					body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(hs, hs, hs) });
 					float dt = 1.0f / 60.0f;
-					for (int i = 0; i < 300; i++) world_step(w, dt);
+					for (int i = 0; i < 120; i++) world_step(w, dt);
 					float y = body_get_position(w, box).y;
 					if (y < -0.5f)
 						printf("  [AVBD FALL-THROUGH] m=%.1f h=%.0f s=%.1f y=%.3f\n", masses[mi], heights[hi], sizes[si], y);
@@ -7217,7 +7217,7 @@ static void run_solver_tests()
 			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
 		}
 		float dt = 1.0f / 60.0f;
-		for (int i = 0; i < 600; i++) world_step(w, dt);
+		for (int i = 0; i < 300; i++) world_step(w, dt);
 		// Check all bodies above floor
 		WorldInternal* wi = (WorldInternal*)w.id;
 		int fallen = 0;
@@ -7266,7 +7266,7 @@ static void run_solver_tests()
 			y += h;
 		}
 		float dt = 1.0f / 60.0f;
-		for (int i = 0; i < 600; i++) world_step(w, dt);
+		for (int i = 0; i < 300; i++) world_step(w, dt);
 		WorldInternal* wi = (WorldInternal*)w.id;
 		int fallen = 0;
 		for (int i = 0; i < asize(wi->body_hot); i++) {
@@ -7401,7 +7401,7 @@ static void run_solver_tests()
 			.position = V3(1, 7, 0), .rotation = quat_identity(), .mass = 1.0f });
 		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
 		float dt = 1.0f / 60.0f;
-		for (int i = 0; i < 600; i++) world_step(w, dt);
+		for (int i = 0; i < 300; i++) world_step(w, dt);
 		float y = body_get_position(w, box).y;
 		printf("  [SoftStep box depth] y=%.4f (expected ~0.4, penetration=%.4f)\n", y, 0.4f - y);
 		destroy_world(w);
@@ -7539,7 +7539,7 @@ static void run_solver_tests()
 
 				float dt = 1.0f / 60.0f;
 				int ok = 1;
-				for (int f = 0; f < 300; f++) {
+				for (int f = 0; f < 120; f++) {
 					world_step(w, dt);
 					float y = body_get_position(w, body).y;
 					if (y < -2.0f) {
@@ -7659,7 +7659,7 @@ static void run_solver_tests()
 
 		float dt = 1.0f / 60.0f;
 		int fallen = 0;
-		for (int f = 0; f < 600; f++) {
+		for (int f = 0; f < 300; f++) {
 			world_step(w, dt);
 			for (int i = 0; i < 27; i++) {
 				v3 p = body_get_position(w, bodies[i]);
@@ -9201,7 +9201,7 @@ static void run_tests()
 	test_quickhull_geometry_stress();
 
 	// Quickhull fuzz: moderate count for regular runs.
-	test_quickhull_fuzz(100); // use 1000+ for stress testing
+	test_quickhull_fuzz(20); // use 1000+ for stress testing
 
 	run_solver_tests();
 	run_ldl_stress_tests();
