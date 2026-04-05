@@ -3219,7 +3219,7 @@ static void test_ldl_solve_topo_vs_dense()
 	double diag_data[LDL_MAX_NODES][21] = {0}, diag_D[LDL_MAX_NODES][6] = {0};
 	CK_DYNA double* L_factors = NULL;
 	afit(L_factors, topo.L_factors_size); asetlen(L_factors, topo.L_factors_size);
-	memset(L_factors, 0, topo.L_factors_size * sizeof(float));
+	memset(L_factors, 0, topo.L_factors_size * sizeof(double));
 	for (int i = 0; i < nc; i++) for (int r = 0; r < 3; r++) for (int c2 = 0; c2 <= r; c2++) diag_data[i][LDL_TRI(r, c2)] = A[(i*3+r)*n + i*3+c2];
 	for (int i = 0; i < nc; i++) for (int j = i+1; j < nc; j++) for (int r = 0; r < 3; r++) for (int c2 = 0; c2 < 3; c2++) { L_factors[edge_off[i][j]+r*3+c2] = A[(i*3+r)*n+j*3+c2]; L_factors[edge_off[j][i]+r*3+c2] = A[(j*3+r)*n+i*3+c2]; }
 
@@ -3228,11 +3228,11 @@ static void test_ldl_solve_topo_vs_dense()
 		double Dk[6]; block_ldl(diag_data[k], Dk, dk); for (int d = 0; d < dk; d++) diag_D[k][d] = Dk[d];
 		// Back up edges before overwriting with L blocks
 		double edge_bk[LDL_MAX_NODES][36];
-		for (int ei = 0; ei < pv->col_count; ei++) { LDL_Column* en = &topo.columns[pv->col_start+ei]; memcpy(edge_bk[ei], &L_factors[en->L_offset], en->dn*dk*sizeof(float)); }
+		for (int ei = 0; ei < pv->col_count; ei++) { LDL_Column* en = &topo.columns[pv->col_start+ei]; memcpy(edge_bk[ei], &L_factors[en->L_offset], en->dn*dk*sizeof(double)); }
 		for (int ei = 0; ei < pv->col_count; ei++) {
 			LDL_Column* en = &topo.columns[pv->col_start+ei]; double* Eik = &L_factors[en->L_offset]; double Lik[36];
 			for (int col = 0; col < en->dn; col++) { double r2[6], s2[6]; for (int r = 0; r < dk; r++) r2[r] = Eik[col*dk+r]; block_solve(diag_data[k], Dk, r2, s2, dk); for (int r = 0; r < dk; r++) Lik[col*dk+r] = s2[r]; }
-			memcpy(Eik, Lik, en->dn*dk*sizeof(float));
+			memcpy(Eik, Lik, en->dn*dk*sizeof(double));
 		}
 		for (int si = 0; si < pv->schur_count; si++) {
 			LDL_Schur* op = &topo.schurs[pv->schur_start+si];
