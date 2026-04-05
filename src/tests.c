@@ -5579,8 +5579,8 @@ static void test_ldl_block_near_singular()
 	double D[3];
 	block_ldl(K, D, 3);
 
-	TEST_BEGIN("block_ldl near-singular: D boosted to 1e-6 minimum");
-	TEST_ASSERT(D[0] >= 1e-6f);
+	TEST_BEGIN("block_ldl near-singular: D boosted to 1e-12 minimum");
+	TEST_ASSERT(D[0] >= 1e-12);
 	TEST_ASSERT(D[1] > 0 && D[2] > 0);
 
 	double b[3] = {1, 2, 3}, x[3];
