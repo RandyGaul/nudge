@@ -91,10 +91,21 @@ int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = non
 // In-place NxN LDL^T factorize. L stored in lower triangle of A (unit diagonal), D separate.
 static void block_ldl(float* A, float* D, int n)
 {
+	// Track maximum original diagonal to set a relative pivot floor.
+	// This prevents near-zero pivots from producing huge L entries in
+	// overconstrained systems where Schur updates drive diagonals negative.
+	float max_diag = 0;
+	for (int j = 0; j < n; j++) {
+		float ad = fabsf(A[j * n + j]);
+		if (ad > max_diag) max_diag = ad;
+	}
+	float pivot_floor = max_diag * 1e-6f;
+	if (pivot_floor < 1e-12f) pivot_floor = 1e-12f;
+
 	for (int j = 0; j < n; j++) {
 		float dj = A[j * n + j];
 		for (int k = 0; k < j; k++) dj -= A[j * n + k] * A[j * n + k] * D[k];
-		D[j] = fabsf(dj) > 1e-12f ? dj : 1e-12f;
+		D[j] = fabsf(dj) > pivot_floor ? dj : pivot_floor;
 		float inv_dj = 1.0f / D[j];
 		for (int i = j + 1; i < n; i++) {
 			float lij = A[i * n + j];
@@ -1298,6 +1309,7 @@ static int ldl_cache_rebuild_blocks(LDL_Cache* c, WorldInternal* w, int island_i
 		if (j->type == JOINT_BALL_SOCKET) {
 			for (int i = 0; i < bs_count; i++) {
 				if (sol_bs[i].joint_idx == ji) {
+					if (sol_bs[i].softness != 0.0f) break; // soft joints handled by PGS only
 					LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b, .solver_idx = i };
 					apush(c->constraints, con);
 					c->n += 3;
@@ -1308,6 +1320,7 @@ static int ldl_cache_rebuild_blocks(LDL_Cache* c, WorldInternal* w, int island_i
 		} else if (j->type == JOINT_DISTANCE) {
 			for (int i = 0; i < dist_count; i++) {
 				if (sol_dist[i].joint_idx == ji) {
+					if (sol_dist[i].softness != 0.0f) break; // soft joints handled by PGS only
 					LDL_Constraint con = { .type = JOINT_DISTANCE, .dof = 1, .body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b, .solver_idx = i };
 					apush(c->constraints, con);
 					c->n += 1;
@@ -1343,21 +1356,33 @@ static void ldl_build_bundles(LDL_Cache* c)
 		c->constraints[j + 1] = tmp;
 	}
 
-	// Group consecutive constraints with same body pair
+	// Group consecutive constraints with same body pair.
+	// Split bundles that would exceed 6 DOF to stay within diag_data[i][36] (max 6x6).
 	int start = 0;
 	while (start < jc) {
 		int ba = c->constraints[start].body_a, bb = c->constraints[start].body_b;
 		int end = start + 1;
 		while (end < jc && c->constraints[end].body_a == ba && c->constraints[end].body_b == bb) end++;
-		int dof = 0;
-		for (int i = start; i < end; i++) {
-			c->constraints[i].bundle_idx = c->bundle_count;
-			c->constraints[i].bundle_offset = dof;
-			dof += c->constraints[i].dof;
+		// Emit one or more bundles, splitting if cumulative DOF > 6
+		int bstart = start;
+		while (bstart < end) {
+			int dof = 0;
+			int bend = bstart;
+			while (bend < end) {
+				int next_dof = dof + c->constraints[bend].dof;
+				if (next_dof > 6 && dof > 0) break; // split here (but always take at least one)
+				dof = next_dof;
+				bend++;
+			}
+			for (int i = bstart; i < bend; i++) {
+				c->constraints[i].bundle_idx = c->bundle_count;
+				c->constraints[i].bundle_offset = (i == bstart) ? 0 : c->constraints[i-1].bundle_offset + c->constraints[i-1].dof;
+			}
+			LDL_Bundle bundle = { .body_a = ba, .body_b = bb, .dof = dof, .start = bstart, .count = bend - bstart };
+			apush(c->bundles, bundle);
+			c->bundle_count++;
+			bstart = bend;
 		}
-		LDL_Bundle bundle = { .body_a = ba, .body_b = bb, .dof = dof, .start = start, .count = end - start };
-		apush(c->bundles, bundle);
-		c->bundle_count++;
 		start = end;
 	}
 }
@@ -1417,20 +1442,42 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 			BodyHot* a = ldl_get_body(w, c, con->body_a);
 			BodyHot* b = ldl_get_body(w, c, con->body_b);
 			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			// Pure velocity residual with regularization damping: r = -dv - reg*lambda
-			rhs[oi] = -dv.x - LDL_COMPLIANCE * s->lambda.x;
-			rhs[oi+1] = -dv.y - LDL_COMPLIANCE * s->lambda.y;
-			rhs[oi+2] = -dv.z - LDL_COMPLIANCE * s->lambda.z;
+			// Clamp warm-started lambda used in regularization term. If the joint was
+			// stretched far, lambda may have grown huge from repeated impulses without
+			// position recovery. Using a huge lambda in the RHS produces garbage output.
+			v3 lam = s->lambda;
+			float lam_mag = len(lam);
+			if (lam_mag > 1e4f) lam = scale(lam, 1e4f / lam_mag);
+			rhs[oi]   = -dv.x - LDL_COMPLIANCE * lam.x;
+			rhs[oi+1] = -dv.y - LDL_COMPLIANCE * lam.y;
+			rhs[oi+2] = -dv.z - LDL_COMPLIANCE * lam.z;
 		} else if (con->type == JOINT_DISTANCE) {
 			SolverDistance* s = &sol_dist[con->solver_idx];
 			BodyHot* a = ldl_get_body(w, c, con->body_a);
 			BodyHot* b = ldl_get_body(w, c, con->body_b);
 			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			rhs[oi] = -dot(dv, s->axis) - LDL_COMPLIANCE * s->lambda;
+			float lam = s->lambda;
+			if (lam > 1e4f) lam = 1e4f; else if (lam < -1e4f) lam = -1e4f;
+			rhs[oi] = -dot(dv, s->axis) - LDL_COMPLIANCE * lam;
 		}
 	}
 
 	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, rhs, lambda);
+
+	// Safety: if the solve produced NaN/inf (e.g. from a severely overconstrained
+	// or rank-deficient system), discard the correction to prevent simulation blow-up.
+	int solve_valid = 1;
+	for (int i = 0; i < n; i++) {
+		if (!(lambda[i] == lambda[i]) || lambda[i] > 1e15f || lambda[i] < -1e15f) {
+			solve_valid = 0;
+			break;
+		}
+	}
+	if (!solve_valid) {
+		CK_FREE(rhs);
+		CK_FREE(lambda);
+		return;
+	}
 
 	// Debug
 	int dbg = g_ldl_debug_enabled && n <= LDL_MAX_DOF;

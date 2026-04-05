@@ -160,7 +160,7 @@ void world_step(World world, float dt)
 	SolverDistance*    sol_dist = NULL;
 	joints_pre_solve(w, sub_dt, &sol_bs, &sol_dist);
 
-	// LDL mode: zero bias for hard joints -- no Baumgarte, position correction via NGS.
+	// LDL mode: zero bias for hard joints -- position correction via split-impulse NGS.
 	if (w->ldl_enabled) {
 		for (int i = 0; i < asize(sol_bs); i++)
 			if (sol_bs[i].softness == 0.0f) sol_bs[i].bias = V3(0, 0, 0);

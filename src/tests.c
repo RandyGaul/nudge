@@ -2759,6 +2759,151 @@ static void test_ldl_heavy_chain()
 	TEST_ASSERT(gap_no_ldl < 10.0f); // PGS stretches badly with 100:1 ratio, that's expected
 }
 
+// Simulate mouse yank on heavy chain: attach a soft spring joint to the end
+// body, teleport the anchor far away, and step. The soft joint must NOT enter
+// the LDL factorization -- if it does, LDL over-corrects and the chain diverges
+// to NaN.
+static void test_ldl_mouse_yank_chain()
+{
+	int chain_len = 10;
+	float link_len = 0.8f;
+	v3 off_a = V3(link_len * 0.5f, 0, 0);
+	v3 off_b = V3(-link_len * 0.5f, 0, 0);
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	Body chain[10];
+	Body prev = anchor;
+	for (int i = 0; i < chain_len; i++) {
+		float mass = (i == chain_len - 1) ? 100.0f : 1.0f;
+		chain[i] = create_body(w, (BodyParams){ .position = V3((i + 1) * link_len, 10, 0), .rotation = quat_identity(), .mass = mass });
+		body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+		prev = chain[i];
+	}
+
+	// Let chain settle
+	step_n(w, 120);
+
+	// Simulate mouse grab: static anchor + soft spring to end of chain
+	Body mouse_anchor = create_body(w, (BodyParams){ .position = body_get_position(w, chain[chain_len - 1]), .rotation = quat_identity(), .mass = 0 });
+	Joint mouse_joint = create_ball_socket(w, (BallSocketParams){
+		.body_a = mouse_anchor,
+		.body_b = chain[chain_len - 1],
+		.local_offset_a = V3(0, 0, 0),
+		.local_offset_b = V3(0, 0, 0),
+		.spring = { .frequency = 5.0f, .damping_ratio = 0.7f },
+	});
+
+	// Simulate continuous mouse drag: move anchor progressively farther each frame
+	int anchor_idx = handle_index(mouse_anchor);
+	for (int f = 0; f < 120; f++) {
+		float t = (float)f / 120.0f;
+		wi->body_hot[anchor_idx].position = V3(10 * t, 10 + 20 * t, 0);
+		world_step(w, 1.0f / 60.0f);
+		// Check for NaN during yank
+		v3 p = body_get_position(w, chain[chain_len - 1]);
+		if (!(p.x == p.x) || !(p.y == p.y) || !(p.z == p.z)) {
+			printf("  [LDL mouse yank] NaN at frame %d during drag\n", f);
+			break;
+		}
+	}
+
+	// Release mouse
+	destroy_joint(w, mouse_joint);
+	destroy_body(w, mouse_anchor);
+
+	// Let chain recover
+	step_n(w, 120);
+
+	// Verify chain didn't blow up: positions must be finite and gaps reasonable
+	int finite = 1;
+	float max_gap = 0;
+	prev = anchor;
+	for (int i = 0; i < chain_len; i++) {
+		v3 p = body_get_position(w, chain[i]);
+		if (!(p.x == p.x) || !(p.y == p.y) || !(p.z == p.z)) finite = 0;
+		v3 v = wi->body_hot[handle_index(chain[i])].velocity;
+		if (!(v.x == v.x) || !(v.y == v.y) || !(v.z == v.z)) finite = 0;
+		float gap = anchor_distance(w, prev, off_a, chain[i], off_b);
+		if (gap > max_gap) max_gap = gap;
+		prev = chain[i];
+	}
+
+	printf("  [LDL mouse yank] finite=%d max_gap=%.4f\n", finite, max_gap);
+
+	TEST_BEGIN("LDL mouse yank: no NaN after yank");
+	TEST_ASSERT(finite);
+
+	TEST_BEGIN("LDL mouse yank: chain recovers (gap < 0.5)");
+	TEST_ASSERT(max_gap < 0.5f);
+
+	destroy_world(w);
+}
+
+// Vertical heavy chain drop: chain starts vertical with heavy ball at bottom.
+// Tests that LDL handles the extreme mass-ratio stress when gravity is aligned
+// with the chain axis. The user reported this causes NaN divergence.
+static void test_ldl_vertical_heavy_chain_drop()
+{
+	int chain_len = 10;
+	float link_len = 0.8f;
+	v3 off_a = V3(0, -link_len * 0.5f, 0); // vertical chain: offsets along Y
+	v3 off_b = V3(0, link_len * 0.5f, 0);
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	Body chain[10];
+	Body prev = anchor;
+	for (int i = 0; i < chain_len; i++) {
+		float mass = (i == chain_len - 1) ? 100.0f : 1.0f;
+		chain[i] = create_body(w, (BodyParams){ .position = V3(0, 10 - (i + 1) * link_len, 0), .rotation = quat_identity(), .mass = mass });
+		body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+		prev = chain[i];
+	}
+
+	int nan_frame = -1;
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, chain[chain_len - 1]);
+		if (!(p.x == p.x) || !(p.y == p.y) || !(p.z == p.z)) {
+			nan_frame = f;
+			break;
+		}
+	}
+
+	float max_gap = 0;
+	if (nan_frame < 0) {
+		prev = anchor;
+		for (int i = 0; i < chain_len; i++) {
+			float gap = anchor_distance(w, prev, off_a, chain[i], off_b);
+			if (gap > max_gap) max_gap = gap;
+			prev = chain[i];
+		}
+	}
+
+	printf("  [LDL vertical drop] nan_frame=%d max_gap=%.4f\n", nan_frame, max_gap);
+
+	TEST_BEGIN("LDL vertical heavy chain: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL vertical heavy chain: gap < 0.5");
+	TEST_ASSERT(max_gap < 0.5f);
+
+	destroy_world(w);
+}
+
 // Two independent chains hanging from separate anchors. Each should get its own
 // island and LDL_Cache. Verify both chains hold tight simultaneously.
 static void test_ldl_two_independent_chains()
@@ -5483,6 +5628,1147 @@ static void test_ldl_delta_correction_accuracy()
 	destroy_world(w);
 }
 
+// -----------------------------------------------------------------------------
+// LDL stress / failure-case tests: push the system into poorly configured or
+// degenerate scenarios to expose erratic behaviors or crashes.
+// -----------------------------------------------------------------------------
+
+// Coincident anchors: both ends of a ball-socket at the exact same local offset.
+// This makes the lever arm zero, so the effective mass K degenerates (no angular
+// contribution). The factorization should still produce finite results due to
+// regularization (LDL_COMPLIANCE).
+static void test_ldl_stress_coincident_anchors()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	// Place two bodies at the same position as the anchor, joint offsets at origin
+	Body a = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body b = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	// Zero-length lever arms
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0) });
+	create_ball_socket(w, (BallSocketParams){ .body_a = a, .body_b = b, .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0) });
+
+	step_n(w, 300);
+
+	v3 pa = body_get_position(w, a);
+	v3 pb = body_get_position(w, b);
+	printf("  [coincident anchors] a=(%.2f,%.2f,%.2f) b=(%.2f,%.2f,%.2f)\n",
+		(double)pa.x, (double)pa.y, (double)pa.z, (double)pb.x, (double)pb.y, (double)pb.z);
+
+	TEST_BEGIN("LDL stress coincident anchors: bodies valid (no NaN)");
+	TEST_ASSERT(is_valid(pa) && is_valid(pb));
+
+	TEST_BEGIN("LDL stress coincident anchors: no explosion");
+	TEST_ASSERT(pa.y > -50.0f && pb.y > -50.0f);
+
+	destroy_world(w);
+}
+
+// Both bodies in a joint are static (mass=0). K matrix is all zeros because
+// inv_mass_a = inv_mass_b = 0. LDL must not divide by zero or produce NaN.
+static void test_ldl_stress_both_static()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body a = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	Body b = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	create_ball_socket(w, (BallSocketParams){ .body_a = a, .body_b = b, .local_offset_a = V3(0.5f,0,0), .local_offset_b = V3(-0.5f,0,0) });
+
+	step_n(w, 120);
+
+	v3 pa = body_get_position(w, a);
+	v3 pb = body_get_position(w, b);
+
+	TEST_BEGIN("LDL stress both static: bodies valid");
+	TEST_ASSERT(is_valid(pa) && is_valid(pb));
+
+	TEST_BEGIN("LDL stress both static: bodies didn't move");
+	TEST_ASSERT(fabsf(pa.x) < 0.01f && fabsf(pb.x - 1.0f) < 0.01f);
+
+	destroy_world(w);
+}
+
+// Extreme mass ratio: 1e6:1 — the K matrix condition number becomes astronomical.
+// Tests whether the LDL_COMPLIANCE regularization is sufficient to prevent blowup.
+static void test_ldl_stress_extreme_mass_ratio()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	// Feather-light link
+	Body light = create_body(w, (BodyParams){ .position = V3(1, 10, 0), .rotation = quat_identity(), .mass = 0.001f });
+	body_add_shape(w, light, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	// Wrecking ball
+	Body heavy = create_body(w, (BodyParams){ .position = V3(2, 10, 0), .rotation = quat_identity(), .mass = 1000.0f });
+	body_add_shape(w, heavy, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+
+	v3 off_a = V3(0.5f,0,0), off_b = V3(-0.5f,0,0);
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = light, .local_offset_a = off_a, .local_offset_b = off_b });
+	create_ball_socket(w, (BallSocketParams){ .body_a = light, .body_b = heavy, .local_offset_a = off_a, .local_offset_b = off_b });
+
+	int nan_frame = -1;
+	for (int f = 0; f < 600; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, heavy);
+		if (!is_valid(p)) { nan_frame = f; break; }
+	}
+
+	float gap0 = anchor_distance(w, anchor, off_a, light, off_b);
+	float gap1 = anchor_distance(w, light, off_a, heavy, off_b);
+	float max_gap = gap0 > gap1 ? gap0 : gap1;
+	printf("  [extreme mass 1e6:1] gap=%.4f nan_frame=%d\n", (double)max_gap, nan_frame);
+
+	TEST_BEGIN("LDL stress extreme mass 1e6:1: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress extreme mass 1e6:1: bodies finite");
+	v3 ph = body_get_position(w, heavy);
+	TEST_ASSERT(is_valid(ph) && ph.y > -100.0f);
+
+	destroy_world(w);
+}
+
+// Redundant joints: multiple ball-sockets between the same body pair at the same
+// anchor points. The K matrix becomes rank-deficient because the constraints are
+// linearly dependent. The factorization must handle this gracefully.
+static void test_ldl_stress_redundant_joints()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body a = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+
+	v3 off_a = V3(0.5f,0,0), off_b = V3(-0.5f,0,0);
+	// 4 identical joints on the same pair — rank-deficient system (12 DOF, only 3 independent).
+	// Tests bundle splitting (max 6 DOF per bundle) + handling of redundant constraints.
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b });
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b });
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b });
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b });
+
+	int nan_frame = -1;
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, a);
+		if (!is_valid(p)) { nan_frame = f; break; }
+	}
+
+	v3 pa = body_get_position(w, a);
+	printf("  [redundant joints] pos=(%.2f,%.2f,%.2f) nan_frame=%d\n",
+		(double)pa.x, (double)pa.y, (double)pa.z, nan_frame);
+
+	TEST_BEGIN("LDL stress redundant joints: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress redundant joints: body valid");
+	TEST_ASSERT(is_valid(pa) && pa.y > -20.0f);
+
+	destroy_world(w);
+}
+
+// Rapid topology thrash: add and destroy joints every single frame.
+// Tests LDL_Cache rebuild, topology version tracking, and memory stability.
+static void test_ldl_stress_topology_thrash()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body a = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	Body b = create_body(w, (BodyParams){ .position = V3(2, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+
+	v3 off_a = V3(0.5f,0,0), off_b = V3(-0.5f,0,0);
+	Joint j0 = create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b });
+	Joint j1 = create_ball_socket(w, (BallSocketParams){ .body_a = a, .body_b = b, .local_offset_a = off_a, .local_offset_b = off_b });
+
+	int nan_frame = -1;
+	for (int f = 0; f < 200; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, b);
+		if (!is_valid(p)) { nan_frame = f; break; }
+
+		// Every 3 frames: destroy a joint and recreate it
+		if (f % 3 == 0) {
+			destroy_joint(w, j1);
+			j1 = create_ball_socket(w, (BallSocketParams){ .body_a = a, .body_b = b, .local_offset_a = off_a, .local_offset_b = off_b });
+		}
+		// Every 7 frames: destroy and recreate the anchor joint too
+		if (f % 7 == 0) {
+			destroy_joint(w, j0);
+			j0 = create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b });
+		}
+	}
+
+	printf("  [topo thrash] nan_frame=%d topo_version=%d\n", nan_frame, wi->ldl_topo_version);
+
+	TEST_BEGIN("LDL stress topology thrash: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress topology thrash: bodies valid at end");
+	v3 pa = body_get_position(w, a);
+	v3 pb = body_get_position(w, b);
+	TEST_ASSERT(is_valid(pa) && is_valid(pb));
+
+	destroy_world(w);
+}
+
+// Huge velocity injection: mid-simulation slam a body to extreme velocity.
+// The delta correction RHS becomes enormous; tests whether the solver stays finite.
+static void test_ldl_stress_velocity_bomb()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body bodies[5];
+	Body prev = anchor;
+	for (int i = 0; i < 5; i++) {
+		bodies[i] = create_body(w, (BodyParams){ .position = V3((i+1)*0.8f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, bodies[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = bodies[i], .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+		prev = bodies[i];
+	}
+
+	// Let it settle, then slam the tip body
+	step_n(w, 60);
+	body_set_velocity(w, bodies[4], V3(0, 1000.0f, 0));
+	body_set_angular_velocity(w, bodies[4], V3(500.0f, 500.0f, 500.0f));
+
+	int nan_frame = -1;
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		for (int i = 0; i < 5; i++) {
+			v3 p = body_get_position(w, bodies[i]);
+			if (!is_valid(p)) { nan_frame = f; break; }
+		}
+		if (nan_frame >= 0) break;
+	}
+
+	printf("  [velocity bomb] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress velocity bomb: no NaN after extreme impulse");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress velocity bomb: bodies still finite");
+	int valid = 1;
+	for (int i = 0; i < 5; i++) {
+		v3 p = body_get_position(w, bodies[i]);
+		if (!is_valid(p)) { valid = 0; break; }
+	}
+	TEST_ASSERT(valid);
+
+	destroy_world(w);
+}
+
+// Distance joints with zero rest length: the constraint axis is undefined when
+// bodies are at the same position. Tests numerical handling of degenerate axis.
+static void test_ldl_stress_zero_length_distance()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	// Body starts exactly at anchor
+	Body a = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	create_distance(w, (DistanceParams){ .body_a = anchor, .body_b = a, .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .rest_length = 0.0f });
+
+	int nan_frame = -1;
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, a);
+		if (!is_valid(p)) { nan_frame = f; break; }
+	}
+
+	printf("  [zero-length distance] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress zero-length distance: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	destroy_world(w);
+}
+
+// Dense clique: 8 bodies all connected to each other with ball-sockets.
+// This creates a fully connected constraint graph (28 constraints, 84 DOF) and
+// tests the LDL ordering/fill-in logic with maximum graph density.
+static void test_ldl_stress_dense_clique()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	int N = 8;
+	Body bodies[8];
+	for (int i = 0; i < N; i++) {
+		float angle = (float)i * 2.0f * 3.14159265f / (float)N;
+		v3 pos = V3(2.0f * cosf(angle), 5.0f, 2.0f * sinf(angle));
+		bodies[i] = create_body(w, (BodyParams){ .position = pos, .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, bodies[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	}
+	// Connect all pairs
+	for (int i = 0; i < N; i++) {
+		for (int j = i + 1; j < N; j++) {
+			create_ball_socket(w, (BallSocketParams){ .body_a = bodies[i], .body_b = bodies[j],
+				.local_offset_a = V3(0.1f * (float)(j-i), 0, 0), .local_offset_b = V3(-0.1f * (float)(j-i), 0, 0) });
+		}
+	}
+
+	int nan_frame = -1;
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		for (int i = 0; i < N; i++) {
+			if (!is_valid(body_get_position(w, bodies[i]))) { nan_frame = f; break; }
+		}
+		if (nan_frame >= 0) break;
+	}
+
+	printf("  [dense clique 8] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress dense clique: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress dense clique: all bodies valid");
+	int valid = 1;
+	for (int i = 0; i < N; i++) {
+		v3 p = body_get_position(w, bodies[i]);
+		if (!is_valid(p) || p.y < -50.0f) { valid = 0; break; }
+	}
+	TEST_ASSERT(valid);
+
+	destroy_world(w);
+}
+
+// Collinear chain: all joints along the exact same axis with identical lever arms.
+// Produces a tridiagonal K matrix where off-diagonal blocks are nearly identical,
+// testing whether the Schur complement updates maintain positive-definiteness.
+static void test_ldl_stress_collinear_chain()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	int N = 15;
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	Body chain[15];
+	Body prev = anchor;
+	// All bodies along exact Y axis — lever arms are perfectly vertical, cross products vanish
+	for (int i = 0; i < N; i++) {
+		chain[i] = create_body(w, (BodyParams){ .position = V3(0, 10 - (i+1)*0.5f, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = V3(0,-0.25f,0), .local_offset_b = V3(0,0.25f,0) });
+		prev = chain[i];
+	}
+
+	int nan_frame = -1;
+	for (int f = 0; f < 600; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, chain[N-1]);
+		if (!is_valid(p)) { nan_frame = f; break; }
+	}
+
+	float max_gap = 0;
+	prev = anchor;
+	for (int i = 0; i < N; i++) {
+		float g = anchor_distance(w, prev, V3(0,-0.25f,0), chain[i], V3(0,0.25f,0));
+		if (g > max_gap) max_gap = g;
+		prev = chain[i];
+	}
+
+	printf("  [collinear chain 15] gap=%.4f nan_frame=%d\n", (double)max_gap, nan_frame);
+
+	TEST_BEGIN("LDL stress collinear chain: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress collinear chain: joints hold");
+	TEST_ASSERT(max_gap < 0.5f);
+
+	destroy_world(w);
+}
+
+// Alternating mass chain: extreme mass alternation (heavy-light-heavy-light...).
+// This creates terrible conditioning because adjacent constraints see wildly
+// different effective masses. The off-diagonal K blocks oscillate in magnitude.
+static void test_ldl_stress_alternating_mass()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	int N = 10;
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	Body chain[10];
+	Body prev = anchor;
+	v3 off_a = V3(0.4f,0,0), off_b = V3(-0.4f,0,0);
+	for (int i = 0; i < N; i++) {
+		float mass = (i % 2 == 0) ? 100.0f : 0.01f; // 10000:1 alternating ratio
+		chain[i] = create_body(w, (BodyParams){ .position = V3((i+1)*0.8f, 10, 0), .rotation = quat_identity(), .mass = mass });
+		body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+		prev = chain[i];
+	}
+
+	int nan_frame = -1;
+	float max_ke = 0;
+	for (int f = 0; f < 600; f++) {
+		world_step(w, 1.0f / 60.0f);
+		float ke = 0;
+		for (int i = 0; i < N; i++) {
+			int idx = handle_index(chain[i]);
+			v3 v = wi->body_hot[idx].velocity;
+			float m = 1.0f / wi->body_hot[idx].inv_mass;
+			ke += 0.5f * m * dot(v, v);
+		}
+		if (ke > max_ke) max_ke = ke;
+		if (!is_valid(body_get_position(w, chain[0]))) { nan_frame = f; break; }
+	}
+
+	float max_gap = 0;
+	prev = anchor;
+	for (int i = 0; i < N; i++) {
+		float g = anchor_distance(w, prev, off_a, chain[i], off_b);
+		if (g > max_gap) max_gap = g;
+		prev = chain[i];
+	}
+
+	printf("  [alternating mass] gap=%.4f max_ke=%.1f nan_frame=%d\n", (double)max_gap, (double)max_ke, nan_frame);
+
+	TEST_BEGIN("LDL stress alternating mass: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress alternating mass: all bodies valid");
+	int valid = 1;
+	for (int i = 0; i < N; i++) {
+		v3 p = body_get_position(w, chain[i]);
+		if (!is_valid(p) || p.y < -50.0f) { valid = 0; break; }
+	}
+	TEST_ASSERT(valid);
+
+	destroy_world(w);
+}
+
+// Single-constraint island: just one ball-socket. Minimal graph (1 node, 0 edges).
+// Tests that the LDL code handles the degenerate 1-node topology correctly.
+static void test_ldl_stress_single_constraint()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body a = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = V3(0.5f,0,0), .local_offset_b = V3(-0.5f,0,0) });
+
+	step_n(w, 300);
+
+	float gap = anchor_distance(w, anchor, V3(0.5f,0,0), a, V3(-0.5f,0,0));
+	printf("  [single constraint] gap=%.4f\n", (double)gap);
+
+	TEST_BEGIN("LDL stress single constraint: body valid");
+	TEST_ASSERT(is_valid(body_get_position(w, a)));
+
+	TEST_BEGIN("LDL stress single constraint: joint holds");
+	TEST_ASSERT(gap < 0.05f);
+
+	destroy_world(w);
+}
+
+// Mixed distance + ball-socket on the same body pair: creates a 4-DOF bundle
+// (3 from ball-socket + 1 from distance). Tests intra-bundle coupling computation
+// between different constraint types sharing both bodies.
+static void test_ldl_stress_mixed_same_pair()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body a = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+
+	// Ball-socket + distance on the exact same body pair (same offsets)
+	v3 off_a = V3(0.5f,0,0), off_b = V3(-0.5f,0,0);
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b });
+	create_distance(w, (DistanceParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b, .rest_length = 1.0f });
+
+	int nan_frame = -1;
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, a);
+		if (!is_valid(p)) { nan_frame = f; break; }
+	}
+
+	printf("  [mixed same pair] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress mixed same pair: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress mixed same pair: body valid");
+	v3 pa = body_get_position(w, a);
+	TEST_ASSERT(is_valid(pa) && pa.y > -20.0f);
+
+	destroy_world(w);
+}
+
+// Near-LDL_MAX_NODES: push node count close to the 128 limit.
+// A hub body with ~40 arms creates 40 bundles + fill-in from the hub.
+// With shattering, the shard welds add more nodes. Tests whether we stay in bounds.
+static void test_ldl_stress_near_max_nodes()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body hub = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 10.0f });
+	body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+
+	// 30 arms radiating out — 30 constraints, each unique body pair with hub
+	// hub DOF = 30 * 3 = 90, well above SHATTER_THRESHOLD=15
+	int ARM_COUNT = 30;
+	Body arms[30];
+	for (int i = 0; i < ARM_COUNT; i++) {
+		float angle = (float)i * 2.0f * 3.14159265f / (float)ARM_COUNT;
+		v3 dir = V3(cosf(angle), 0, sinf(angle));
+		arms[i] = create_body(w, (BodyParams){ .position = add(V3(0, 8, 0), scale(dir, 1.5f)), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arms[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arms[i], .local_offset_a = scale(dir, 0.3f), .local_offset_b = scale(dir, -0.3f) });
+	}
+
+	int nan_frame = -1;
+	for (int f = 0; f < 120; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, hub);
+		if (!is_valid(p)) { nan_frame = f; break; }
+	}
+
+	printf("  [near max nodes 30-arm hub] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress near max nodes: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress near max nodes: hub body valid");
+	v3 ph = body_get_position(w, hub);
+	TEST_ASSERT(is_valid(ph) && ph.y > -50.0f);
+
+	destroy_world(w);
+}
+
+// Inverted gravity with tangled initial positions: bodies start overlapping and
+// gravity pulls upward. The solver faces large initial penetration and conflicting
+// constraint forces. Tests delta correction sign handling under unusual conditions.
+static void test_ldl_stress_inverted_gravity_tangle()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, 9.81f, 0) }); // gravity UP
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	// All bodies start at nearly the same position (tangled), gravity is inverted
+	Body chain[5];
+	Body prev = anchor;
+	for (int i = 0; i < 5; i++) {
+		chain[i] = create_body(w, (BodyParams){ .position = V3(0.01f * (float)i, 0.01f * (float)i, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+		prev = chain[i];
+	}
+
+	int nan_frame = -1;
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		for (int i = 0; i < 5; i++) {
+			if (!is_valid(body_get_position(w, chain[i]))) { nan_frame = f; break; }
+		}
+		if (nan_frame >= 0) break;
+	}
+
+	printf("  [inverted gravity tangle] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress inverted gravity tangle: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress inverted gravity tangle: all bodies valid");
+	int valid = 1;
+	for (int i = 0; i < 5; i++) {
+		v3 p = body_get_position(w, chain[i]);
+		if (!is_valid(p)) { valid = 0; break; }
+	}
+	TEST_ASSERT(valid);
+
+	destroy_world(w);
+}
+
+// Distance-only chain: tests the 1x1 block path through LDL factorization.
+// All constraints are 1-DOF distance joints, no ball-sockets. The K matrix
+// is scalar-block tridiagonal. Tests block_ldl with n=1 blocks throughout.
+static void test_ldl_stress_distance_only_chain()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	int N = 10;
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	Body chain[10];
+	Body prev = anchor;
+	for (int i = 0; i < N; i++) {
+		chain[i] = create_body(w, (BodyParams){ .position = V3(0, 10 - (i+1)*1.0f, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_distance(w, (DistanceParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = V3(0,-0.5f,0), .local_offset_b = V3(0,0.5f,0), .rest_length = 0.0f });
+		prev = chain[i];
+	}
+
+	int nan_frame = -1;
+	for (int f = 0; f < 600; f++) {
+		world_step(w, 1.0f / 60.0f);
+		if (!is_valid(body_get_position(w, chain[N-1]))) { nan_frame = f; break; }
+	}
+
+	printf("  [distance-only chain] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress distance-only chain: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress distance-only chain: all finite");
+	int valid = 1;
+	for (int i = 0; i < N; i++) {
+		v3 p = body_get_position(w, chain[i]);
+		if (!is_valid(p)) { valid = 0; break; }
+	}
+	TEST_ASSERT(valid);
+
+	destroy_world(w);
+}
+
+// Opposing velocity slam: two chains share a common hub body. We slam the tip
+// of each chain in opposite directions simultaneously. The delta correction sees
+// conflicting RHS entries across the shared node. Tests sign consistency.
+static void test_ldl_stress_opposing_slams()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body hub = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 5.0f });
+	body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+
+	// Left arm: hub -> a -> tip_l
+	Body a = create_body(w, (BodyParams){ .position = V3(-1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	Body tip_l = create_body(w, (BodyParams){ .position = V3(-2, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, tip_l, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = a, .local_offset_a = V3(-0.5f,0,0), .local_offset_b = V3(0.5f,0,0) });
+	create_ball_socket(w, (BallSocketParams){ .body_a = a, .body_b = tip_l, .local_offset_a = V3(-0.5f,0,0), .local_offset_b = V3(0.5f,0,0) });
+
+	// Right arm: hub -> b -> tip_r
+	Body b = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	Body tip_r = create_body(w, (BodyParams){ .position = V3(2, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, tip_r, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = b, .local_offset_a = V3(0.5f,0,0), .local_offset_b = V3(-0.5f,0,0) });
+	create_ball_socket(w, (BallSocketParams){ .body_a = b, .body_b = tip_r, .local_offset_a = V3(0.5f,0,0), .local_offset_b = V3(-0.5f,0,0) });
+
+	step_n(w, 60);
+
+	// Slam tips in opposite directions
+	body_set_velocity(w, tip_l, V3(-500, 300, 0));
+	body_set_velocity(w, tip_r, V3(500, 300, 0));
+
+	int nan_frame = -1;
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		if (!is_valid(body_get_position(w, hub))) { nan_frame = f; break; }
+	}
+
+	printf("  [opposing slams] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress opposing slams: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress opposing slams: hub body valid");
+	v3 ph = body_get_position(w, hub);
+	TEST_ASSERT(is_valid(ph));
+
+	destroy_world(w);
+}
+
+// Zero-gravity free-floating: with no gravity, a chain with initial angular
+// velocity should conserve angular momentum. Tests that LDL correction doesn't
+// inject spurious energy/torque in the zero-gravity case.
+static void test_ldl_stress_zero_gravity_spin()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body chain[4];
+	for (int i = 0; i < 4; i++) {
+		chain[i] = create_body(w, (BodyParams){ .position = V3((float)i * 0.8f, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	}
+	for (int i = 0; i < 3; i++) {
+		create_ball_socket(w, (BallSocketParams){ .body_a = chain[i], .body_b = chain[i+1], .local_offset_a = V3(0.4f,0,0), .local_offset_b = V3(-0.4f,0,0) });
+	}
+
+	// Give initial spin
+	body_set_angular_velocity(w, chain[0], V3(0, 10, 0));
+	body_set_velocity(w, chain[3], V3(0, 3, 0));
+
+	float initial_ke = measure_system_ke(wi, chain, 4);
+	float max_ke = initial_ke;
+	int nan_frame = -1;
+	for (int f = 0; f < 1200; f++) {
+		world_step(w, 1.0f / 60.0f);
+		float ke = measure_system_ke(wi, chain, 4);
+		if (ke > max_ke) max_ke = ke;
+		if (!is_valid(body_get_position(w, chain[0]))) { nan_frame = f; break; }
+	}
+
+	printf("  [zero-g spin] initial_ke=%.2f max_ke=%.2f nan_frame=%d\n",
+		(double)initial_ke, (double)max_ke, nan_frame);
+
+	TEST_BEGIN("LDL stress zero-g spin: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress zero-g spin: KE bounded (no energy growth)");
+	// Energy should not grow beyond initial + small tolerance from numerical error
+	TEST_ASSERT(max_ke < initial_ke * 2.0f + 1.0f);
+
+	destroy_world(w);
+}
+
+// Spring softness extremes: very stiff (softness near 0) and very soft springs
+// in the same island. The K matrix diagonal entries span huge ranges within
+// a single bundle, testing conditioning.
+static void test_ldl_stress_mixed_stiffness()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body a = create_body(w, (BodyParams){ .position = V3(1, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	Body b = create_body(w, (BodyParams){ .position = V3(2, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	Body c = create_body(w, (BodyParams){ .position = V3(3, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, c, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+
+	v3 off_a = V3(0.5f,0,0), off_b = V3(-0.5f,0,0);
+	// Very stiff (rigid) joint
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b });
+	// Very soft spring
+	create_ball_socket(w, (BallSocketParams){ .body_a = a, .body_b = b, .local_offset_a = off_a, .local_offset_b = off_b, .spring = { .frequency = 0.5f, .damping_ratio = 0.1f } });
+	// Back to rigid
+	create_ball_socket(w, (BallSocketParams){ .body_a = b, .body_b = c, .local_offset_a = off_a, .local_offset_b = off_b });
+
+	int nan_frame = -1;
+	for (int f = 0; f < 600; f++) {
+		world_step(w, 1.0f / 60.0f);
+		for (int i = 0; i < 3; i++) {
+			Body bodies[3] = {a, b, c};
+			if (!is_valid(body_get_position(w, bodies[i]))) { nan_frame = f; break; }
+		}
+		if (nan_frame >= 0) break;
+	}
+
+	printf("  [mixed stiffness] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress mixed stiffness: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress mixed stiffness: all valid");
+	TEST_ASSERT(is_valid(body_get_position(w, a)) && is_valid(body_get_position(w, b)) && is_valid(body_get_position(w, c)));
+
+	destroy_world(w);
+}
+
+// Bidirectional hub-to-hub: two hubs connected to each other + each has arms.
+// Creates a complex graph with two high-degree nodes linked by a bridge edge.
+// Tests fill-in handling when two cliques connect.
+static void test_ldl_stress_double_hub_bridge()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body hub1 = create_body(w, (BodyParams){ .position = V3(-2, 8, 0), .rotation = quat_identity(), .mass = 5.0f });
+	body_add_shape(w, hub1, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+	Body hub2 = create_body(w, (BodyParams){ .position = V3(2, 8, 0), .rotation = quat_identity(), .mass = 5.0f });
+	body_add_shape(w, hub2, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+
+	// Bridge between hubs
+	create_ball_socket(w, (BallSocketParams){ .body_a = hub1, .body_b = hub2, .local_offset_a = V3(2,0,0), .local_offset_b = V3(-2,0,0) });
+
+	// 6 arms off hub1
+	for (int i = 0; i < 6; i++) {
+		float angle = (float)i * 2.0f * 3.14159265f / 6.0f;
+		v3 dir = V3(cosf(angle), 0, sinf(angle));
+		Body arm = create_body(w, (BodyParams){ .position = add(V3(-2, 8, 0), dir), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = hub1, .body_b = arm, .local_offset_a = scale(dir, 0.3f), .local_offset_b = scale(dir, -0.3f) });
+	}
+
+	// 6 arms off hub2
+	for (int i = 0; i < 6; i++) {
+		float angle = (float)i * 2.0f * 3.14159265f / 6.0f;
+		v3 dir = V3(cosf(angle), 0, sinf(angle));
+		Body arm = create_body(w, (BodyParams){ .position = add(V3(2, 8, 0), dir), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = hub2, .body_b = arm, .local_offset_a = scale(dir, 0.3f), .local_offset_b = scale(dir, -0.3f) });
+	}
+
+	int nan_frame = -1;
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		if (!is_valid(body_get_position(w, hub1)) || !is_valid(body_get_position(w, hub2))) { nan_frame = f; break; }
+	}
+
+	printf("  [double hub bridge] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress double hub bridge: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress double hub bridge: hubs valid");
+	TEST_ASSERT(is_valid(body_get_position(w, hub1)) && is_valid(body_get_position(w, hub2)));
+
+	destroy_world(w);
+}
+
+// Rapid create-destroy-create cycle: destroy a body (which destroys all its joints),
+// then immediately recreate everything. Exercises LDL_Cache invalidation and
+// reallocation under rapid turnover.
+static void test_ldl_stress_body_destroy_recreate()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	v3 off_a = V3(0.5f,0,0), off_b = V3(-0.5f,0,0);
+	Body a = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	Joint j = create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b });
+
+	int nan_frame = -1;
+	for (int f = 0; f < 200; f++) {
+		world_step(w, 1.0f / 60.0f);
+
+		if (f % 10 == 5) {
+			// Destroy and immediately recreate
+			destroy_joint(w, j);
+			j = create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b });
+		}
+
+		v3 p = body_get_position(w, a);
+		if (!is_valid(p)) { nan_frame = f; break; }
+	}
+
+	printf("  [body destroy-recreate] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress body destroy-recreate: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress body destroy-recreate: body valid");
+	TEST_ASSERT(is_valid(body_get_position(w, a)));
+
+	destroy_world(w);
+}
+
+// Micro mass chain: all bodies have extremely tiny mass (1e-6).
+// inv_mass becomes enormous (1e6), making K diagonal entries huge.
+// Tests floating-point overflow during K computation and factorization.
+static void test_ldl_stress_micro_mass()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	int N = 5;
+	Body chain[5];
+	Body prev = anchor;
+	v3 off_a = V3(0.4f,0,0), off_b = V3(-0.4f,0,0);
+	for (int i = 0; i < N; i++) {
+		chain[i] = create_body(w, (BodyParams){ .position = V3((i+1)*0.8f, 5, 0), .rotation = quat_identity(), .mass = 1e-5f });
+		body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+		prev = chain[i];
+	}
+
+	int nan_frame = -1;
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		for (int i = 0; i < N; i++) {
+			if (!is_valid(body_get_position(w, chain[i]))) { nan_frame = f; break; }
+		}
+		if (nan_frame >= 0) break;
+	}
+
+	printf("  [micro mass 1e-5] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress micro mass: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	destroy_world(w);
+}
+
+// Constraint loop: 4 bodies forming a rigid loop (A-B-C-D-A). This creates
+// a cycle in the constraint graph. The K matrix is no longer tree-structured;
+// the LDL elimination must handle fill-in from the cycle correctly.
+static void test_ldl_stress_constraint_loop()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	// 4 bodies forming a square
+	Body bodies[4];
+	v3 positions[4] = { V3(-1, 5, -1), V3(1, 5, -1), V3(1, 5, 1), V3(-1, 5, 1) };
+	for (int i = 0; i < 4; i++) {
+		bodies[i] = create_body(w, (BodyParams){ .position = positions[i], .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, bodies[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	}
+
+	// Close the loop: A-B, B-C, C-D, D-A
+	create_ball_socket(w, (BallSocketParams){ .body_a = bodies[0], .body_b = bodies[1], .local_offset_a = V3(1,0,0), .local_offset_b = V3(-1,0,0) });
+	create_ball_socket(w, (BallSocketParams){ .body_a = bodies[1], .body_b = bodies[2], .local_offset_a = V3(0,0,1), .local_offset_b = V3(0,0,-1) });
+	create_ball_socket(w, (BallSocketParams){ .body_a = bodies[2], .body_b = bodies[3], .local_offset_a = V3(-1,0,0), .local_offset_b = V3(1,0,0) });
+	create_ball_socket(w, (BallSocketParams){ .body_a = bodies[3], .body_b = bodies[0], .local_offset_a = V3(0,0,-1), .local_offset_b = V3(0,0,1) });
+
+	int nan_frame = -1;
+	for (int f = 0; f < 600; f++) {
+		world_step(w, 1.0f / 60.0f);
+		for (int i = 0; i < 4; i++) {
+			if (!is_valid(body_get_position(w, bodies[i]))) { nan_frame = f; break; }
+		}
+		if (nan_frame >= 0) break;
+	}
+
+	printf("  [constraint loop 4] nan_frame=%d\n", nan_frame);
+
+	TEST_BEGIN("LDL stress constraint loop: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+
+	TEST_BEGIN("LDL stress constraint loop: all finite");
+	int valid = 1;
+	for (int i = 0; i < 4; i++) {
+		v3 p = body_get_position(w, bodies[i]);
+		if (!is_valid(p)) { valid = 0; break; }
+	}
+	TEST_ASSERT(valid);
+
+	destroy_world(w);
+}
+
+// Stretched joint recovery: yank a chain tip far away, verify LDL recovers the
+// joint gap within a reasonable number of frames. Compares LDL vs PGS-only to
+// ensure LDL doesn't prevent recovery or cause erratic behavior after stretching.
+static void test_ldl_stress_stretched_recovery()
+{
+	float link_len = 0.8f;
+	v3 off_a = V3(link_len * 0.5f, 0, 0);
+	v3 off_b = V3(-link_len * 0.5f, 0, 0);
+
+	// Run WITH LDL
+	float gap_ldl_before = 0, gap_ldl_after = 0;
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 1;
+		wi->sleep_enabled = 0;
+
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body chain[5];
+		Body prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			chain[i] = create_body(w, (BodyParams){ .position = V3((i+1)*link_len, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+			prev = chain[i];
+		}
+
+		// Let it settle
+		step_n(w, 120);
+
+		// Yank the tip body far away
+		body_set_velocity(w, chain[4], V3(50, 80, 0));
+		step_n(w, 30);
+
+		// Measure gap right after the yank settles
+		prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			float g = anchor_distance(w, prev, off_a, chain[i], off_b);
+			if (g > gap_ldl_before) gap_ldl_before = g;
+			prev = chain[i];
+		}
+
+		// Let it recover
+		step_n(w, 300);
+
+		prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			float g = anchor_distance(w, prev, off_a, chain[i], off_b);
+			if (g > gap_ldl_after) gap_ldl_after = g;
+			prev = chain[i];
+		}
+		destroy_world(w);
+	}
+
+	// Run WITHOUT LDL for comparison
+	float gap_pgs_before = 0, gap_pgs_after = 0;
+	{
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = 0;
+		wi->sleep_enabled = 0;
+
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body chain[5];
+		Body prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			chain[i] = create_body(w, (BodyParams){ .position = V3((i+1)*link_len, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+			prev = chain[i];
+		}
+
+		step_n(w, 120);
+		body_set_velocity(w, chain[4], V3(50, 80, 0));
+		step_n(w, 30);
+
+		prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			float g = anchor_distance(w, prev, off_a, chain[i], off_b);
+			if (g > gap_pgs_before) gap_pgs_before = g;
+			prev = chain[i];
+		}
+
+		step_n(w, 300);
+
+		prev = anchor;
+		for (int i = 0; i < 5; i++) {
+			float g = anchor_distance(w, prev, off_a, chain[i], off_b);
+			if (g > gap_pgs_after) gap_pgs_after = g;
+			prev = chain[i];
+		}
+		destroy_world(w);
+	}
+
+	printf("  [stretched recovery] LDL: before=%.4f after=%.4f  PGS: before=%.4f after=%.4f\n",
+		(double)gap_ldl_before, (double)gap_ldl_after, (double)gap_pgs_before, (double)gap_pgs_after);
+
+	TEST_BEGIN("LDL stretched recovery: joint recovers after yank");
+	TEST_ASSERT(gap_ldl_after < gap_ldl_before);
+
+	TEST_BEGIN("LDL stretched recovery: gap below 0.1 after recovery");
+	TEST_ASSERT(gap_ldl_after < 0.1f);
+
+	TEST_BEGIN("LDL stretched recovery: LDL not drastically worse than PGS");
+	TEST_ASSERT(gap_ldl_after <= gap_pgs_after * 5.0f);
+}
+
+// Heavy chain stretched recovery: extreme mass ratio chain gets yanked.
+// The heavy tip resists recovery; LDL must help, not hinder.
+static void test_ldl_stress_heavy_stretched_recovery()
+{
+	v3 off_a = V3(0.5f, 0, 0), off_b = V3(-0.5f, 0, 0);
+
+	float gap_ldl = 0, gap_pgs = 0;
+	for (int use_ldl = 0; use_ldl < 2; use_ldl++) {
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = use_ldl;
+		wi->sleep_enabled = 0;
+
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body light = create_body(w, (BodyParams){ .position = V3(1, 10, 0), .rotation = quat_identity(), .mass = 0.1f });
+		body_add_shape(w, light, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body heavy = create_body(w, (BodyParams){ .position = V3(2, 10, 0), .rotation = quat_identity(), .mass = 50.0f });
+		body_add_shape(w, heavy, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = light, .local_offset_a = off_a, .local_offset_b = off_b });
+		create_ball_socket(w, (BallSocketParams){ .body_a = light, .body_b = heavy, .local_offset_a = off_a, .local_offset_b = off_b });
+
+		// Settle, then yank heavy body
+		step_n(w, 120);
+		body_set_velocity(w, heavy, V3(30, 60, 0));
+
+		// Let it try to recover
+		step_n(w, 600);
+
+		float g0 = anchor_distance(w, anchor, off_a, light, off_b);
+		float g1 = anchor_distance(w, light, off_a, heavy, off_b);
+		float max_gap = g0 > g1 ? g0 : g1;
+
+		if (use_ldl) gap_ldl = max_gap; else gap_pgs = max_gap;
+		destroy_world(w);
+	}
+
+	printf("  [heavy stretched] LDL=%.4f PGS=%.4f\n", (double)gap_ldl, (double)gap_pgs);
+
+	TEST_BEGIN("LDL heavy stretched: joint recovers");
+	TEST_ASSERT(gap_ldl < 0.5f);
+
+	TEST_BEGIN("LDL heavy stretched: LDL not worse than PGS");
+	TEST_ASSERT(gap_ldl <= gap_pgs * 2.0f);
+}
+
 // Mixed scene: chain + hub star in the same world.
 static void test_ldl_mixed_chain_and_hub()
 {
@@ -5565,6 +6851,8 @@ static void run_solver_tests()
 	test_ball_socket_pin_converges();
 	test_ball_socket_pendulum();
 	test_ldl_heavy_chain();
+	test_ldl_mouse_yank_chain();
+	test_ldl_vertical_heavy_chain_drop();
 	test_ldl_two_independent_chains();
 	test_ldl_topology_change();
 	test_ldl_block_math();
@@ -7583,6 +8871,35 @@ static void run_sleep_tests()
 	test_sleep_wake_wakes_whole_island();
 }
 
+static void run_ldl_stress_tests()
+{
+	printf("--- LDL stress tests ---\n");
+	test_ldl_stress_coincident_anchors();
+	test_ldl_stress_both_static();
+	test_ldl_stress_extreme_mass_ratio();
+	test_ldl_stress_redundant_joints();
+	test_ldl_stress_topology_thrash();
+	test_ldl_stress_velocity_bomb();
+	test_ldl_stress_zero_length_distance();
+	test_ldl_stress_dense_clique();
+	test_ldl_stress_collinear_chain();
+	test_ldl_stress_alternating_mass();
+	test_ldl_stress_single_constraint();
+	test_ldl_stress_mixed_same_pair();
+	test_ldl_stress_near_max_nodes();
+	test_ldl_stress_inverted_gravity_tangle();
+	test_ldl_stress_distance_only_chain();
+	test_ldl_stress_opposing_slams();
+	test_ldl_stress_zero_gravity_spin();
+	test_ldl_stress_mixed_stiffness();
+	test_ldl_stress_double_hub_bridge();
+	test_ldl_stress_body_destroy_recreate();
+	test_ldl_stress_micro_mass();
+	test_ldl_stress_constraint_loop();
+	test_ldl_stress_stretched_recovery();
+	test_ldl_stress_heavy_stretched_recovery();
+}
+
 static void run_tests()
 {
 	test_pass = 0;
@@ -7616,6 +8933,7 @@ static void run_tests()
 	test_quickhull_fuzz(100); // use 1000+ for stress testing
 
 	run_solver_tests();
+	run_ldl_stress_tests();
 	run_bvh_tests();
 	run_query_tests();
 	test_feature_ids();
