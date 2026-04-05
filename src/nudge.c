@@ -160,9 +160,12 @@ void world_step(World world, float dt)
 	SolverDistance*    sol_dist = NULL;
 	joints_pre_solve(w, sub_dt, &sol_bs, &sol_dist);
 
-	joints_warm_start(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist));
+	// PGS warm-start joints only when LDL is off (LDL manages its own lambda).
+	if (!w->ldl_enabled)
+		joints_warm_start(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist));
 
 	// --- Graph color (once per frame) ---
+	// When LDL is primary solver for joints, PGS only handles contacts.
 	int count = asize(w->body_hot);
 	CK_DYNA ConstraintRef* crefs = NULL;
 	int sm_count = asize(sm);
@@ -171,17 +174,17 @@ void world_step(World world, float dt)
 			.body_a = sm[i].body_a, .body_b = sm[i].body_b };
 		apush(crefs, r);
 	}
-	// Joints always in PGS. When LDL is enabled, PGS provides warm-started
-	// iterative convergence, then LDL corrects the remaining residual.
-	for (int i = 0; i < asize(sol_bs); i++) {
-		ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
-			.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
-		apush(crefs, r);
-	}
-	for (int i = 0; i < asize(sol_dist); i++) {
-		ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
-			.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
-		apush(crefs, r);
+	if (!w->ldl_enabled) {
+		for (int i = 0; i < asize(sol_bs); i++) {
+			ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
+				.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
+			apush(crefs, r);
+		}
+		for (int i = 0; i < asize(sol_dist); i++) {
+			ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
+				.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
+			apush(crefs, r);
+		}
 	}
 
 	int cref_count = asize(crefs);
@@ -190,19 +193,28 @@ void world_step(World world, float dt)
 	if (cref_count > 0)
 		color_constraints(crefs, cref_count, count, batch_starts, &color_count);
 
-	// --- Sub-step loop: velocity solve + position integrate ---
-	// First sub-step: velocities already integrated above.
+	// --- Sub-step loop ---
+	// Primary LDL: LDL solves joints, PGS solves contacts, outer loop couples them.
+	// Non-LDL: PGS solves everything, NGS corrects position.
 	for (int sub = 0; sub < n_sub; sub++) {
 		if (sub > 0)
 			integrate_velocities(w, sub_dt);
 
-		for (int iter = 0; iter < w->velocity_iters; iter++)
-			for (int c = 0; c < color_count; c++)
-				for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-					solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist);
-
-		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0))
+		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0)) {
+			// Primary LDL: factor K, then iterate LDL joints + PGS contacts
 			ldl_correction(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub, sub_dt);
+			for (int iter = 0; iter < w->velocity_iters; iter++)
+				for (int c = 0; c < color_count; c++)
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist);
+			// LDL position correction BEFORE integration (K is fresh)
+			ldl_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub_dt);
+		} else {
+			for (int iter = 0; iter < w->velocity_iters; iter++)
+				for (int c = 0; c < color_count; c++)
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist);
+		}
 
 		integrate_positions(w, sub_dt);
 
@@ -210,10 +222,9 @@ void world_step(World world, float dt)
 		if (w->solver_type == SOLVER_SOFT_STEP || w->solver_type == SOLVER_BLOCK)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
-		// Position correction AFTER integration — corrects drift from velocity/rotation coupling.
-		// Use NGS for all modes: iterative correction with fresh lever arms each iteration.
-		// LDL position solve with stale K causes energy injection on multi-node chains.
-		joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), w->position_iters);
+		// NGS position correction for joints (non-LDL path only)
+		if (!w->ldl_enabled)
+			joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), w->position_iters);
 	}
 
 	afree(crefs);

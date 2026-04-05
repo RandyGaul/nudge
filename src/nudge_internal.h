@@ -87,8 +87,8 @@ typedef struct BVHTree BVHTree; // forward decl, defined in bvh.c
 // LDL computes K = J * M^{-1} * J^T, RHS = -J * v, and impulse = M^{-1} * J^T * lambda generically.
 typedef struct LDL_JacobianRow
 {
-	float J_a[6];
-	float J_b[6];
+	double J_a[6];
+	double J_b[6];
 } LDL_JacobianRow;
 
 typedef struct LDL_Constraint
@@ -125,14 +125,14 @@ typedef struct LDL_Sparse
 	int row_offset[LDL_MAX_NODES+1]; // cumulative DOF offset
 	int n;                            // total scalar DOFs
 
-	// Diagonal blocks: packed lower-triangular, dof*(dof+1)/2 floats per node.
-	float diag_data[LDL_MAX_NODES][6]; // max 3x3 packed (6 elements)
-	float diag_D[LDL_MAX_NODES][3];   // D pivots from block LDL (max 3 per 3x3 block)
+	// Diagonal blocks: packed lower-triangular, dof*(dof+1)/2 doubles per node.
+	double diag_data[LDL_MAX_NODES][6]; // max 3x3 packed (6 elements)
+	double diag_D[LDL_MAX_NODES][3];   // D pivots from block LDL (max 3 per 3x3 block)
 
 	// Off-diagonal: per-node neighbor list.
-	// adj[i][k] = neighbor node index, adj_data[i][k] = block data (dof[i]*dof[j] floats).
+	// adj[i][k] = neighbor node index, adj_data[i][k] = block data (dof[i]*dof[j] doubles).
 	CK_DYNA int* adj[LDL_MAX_NODES];       // neighbor indices
-	CK_DYNA float* adj_data[LDL_MAX_NODES]; // packed block floats per neighbor
+	CK_DYNA double* adj_data[LDL_MAX_NODES]; // packed block doubles per neighbor
 
 	// Elimination ordering (symbolic phase output).
 	int elim_order[LDL_MAX_NODES]; // pivot sequence
@@ -213,11 +213,11 @@ typedef struct LDL_Cache
 	int bundle_count;
 	int n;              // total DOFs
 	LDL_Topology* topo; // cached topology (NULL until built)
-	CK_DYNA float* L_factors; // contiguous off-diagonal L-factor blocks
+	CK_DYNA double* L_factors; // contiguous off-diagonal L-factor blocks (double precision)
 	CK_DYNA LDL_JacobianRow* jacobians; // per-DOF Jacobian rows (filled each substep)
-	CK_DYNA float* scale;               // diagonal equilibration: S[i] = 1/sqrt(K_ii) per DOF
-	float diag_data[LDL_MAX_NODES][21]; // diagonal blocks: packed lower-triangular (max 6x6 = 21)
-	float diag_D[LDL_MAX_NODES][6];    // D pivots (max 6 per block)
+	CK_DYNA double* scale;              // diagonal equilibration scale factors
+	double diag_data[LDL_MAX_NODES][21]; // diagonal blocks: packed lower-triangular (max 6x6 = 21)
+	double diag_D[LDL_MAX_NODES][6];    // D pivots (max 6 per block)
 	int topo_version;   // world topo version when blocks were built
 
 	// Shattering state (weight-based: no virtual body copies)

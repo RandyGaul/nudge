@@ -55,40 +55,18 @@ int main(int argc, char* argv[])
 		test_quickhull_fuzz(fuzz_iters);
 		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	} else if (argc > 1 && strcmp(argv[1], "--quick") == 0) {
-		// Diagnostic: 3-link chain with 100:1 on last link
-		for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
-			World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-			WorldInternal* wi = (WorldInternal*)w.id;
-			wi->ldl_enabled = use_ldl;
-			float ll = 0.8f;
-			v3 oa = V3(ll*0.5f,0,0), ob = V3(-ll*0.5f,0,0);
-			Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
-			body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
-			Body prev = anchor;
-			Body chain[3];
-			for (int i = 0; i < 3; i++) {
-				float mass = (i == 2) ? 100.0f : 1.0f;
-				chain[i] = create_body(w, (BodyParams){ .position = V3((i+1)*ll, 10, 0), .rotation = quat_identity(), .mass = mass });
-				body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
-				create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = oa, .local_offset_b = ob });
-				prev = chain[i];
-			}
-			for (int f = 0; f < 120; f++) {
-				world_step(w, 1.0f/60.0f);
-				if (f < 3 || f % 20 == 0) {
-					float max_g = 0;
-					prev = anchor;
-					for (int i = 0; i < 3; i++) {
-						float g = anchor_distance(w, prev, oa, chain[i], ob);
-						if (g > max_g) max_g = g;
-						prev = chain[i];
-					}
-					printf("  [%s f%d] max_gap=%.6f\n", use_ldl ? "ldl" : "pgs", f, (double)max_g);
-				}
-			}
-			destroy_world(w);
-		}
 		test_ldl_stress_single_constraint();
+		test_ldl_heavy_chain();
+		test_ldl_two_independent_chains();
+		test_ldl_hub_star_shattering();
+		test_ldl_topology_change();
+		test_ldl_energy_comprehensive();
+		test_ldl_long_chain();
+		test_ldl_stress_dense_clique();
+		test_ldl_stress_alternating_mass();
+		test_ldl_mixed_chain_and_hub();
+		test_ldl_stress_stretched_recovery();
+		test_ldl_stress_heavy_stretched_recovery();
 		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	} else {
 		for (int i = 1; i < argc; i++) {

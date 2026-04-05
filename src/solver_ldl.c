@@ -5,11 +5,44 @@
 // lambda = constraint impulses, b = velocity/position error. K is symmetric positive
 // definite (regularized) with block structure from the constraint graph.
 
+// Double-precision vector/quat types for LDL internals.
+typedef struct dv3 { double x, y, z; } dv3;
+typedef struct dquat { double x, y, z, w; } dquat;
+static inline dv3 DV3(double x, double y, double z) { return (dv3){x, y, z}; }
+static inline dv3 dv3_from_v3(v3 v) { return (dv3){v.x, v.y, v.z}; }
+static inline v3 dv3_to_v3(dv3 v) { return V3((float)v.x, (float)v.y, (float)v.z); }
+static inline dv3 dv3_add(dv3 a, dv3 b) { return DV3(a.x+b.x, a.y+b.y, a.z+b.z); }
+static inline dv3 dv3_sub(dv3 a, dv3 b) { return DV3(a.x-b.x, a.y-b.y, a.z-b.z); }
+static inline dv3 dv3_scale(dv3 v, double s) { return DV3(v.x*s, v.y*s, v.z*s); }
+static inline dv3 dv3_cross(dv3 a, dv3 b) { return DV3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x); }
+static inline double dv3_dot(dv3 a, dv3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+static inline double dv3_len(dv3 v) { return sqrt(v.x*v.x + v.y*v.y + v.z*v.z); }
+
+// Double-precision inv_inertia_mul: R * diag(inv_I) * R^T * v.
+// Reads float quat/inertia from body, computes entirely in double.
+static dv3 dinv_inertia_mul(quat rot, v3 inv_i, dv3 v)
+{
+	// rotate_inv(q, v): R^T * v in double
+	double qx = rot.x, qy = rot.y, qz = rot.z, qw = rot.w;
+	double vx = v.x, vy = v.y, vz = v.z;
+	double tx = 2.0*(qy*vz - qz*vy), ty = 2.0*(qz*vx - qx*vz), tz = 2.0*(qx*vy - qy*vx);
+	// inv(q) = conjugate for unit quat: negate xyz
+	double ix = -qx, iy = -qy, iz = -qz;
+	double rx = vx + qw*tx + (iy*tz - iz*ty);
+	double ry = vy + qw*ty + (iz*tx - ix*tz);
+	double rz = vz + qw*tz + (ix*ty - iy*tx);
+	// scale by diagonal inertia
+	double sx = rx * (double)inv_i.x, sy = ry * (double)inv_i.y, sz = rz * (double)inv_i.z;
+	// rotate(q, scaled): R * scaled in double
+	double tx2 = 2.0*(qy*sz - qz*sy), ty2 = 2.0*(qz*sx - qx*sz), tz2 = 2.0*(qx*sy - qy*sx);
+	return DV3(sx + qw*tx2 + (qy*tz2 - qz*ty2), sy + qw*ty2 + (qz*tx2 - qx*tz2), sz + qw*tz2 + (qx*ty2 - qy*tx2));
+}
+
 static LDL_DebugInfo g_ldl_debug_info;
 int g_ldl_debug_enabled;
 int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = none)
 
-#define SHATTER_THRESHOLD 999 // DISABLED: shattering needs debugging. Was 15.
+#define SHATTER_THRESHOLD 15 // DOF threshold: 6+ ball-sockets (18 DOF) triggers shattering
 #define SHARD_TARGET      6 // target DOF per shard
 #define LDL_MIN_COMPLIANCE 5e-5f // min regularization floor: compliance * trace(K) / dim on K diagonal + compliance*lambda in RHS
 
@@ -24,57 +57,48 @@ int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = non
 // In-place NxN LDL^T factorize on packed lower-triangular storage.
 // L stored in-place (unit diagonal implicit), D separate.
 // Packed storage guarantees symmetry — no need to symmetrize.
-static void block_ldl(float* A, float* D, int n)
+// Block math operates in double precision for numerical stability.
+static void block_ldl(double* A, double* D, int n)
 {
 	for (int j = 0; j < n; j++) {
-		float dj = A[LDL_TRI(j,j)];
+		double dj = A[LDL_TRI(j,j)];
 		for (int k = 0; k < j; k++) dj -= A[LDL_TRI(j,k)] * A[LDL_TRI(j,k)] * D[k];
-		// Diagonal boosting: if float Schur reductions drove the pivot near-zero or negative,
-		// boost it to a small positive value BEFORE computing L entries below. Unlike a post-hoc
-		// clamp, this keeps L consistent with D (L was computed from the boosted pivot).
-		if (dj < 1e-6f) dj = 1e-6f;
+		// Diagonal boosting for near-zero pivots (double precision rarely needs this).
+		if (dj < 1e-12) dj = 1e-12;
 		D[j] = dj;
-		float inv_dj = 1.0f / D[j];
+		double inv_dj = 1.0 / D[j];
 		for (int i = j + 1; i < n; i++) {
-			float lij = A[LDL_TRI(i,j)];
+			double lij = A[LDL_TRI(i,j)];
 			for (int k = 0; k < j; k++) lij -= A[LDL_TRI(i,k)] * A[LDL_TRI(j,k)] * D[k];
 			A[LDL_TRI(i,j)] = lij * inv_dj;
 		}
 	}
 }
 
-// Solve NxN LDL system on packed lower-triangular storage.
-// L stored in packed A (unit diagonal implicit), D separate.
-static void block_solve(float* L, float* D, float* b, float* x, int n)
+static void block_solve(double* L, double* D, double* b, double* x, int n)
 {
-	// Forward: Ly = b
 	for (int i = 0; i < n; i++) { x[i] = b[i]; for (int k = 0; k < i; k++) x[i] -= L[LDL_TRI(i,k)] * x[k]; }
-	// Diagonal
 	for (int i = 0; i < n; i++) x[i] /= D[i];
-	// Back: L^T x = z (L^T_{i,k} = L_{k,i} for k > i)
 	for (int i = n - 1; i >= 0; i--) for (int k = i + 1; k < n; k++) x[i] -= L[LDL_TRI(k,i)] * x[k];
 }
 
-// Compute C = A * B where A is (ra x ca), B is (ca x cb). Out is (ra x cb).
-static void block_mul(float* A, int ra, int ca, float* B, int cb, float* out)
+static void block_mul(double* A, int ra, int ca, double* B, int cb, double* out)
 {
 	for (int i = 0; i < ra; i++) {
 		for (int j = 0; j < cb; j++) {
-			float sum = 0;
+			double sum = 0;
 			for (int k = 0; k < ca; k++) sum += A[i*ca + k] * B[k*cb + j];
 			out[i*cb + j] = sum;
 		}
 	}
 }
 
-// A -= B, both (r x c).
-static void block_sub(float* A, float* B, int r, int c)
+static void block_sub(double* A, double* B, int r, int c)
 {
 	for (int i = 0; i < r * c; i++) A[i] -= B[i];
 }
 
-// Transpose: out = A^T where A is (r x c), out is (c x r).
-static void block_transpose(float* A, int r, int c, float* out)
+static void block_transpose(double* A, int r, int c, double* out)
 {
 	for (int i = 0; i < r; i++) {
 		for (int j = 0; j < c; j++) {
@@ -112,7 +136,7 @@ static int ldl_sparse_find_edge(LDL_Sparse* s, int i, int j)
 
 // Get or create off-diagonal block for edge (i, j). Returns pointer to block data.
 // Creates the block (zeroed) in both adj[i] and adj[j] if it doesn't exist.
-static float* ldl_sparse_get_or_create_edge(LDL_Sparse* s, int i, int j)
+static double* ldl_sparse_get_or_create_edge(LDL_Sparse* s, int i, int j)
 {
 	int ki = ldl_sparse_find_edge(s, i, j);
 	if (ki >= 0) return &s->adj_data[i][ki * s->dof[i] * s->dof[j]];
@@ -125,8 +149,8 @@ static float* ldl_sparse_get_or_create_edge(LDL_Sparse* s, int i, int j)
 	apush(s->adj[i], j);
 	afit(s->adj_data[i], old_size_i + block_size_ij);
 	asetlen(s->adj_data[i], old_size_i + block_size_ij);
-	float* data_ij = &s->adj_data[i][old_size_i];
-	memset(data_ij, 0, block_size_ij * sizeof(float));
+	double* data_ij = &s->adj_data[i][old_size_i];
+	memset(data_ij, 0, block_size_ij * sizeof(double));
 
 	// Add i to adj[j]
 	int block_size_ji = dj * di;
@@ -134,14 +158,14 @@ static float* ldl_sparse_get_or_create_edge(LDL_Sparse* s, int i, int j)
 	apush(s->adj[j], i);
 	afit(s->adj_data[j], old_size_j + block_size_ji);
 	asetlen(s->adj_data[j], old_size_j + block_size_ji);
-	float* data_ji = &s->adj_data[j][old_size_j];
-	memset(data_ji, 0, block_size_ji * sizeof(float));
+	double* data_ji = &s->adj_data[j][old_size_j];
+	memset(data_ji, 0, block_size_ji * sizeof(double));
 
 	return data_ij;
 }
 
 // Get existing off-diagonal block data for edge (i, j). Returns NULL if not found.
-static float* ldl_sparse_get_edge(LDL_Sparse* s, int i, int j)
+static double* ldl_sparse_get_edge(LDL_Sparse* s, int i, int j)
 {
 	int ki = ldl_sparse_find_edge(s, i, j);
 	if (ki < 0) return NULL;
@@ -149,16 +173,25 @@ static float* ldl_sparse_get_edge(LDL_Sparse* s, int i, int j)
 }
 
 // Apply angular position correction: integrate rotation by angular velocity w for one step.
-static void apply_rotation_delta(quat* q, v3 w)
+// Takes dv3 (double) from LDL internals, writes to quat (float) body state.
+static void apply_rotation_delta(quat* q, dv3 w)
 {
 	if (w.x == 0 && w.y == 0 && w.z == 0) return;
-	quat spin = { w.x, w.y, w.z, 0.0f };
-	quat dq = mul(spin, *q);
-	q->x += 0.5f * dq.x; q->y += 0.5f * dq.y;
-	q->z += 0.5f * dq.z; q->w += 0.5f * dq.w;
-	float ql = sqrtf(q->x*q->x + q->y*q->y + q->z*q->z + q->w*q->w);
-	float inv_ql = 1.0f / (ql > 1e-15f ? ql : 1.0f);
-	q->x *= inv_ql; q->y *= inv_ql; q->z *= inv_ql; q->w *= inv_ql;
+	dquat dq_spin = { w.x, w.y, w.z, 0.0 };
+	dquat dq_cur = { q->x, q->y, q->z, q->w };
+	// dq = spin * q (quaternion multiply in double)
+	dquat dq = {
+		dq_spin.w*dq_cur.x + dq_spin.x*dq_cur.w + dq_spin.y*dq_cur.z - dq_spin.z*dq_cur.y,
+		dq_spin.w*dq_cur.y - dq_spin.x*dq_cur.z + dq_spin.y*dq_cur.w + dq_spin.z*dq_cur.x,
+		dq_spin.w*dq_cur.z + dq_spin.x*dq_cur.y - dq_spin.y*dq_cur.x + dq_spin.z*dq_cur.w,
+		dq_spin.w*dq_cur.w - dq_spin.x*dq_cur.x - dq_spin.y*dq_cur.y - dq_spin.z*dq_cur.z,
+	};
+	dq_cur.x += 0.5 * dq.x; dq_cur.y += 0.5 * dq.y;
+	dq_cur.z += 0.5 * dq.z; dq_cur.w += 0.5 * dq.w;
+	double ql = sqrt(dq_cur.x*dq_cur.x + dq_cur.y*dq_cur.y + dq_cur.z*dq_cur.z + dq_cur.w*dq_cur.w);
+	double inv_ql = 1.0 / (ql > 1e-15 ? ql : 1.0);
+	q->x = (float)(dq_cur.x * inv_ql); q->y = (float)(dq_cur.y * inv_ql);
+	q->z = (float)(dq_cur.z * inv_ql); q->w = (float)(dq_cur.w * inv_ql);
 }
 
 // -----------------------------------------------------------------------------
@@ -170,7 +203,7 @@ static void apply_rotation_delta(quat* q, v3 w)
 static void ldl_fill_jacobian(LDL_Constraint* con, SolverBallSocket* sol_bs, SolverDistance* sol_dist, LDL_JacobianRow* jac)
 {
 	int dof = con->dof;
-	for (int d = 0; d < dof; d++) { memset(jac[d].J_a, 0, 6 * sizeof(float)); memset(jac[d].J_b, 0, 6 * sizeof(float)); }
+	for (int d = 0; d < dof; d++) { memset(jac[d].J_a, 0, 6 * sizeof(double)); memset(jac[d].J_b, 0, 6 * sizeof(double)); }
 
 	if (con->is_synthetic) {
 		// Weld: J_a = -I_6, J_b = +I_6
@@ -199,52 +232,49 @@ static void ldl_fill_jacobian(LDL_Constraint* con, SolverBallSocket* sol_bs, Sol
 
 // Accumulate K contribution from one body: K += J * (w * M^{-1}) * J^T into packed lower-tri.
 // jac has dof rows, side: 0 = J_a, 1 = J_b. weight scales inv_mass/inv_inertia (shattering).
-static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_start, BodyHot* body, float weight, float* K_packed)
+static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_start, BodyHot* body, float weight, double* K_packed)
 {
-	float wm = body->inv_mass * weight;
-	// Compute W = (w * M^{-1}) * J^T column by column (6 x dof), then K += J * W.
-	float W[36]; // max 6 x 6
+	double wm = (double)body->inv_mass * (double)weight;
+	double W[36];
 	for (int d = 0; d < dof; d++) {
-		float* J = side ? jac[d].J_b : jac[d].J_a;
+		double* J = side ? jac[d].J_b : jac[d].J_a;
 		W[0*dof+d] = wm * J[0];
 		W[1*dof+d] = wm * J[1];
 		W[2*dof+d] = wm * J[2];
-		v3 j_ang = V3(J[3], J[4], J[5]);
-		v3 w_ang = scale(inv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang), weight);
+		dv3 j_ang = DV3(J[3], J[4], J[5]);
+		dv3 w_ang = dv3_scale(dinv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang), (double)weight);
 		W[3*dof+d] = w_ang.x;
 		W[4*dof+d] = w_ang.y;
 		W[5*dof+d] = w_ang.z;
 	}
 	for (int r = 0; r < dof; r++)
 		for (int c = 0; c <= r; c++) {
-			float sum = 0;
-			float* Jr = side ? jac[r].J_b : jac[r].J_a;
+			double sum = 0;
+			double* Jr = side ? jac[r].J_b : jac[r].J_a;
 			for (int k = 0; k < 6; k++) sum += Jr[k] * W[k*dof + c];
 			K_packed[LDL_TRI(dof_start+r, dof_start+c)] += sum;
 		}
 }
 
-// Compute off-diagonal K contribution: out += J_i * (w * M^{-1}) * J_j^T for shared body.
-// weight scales inv_mass/inv_inertia for shattering.
-static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_JacobianRow* jac_j, int dj, int side_j, BodyHot* body, float weight, float* out)
+static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_JacobianRow* jac_j, int dj, int side_j, BodyHot* body, float weight, double* out)
 {
-	float wm = body->inv_mass * weight;
-	float W[36]; // (w * M^{-1}) * J_j^T (6 x dj)
+	double wm = (double)body->inv_mass * (double)weight;
+	double W[36];
 	for (int d = 0; d < dj; d++) {
-		float* J = side_j ? jac_j[d].J_b : jac_j[d].J_a;
+		double* J = side_j ? jac_j[d].J_b : jac_j[d].J_a;
 		W[0*dj+d] = wm * J[0];
 		W[1*dj+d] = wm * J[1];
 		W[2*dj+d] = wm * J[2];
-		v3 j_ang = V3(J[3], J[4], J[5]);
-		v3 w_ang = scale(inv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang), weight);
+		dv3 j_ang = DV3(J[3], J[4], J[5]);
+		dv3 w_ang = dv3_scale(dinv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang), (double)weight);
 		W[3*dj+d] = w_ang.x;
 		W[4*dj+d] = w_ang.y;
 		W[5*dj+d] = w_ang.z;
 	}
 	for (int r = 0; r < di; r++) {
-		float* Jr = side_i ? jac_i[r].J_b : jac_i[r].J_a;
+		double* Jr = side_i ? jac_i[r].J_b : jac_i[r].J_a;
 		for (int c = 0; c < dj; c++) {
-			float sum = 0;
+			double sum = 0;
 			for (int k = 0; k < 6; k++) sum += Jr[k] * W[k*dj + c];
 			out[r*dj + c] += sum;
 		}
@@ -254,27 +284,30 @@ static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_Jacob
 // Apply impulse generically: v += M^{-1} * J^T * lambda for one body.
 // jac has dof rows, lambda has dof scalars. side: 0 = J_a, 1 = J_b.
 // sign: +1 or -1 (convention: body_a gets -, body_b gets +... but sign is baked into J).
-static void ldl_apply_jacobian_impulse(LDL_JacobianRow* jac, int dof, float* lambda, BodyHot* body, int side)
+// Apply impulse: double Jacobian × double lambda → float body state (API boundary cast).
+static void ldl_apply_jacobian_impulse(LDL_JacobianRow* jac, int dof, double* lambda, BodyHot* body, int side)
 {
 	for (int d = 0; d < dof; d++) {
-		float* J = side ? jac[d].J_b : jac[d].J_a;
-		float lam = lambda[d];
-		body->velocity.x += body->inv_mass * J[0] * lam;
-		body->velocity.y += body->inv_mass * J[1] * lam;
-		body->velocity.z += body->inv_mass * J[2] * lam;
-		v3 j_ang = V3(J[3] * lam, J[4] * lam, J[5] * lam);
-		v3 dw = inv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang);
-		body->angular_velocity.x += dw.x;
-		body->angular_velocity.y += dw.y;
-		body->angular_velocity.z += dw.z;
+		double* J = side ? jac[d].J_b : jac[d].J_a;
+		double lam = lambda[d];
+		double inv_m = (double)body->inv_mass;
+		dv3 dv = DV3(inv_m * J[0] * lam, inv_m * J[1] * lam, inv_m * J[2] * lam);
+		body->velocity.x += (float)dv.x;
+		body->velocity.y += (float)dv.y;
+		body->velocity.z += (float)dv.z;
+		dv3 j_ang_d = DV3(J[3] * lam, J[4] * lam, J[5] * lam);
+		dv3 dw = dinv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang_d);
+		body->angular_velocity.x += (float)dw.x;
+		body->angular_velocity.y += (float)dw.y;
+		body->angular_velocity.z += (float)dw.z;
 	}
 }
 
-// Compute constraint velocity error: sum of J_a * v_a + J_b * v_b for one DOF row.
-static float ldl_constraint_velocity(LDL_JacobianRow* jac, BodyHot* a, BodyHot* b)
+// Constraint velocity: double Jacobian × float body state → double result.
+static double ldl_constraint_velocity(LDL_JacobianRow* jac, BodyHot* a, BodyHot* b)
 {
-	float* Ja = jac->J_a;
-	float* Jb = jac->J_b;
+	double* Ja = jac->J_a;
+	double* Jb = jac->J_b;
 	return Ja[0]*a->velocity.x + Ja[1]*a->velocity.y + Ja[2]*a->velocity.z + Ja[3]*a->angular_velocity.x + Ja[4]*a->angular_velocity.y + Ja[5]*a->angular_velocity.z + Jb[0]*b->velocity.x + Jb[1]*b->velocity.y + Jb[2]*b->velocity.z + Jb[3]*b->angular_velocity.x + Jb[4]*b->angular_velocity.y + Jb[5]*b->angular_velocity.z;
 }
 
@@ -750,12 +783,12 @@ static void ldl_build_topology(LDL_Cache* c, WorldInternal* w)
 }
 
 // Post-factorization condition number estimate: max(D) / min(D).
-static float ldl_condition_check(LDL_Cache* c, LDL_Topology* t)
+static double ldl_condition_check(LDL_Cache* c, LDL_Topology* t)
 {
-	float minD = 1e30f, maxD = 0.0f;
+	double minD = 1e30, maxD = 0.0;
 	for (int i = 0; i < t->node_count; i++) {
 		for (int d = 0; d < t->dof[i]; d++) {
-			float val = c->diag_D[i][d];
+			double val = c->diag_D[i][d];
 			if (val < minD) minD = val;
 			if (val > maxD) maxD = val;
 		}
@@ -777,7 +810,7 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 	// Zero buffers
 	memset(c->diag_data, 0, sizeof(c->diag_data));
 	memset(c->diag_D, 0, sizeof(c->diag_D));
-	if (c->L_factors) memset(c->L_factors, 0, t->L_factors_size * sizeof(float));
+	if (c->L_factors) memset(c->L_factors, 0, t->L_factors_size * sizeof(double));
 
 	// Compute and store Jacobians for all constraints.
 	int jc = c->joint_count;
@@ -809,11 +842,11 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 
 			// Trace-based regularization
 			if (!con->is_synthetic) {
-				float soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : sol_dist[con->solver_idx].softness;
-				float compliance = soft > 0.0f ? soft : LDL_MIN_COMPLIANCE;
-				float trace = 0;
+				double soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : sol_dist[con->solver_idx].softness;
+				double compliance = soft > 0.0f ? soft : LDL_MIN_COMPLIANCE;
+				double trace = 0;
 				for (int d = 0; d < dk; d++) trace += c->diag_data[bi][LDL_TRI(off+d, off+d)];
-				float reg = compliance * trace / dk;
+				double reg = compliance * trace / dk;
 				for (int d = 0; d < dk; d++) c->diag_data[bi][LDL_TRI(off+d, off+d)] += reg;
 			}
 		}
@@ -830,11 +863,11 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 				for (int bs = 0; bs < 2; bs++) {
 					int body = bs == 0 ? bun->body_a : bun->body_b;
 					int real_b = bs == 0 ? con_i->real_body_a : con_i->real_body_b;
-					float wt = (body == con_i->body_a) ? con_i->weight_a : con_i->weight_b;
+					double wt = (body == con_i->body_a) ? con_i->weight_a : con_i->weight_b;
 					BodyHot* B = &w->body_hot[real_b];
 					int side_i = (body == con_i->body_b) ? 1 : 0;
 					int side_j = (body == con_j->body_b) ? 1 : 0;
-					float buf[36] = {0};
+					double buf[36] = {0};
 					ldl_K_body_off(jac_i, di, side_i, jac_j, dj, side_j, B, wt, buf);
 					for (int r = 0; r < di; r++)
 						for (int col = 0; col < dj; col++)
@@ -852,15 +885,15 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 		int bun_i = f->block_i, bun_j = f->block_j;
 		LDL_Bundle* bi_b = &c->bundles[bun_i], *bj_b = &c->bundles[bun_j];
 		int bdk_i = bi_b->dof, bdk_j = bj_b->dof;
-		float* edge_ij = &c->L_factors[f->L_offset_ij];
-		float* edge_ji = &c->L_factors[f->L_offset_ji];
+		double* edge_ij = &c->L_factors[f->L_offset_ij];
+		double* edge_ji = &c->L_factors[f->L_offset_ji];
 
 		for (int ci = 0; ci < bi_b->count; ci++) {
 			LDL_Constraint* con_i = &c->constraints[bi_b->start + ci];
 			if (con_i->body_a != f->body && con_i->body_b != f->body) continue;
 			int side_i = (f->body == con_i->body_b) ? 1 : 0;
 			int real_b = side_i ? con_i->real_body_b : con_i->real_body_a;
-			float wt = side_i ? con_i->weight_b : con_i->weight_a;
+			double wt = side_i ? con_i->weight_b : con_i->weight_a;
 			BodyHot* B = &w->body_hot[real_b];
 			LDL_JacobianRow* jac_i = &c->jacobians[con_i->jacobian_start];
 			for (int cj = 0; cj < bj_b->count; cj++) {
@@ -870,13 +903,13 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 				int oi = con_i->bundle_offset, oj = con_j->bundle_offset;
 				int di = con_i->dof, dj = con_j->dof;
 				LDL_JacobianRow* jac_j = &c->jacobians[con_j->jacobian_start];
-				float buf[36] = {0};
+				double buf[36] = {0};
 				ldl_K_body_off(jac_i, di, side_i, jac_j, dj, side_j, B, wt, buf);
 				// Write to both directions
 				for (int r = 0; r < di; r++)
 					for (int col = 0; col < dj; col++)
 						edge_ij[(oi+r)*bdk_j + (oj+col)] += buf[r*dj + col];
-				float buf_T[36];
+				double buf_T[36];
 				block_transpose(buf, di, dj, buf_T);
 				for (int r = 0; r < dj; r++)
 					for (int col = 0; col < di; col++)
@@ -904,8 +937,8 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 			int bi = f->block_i, bj = f->block_j;
 			int di = t->dof[bi], dj = t->dof[bj];
 			int oi = t->row_offset[bi], oj = t->row_offset[bj];
-			float* eij = &c->L_factors[f->L_offset_ij];
-			float* eji = &c->L_factors[f->L_offset_ji];
+			double* eij = &c->L_factors[f->L_offset_ij];
+			double* eji = &c->L_factors[f->L_offset_ji];
 			for (int r = 0; r < di; r++) {
 				for (int col = 0; col < dj; col++) {
 					g_ldl_debug_info.A[(oi+r)*n + oj+col] = eij[r*dj + col];
@@ -920,38 +953,34 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 	}
 
 	// Diagonal equilibration (Golub & Van Loan): scale K so all diagonal entries are O(1).
-	// Prevents K^{-1} from amplifying residuals proportionally to mass ratio.
-	// S[i] = 1/sqrt(K_ii). K'[r,c] = S[r] * K[r,c] * S[c].
+	// Improves float32 factorization accuracy for extreme mass ratios.
 	{
-		int n = t->n;
+		int n2 = t->n;
 		afree(c->scale);
 		c->scale = NULL;
-		afit(c->scale, n);
-		asetlen(c->scale, n);
-		// Compute scale factors from assembled diagonal
+		afit(c->scale, n2);
+		asetlen(c->scale, n2);
 		for (int i = 0; i < nc; i++) {
 			int di = t->dof[i], oi = t->row_offset[i];
 			for (int d = 0; d < di; d++) {
-				float kd = c->diag_data[i][LDL_TRI(d, d)];
-				c->scale[oi + d] = kd > 1e-12f ? 1.0f / sqrtf(kd) : 1.0f;
+				double kd = c->diag_data[i][LDL_TRI(d, d)];
+				c->scale[oi + d] = kd > 1e-12 ? 1.0 / sqrt(kd) : 1.0;
 			}
 		}
-		// Scale diagonal blocks
 		for (int i = 0; i < nc; i++) {
 			int di = t->dof[i], oi = t->row_offset[i];
 			for (int r = 0; r < di; r++)
 				for (int col = 0; col <= r; col++)
 					c->diag_data[i][LDL_TRI(r, col)] *= c->scale[oi+r] * c->scale[oi+col];
 		}
-		// Scale off-diagonal edge blocks
 		int fc = asize(t->couplings);
 		for (int fi = 0; fi < fc; fi++) {
 			LDL_Coupling* f = &t->couplings[fi];
 			int bun_i = f->block_i, bun_j = f->block_j;
 			int di = t->dof[bun_i], dj = t->dof[bun_j];
 			int oi = t->row_offset[bun_i], oj = t->row_offset[bun_j];
-			float* eij = &c->L_factors[f->L_offset_ij];
-			float* eji = &c->L_factors[f->L_offset_ji];
+			double* eij = &c->L_factors[f->L_offset_ij];
+			double* eji = &c->L_factors[f->L_offset_ji];
 			for (int r = 0; r < di; r++)
 				for (int col = 0; col < dj; col++)
 					eij[r*dj + col] *= c->scale[oi+r] * c->scale[oj+col];
@@ -969,33 +998,33 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 		int dk = pv->dk;
 
 		// Factor diagonal block (packed storage)
-		float Dk[6];
+		double Dk[6];
 		block_ldl(c->diag_data[k], Dk, dk);
 		for (int d = 0; d < dk; d++) c->diag_D[k][d] = Dk[d];
 
 		// Back up edge matrices before overwriting with L blocks.
 		// Schur updates use E_backup * L^T directly instead of L * N * L^T.
-		float edge_backups[LDL_MAX_NODES][36];
+		double edge_backups[LDL_MAX_NODES][36];
 		for (int ei = 0; ei < pv->col_count; ei++) {
 			LDL_Column* en = &t->columns[pv->col_start + ei];
-			memcpy(edge_backups[ei], &c->L_factors[en->L_offset], en->dn * dk * sizeof(float));
+			memcpy(edge_backups[ei], &c->L_factors[en->L_offset], en->dn * dk * sizeof(double));
 		}
 
 		// Compute L blocks for non-eliminated neighbors
 		for (int ei = 0; ei < pv->col_count; ei++) {
 			LDL_Column* en = &t->columns[pv->col_start + ei];
 			int di = en->dn;
-			float* Eik = &c->L_factors[en->L_offset]; // currently holds K_{i,k}, will be overwritten with L_{i,k}
+			double* Eik = &c->L_factors[en->L_offset]; // currently holds K_{i,k}, will be overwritten with L_{i,k}
 
 			// L_{i,k} = E_{i,k} * N_k^{-1}: solve N_k * X = E^T column by column
-			float Lik[36];
+			double Lik[36];
 			for (int col = 0; col < di; col++) {
-				float rhs[6], sol[6];
+				double rhs[6], sol[6];
 				for (int r = 0; r < dk; r++) rhs[r] = Eik[col * dk + r];
 				block_solve(c->diag_data[k], Dk, rhs, sol, dk);
 				for (int r = 0; r < dk; r++) Lik[col * dk + r] = sol[r];
 			}
-			memcpy(Eik, Lik, di * dk * sizeof(float));
+			memcpy(Eik, Lik, di * dk * sizeof(double));
 		}
 
 		// Apply Schur complement updates: product = E_{i,k}_backup * L_{j,k}^T
@@ -1004,13 +1033,13 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 			int di = op->di, dj = op->dj;
 
 			// Find backup for E_{i,k}
-			float* Eik_backup = NULL;
+			double* Eik_backup = NULL;
 			for (int ei = 0; ei < pv->col_count; ei++) {
 				if (t->columns[pv->col_start + ei].L_offset == op->Lik_offset) { Eik_backup = edge_backups[ei]; break; }
 			}
 
-			float* Ljk = &c->L_factors[op->Ljk_offset];
-			float LjkT[36], product[36];
+			double* Ljk = &c->L_factors[op->Ljk_offset];
+			double LjkT[36], product[36];
 			block_transpose(Ljk, dj, dk, LjkT);
 			block_mul(Eik_backup, di, dk, LjkT, dj, product);
 
@@ -1024,7 +1053,7 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 			} else {
 				// Off-diagonal update: write to (i,j) and transpose to (j,i)
 				block_sub(&c->L_factors[op->target_offset], product, di, dj);
-				float product_T[36];
+				double product_T[36];
 				block_transpose(product, di, dj, product_T);
 				block_sub(&c->L_factors[op->target_offset_rev], product_T, dj, di);
 			}
@@ -1047,10 +1076,10 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 }
 
 // Forward/diagonal/back substitution using precomputed topology.
-static void ldl_solve_topo(LDL_Topology* t, float diag_data[][21], float diag_D[][6], float* L_factors, float* rhs, float* x)
+static void ldl_solve_topo(LDL_Topology* t, double diag_data[][21], double diag_D[][6], double* L_factors, double* rhs, double* x)
 {
 	int nc = t->node_count;
-	memcpy(x, rhs, t->n * sizeof(float));
+	memcpy(x, rhs, t->n * sizeof(double));
 
 	// Forward substitution
 	for (int step = 0; step < nc; step++) {
@@ -1058,7 +1087,7 @@ static void ldl_solve_topo(LDL_Topology* t, float diag_data[][21], float diag_D[
 		int ok = pv->ok, dk = pv->dk;
 		for (int fi = 0; fi < pv->fwd_count; fi++) {
 			LDL_Neighbor* sn = &t->fwd_neighbors[pv->fwd_start + fi];
-			float* Lkj = &L_factors[sn->L_offset]; // L_{k,j}: dk x dj block
+			double* Lkj = &L_factors[sn->L_offset]; // L_{k,j}: dk x dj block
 			int dj = sn->dn, oj = sn->on;
 			for (int r = 0; r < dk; r++) {
 				for (int c = 0; c < dj; c++) {
@@ -1072,7 +1101,7 @@ static void ldl_solve_topo(LDL_Topology* t, float diag_data[][21], float diag_D[
 	for (int step = 0; step < nc; step++) {
 		LDL_Pivot* pv = &t->pivots[step];
 		int k = pv->node, ok = pv->ok, dk = pv->dk;
-		float tmp[6];
+		double tmp[6];
 		for (int d = 0; d < dk; d++) tmp[d] = x[ok + d];
 		block_solve(diag_data[k], diag_D[k], tmp, &x[ok], dk);
 	}
@@ -1083,7 +1112,7 @@ static void ldl_solve_topo(LDL_Topology* t, float diag_data[][21], float diag_D[
 		int ok = pv->ok, dk = pv->dk;
 		for (int bi = 0; bi < pv->back_count; bi++) {
 			LDL_Neighbor* sn = &t->back_neighbors[pv->back_start + bi];
-			float* Ljk = &L_factors[sn->L_offset]; // L_{j,k}: dj x dk block. Apply L^T.
+			double* Ljk = &L_factors[sn->L_offset]; // L_{j,k}: dj x dk block. Apply L^T.
 			int dj = sn->dn, oj = sn->on;
 			for (int r = 0; r < dk; r++) {
 				for (int c = 0; c < dj; c++) {
@@ -1225,13 +1254,12 @@ static void ldl_build_bundles(LDL_Cache* c)
 	}
 }
 
-// Scaled solve: applies diagonal equilibration. rhs and x are in original (unscaled) space.
-// Internally: rhs' = S * rhs, solve K' * y = rhs', x = S * y.
-static void ldl_solve_scaled(LDL_Cache* c, float* rhs, float* x)
+// Scaled solve: applies diagonal equilibration. All double.
+static void ldl_solve_scaled(LDL_Cache* c, double* rhs, double* x)
 {
 	LDL_Topology* t = c->topo;
 	int n = t->n;
-	float* srhs = CK_ALLOC(n * sizeof(float));
+	double* srhs = CK_ALLOC(n * sizeof(double));
 	for (int i = 0; i < n; i++) srhs[i] = c->scale[i] * rhs[i];
 	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, srhs, x);
 	for (int i = 0; i < n; i++) x[i] *= c->scale[i];
@@ -1239,10 +1267,10 @@ static void ldl_solve_scaled(LDL_Cache* c, float* rhs, float* x)
 }
 
 // Validate solve output: returns 0 if any NaN/inf/huge values found.
-static int ldl_validate_lambda(float* lambda, int n)
+static int ldl_validate_lambda(double* lambda, int n)
 {
 	for (int i = 0; i < n; i++) {
-		if (!(lambda[i] == lambda[i]) || lambda[i] > 1e15f || lambda[i] < -1e15f) return 0;
+		if (!(lambda[i] == lambda[i]) || lambda[i] > 1e15 || lambda[i] < -1e15) return 0;
 	}
 	return 1;
 }
@@ -1256,21 +1284,29 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 
 	// --- Velocity solve ---
 	// Generic RHS: vel_rhs[d] = -J_d * v - compliance * lambda_d for each DOF row.
-	float* vel_rhs = CK_ALLOC(n * sizeof(float));
-	float* vel_lambda = CK_ALLOC(n * sizeof(float));
-	memset(vel_rhs, 0, n * sizeof(float));
+	double* vel_rhs = CK_ALLOC(n * sizeof(double));
+	double* vel_lambda = CK_ALLOC(n * sizeof(double));
+	memset(vel_rhs, 0, n * sizeof(double));
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
 		int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
 		BodyHot* a = &w->body_hot[con->real_body_a];
 		BodyHot* b = &w->body_hot[con->real_body_b];
 		LDL_JacobianRow* jac = &c->jacobians[con->jacobian_start];
-		// Delta-correction RHS: just the velocity residual after PGS.
-		// No compliance * lambda term — that's for full-solve mode.
-		// Compliance is already in K (regularization), which controls correction stiffness.
+		// Primary mode RHS: full constraint velocity error + compliance spring-back.
+		double compliance = 0.0;
+		if (!con->is_synthetic) {
+			double soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : sol_dist[con->solver_idx].softness;
+			compliance = soft > 0.0f ? soft : LDL_MIN_COMPLIANCE;
+		}
 		for (int d = 0; d < con->dof; d++) {
-			float vel_err = ldl_constraint_velocity(&jac[d], a, b);
-			vel_rhs[oi + d] = -vel_err;
+			double vel_err = ldl_constraint_velocity(&jac[d], a, b);
+			double lam = 0.0;
+			if (!con->is_synthetic) {
+				if (con->type == JOINT_BALL_SOCKET) { v3 l = sol_bs[con->solver_idx].lambda; lam = d == 0 ? l.x : d == 1 ? l.y : l.z; }
+				else lam = sol_dist[con->solver_idx].lambda;
+			}
+			vel_rhs[oi + d] = -vel_err - compliance * lam;
 		}
 	}
 
@@ -1284,7 +1320,7 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 
 	// Debug
 	int dbg = g_ldl_debug_enabled && n <= LDL_MAX_DOF;
-	if (dbg) { memcpy(g_ldl_debug_info.rhs, vel_rhs, n * sizeof(float)); memcpy(g_ldl_debug_info.lambda_ldl, vel_lambda, n * sizeof(float)); g_ldl_debug_info.valid = 1; }
+	if (dbg) { for (int i2 = 0; i2 < n; i2++) { g_ldl_debug_info.rhs[i2] = (float)vel_rhs[i2]; g_ldl_debug_info.lambda_ldl[i2] = (float)vel_lambda[i2]; }; g_ldl_debug_info.valid = 1; }
 
 	// Apply velocity delta via generic Jacobian: v += M^{-1} * J^T * lambda.
 	// Synthetic weld deltas are skipped -- they couple shards only.
@@ -1301,10 +1337,11 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 		else { real_a = sol_dist[con->solver_idx].body_a; real_b = sol_dist[con->solver_idx].body_b; }
 		ldl_apply_jacobian_impulse(jac, con->dof, &vel_lambda[oi], &w->body_hot[real_a], 0);
 		ldl_apply_jacobian_impulse(jac, con->dof, &vel_lambda[oi], &w->body_hot[real_b], 1);
+		// Primary mode: lambda is the full impulse, not a delta. SET, don't accumulate.
 		if (con->type == JOINT_BALL_SOCKET) {
-			sol_bs[con->solver_idx].lambda = add(sol_bs[con->solver_idx].lambda, V3(vel_lambda[oi], vel_lambda[oi+1], vel_lambda[oi+2]));
+			sol_bs[con->solver_idx].lambda = V3(vel_lambda[oi], vel_lambda[oi+1], vel_lambda[oi+2]);
 		} else {
-			sol_dist[con->solver_idx].lambda += vel_lambda[oi];
+			sol_dist[con->solver_idx].lambda = vel_lambda[oi];
 		}
 	}
 
@@ -1320,10 +1357,10 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 	int n = c->n;
 	LDL_Topology* t = c->topo;
 
-	float* pos_rhs = CK_ALLOC(n * sizeof(float));
-	float* pos_lambda = CK_ALLOC(n * sizeof(float));
-	memset(pos_rhs, 0, n * sizeof(float));
-	float ptv = 1.0f / sub_dt;
+	double* pos_rhs = CK_ALLOC(n * sizeof(double));
+	double* pos_lambda = CK_ALLOC(n * sizeof(double));
+	memset(pos_rhs, 0, n * sizeof(double));
+	double ptv = 1.0 / sub_dt;
 
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
@@ -1347,15 +1384,24 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 			v3 ra = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
 			v3 rb = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
 			v3 d = sub(add(b->position, rb), add(a->position, ra));
-			float dist_val = len(d);
-			float err = dist_val - w->joints[s->joint_idx].distance.rest_length;
+			double dist_val = len(d);
+			double err = dist_val - w->joints[s->joint_idx].distance.rest_length;
 			pos_rhs[oi] = -ptv * err;
 		}
 	}
 
 	ldl_solve_scaled(c, pos_rhs, pos_lambda);
 
+	// Apply position corrections simultaneously: accumulate per-body deltas, then apply once.
+	// Sequential application would move shared bodies between constraint corrections,
+	// breaking the coupled solution the LDL solve computed.
 	if (ldl_validate_lambda(pos_lambda, n)) {
+		int body_count = asize(w->body_hot);
+		dv3* pos_delta = CK_ALLOC(body_count * sizeof(dv3));
+		dv3* ang_delta = CK_ALLOC(body_count * sizeof(dv3));
+		memset(pos_delta, 0, body_count * sizeof(dv3));
+		memset(ang_delta, 0, body_count * sizeof(dv3));
+
 		for (int i = 0; i < jc; i++) {
 			LDL_Constraint* con = &c->constraints[i];
 			if (con->is_synthetic) continue;
@@ -1364,20 +1410,29 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 			int real_a, real_b;
 			if (con->type == JOINT_BALL_SOCKET) { real_a = sol_bs[con->solver_idx].body_a; real_b = sol_bs[con->solver_idx].body_b; }
 			else { real_a = sol_dist[con->solver_idx].body_a; real_b = sol_dist[con->solver_idx].body_b; }
-			BodyHot* a = &w->body_hot[real_a];
-			BodyHot* b = &w->body_hot[real_b];
+			double inv_ma = (double)w->body_hot[real_a].inv_mass;
+			double inv_mb = (double)w->body_hot[real_b].inv_mass;
 			for (int d = 0; d < con->dof; d++) {
-				float lam = pos_lambda[oi + d] * sub_dt;
-				v3 dpa = V3(a->inv_mass * jac[d].J_a[0] * lam, a->inv_mass * jac[d].J_a[1] * lam, a->inv_mass * jac[d].J_a[2] * lam);
-				a->position = add(a->position, dpa);
-				v3 j_ang_a = V3(jac[d].J_a[3] * lam, jac[d].J_a[4] * lam, jac[d].J_a[5] * lam);
-				apply_rotation_delta(&a->rotation, inv_inertia_mul(a->rotation, a->inv_inertia_local, j_ang_a));
-				v3 dpb = V3(b->inv_mass * jac[d].J_b[0] * lam, b->inv_mass * jac[d].J_b[1] * lam, b->inv_mass * jac[d].J_b[2] * lam);
-				b->position = add(b->position, dpb);
-				v3 j_ang_b = V3(jac[d].J_b[3] * lam, jac[d].J_b[4] * lam, jac[d].J_b[5] * lam);
-				apply_rotation_delta(&b->rotation, inv_inertia_mul(b->rotation, b->inv_inertia_local, j_ang_b));
+				double lam = pos_lambda[oi + d] * (double)sub_dt;
+				pos_delta[real_a] = dv3_add(pos_delta[real_a], DV3(inv_ma * jac[d].J_a[0] * lam, inv_ma * jac[d].J_a[1] * lam, inv_ma * jac[d].J_a[2] * lam));
+				dv3 j_ang_a = DV3(jac[d].J_a[3] * lam, jac[d].J_a[4] * lam, jac[d].J_a[5] * lam);
+				dv3 dwa = dinv_inertia_mul(w->body_hot[real_a].rotation, w->body_hot[real_a].inv_inertia_local, j_ang_a);
+				ang_delta[real_a] = dv3_add(ang_delta[real_a], dwa);
+				pos_delta[real_b] = dv3_add(pos_delta[real_b], DV3(inv_mb * jac[d].J_b[0] * lam, inv_mb * jac[d].J_b[1] * lam, inv_mb * jac[d].J_b[2] * lam));
+				dv3 j_ang_b = DV3(jac[d].J_b[3] * lam, jac[d].J_b[4] * lam, jac[d].J_b[5] * lam);
+				dv3 dwb = dinv_inertia_mul(w->body_hot[real_b].rotation, w->body_hot[real_b].inv_inertia_local, j_ang_b);
+				ang_delta[real_b] = dv3_add(ang_delta[real_b], dwb);
 			}
 		}
+
+		for (int bi = 0; bi < body_count; bi++) {
+			if (w->body_hot[bi].inv_mass == 0.0f) continue;
+			w->body_hot[bi].position = add(w->body_hot[bi].position, dv3_to_v3(pos_delta[bi]));
+			apply_rotation_delta(&w->body_hot[bi].rotation, ang_delta[bi]);
+		}
+
+		CK_FREE(pos_delta);
+		CK_FREE(ang_delta);
 	}
 
 	CK_FREE(pos_rhs);
@@ -1427,10 +1482,28 @@ static void ldl_correction(WorldInternal* w, SolverBallSocket* sol_bs, int bs_co
 	}
 }
 
-// Position correction pass. Called after integrate_positions to correct drift.
-// Reuses the K factored during ldl_correction.
+// Mass ratio compression exponent for position correction (Roblox-style).
+// Compresses 100:1 → ~4:1 for better conditioning in position stage.
+#define LDL_POS_MASS_EXP 0.5f
+
+// Position correction pass. Refactorizes K with compressed masses for better
+// conditioning at extreme mass ratios. Position correction is stabilization,
+// not dynamics — using compressed masses is safe.
 static void ldl_position_correct(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, float sub_dt)
 {
+	// Compress inv_mass and inv_inertia for position stage
+	int body_count = asize(w->body_hot);
+	float* save_inv_mass = CK_ALLOC(body_count * sizeof(float));
+	v3* save_inv_inertia = CK_ALLOC(body_count * sizeof(v3));
+	for (int i = 0; i < body_count; i++) {
+		save_inv_mass[i] = w->body_hot[i].inv_mass;
+		save_inv_inertia[i] = w->body_hot[i].inv_inertia_local;
+		if (w->body_hot[i].inv_mass > 0.0f) {
+			w->body_hot[i].inv_mass = powf(w->body_hot[i].inv_mass, LDL_POS_MASS_EXP);
+			w->body_hot[i].inv_inertia_local = scale(w->body_hot[i].inv_inertia_local, w->body_hot[i].inv_mass / save_inv_mass[i]);
+		}
+	}
+
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {
 		if (!(w->island_gen[ii] & 1)) continue;
@@ -1439,6 +1512,16 @@ static void ldl_position_correct(WorldInternal* w, SolverBallSocket* sol_bs, int
 		if (isl->joint_count == 0) continue;
 		LDL_Cache* c = &isl->ldl;
 		if (c->n == 0 || !c->topo) continue;
+		// Refactorize K with compressed masses
+		ldl_numeric_factor(c, w, sol_bs, sol_dist);
 		ldl_island_position_correct(c, w, sol_bs, sol_dist, sub_dt);
 	}
+
+	// Restore real masses
+	for (int i = 0; i < body_count; i++) {
+		w->body_hot[i].inv_mass = save_inv_mass[i];
+		w->body_hot[i].inv_inertia_local = save_inv_inertia[i];
+	}
+	CK_FREE(save_inv_mass);
+	CK_FREE(save_inv_inertia);
 }
