@@ -3627,6 +3627,7 @@ static void test_ldl_no_shatter_below_threshold()
 		if (gap > max_gap) max_gap = gap;
 	}
 
+	printf("  [LDL below threshold] max_gap=%.4f\n", (double)max_gap);
 	TEST_BEGIN("LDL below threshold: joints still tight without shattering");
 	TEST_ASSERT(max_gap < 0.5f);
 

@@ -222,10 +222,10 @@ void world_step(World world, float dt)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
 		// Position correction after integration.
+		// LDL: direct solve projects out bulk error, NGS cleans up residual.
 		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0))
 			ldl_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub_dt);
-		else
-			joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), w->position_iters);
+		joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), w->position_iters);
 	}
 
 	afree(crefs);
