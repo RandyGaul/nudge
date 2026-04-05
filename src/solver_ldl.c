@@ -836,14 +836,18 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 			ldl_K_body_contrib(jac, dk, 0, off, a, con->weight_a, c->diag_data[bi]);
 			ldl_K_body_contrib(jac, dk, 1, off, b, con->weight_b, c->diag_data[bi]);
 
-			// Trace-based regularization
+			// Regularization: soft constraints add softness directly to K diagonal
+			// (matching PGS convention). Rigid constraints use trace-scaled minimum compliance.
 			if (!con->is_synthetic) {
 				double soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : sol_dist[con->solver_idx].softness;
-				double compliance = soft > 0.0f ? soft : LDL_MIN_COMPLIANCE;
-				double trace = 0;
-				for (int d = 0; d < dk; d++) trace += c->diag_data[bi][LDL_TRI(off+d, off+d)];
-				double reg = compliance * trace / dk;
-				for (int d = 0; d < dk; d++) c->diag_data[bi][LDL_TRI(off+d, off+d)] += reg;
+				if (soft > 0.0f) {
+					for (int d = 0; d < dk; d++) c->diag_data[bi][LDL_TRI(off+d, off+d)] += soft;
+				} else {
+					double trace = 0;
+					for (int d = 0; d < dk; d++) trace += c->diag_data[bi][LDL_TRI(off+d, off+d)];
+					double reg = LDL_MIN_COMPLIANCE * trace / dk;
+					for (int d = 0; d < dk; d++) c->diag_data[bi][LDL_TRI(off+d, off+d)] += reg;
+				}
 			}
 		}
 		// Intra-bundle coupling: pairs of constraints within same bundle share both bodies.
@@ -1298,11 +1302,17 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 		for (int d = 0; d < con->dof; d++) {
 			double vel_err = ldl_constraint_velocity(&jac[d], a, b);
 			double lam = 0.0;
+			double bias = 0.0;
 			if (!con->is_synthetic) {
-				if (con->type == JOINT_BALL_SOCKET) { v3 l = sol_bs[con->solver_idx].lambda; lam = d == 0 ? l.x : d == 1 ? l.y : l.z; }
-				else lam = sol_dist[con->solver_idx].lambda;
+				if (con->type == JOINT_BALL_SOCKET) {
+					v3 l = sol_bs[con->solver_idx].lambda; lam = d == 0 ? l.x : d == 1 ? l.y : l.z;
+					v3 bb = sol_bs[con->solver_idx].bias; bias = d == 0 ? bb.x : d == 1 ? bb.y : bb.z;
+				} else {
+					lam = sol_dist[con->solver_idx].lambda;
+					bias = sol_dist[con->solver_idx].bias;
+				}
 			}
-			vel_rhs[oi + d] = -vel_err - compliance * lam;
+			vel_rhs[oi + d] = -vel_err - bias - compliance * lam;
 		}
 	}
 

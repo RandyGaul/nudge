@@ -5641,6 +5641,260 @@ static void test_ldl_delta_correction_accuracy()
 }
 
 // -----------------------------------------------------------------------------
+// LDL soft constraint tests: soft springs (frequency > 0) inside the LDL
+// factorization. These exercise the compliance path, coupling with rigid joints,
+// and sharp yank recovery.
+// -----------------------------------------------------------------------------
+
+// Soft spring chain: all joints are soft springs. Bodies should settle at an
+// equilibrium under gravity, NOT at zero gap.
+static void test_ldl_soft_chain()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body bodies[3];
+	Body prev = anchor;
+	v3 off_a = V3(0.5f, 0, 0), off_b = V3(-0.5f, 0, 0);
+	for (int i = 0; i < 3; i++) {
+		bodies[i] = create_body(w, (BodyParams){ .position = V3((i+1)*1.0f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, bodies[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = bodies[i], .local_offset_a = off_a, .local_offset_b = off_b, .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+		prev = bodies[i];
+	}
+
+	step_n(w, 300);
+
+	// All bodies must be valid (no NaN)
+	int valid = 1;
+	for (int i = 0; i < 3; i++) {
+		v3 p = body_get_position(w, bodies[i]);
+		if (!is_valid(p) || p.y < -50.0f) valid = 0;
+	}
+
+	TEST_BEGIN("LDL soft chain: bodies valid");
+	TEST_ASSERT(valid);
+
+	// Soft chain should settle (low velocity)
+	float max_speed = 0;
+	for (int i = 0; i < 3; i++) {
+		v3 v = wi->body_hot[handle_index(bodies[i])].velocity;
+		float s = len(v);
+		if (s > max_speed) max_speed = s;
+	}
+	printf("  [LDL soft chain] max_speed=%.4f\n", (double)max_speed);
+	TEST_BEGIN("LDL soft chain: settled (low velocity)");
+	TEST_ASSERT(max_speed < 5.0f);
+
+	destroy_world(w);
+}
+
+// Mixed rigid + soft: rigid chain with one soft spring in the middle.
+// Rigid joints must stay tight; soft joint stretches under load.
+static void test_ldl_mixed_rigid_soft()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body a = create_body(w, (BodyParams){ .position = V3(1, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body b = create_body(w, (BodyParams){ .position = V3(2, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body c = create_body(w, (BodyParams){ .position = V3(3, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, c, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	v3 off_a = V3(0.5f, 0, 0), off_b = V3(-0.5f, 0, 0);
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = a, .local_offset_a = off_a, .local_offset_b = off_b });
+	create_ball_socket(w, (BallSocketParams){ .body_a = a, .body_b = b, .local_offset_a = off_a, .local_offset_b = off_b, .spring = { .frequency = 3.0f, .damping_ratio = 0.5f } });
+	create_ball_socket(w, (BallSocketParams){ .body_a = b, .body_b = c, .local_offset_a = off_a, .local_offset_b = off_b });
+
+	step_n(w, 300);
+
+	float gap_rigid = anchor_distance(w, anchor, off_a, a, off_b);
+	float gap_rigid2 = anchor_distance(w, b, off_a, c, off_b);
+	float gap_soft = anchor_distance(w, a, off_a, b, off_b);
+
+	printf("  [LDL mixed rigid+soft] rigid1=%.4f soft=%.4f rigid2=%.4f\n", (double)gap_rigid, (double)gap_soft, (double)gap_rigid2);
+
+	TEST_BEGIN("LDL mixed rigid+soft: rigid joints tight");
+	TEST_ASSERT(gap_rigid < 0.1f);
+	TEST_ASSERT(gap_rigid2 < 0.1f);
+
+	TEST_BEGIN("LDL mixed rigid+soft: bodies valid");
+	v3 pa = body_get_position(w, a);
+	v3 pb = body_get_position(w, b);
+	v3 pc = body_get_position(w, c);
+	TEST_ASSERT(is_valid(pa) && is_valid(pb) && is_valid(pc));
+
+	destroy_world(w);
+}
+
+// Soft spring on hub: soft joint attached to a shattered hub body.
+// Tests coupling of soft compliance with shard weights.
+static void test_ldl_soft_hub()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body hub = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 5.0f });
+	body_add_shape(w, hub, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = hub, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0) });
+
+	// 6 arms = 7 joints = 21 DOF > SHATTER_THRESHOLD (15)
+	Body arms[6];
+	for (int i = 0; i < 6; i++) {
+		float angle = (float)i * 2.0f * 3.14159265f / 6.0f;
+		v3 dir = V3(cosf(angle), 0, sinf(angle));
+		arms[i] = create_body(w, (BodyParams){ .position = add(V3(0, 8, 0), dir), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arms[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = hub, .body_b = arms[i], .local_offset_a = scale(dir, 0.3f), .local_offset_b = scale(dir, -0.3f) });
+	}
+
+	// Add a soft spring pulling one arm outward (simulates mouse drag force)
+	Body pull_anchor = create_body(w, (BodyParams){ .position = V3(3, 8, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, pull_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Joint pull = create_ball_socket(w, (BallSocketParams){ .body_a = pull_anchor, .body_b = arms[0], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+
+	step_n(w, 120);
+
+	// Release the pull
+	destroy_joint(w, pull);
+	destroy_body(w, pull_anchor);
+
+	// Let it recover
+	step_n(w, 120);
+
+	int valid = 1;
+	float max_gap = 0;
+	for (int i = 0; i < 6; i++) {
+		v3 hp = body_get_position(w, hub);
+		v3 ap = body_get_position(w, arms[i]);
+		if (!is_valid(hp) || !is_valid(ap)) { valid = 0; continue; }
+		float gap = fabsf(len(sub(ap, hp)) - 0.6f);
+		if (gap > max_gap) max_gap = gap;
+	}
+
+	printf("  [LDL soft hub] valid=%d max_gap=%.4f\n", valid, (double)max_gap);
+	TEST_BEGIN("LDL soft hub: bodies valid after pull+release");
+	TEST_ASSERT(valid);
+	TEST_BEGIN("LDL soft hub: hub recovers after pull release");
+	TEST_ASSERT(max_gap < 2.0f);
+
+	destroy_world(w);
+}
+
+// Sharp yank recovery: measure how quickly the chain recovers after a violent
+// teleport of the mouse anchor. Tests the LDL velocity + position correction.
+static void test_ldl_sharp_yank_recovery()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body chain[5];
+	Body prev = anchor;
+	v3 off_a = V3(0.4f, 0, 0), off_b = V3(-0.4f, 0, 0);
+	for (int i = 0; i < 5; i++) {
+		chain[i] = create_body(w, (BodyParams){ .position = V3((i+1)*0.8f, 10, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+		prev = chain[i];
+	}
+
+	// Settle
+	step_n(w, 60);
+
+	// Attach soft mouse spring and yank hard
+	Body mouse = create_body(w, (BodyParams){ .position = body_get_position(w, chain[4]), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, mouse, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Joint mj = create_ball_socket(w, (BallSocketParams){ .body_a = mouse, .body_b = chain[4], .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+
+	// Sharp teleport
+	int mi = handle_index(mouse);
+	wi->body_hot[mi].position = V3(20, 30, 0);
+	step_n(w, 10);
+
+	// Release
+	destroy_joint(w, mj);
+	destroy_body(w, mouse);
+
+	// Measure gap immediately after release
+	float gap_after_release = 0;
+	prev = anchor;
+	for (int i = 0; i < 5; i++) {
+		float g = anchor_distance(w, prev, off_a, chain[i], off_b);
+		if (g > gap_after_release) gap_after_release = g;
+		prev = chain[i];
+	}
+
+	// Recover
+	step_n(w, 120);
+
+	float gap_recovered = 0;
+	prev = anchor;
+	for (int i = 0; i < 5; i++) {
+		float g = anchor_distance(w, prev, off_a, chain[i], off_b);
+		if (g > gap_recovered) gap_recovered = g;
+		prev = chain[i];
+	}
+
+	int valid = 1;
+	for (int i = 0; i < 5; i++) {
+		v3 p = body_get_position(w, chain[i]);
+		if (!is_valid(p)) valid = 0;
+	}
+
+	printf("  [LDL sharp yank] after_release=%.4f recovered=%.4f\n", (double)gap_after_release, (double)gap_recovered);
+	TEST_BEGIN("LDL sharp yank: bodies valid");
+	TEST_ASSERT(valid);
+	TEST_BEGIN("LDL sharp yank: recovery reduces gap");
+	TEST_ASSERT(gap_recovered < gap_after_release + 0.1f);
+	TEST_BEGIN("LDL sharp yank: chain recovers to reasonable gap");
+	TEST_ASSERT(gap_recovered < 5.0f);
+
+	destroy_world(w);
+}
+
+// Soft constraint with extreme mass ratio: heavy body on soft spring.
+// The large compliance * large lambda product must not blow up.
+static void test_ldl_soft_heavy()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body heavy = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 50.0f });
+	body_add_shape(w, heavy, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = heavy, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0), .spring = { .frequency = 2.0f, .damping_ratio = 0.5f } });
+
+	step_n(w, 300);
+
+	v3 p = body_get_position(w, heavy);
+	v3 v = wi->body_hot[handle_index(heavy)].velocity;
+	printf("  [LDL soft heavy] pos=(%.2f,%.2f,%.2f) vel=(%.4f,%.4f,%.4f)\n", p.x, p.y, p.z, v.x, v.y, v.z);
+
+	TEST_BEGIN("LDL soft heavy: body valid");
+	TEST_ASSERT(is_valid(p) && p.y > -50.0f);
+	TEST_BEGIN("LDL soft heavy: not diverging");
+	TEST_ASSERT(len(v) < 50.0f);
+
+	destroy_world(w);
+}
+
+// -----------------------------------------------------------------------------
 // LDL stress / failure-case tests: push the system into poorly configured or
 // degenerate scenarios to expose erratic behaviors or crashes.
 // -----------------------------------------------------------------------------
@@ -6883,6 +7137,11 @@ static void run_solver_tests()
 	test_ldl_long_chain();
 	test_ldl_block_near_singular();
 	test_ldl_delta_correction_accuracy();
+	test_ldl_soft_chain();
+	test_ldl_mixed_rigid_soft();
+	test_ldl_soft_hub();
+	test_ldl_sharp_yank_recovery();
+	test_ldl_soft_heavy();
 	test_bounce_height_monotonic();
 	bounce_test_for_solver(SOLVER_SOFT_STEP, "Soft Step");
 	bounce_test_for_solver(SOLVER_SI_SOFT, "SI Soft");
