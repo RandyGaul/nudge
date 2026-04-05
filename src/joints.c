@@ -27,8 +27,8 @@ static v3 sym3x3_mul_v3(const float* m, v3 v)
 static void spring_compute(SpringParams sp, float dt, float* pos_to_vel, float* softness)
 {
 	if (sp.frequency <= 0.0f) {
-		// Rigid constraint: Baumgarte stabilization with fractional correction.
-		*pos_to_vel = dt > 0.0f ? SOLVER_BAUMGARTE / dt : 0.0f;
+		// Rigid constraint: no velocity bias. Position correction via NGS or LDL.
+		*pos_to_vel = 0.0f;
 		*softness = 0.0f;
 		return;
 	}

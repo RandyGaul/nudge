@@ -160,14 +160,6 @@ void world_step(World world, float dt)
 	SolverDistance*    sol_dist = NULL;
 	joints_pre_solve(w, sub_dt, &sol_bs, &sol_dist);
 
-	// LDL mode: zero bias for hard joints -- position correction via split-impulse NGS.
-	if (w->ldl_enabled) {
-		for (int i = 0; i < asize(sol_bs); i++)
-			if (sol_bs[i].softness == 0.0f) sol_bs[i].bias = V3(0, 0, 0);
-		for (int i = 0; i < asize(sol_dist); i++)
-			if (sol_dist[i].softness == 0.0f) sol_dist[i].bias = 0.0f;
-	}
-
 	joints_warm_start(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist));
 
 	// --- Graph color (once per frame) ---
@@ -218,16 +210,9 @@ void world_step(World world, float dt)
 		if (w->solver_type == SOLVER_SOFT_STEP || w->solver_type == SOLVER_BLOCK)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
-		if (w->ldl_enabled) {
-			// LDL position stage replaces split impulse -- no-op here.
-		} else {
-			// PGS-only: zero bias after first sub-step (stale).
-			if (sub == 0) {
-				for (int i = 0; i < asize(sol_bs); i++)
-					if (sol_bs[i].softness == 0.0f) sol_bs[i].bias = V3(0, 0, 0);
-				for (int i = 0; i < asize(sol_dist); i++)
-					if (sol_dist[i].softness == 0.0f) sol_dist[i].bias = 0.0f;
-			}
+		if (!w->ldl_enabled) {
+			// PGS-only: NGS position correction for joints (no Baumgarte).
+			joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), w->position_iters);
 		}
 	}
 

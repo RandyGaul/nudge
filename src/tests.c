@@ -3090,10 +3090,12 @@ static void test_ldl_topology_change()
 // compare against dense scalar LDL. Tests factorize + solve correctness.
 static void test_ldl_block_math()
 {
-	// Test block_ldl + block_solve for a known 3x3 SPD matrix
-	float K[9] = {10, 1, 2, 1, 12, 3, 2, 3, 15};
+	// Test block_ldl + block_solve for a known 3x3 SPD matrix (packed lower-triangular).
+	// Full: {10, 1, 2, 1, 12, 3, 2, 3, 15}
+	// Packed lower tri (row-major): (0,0),(1,0),(1,1),(2,0),(2,1),(2,2)
+	float K[6] = {10, 1, 12, 2, 3, 15};
 	float D[3];
-	float K_save[9]; memcpy(K_save, K, sizeof(K));
+	float K_save[6]; memcpy(K_save, K, sizeof(K));
 	block_ldl(K, D, 3);
 
 	TEST_BEGIN("block_ldl: D pivots positive");
@@ -3102,9 +3104,9 @@ static void test_ldl_block_math()
 	// Verify K_save * x = b has a correct solution
 	float b[3] = {1, 2, 3}, x[3];
 	block_solve(K, D, b, x, 3);
-	// Check residual: K_save * x - b should be near zero
+	// Check residual: K_full * x - b should be near zero (expand packed to full for multiply)
 	float res[3];
-	for (int i = 0; i < 3; i++) { res[i] = -b[i]; for (int j = 0; j < 3; j++) res[i] += K_save[i*3+j] * x[j]; }
+	for (int i = 0; i < 3; i++) { res[i] = -b[i]; for (int j = 0; j < 3; j++) res[i] += K_save[LDL_TRI(i,j)] * x[j]; }
 	float max_res = 0;
 	for (int i = 0; i < 3; i++) { float e = fabsf(res[i]); if (e > max_res) max_res = e; }
 	TEST_BEGIN("block_solve 3x3: residual < 1e-5");
@@ -3118,17 +3120,17 @@ static void test_ldl_block_math()
 	TEST_BEGIN("block_solve 1x1: x = b/K");
 	TEST_ASSERT(fabsf(x1[0] - 2.0f) < 1e-6f);
 
-	// Test 6x6: build SPD via A = diag(large) + small off-diag
-	float K6[36];
+	// Test 6x6: build SPD via A = diag(large) + small off-diag (packed lower-triangular)
+	float K6[21];
 	memset(K6, 0, sizeof(K6));
-	for (int i = 0; i < 6; i++) K6[i*6+i] = 20.0f;
-	for (int i = 0; i < 6; i++) for (int j = i+1; j < 6; j++) { K6[i*6+j] = 0.5f; K6[j*6+i] = 0.5f; }
-	float K6_save[36]; memcpy(K6_save, K6, sizeof(K6));
+	for (int i = 0; i < 6; i++) K6[LDL_TRI(i,i)] = 20.0f;
+	for (int i = 0; i < 6; i++) for (int j = 0; j < i; j++) K6[LDL_TRI(i,j)] = 0.5f;
+	float K6_save[21]; memcpy(K6_save, K6, sizeof(K6));
 	float D6[6], b6[6] = {1,2,3,4,5,6}, x6[6];
 	block_ldl(K6, D6, 6);
 	block_solve(K6, D6, b6, x6, 6);
 	float res6[6];
-	for (int i = 0; i < 6; i++) { res6[i] = -b6[i]; for (int j = 0; j < 6; j++) res6[i] += K6_save[i*6+j] * x6[j]; }
+	for (int i = 0; i < 6; i++) { res6[i] = -b6[i]; for (int j = 0; j < 6; j++) res6[i] += K6_save[LDL_TRI(i,j)] * x6[j]; }
 	float max_res6 = 0;
 	for (int i = 0; i < 6; i++) { float e = fabsf(res6[i]); if (e > max_res6) max_res6 = e; }
 	TEST_BEGIN("block_solve 6x6: residual < 1e-4");
@@ -3212,36 +3214,41 @@ static void test_ldl_solve_topo_vs_dense()
 		afree(later); elim[k] = 1;
 	}
 
-	// Fill from dense A, factorize, solve
-	float diag_data[LDL_MAX_NODES][36] = {0}, diag_D[LDL_MAX_NODES][6] = {0};
+	// Fill from dense A, factorize, solve (packed lower-triangular diag_data)
+	float diag_data[LDL_MAX_NODES][21] = {0}, diag_D[LDL_MAX_NODES][6] = {0};
 	CK_DYNA float* L_factors = NULL;
 	afit(L_factors, topo.L_factors_size); asetlen(L_factors, topo.L_factors_size);
 	memset(L_factors, 0, topo.L_factors_size * sizeof(float));
-	for (int i = 0; i < nc; i++) for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) diag_data[i][r*3+c] = A[(i*3+r)*n + i*3+c];
-	for (int i = 0; i < nc; i++) for (int j = i+1; j < nc; j++) for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) { L_factors[edge_off[i][j]+r*3+c] = A[(i*3+r)*n+j*3+c]; L_factors[edge_off[j][i]+r*3+c] = A[(j*3+r)*n+i*3+c]; }
+	for (int i = 0; i < nc; i++) for (int r = 0; r < 3; r++) for (int c2 = 0; c2 <= r; c2++) diag_data[i][LDL_TRI(r, c2)] = A[(i*3+r)*n + i*3+c2];
+	for (int i = 0; i < nc; i++) for (int j = i+1; j < nc; j++) for (int r = 0; r < 3; r++) for (int c2 = 0; c2 < 3; c2++) { L_factors[edge_off[i][j]+r*3+c2] = A[(i*3+r)*n+j*3+c2]; L_factors[edge_off[j][i]+r*3+c2] = A[(j*3+r)*n+i*3+c2]; }
 
 	for (int step = 0; step < nc; step++) {
 		LDL_Pivot* pv = &topo.pivots[step]; int k = pv->node, dk = 3;
 		float Dk[6]; block_ldl(diag_data[k], Dk, dk); for (int d = 0; d < dk; d++) diag_D[k][d] = Dk[d];
+		// Back up edges before overwriting with L blocks
+		float edge_bk[LDL_MAX_NODES][36];
+		for (int ei = 0; ei < pv->col_count; ei++) { LDL_Column* en = &topo.columns[pv->col_start+ei]; memcpy(edge_bk[ei], &L_factors[en->L_offset], en->dn*dk*sizeof(float)); }
 		for (int ei = 0; ei < pv->col_count; ei++) {
 			LDL_Column* en = &topo.columns[pv->col_start+ei]; float* Eik = &L_factors[en->L_offset]; float Lik[36];
 			for (int col = 0; col < en->dn; col++) { float r2[6], s2[6]; for (int r = 0; r < dk; r++) r2[r] = Eik[col*dk+r]; block_solve(diag_data[k], Dk, r2, s2, dk); for (int r = 0; r < dk; r++) Lik[col*dk+r] = s2[r]; }
 			memcpy(Eik, Lik, en->dn*dk*sizeof(float));
 		}
-		float Nk[36], Lkk[36], LDk2[36], LkkT[36]; memset(Lkk, 0, 36*sizeof(float));
-		for (int r = 0; r < dk; r++) { Lkk[r*dk+r] = 1.0f; for (int c = 0; c < r; c++) Lkk[r*dk+c] = diag_data[k][r*dk+c]; }
-		for (int r = 0; r < dk; r++) for (int c = 0; c < dk; c++) LDk2[r*dk+c] = Lkk[r*dk+c]*Dk[c];
-		block_transpose(Lkk, dk, dk, LkkT); block_mul(LDk2, dk, dk, LkkT, dk, Nk);
 		for (int si = 0; si < pv->schur_count; si++) {
-			LDL_Schur* op = &topo.schurs[pv->schur_start+si]; float* Lik2 = &L_factors[op->Lik_offset]; float* Ljk2 = &L_factors[op->Ljk_offset];
-			float LikNk[36], LjkT2[36], prod[36]; block_mul(Lik2, op->di, dk, Nk, dk, LikNk); block_transpose(Ljk2, op->dj, dk, LjkT2); block_mul(LikNk, op->di, dk, LjkT2, op->dj, prod);
-			if (op->target_offset < 0) block_sub(diag_data[op->target_node], prod, op->di, op->di);
-			else { block_sub(&L_factors[op->target_offset], prod, op->di, op->dj); float pt[36]; block_transpose(prod, op->di, op->dj, pt); block_sub(&L_factors[op->target_offset_rev], pt, op->dj, op->di); }
+			LDL_Schur* op = &topo.schurs[pv->schur_start+si];
+			float* Ebk = NULL;
+			for (int ei = 0; ei < pv->col_count; ei++) { if (topo.columns[pv->col_start+ei].L_offset == op->Lik_offset) { Ebk = edge_bk[ei]; break; } }
+			float* Ljk2 = &L_factors[op->Ljk_offset];
+			float LjkT2[36], prod[36]; block_transpose(Ljk2, op->dj, dk, LjkT2); block_mul(Ebk, op->di, dk, LjkT2, op->dj, prod);
+			if (op->target_offset < 0) {
+				int tn = op->target_node;
+				for (int r = 0; r < op->di; r++) for (int c2 = 0; c2 <= r; c2++) diag_data[tn][LDL_TRI(r, c2)] -= 0.5f * (prod[r*op->di+c2] + prod[c2*op->di+r]);
+			} else { block_sub(&L_factors[op->target_offset], prod, op->di, op->dj); float pt[36]; block_transpose(prod, op->di, op->dj, pt); block_sub(&L_factors[op->target_offset_rev], pt, op->dj, op->di); }
 		}
 	}
 
 	float x_topo[9];
 	ldl_solve_topo(&topo, diag_data, diag_D, L_factors, rhs, x_topo);
+	(void)diag_data; // suppress potential unused warning after packed conversion
 
 	printf("  [LDL math] dense: "); for (int i = 0; i < 9; i++) printf("%.4f ", (double)x_dense[i]); printf("\n");
 	printf("  [LDL math] topo:  "); for (int i = 0; i < 9; i++) printf("%.4f ", (double)x_topo[i]); printf("\n");
@@ -3464,10 +3471,10 @@ static void test_ldl_solve_topo_identity()
 	topo.pivots[0] = (LDL_Pivot){ .node = 0, .dk = 3, .ok = 0 };
 	topo.L_factors_size = 0;
 
-	float diag_data[LDL_MAX_NODES][36] = {0};
+	float diag_data[LDL_MAX_NODES][21] = {0};
 	float diag_D[LDL_MAX_NODES][6] = {0};
-	// K = 10*I
-	diag_data[0][0] = 10; diag_data[0][4] = 10; diag_data[0][8] = 10;
+	// K = 10*I (packed lower-triangular)
+	diag_data[0][LDL_TRI(0,0)] = 10; diag_data[0][LDL_TRI(1,1)] = 10; diag_data[0][LDL_TRI(2,2)] = 10;
 	// Factorize in place
 	float Dk[6];
 	block_ldl(diag_data[0], Dk, 3);
@@ -3495,9 +3502,9 @@ static void test_ldl_solve_topo_identity()
 	topo2.pivots[1] = (LDL_Pivot){ .node = 1, .dk = 3, .ok = 3 };
 	topo2.L_factors_size = 0;
 
-	float dd2[LDL_MAX_NODES][36] = {0}, dD2[LDL_MAX_NODES][6] = {0};
-	dd2[0][0] = 5; dd2[0][4] = 5; dd2[0][8] = 5;
-	dd2[1][0] = 8; dd2[1][4] = 8; dd2[1][8] = 8;
+	float dd2[LDL_MAX_NODES][21] = {0}, dD2[LDL_MAX_NODES][6] = {0};
+	dd2[0][LDL_TRI(0,0)] = 5; dd2[0][LDL_TRI(1,1)] = 5; dd2[0][LDL_TRI(2,2)] = 5;
+	dd2[1][LDL_TRI(0,0)] = 8; dd2[1][LDL_TRI(1,1)] = 8; dd2[1][LDL_TRI(2,2)] = 8;
 	float Dk2[6];
 	block_ldl(dd2[0], Dk2, 3); for (int d = 0; d < 3; d++) dD2[0][d] = Dk2[d];
 	block_ldl(dd2[1], Dk2, 3); for (int d = 0; d < 3; d++) dD2[1][d] = Dk2[d];

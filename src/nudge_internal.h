@@ -83,6 +83,14 @@ typedef struct JointInternal
 typedef struct BVHTree BVHTree; // forward decl, defined in bvh.c
 
 // LDL direct solver types (used by solver_ldl.c).
+// Per-DOF Jacobian row: J_a and J_b each have 6 components [lin_x, lin_y, lin_z, ang_x, ang_y, ang_z].
+// LDL computes K = J * M^{-1} * J^T, RHS = -J * v, and impulse = M^{-1} * J^T * lambda generically.
+typedef struct LDL_JacobianRow
+{
+	float J_a[6];
+	float J_b[6];
+} LDL_JacobianRow;
+
 typedef struct LDL_Constraint
 {
 	int type;         // JOINT_BALL_SOCKET or JOINT_DISTANCE (or -1 for synthetic)
@@ -92,6 +100,7 @@ typedef struct LDL_Constraint
 	int is_synthetic;
 	int bundle_idx;   // which bundle this constraint belongs to
 	int bundle_offset; // local DOF offset within its bundle's DOF space
+	int jacobian_start; // index into LDL_Cache.jacobians[] for first row
 } LDL_Constraint;
 
 // Group of constraints between the same body pair, forming one graph node.
@@ -114,8 +123,8 @@ typedef struct LDL_Sparse
 	int row_offset[LDL_MAX_NODES+1]; // cumulative DOF offset
 	int n;                            // total scalar DOFs
 
-	// Diagonal blocks: diag_data[i] points to dof[i]*dof[i] floats.
-	float diag_data[LDL_MAX_NODES][9]; // max 3x3 per node
+	// Diagonal blocks: packed lower-triangular, dof*(dof+1)/2 floats per node.
+	float diag_data[LDL_MAX_NODES][6]; // max 3x3 packed (6 elements)
 	float diag_D[LDL_MAX_NODES][3];   // D pivots from block LDL (max 3 per 3x3 block)
 
 	// Off-diagonal: per-node neighbor list.
@@ -203,7 +212,8 @@ typedef struct LDL_Cache
 	int n;              // total DOFs
 	LDL_Topology* topo; // cached topology (NULL until built)
 	CK_DYNA float* L_factors; // contiguous off-diagonal L-factor blocks
-	float diag_data[LDL_MAX_NODES][36]; // diagonal blocks (max 6x6)
+	CK_DYNA LDL_JacobianRow* jacobians; // per-DOF Jacobian rows (filled each substep)
+	float diag_data[LDL_MAX_NODES][21]; // diagonal blocks: packed lower-triangular (max 6x6 = 21)
 	float diag_D[LDL_MAX_NODES][6];    // D pivots (max 6 per block)
 	int topo_version;   // world topo version when blocks were built
 
@@ -277,7 +287,7 @@ typedef struct WorldInternal
 
 #define SOLVER_VELOCITY_ITERS      10
 #define SOLVER_POSITION_ITERS      4
-#define SOLVER_BAUMGARTE           0.2f   // used by joints only; contacts use NGS
+// SOLVER_BAUMGARTE removed: joints use NGS or LDL position correction, not velocity bias.
 #define SOLVER_SLOP                0.005f // NGS position correction dead zone
 #define SOLVER_RESTITUTION_THRESH  1.0f
 #define SOLVER_POS_BAUMGARTE       0.2f

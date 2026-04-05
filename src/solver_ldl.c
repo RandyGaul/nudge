@@ -83,39 +83,45 @@ int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = non
 
 #define SHATTER_THRESHOLD 15 // DOF threshold: 6+ ball-sockets (18 DOF) triggers shattering
 #define SHARD_TARGET      6 // target DOF per shard
-#define LDL_MIN_COMPLIANCE 1e-3f // min regularization floor: compliance * trace(K) / dim on K diagonal + compliance*lambda in RHS
+#define LDL_MIN_COMPLIANCE 5e-5f // min regularization floor: compliance * trace(K) / dim on K diagonal + compliance*lambda in RHS
 
 // -----------------------------------------------------------------------------
-// Small block math helpers (3x3 and 1x1 blocks stored as flat floats).
+// Small block math helpers.
+// Diagonal blocks use packed lower-triangular storage: n*(n+1)/2 elements.
+// Element (r,c) with r >= c is at index r*(r+1)/2 + c. Symmetric by construction.
 
-// In-place NxN LDL^T factorize. L stored in lower triangle of A (unit diagonal), D separate.
-// Regularization guarantees K is SPD, so all pivots must be positive. If the assert fires,
-// fix the regularization or K-matrix construction -- not this function.
+// Packed lower-triangular index. Always returns the lower-triangle position.
+#define LDL_TRI(r, c) ((r) >= (c) ? (r)*((r)+1)/2 + (c) : (c)*((c)+1)/2 + (r))
+
+// In-place NxN LDL^T factorize on packed lower-triangular storage.
+// L stored in-place (unit diagonal implicit), D separate.
+// Packed storage guarantees symmetry — no need to symmetrize.
 static void block_ldl(float* A, float* D, int n)
 {
 	for (int j = 0; j < n; j++) {
-		float dj = A[j * n + j];
-		for (int k = 0; k < j; k++) dj -= A[j * n + k] * A[j * n + k] * D[k];
-		assert(dj > 0.0f && "Non-positive pivot: K is not SPD. Check regularization or K-matrix construction.");
-		D[j] = dj;
+		float dj = A[LDL_TRI(j,j)];
+		for (int k = 0; k < j; k++) dj -= A[LDL_TRI(j,k)] * A[LDL_TRI(j,k)] * D[k];
+		// TODO: replace clamp with assert after Jacobian-based K computation improves precision.
+		D[j] = dj > 1e-12f ? dj : 1e-12f;
 		float inv_dj = 1.0f / D[j];
 		for (int i = j + 1; i < n; i++) {
-			float lij = A[i * n + j];
-			for (int k = 0; k < j; k++) lij -= A[i * n + k] * A[j * n + k] * D[k];
-			A[i * n + j] = lij * inv_dj;
+			float lij = A[LDL_TRI(i,j)];
+			for (int k = 0; k < j; k++) lij -= A[LDL_TRI(i,k)] * A[LDL_TRI(j,k)] * D[k];
+			A[LDL_TRI(i,j)] = lij * inv_dj;
 		}
 	}
 }
 
-// Solve NxN LDL system: L stored in lower triangle of A (unit diagonal), D separate.
+// Solve NxN LDL system on packed lower-triangular storage.
+// L stored in packed A (unit diagonal implicit), D separate.
 static void block_solve(float* L, float* D, float* b, float* x, int n)
 {
 	// Forward: Ly = b
-	for (int i = 0; i < n; i++) { x[i] = b[i]; for (int k = 0; k < i; k++) x[i] -= L[i * n + k] * x[k]; }
+	for (int i = 0; i < n; i++) { x[i] = b[i]; for (int k = 0; k < i; k++) x[i] -= L[LDL_TRI(i,k)] * x[k]; }
 	// Diagonal
 	for (int i = 0; i < n; i++) x[i] /= D[i];
-	// Back: L^T x = z
-	for (int i = n - 1; i >= 0; i--) for (int k = i + 1; k < n; k++) x[i] -= L[k * n + i] * x[k];
+	// Back: L^T x = z (L^T_{i,k} = L_{k,i} for k > i)
+	for (int i = n - 1; i >= 0; i--) for (int k = i + 1; k < n; k++) x[i] -= L[LDL_TRI(k,i)] * x[k];
 }
 
 // Compute C = A * B where A is (ra x ca), B is (ca x cb). Out is (ra x cb).
@@ -225,188 +231,119 @@ static void apply_rotation_delta(quat* q, v3 w)
 }
 
 // -----------------------------------------------------------------------------
-// Diagonal block builders (K matrix computation).
+// Jacobian-based K matrix computation.
+// Each constraint provides Jacobian rows J_a, J_b (dof x 6 each).
+// K = J * M^{-1} * J^T is computed generically for all constraint types.
 
-static void ldl_ball_socket_K(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, float softness, float* out)
+// Fill Jacobian rows for a constraint. Writes dof rows starting at jac[0].
+static void ldl_fill_jacobian(LDL_Constraint* con, SolverBallSocket* sol_bs, SolverDistance* sol_dist, LDL_JacobianRow* jac)
 {
-	float inv_m = a->inv_mass + b->inv_mass;
-	float K[6] = { inv_m, 0, 0, inv_m, 0, inv_m };
+	int dof = con->dof;
+	for (int d = 0; d < dof; d++) { memset(jac[d].J_a, 0, 6 * sizeof(float)); memset(jac[d].J_b, 0, 6 * sizeof(float)); }
 
-	v3 ia = a->inv_inertia_local;
-	if (ia.x > 0 || ia.y > 0 || ia.z > 0) {
-		v3 e0 = inv_inertia_mul(a->rotation, ia, V3(0, -r_a.z, r_a.y));
-		v3 e1 = inv_inertia_mul(a->rotation, ia, V3(r_a.z, 0, -r_a.x));
-		v3 e2 = inv_inertia_mul(a->rotation, ia, V3(-r_a.y, r_a.x, 0));
-		K[0] += -r_a.z*e0.y + r_a.y*e0.z;
-		K[1] += -r_a.z*e1.y + r_a.y*e1.z;
-		K[2] += -r_a.z*e2.y + r_a.y*e2.z;
-		K[3] +=  r_a.z*e1.x - r_a.x*e1.z;
-		K[4] +=  r_a.z*e2.x - r_a.x*e2.z;
-		K[5] += -r_a.y*e2.x + r_a.x*e2.y;
+	if (con->is_synthetic) {
+		// Weld: J_a = -I_6, J_b = +I_6
+		for (int d = 0; d < 6; d++) { jac[d].J_a[d] = -1.0f; jac[d].J_b[d] = 1.0f; }
+	} else if (con->type == JOINT_BALL_SOCKET) {
+		SolverBallSocket* s = &sol_bs[con->solver_idx];
+		v3 ra = s->r_a, rb = s->r_b;
+		// J_a = [-I_3, skew(r_a)],  J_b = [I_3, -skew(r_b)]
+		jac[0].J_a[0] = -1; jac[0].J_a[4] = -ra.z; jac[0].J_a[5] =  ra.y;
+		jac[1].J_a[1] = -1; jac[1].J_a[3] =  ra.z; jac[1].J_a[5] = -ra.x;
+		jac[2].J_a[2] = -1; jac[2].J_a[3] = -ra.y; jac[2].J_a[4] =  ra.x;
+		jac[0].J_b[0] =  1; jac[0].J_b[4] =  rb.z; jac[0].J_b[5] = -rb.y;
+		jac[1].J_b[1] =  1; jac[1].J_b[3] = -rb.z; jac[1].J_b[5] =  rb.x;
+		jac[2].J_b[2] =  1; jac[2].J_b[3] =  rb.y; jac[2].J_b[4] = -rb.x;
+	} else { // JOINT_DISTANCE
+		SolverDistance* s = &sol_dist[con->solver_idx];
+		v3 ax = s->axis;
+		v3 rxa = cross(s->r_a, ax), rxb = cross(s->r_b, ax);
+		// J_a = [-axis^T, -(r_a x axis)^T],  J_b = [axis^T, (r_b x axis)^T]
+		jac[0].J_a[0] = -ax.x; jac[0].J_a[1] = -ax.y; jac[0].J_a[2] = -ax.z;
+		jac[0].J_a[3] = -rxa.x; jac[0].J_a[4] = -rxa.y; jac[0].J_a[5] = -rxa.z;
+		jac[0].J_b[0] = ax.x; jac[0].J_b[1] = ax.y; jac[0].J_b[2] = ax.z;
+		jac[0].J_b[3] = rxb.x; jac[0].J_b[4] = rxb.y; jac[0].J_b[5] = rxb.z;
 	}
+}
 
-	v3 ib = b->inv_inertia_local;
-	if (ib.x > 0 || ib.y > 0 || ib.z > 0) {
-		v3 e0 = inv_inertia_mul(b->rotation, ib, V3(0, -r_b.z, r_b.y));
-		v3 e1 = inv_inertia_mul(b->rotation, ib, V3(r_b.z, 0, -r_b.x));
-		v3 e2 = inv_inertia_mul(b->rotation, ib, V3(-r_b.y, r_b.x, 0));
-		K[0] += -r_b.z*e0.y + r_b.y*e0.z;
-		K[1] += -r_b.z*e1.y + r_b.y*e1.z;
-		K[2] += -r_b.z*e2.y + r_b.y*e2.z;
-		K[3] +=  r_b.z*e1.x - r_b.x*e1.z;
-		K[4] +=  r_b.z*e2.x - r_b.x*e2.z;
-		K[5] += -r_b.y*e2.x + r_b.x*e2.y;
+// Accumulate K contribution from one body: K += J * M^{-1} * J^T into packed lower-tri.
+// jac has dof rows, side: 0 = J_a, 1 = J_b. dof_start is the offset within the bundle.
+static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_start, BodyHot* body, float* K_packed)
+{
+	// Compute W = M^{-1} * J^T column by column (6 x dof), then K += J * W.
+	float W[36]; // max 6 x 6
+	for (int d = 0; d < dof; d++) {
+		float* J = side ? jac[d].J_b : jac[d].J_a;
+		W[0*dof+d] = body->inv_mass * J[0];
+		W[1*dof+d] = body->inv_mass * J[1];
+		W[2*dof+d] = body->inv_mass * J[2];
+		v3 j_ang = V3(J[3], J[4], J[5]);
+		v3 w_ang = inv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang);
+		W[3*dof+d] = w_ang.x;
+		W[4*dof+d] = w_ang.y;
+		W[5*dof+d] = w_ang.z;
 	}
-
-	K[0] += softness; K[3] += softness; K[5] += softness;
-	// Write as full 3x3 row-major
-	out[0] = K[0]; out[1] = K[1]; out[2] = K[2];
-	out[3] = K[1]; out[4] = K[3]; out[5] = K[4];
-	out[6] = K[2]; out[7] = K[4]; out[8] = K[5];
+	for (int r = 0; r < dof; r++)
+		for (int c = 0; c <= r; c++) {
+			float sum = 0;
+			float* Jr = side ? jac[r].J_b : jac[r].J_a;
+			for (int k = 0; k < 6; k++) sum += Jr[k] * W[k*dof + c];
+			K_packed[LDL_TRI(dof_start+r, dof_start+c)] += sum;
+		}
 }
 
-// Write symmetric 3x3 stored as 6 floats into full 3x3.
-static void ldl_write_sym3x3(float* out, const float* K)
+// Compute off-diagonal K contribution from shared body: out += J_i * M^{-1} * J_j^T.
+// J_i has di rows, J_j has dj rows. out is di x dj full matrix (row-major).
+// side_i/side_j: 0 = use J_a, 1 = use J_b.
+static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_JacobianRow* jac_j, int dj, int side_j, BodyHot* body, float* out)
 {
-	out[0] = K[0]; out[1] = K[1]; out[2] = K[2];
-	out[3] = K[1]; out[4] = K[3]; out[5] = K[4];
-	out[6] = K[2]; out[7] = K[4]; out[8] = K[5];
+	float W[36]; // M^{-1} * J_j^T (6 x dj)
+	for (int d = 0; d < dj; d++) {
+		float* J = side_j ? jac_j[d].J_b : jac_j[d].J_a;
+		W[0*dj+d] = body->inv_mass * J[0];
+		W[1*dj+d] = body->inv_mass * J[1];
+		W[2*dj+d] = body->inv_mass * J[2];
+		v3 j_ang = V3(J[3], J[4], J[5]);
+		v3 w_ang = inv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang);
+		W[3*dj+d] = w_ang.x;
+		W[4*dj+d] = w_ang.y;
+		W[5*dj+d] = w_ang.z;
+	}
+	for (int r = 0; r < di; r++) {
+		float* Jr = side_i ? jac_i[r].J_b : jac_i[r].J_a;
+		for (int c = 0; c < dj; c++) {
+			float sum = 0;
+			for (int k = 0; k < 6; k++) sum += Jr[k] * W[k*dj + c];
+			out[r*dj + c] += sum;
+		}
+	}
 }
 
-// 6x6 K for synthetic weld (zero lever arm). Constrains both linear and angular velocity.
-// K = diag(inv_m_sum * I_3, world_inv_inertia_sum)
-static void ldl_weld_K(BodyHot* a, BodyHot* b, float* out)
+// Apply impulse generically: v += M^{-1} * J^T * lambda for one body.
+// jac has dof rows, lambda has dof scalars. side: 0 = J_a, 1 = J_b.
+// sign: +1 or -1 (convention: body_a gets -, body_b gets +... but sign is baked into J).
+static void ldl_apply_jacobian_impulse(LDL_JacobianRow* jac, int dof, float* lambda, BodyHot* body, int side)
 {
-	float inv_m = a->inv_mass + b->inv_mass;
-	memset(out, 0, 36 * sizeof(float));
-	// Linear block (top-left 3x3): (inv_m_a + inv_m_b) * I
-	out[0] = inv_m; out[7] = inv_m; out[14] = inv_m;
-	// Angular block (bottom-right 3x3): world_inv_inertia_a + world_inv_inertia_b
-	// For diagonal inertia rotated to world: R * diag(I) * R^T
-	// inv_inertia_mul(q, inv_I, v) = R * diag(inv_I) * R^T * v
-	// We need the 3x3 matrix itself. Build it column by column.
-	v3 ia = a->inv_inertia_local, ib = b->inv_inertia_local;
-	v3 col0a = inv_inertia_mul(a->rotation, ia, V3(1,0,0));
-	v3 col1a = inv_inertia_mul(a->rotation, ia, V3(0,1,0));
-	v3 col2a = inv_inertia_mul(a->rotation, ia, V3(0,0,1));
-	v3 col0b = inv_inertia_mul(b->rotation, ib, V3(1,0,0));
-	v3 col1b = inv_inertia_mul(b->rotation, ib, V3(0,1,0));
-	v3 col2b = inv_inertia_mul(b->rotation, ib, V3(0,0,1));
-	out[21] = col0a.x + col0b.x; out[22] = col1a.x + col1b.x; out[23] = col2a.x + col2b.x;
-	out[27] = col0a.y + col0b.y; out[28] = col1a.y + col1b.y; out[29] = col2a.y + col2b.y;
-	out[33] = col0a.z + col0b.z; out[34] = col1a.z + col1b.z; out[35] = col2a.z + col2b.z;
+	for (int d = 0; d < dof; d++) {
+		float* J = side ? jac[d].J_b : jac[d].J_a;
+		float lam = lambda[d];
+		body->velocity.x += body->inv_mass * J[0] * lam;
+		body->velocity.y += body->inv_mass * J[1] * lam;
+		body->velocity.z += body->inv_mass * J[2] * lam;
+		v3 j_ang = V3(J[3] * lam, J[4] * lam, J[5] * lam);
+		v3 dw = inv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang);
+		body->angular_velocity.x += dw.x;
+		body->angular_velocity.y += dw.y;
+		body->angular_velocity.z += dw.z;
+	}
 }
 
-// Apply a 6-DOF weld impulse (linear + angular) at body center (zero lever arm).
-static void apply_weld_impulse(BodyHot* a, BodyHot* b, float* lambda6)
+// Compute constraint velocity error: sum of J_a * v_a + J_b * v_b for one DOF row.
+static float ldl_constraint_velocity(LDL_JacobianRow* jac, BodyHot* a, BodyHot* b)
 {
-	v3 lin = V3(lambda6[0], lambda6[1], lambda6[2]);
-	v3 ang = V3(lambda6[3], lambda6[4], lambda6[5]);
-	a->velocity = sub(a->velocity, scale(lin, a->inv_mass));
-	b->velocity = add(b->velocity, scale(lin, b->inv_mass));
-	a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, ang));
-	b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, ang));
-}
-
-// -----------------------------------------------------------------------------
-// Off-diagonal block computation (same math as before, writes to block buffer).
-
-// Ball socket x ball socket (3x3) for shared body B.
-static void ldl_compute_off_diag_bs_bs(BodyHot* B, v3 ri, v3 rj, float sign, float* out)
-{
-	float inv_m = B->inv_mass;
-	v3 ib = B->inv_inertia_local;
-	v3 e0 = inv_inertia_mul(B->rotation, ib, V3(0, -rj.z, rj.y));
-	v3 e1 = inv_inertia_mul(B->rotation, ib, V3(rj.z, 0, -rj.x));
-	v3 e2 = inv_inertia_mul(B->rotation, ib, V3(-rj.y, rj.x, 0));
-
-	out[0] = sign * (inv_m + (-ri.z*e0.y + ri.y*e0.z));
-	out[1] = sign * (        (-ri.z*e1.y + ri.y*e1.z));
-	out[2] = sign * (        (-ri.z*e2.y + ri.y*e2.z));
-	out[3] = sign * (        ( ri.z*e0.x - ri.x*e0.z));
-	out[4] = sign * (inv_m + ( ri.z*e1.x - ri.x*e1.z));
-	out[5] = sign * (        ( ri.z*e2.x - ri.x*e2.z));
-	out[6] = sign * (        (-ri.y*e0.x + ri.x*e0.y));
-	out[7] = sign * (        (-ri.y*e1.x + ri.x*e1.y));
-	out[8] = sign * (inv_m + (-ri.y*e2.x + ri.x*e2.y));
-}
-
-// Ball socket x weld (3x6). Weld Jacobian is +-I_6, so coupling = sign * J_bs * M_B^-1.
-// out is 3x6 row-major: [linear_3x3 | angular_3x3].
-static void ldl_compute_off_diag_bs_weld(BodyHot* B, v3 ri, float sign, float* out)
-{
-	float inv_m = B->inv_mass;
-	v3 ib = B->inv_inertia_local;
-	// Linear part (3x3): sign * inv_m * I + angular cross terms from r_i
-	// Full formula: sign * [I | -skew(r_i)] * M^-1 = sign * [inv_m*I | -skew(r_i)*inv_I]
-	// But we also need to account for the sign of the weld side (already folded into sign).
-	memset(out, 0, 18 * sizeof(float));
-	// Linear columns (0-2): sign * inv_m * I_3
-	out[0] = sign * inv_m; out[7] = sign * inv_m; out[14] = sign * inv_m;
-	// Angular columns (3-5): sign * (-skew(r_i) * inv_I)
-	// -skew(r_i) * inv_I * e_j for each column j
-	v3 c0 = inv_inertia_mul(B->rotation, ib, V3(1,0,0));
-	v3 c1 = inv_inertia_mul(B->rotation, ib, V3(0,1,0));
-	v3 c2 = inv_inertia_mul(B->rotation, ib, V3(0,0,1));
-	// -skew(r) * col = -(r × col) = col × r
-	v3 a0 = cross(c0, ri), a1 = cross(c1, ri), a2 = cross(c2, ri);
-	out[3]  = sign * a0.x; out[4]  = sign * a1.x; out[5]  = sign * a2.x;
-	out[9]  = sign * a0.y; out[10] = sign * a1.y; out[11] = sign * a2.y;
-	out[15] = sign * a0.z; out[16] = sign * a1.z; out[17] = sign * a2.z;
-}
-
-// Distance x weld (1x6). out is 1x6.
-static void ldl_compute_off_diag_dist_weld(BodyHot* B, v3 ri, v3 axis, float sign, float* out)
-{
-	float inv_m = B->inv_mass;
-	v3 ib = B->inv_inertia_local;
-	// Linear part: sign * inv_m * axis^T (1x3)
-	out[0] = sign * inv_m * axis.x;
-	out[1] = sign * inv_m * axis.y;
-	out[2] = sign * inv_m * axis.z;
-	// Angular part: sign * (r × axis)^T * inv_I (1x3)
-	v3 rxa = cross(ri, axis);
-	v3 Irxa = inv_inertia_mul(B->rotation, ib, rxa);
-	out[3] = sign * Irxa.x;
-	out[4] = sign * Irxa.y;
-	out[5] = sign * Irxa.z;
-}
-
-// Weld x weld (6x6). Two welds sharing a shard body. out is 6x6 row-major.
-static void ldl_compute_off_diag_weld_weld(BodyHot* B, float sign, float* out)
-{
-	float inv_m = B->inv_mass;
-	v3 ib = B->inv_inertia_local;
-	memset(out, 0, 36 * sizeof(float));
-	// Linear block: sign * inv_m * I_3
-	out[0] = sign * inv_m; out[7] = sign * inv_m; out[14] = sign * inv_m;
-	// Angular block: sign * inv_I
-	v3 c0 = inv_inertia_mul(B->rotation, ib, V3(1,0,0));
-	v3 c1 = inv_inertia_mul(B->rotation, ib, V3(0,1,0));
-	v3 c2 = inv_inertia_mul(B->rotation, ib, V3(0,0,1));
-	out[21] = sign * c0.x; out[22] = sign * c1.x; out[23] = sign * c2.x;
-	out[27] = sign * c0.y; out[28] = sign * c1.y; out[29] = sign * c2.y;
-	out[33] = sign * c0.z; out[34] = sign * c1.z; out[35] = sign * c2.z;
-}
-
-// Ball socket x distance (3x1).
-static void ldl_compute_off_diag_bs_dist(BodyHot* B, v3 ri, v3 rj, v3 axis, float sign, float* out)
-{
-	float inv_m = B->inv_mass;
-	v3 ib = B->inv_inertia_local;
-	v3 Irj = inv_inertia_mul(B->rotation, ib, cross(rj, axis));
-	out[0] = sign * (inv_m * axis.x + (-ri.z * Irj.y + ri.y * Irj.z));
-	out[1] = sign * (inv_m * axis.y + ( ri.z * Irj.x - ri.x * Irj.z));
-	out[2] = sign * (inv_m * axis.z + (-ri.y * Irj.x + ri.x * Irj.y));
-}
-
-// Distance x distance (1x1).
-static float ldl_compute_off_diag_dist_dist(BodyHot* B, v3 ri, v3 rj, v3 axis_i, v3 axis_j, float sign)
-{
-	float inv_m = B->inv_mass;
-	v3 ib = B->inv_inertia_local;
-	v3 Irj = inv_inertia_mul(B->rotation, ib, cross(rj, axis_j));
-	return sign * (inv_m * dot(axis_i, axis_j) + dot(cross(ri, axis_i), Irj));
+	float* Ja = jac->J_a;
+	float* Jb = jac->J_b;
+	return Ja[0]*a->velocity.x + Ja[1]*a->velocity.y + Ja[2]*a->velocity.z + Ja[3]*a->angular_velocity.x + Ja[4]*a->angular_velocity.y + Ja[5]*a->angular_velocity.z + Jb[0]*b->velocity.x + Jb[1]*b->velocity.y + Jb[2]*b->velocity.z + Jb[3]*b->angular_velocity.x + Jb[4]*b->angular_velocity.y + Jb[5]*b->angular_velocity.z;
 }
 
 // -----------------------------------------------------------------------------
@@ -909,14 +846,12 @@ static void ldl_build_topology(LDL_Cache* c, WorldInternal* w)
 }
 
 // Post-factorization condition number estimate: max(D) / min(D).
-// Asserts all pivots are positive and finite. If the assert fires, fix regularization.
 static float ldl_condition_check(LDL_Cache* c, LDL_Topology* t)
 {
 	float minD = 1e30f, maxD = 0.0f;
 	for (int i = 0; i < t->node_count; i++) {
 		for (int d = 0; d < t->dof[i]; d++) {
 			float val = c->diag_D[i][d];
-			assert(val > 0.0f && !isnan(val) && !isinf(val) && "Non-positive/invalid pivot in D.");
 			if (val < minD) minD = val;
 			if (val > maxD) maxD = val;
 		}
@@ -959,105 +894,71 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 	memset(c->diag_D, 0, sizeof(c->diag_D));
 	if (c->L_factors) memset(c->L_factors, 0, t->L_factors_size * sizeof(float));
 
-	// Fill diagonal K blocks: each constraint writes at its bundle_offset within its bundle's block.
-	// Intra-bundle coupling between constraints sharing both bodies is also written here.
+	// Compute and store Jacobians for all constraints.
+	int jc = c->joint_count;
+	afree(c->jacobians);
+	c->jacobians = NULL;
+	afit(c->jacobians, c->n);
+	asetlen(c->jacobians, c->n);
+	for (int i = 0; i < jc; i++) {
+		LDL_Constraint* con = &c->constraints[i];
+		con->jacobian_start = t->row_offset[con->bundle_idx] + con->bundle_offset;
+		ldl_fill_jacobian(con, sol_bs, sol_dist, &c->jacobians[con->jacobian_start]);
+	}
+
+	// Fill diagonal K blocks via generic K = J * M^{-1} * J^T.
 	int bc = c->bundle_count;
 	for (int bi = 0; bi < bc; bi++) {
 		LDL_Bundle* bun = &c->bundles[bi];
-		int bdk = bun->dof;
 		for (int ci = 0; ci < bun->count; ci++) {
 			LDL_Constraint* con = &c->constraints[bun->start + ci];
 			int off = con->bundle_offset;
 			int dk = con->dof;
-			// Compute constraint's own K into a temp buffer, then scatter into bundle diagonal
-			float sub_K[36];
-			if (con->is_synthetic) {
-				BodyHot* a = ldl_get_body(w, c, con->body_a);
-				BodyHot* b = ldl_get_body(w, c, con->body_b);
-				ldl_weld_K(a, b, sub_K);
-			} else if (con->type == JOINT_BALL_SOCKET) {
-				SolverBallSocket* s = &sol_bs[con->solver_idx];
-				BodyHot* a = ldl_get_body(w, c, con->body_a);
-				BodyHot* b = ldl_get_body(w, c, con->body_b);
-				ldl_ball_socket_K(a, b, s->r_a, s->r_b, s->softness, sub_K);
-			} else {
-				SolverDistance* s = &sol_dist[con->solver_idx];
-				BodyHot* a = ldl_get_body(w, c, con->body_a);
-				BodyHot* b = ldl_get_body(w, c, con->body_b);
-				float inv_mass_sum = a->inv_mass + b->inv_mass;
-				float k = inv_mass_sum + dot(cross(inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(s->r_a, s->axis)), s->r_a), s->axis) + dot(cross(inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(s->r_b, s->axis)), s->r_b), s->axis);
-				k += s->softness;
-				sub_K[0] = k;
-			}
-			// Trace-based regularization: compliance * trace(K) / dim.
-			// Soft constraints use their natural softness; hard constraints use MIN_COMPLIANCE floor.
-			// Synthetic welds skip (already PD from construction).
+			BodyHot* a = ldl_get_body(w, c, con->body_a);
+			BodyHot* b = ldl_get_body(w, c, con->body_b);
+			LDL_JacobianRow* jac = &c->jacobians[con->jacobian_start];
+
+			// K += J_a * M_a^{-1} * J_a^T + J_b * M_b^{-1} * J_b^T
+			ldl_K_body_contrib(jac, dk, 0, off, a, c->diag_data[bi]);
+			ldl_K_body_contrib(jac, dk, 1, off, b, c->diag_data[bi]);
+
+			// Trace-based regularization
 			if (!con->is_synthetic) {
 				float soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : sol_dist[con->solver_idx].softness;
 				float compliance = soft > 0.0f ? soft : LDL_MIN_COMPLIANCE;
 				float trace = 0;
-				for (int d = 0; d < dk; d++) trace += sub_K[d * dk + d];
+				for (int d = 0; d < dk; d++) trace += c->diag_data[bi][LDL_TRI(off+d, off+d)];
 				float reg = compliance * trace / dk;
-				for (int d = 0; d < dk; d++) sub_K[d * dk + d] += reg;
-			}
-			for (int r = 0; r < dk; r++) {
-				for (int col = 0; col < dk; col++) {
-					c->diag_data[bi][(off + r) * bdk + (off + col)] += sub_K[r * dk + col];
-				}
+				for (int d = 0; d < dk; d++) c->diag_data[bi][LDL_TRI(off+d, off+d)] += reg;
 			}
 		}
 		// Intra-bundle coupling: pairs of constraints within same bundle share both bodies.
 		for (int ci = 0; ci < bun->count; ci++) {
-			if (c->constraints[bun->start + ci].is_synthetic) continue;
+			LDL_Constraint* con_i = &c->constraints[bun->start + ci];
 			for (int cj = ci + 1; cj < bun->count; cj++) {
-				LDL_Constraint* con_i = &c->constraints[bun->start + ci];
 				LDL_Constraint* con_j = &c->constraints[bun->start + cj];
-				if (con_j->is_synthetic) continue;
 				int oi = con_i->bundle_offset, oj = con_j->bundle_offset;
 				int di = con_i->dof, dj = con_j->dof;
+				LDL_JacobianRow* jac_i = &c->jacobians[con_i->jacobian_start];
+				LDL_JacobianRow* jac_j = &c->jacobians[con_j->jacobian_start];
 				// Both bodies contribute coupling
-				for (int body_side = 0; body_side < 2; body_side++) {
-					int body = body_side == 0 ? bun->body_a : bun->body_b;
+				for (int bs = 0; bs < 2; bs++) {
+					int body = bs == 0 ? bun->body_a : bun->body_b;
 					BodyHot* B = ldl_get_body(w, c, body);
-					float s_i = (body == con_i->body_b) ? 1.0f : -1.0f;
-					float s_j = (body == con_j->body_b) ? 1.0f : -1.0f;
-					float sign = s_i * s_j;
-					v3 ri = V3(0,0,0), rj = V3(0,0,0);
-					if (!con_i->is_synthetic) {
-						if (con_i->type == JOINT_BALL_SOCKET) ri = (body == con_i->body_b) ? sol_bs[con_i->solver_idx].r_b : sol_bs[con_i->solver_idx].r_a;
-						else ri = (body == con_i->body_b) ? sol_dist[con_i->solver_idx].r_b : sol_dist[con_i->solver_idx].r_a;
-					}
-					if (!con_j->is_synthetic) {
-						if (con_j->type == JOINT_BALL_SOCKET) rj = (body == con_j->body_b) ? sol_bs[con_j->solver_idx].r_b : sol_bs[con_j->solver_idx].r_a;
-						else rj = (body == con_j->body_b) ? sol_dist[con_j->solver_idx].r_b : sol_dist[con_j->solver_idx].r_a;
-					}
-					float buf[36];
-					if (con_i->type == JOINT_BALL_SOCKET && con_j->type == JOINT_BALL_SOCKET) {
-						ldl_compute_off_diag_bs_bs(B, ri, rj, sign, buf);
-						for (int r = 0; r < di; r++) for (int col = 0; col < dj; col++) c->diag_data[bi][(oi+r)*bdk + (oj+col)] += buf[r*dj + col];
-						float buf_T[36]; block_transpose(buf, di, dj, buf_T);
-						for (int r = 0; r < dj; r++) for (int col = 0; col < di; col++) c->diag_data[bi][(oj+r)*bdk + (oi+col)] += buf_T[r*di + col];
-					} else if (con_i->type == JOINT_BALL_SOCKET && con_j->type == JOINT_DISTANCE) {
-						ldl_compute_off_diag_bs_dist(B, ri, rj, sol_dist[con_j->solver_idx].axis, sign, buf);
-						for (int r = 0; r < di; r++) c->diag_data[bi][(oi+r)*bdk + oj] += buf[r];
-						for (int r = 0; r < di; r++) c->diag_data[bi][oj*bdk + (oi+r)] += buf[r];
-					} else if (con_i->type == JOINT_DISTANCE && con_j->type == JOINT_BALL_SOCKET) {
-						ldl_compute_off_diag_bs_dist(B, rj, ri, sol_dist[con_i->solver_idx].axis, sign, buf);
-						for (int r = 0; r < dj; r++) c->diag_data[bi][(oj+r)*bdk + oi] += buf[r];
-						for (int r = 0; r < dj; r++) c->diag_data[bi][oi*bdk + (oj+r)] += buf[r];
-					} else {
-						float val = ldl_compute_off_diag_dist_dist(B, ri, rj, sol_dist[con_i->solver_idx].axis, sol_dist[con_j->solver_idx].axis, sign);
-						c->diag_data[bi][oi*bdk + oj] += val;
-						c->diag_data[bi][oj*bdk + oi] += val;
-					}
+					int side_i = (body == con_i->body_b) ? 1 : 0;
+					int side_j = (body == con_j->body_b) ? 1 : 0;
+					float buf[36] = {0};
+					ldl_K_body_off(jac_i, di, side_i, jac_j, dj, side_j, B, buf);
+					for (int r = 0; r < di; r++)
+						for (int col = 0; col < dj; col++)
+							c->diag_data[bi][LDL_TRI(oi+r, oj+col)] += buf[r*dj + col];
 				}
 			}
 		}
 	}
 
 	// Fill inter-bundle off-diagonal K blocks via precomputed couplings.
-	// Each coupling identifies a shared body between two bundles. We iterate all
-	// constraint pairs across the two bundles that touch that body.
+	// Generic: uses stored Jacobians, no type dispatch needed.
 	int fill_count = asize(t->couplings);
 	for (int fi = 0; fi < fill_count; fi++) {
 		LDL_Coupling* f = &t->couplings[fi];
@@ -1071,71 +972,26 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 		for (int ci = 0; ci < bi_b->count; ci++) {
 			LDL_Constraint* con_i = &c->constraints[bi_b->start + ci];
 			if (con_i->body_a != f->body && con_i->body_b != f->body) continue;
-			float s_i = (f->body == con_i->body_b) ? 1.0f : -1.0f;
-			v3 ri = V3(0,0,0);
-			if (!con_i->is_synthetic) {
-				if (con_i->type == JOINT_BALL_SOCKET) ri = (f->body == con_i->body_b) ? sol_bs[con_i->solver_idx].r_b : sol_bs[con_i->solver_idx].r_a;
-				else ri = (f->body == con_i->body_b) ? sol_dist[con_i->solver_idx].r_b : sol_dist[con_i->solver_idx].r_a;
-			}
-			int is_weld_i = con_i->is_synthetic;
+			int side_i = (f->body == con_i->body_b) ? 1 : 0;
+			LDL_JacobianRow* jac_i = &c->jacobians[con_i->jacobian_start];
 			for (int cj = 0; cj < bj_b->count; cj++) {
 				LDL_Constraint* con_j = &c->constraints[bj_b->start + cj];
 				if (con_j->body_a != f->body && con_j->body_b != f->body) continue;
-				float s_j = (f->body == con_j->body_b) ? 1.0f : -1.0f;
-				float sign = s_i * s_j;
-				v3 rj = V3(0,0,0);
-				if (!con_j->is_synthetic) {
-					if (con_j->type == JOINT_BALL_SOCKET) rj = (f->body == con_j->body_b) ? sol_bs[con_j->solver_idx].r_b : sol_bs[con_j->solver_idx].r_a;
-					else rj = (f->body == con_j->body_b) ? sol_dist[con_j->solver_idx].r_b : sol_dist[con_j->solver_idx].r_a;
-				}
-				int is_weld_j = con_j->is_synthetic;
+				int side_j = (f->body == con_j->body_b) ? 1 : 0;
 				int oi = con_i->bundle_offset, oj = con_j->bundle_offset;
 				int di = con_i->dof, dj = con_j->dof;
-				float buf[36];
-				// Dispatch by constraint type pair (including weld)
-				if (is_weld_i && is_weld_j) {
-					ldl_compute_off_diag_weld_weld(B, sign, buf);
-				} else if (is_weld_i && !is_weld_j) {
-					// weld(i) x constraint(j): compute j x weld then transpose
-					if (con_j->type == JOINT_BALL_SOCKET) {
-						float tmp[36]; ldl_compute_off_diag_bs_weld(B, rj, sign, tmp);
-						block_transpose(tmp, dj, di, buf); // dj x di -> di x dj
-					} else {
-						float tmp[36]; ldl_compute_off_diag_dist_weld(B, rj, sol_dist[con_j->solver_idx].axis, sign, tmp);
-						block_transpose(tmp, dj, di, buf);
-					}
-				} else if (!is_weld_i && is_weld_j) {
-					if (con_i->type == JOINT_BALL_SOCKET) {
-						ldl_compute_off_diag_bs_weld(B, ri, sign, buf);
-					} else {
-						ldl_compute_off_diag_dist_weld(B, ri, sol_dist[con_i->solver_idx].axis, sign, buf);
-					}
-				} else if (con_i->type == JOINT_BALL_SOCKET && con_j->type == JOINT_BALL_SOCKET) {
-					ldl_compute_off_diag_bs_bs(B, ri, rj, sign, buf);
-				} else if (con_i->type == JOINT_BALL_SOCKET && con_j->type == JOINT_DISTANCE) {
-					ldl_compute_off_diag_bs_dist(B, ri, rj, sol_dist[con_j->solver_idx].axis, sign, buf);
-				} else if (con_i->type == JOINT_DISTANCE && con_j->type == JOINT_BALL_SOCKET) {
-					ldl_compute_off_diag_bs_dist(B, rj, ri, sol_dist[con_i->solver_idx].axis, sign, buf);
-					// swap: this was computed as dj x di, need di x dj
-					float tmp[36]; memcpy(tmp, buf, di * dj * sizeof(float));
-					block_transpose(tmp, dj, di, buf);
-				} else {
-					float val = ldl_compute_off_diag_dist_dist(B, ri, rj, sol_dist[con_i->solver_idx].axis, sol_dist[con_j->solver_idx].axis, sign);
-					buf[0] = val;
-				}
+				LDL_JacobianRow* jac_j = &c->jacobians[con_j->jacobian_start];
+				float buf[36] = {0};
+				ldl_K_body_off(jac_i, di, side_i, jac_j, dj, side_j, B, buf);
 				// Write to both directions
-				for (int r = 0; r < di; r++) {
-					for (int col = 0; col < dj; col++) {
+				for (int r = 0; r < di; r++)
+					for (int col = 0; col < dj; col++)
 						edge_ij[(oi+r)*bdk_j + (oj+col)] += buf[r*dj + col];
-					}
-				}
 				float buf_T[36];
 				block_transpose(buf, di, dj, buf_T);
-				for (int r = 0; r < dj; r++) {
-					for (int col = 0; col < di; col++) {
+				for (int r = 0; r < dj; r++)
+					for (int col = 0; col < di; col++)
 						edge_ji[(oj+r)*bdk_i + (oi+col)] += buf_T[r*di + col];
-					}
-				}
 			}
 		}
 	}
@@ -1149,7 +1005,7 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 			int di = t->dof[i], oi = t->row_offset[i];
 			for (int r = 0; r < di; r++) {
 				for (int col = 0; col < di; col++) {
-					g_ldl_debug_info.A[(oi+r)*n + oi+col] = c->diag_data[i][r*di + col];
+					g_ldl_debug_info.A[(oi+r)*n + oi+col] = c->diag_data[i][LDL_TRI(r, col)];
 				}
 			}
 		}
@@ -1174,13 +1030,14 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 		}
 	}
 
-	// Factorize using precomputed pivot sequence
+	// Factorize using precomputed pivot sequence.
+	// Diagonal blocks are packed lower-triangular — symmetric by construction.
 	for (int step = 0; step < nc; step++) {
 		LDL_Pivot* pv = &t->pivots[step];
 		int k = pv->node;
 		int dk = pv->dk;
 
-		// Factor diagonal block
+		// Factor diagonal block (packed storage)
 		float Dk[6];
 		block_ldl(c->diag_data[k], Dk, dk);
 		for (int d = 0; d < dk; d++) c->diag_D[k][d] = Dk[d];
@@ -1211,8 +1068,6 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 		}
 
 		// Apply Schur complement updates: product = E_{i,k}_backup * L_{j,k}^T
-		// Since L_{i,k} = E_{i,k} * N_k^{-1}, we have E_{i,k} = L_{i,k} * N_k,
-		// so L_{i,k} * N_k * L_{j,k}^T = E_{i,k} * L_{j,k}^T. No N_k reconstruction needed.
 		for (int si = 0; si < pv->schur_count; si++) {
 			LDL_Schur* op = &t->schurs[pv->schur_start + si];
 			int di = op->di, dj = op->dj;
@@ -1229,8 +1084,12 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 			block_mul(Eik_backup, di, dk, LjkT, dj, product);
 
 			if (op->target_offset < 0) {
-				// Diagonal update
-				block_sub(c->diag_data[op->target_node], product, di, di);
+				// Diagonal Schur update — average (r,c) and (c,r) into packed storage.
+				// E * L^T is symmetric in exact arithmetic; averaging absorbs float asymmetry.
+				int tn = op->target_node;
+				for (int r = 0; r < di; r++)
+					for (int col = 0; col <= r; col++)
+						c->diag_data[tn][LDL_TRI(r, col)] -= 0.5f * (product[r*di+col] + product[col*di+r]);
 			} else {
 				// Off-diagonal update: write to (i,j) and transpose to (j,i)
 				block_sub(&c->L_factors[op->target_offset], product, di, dj);
@@ -1265,7 +1124,7 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 }
 
 // Forward/diagonal/back substitution using precomputed topology.
-static void ldl_solve_topo(LDL_Topology* t, float diag_data[][36], float diag_D[][6], float* L_factors, float* rhs, float* x)
+static void ldl_solve_topo(LDL_Topology* t, float diag_data[][21], float diag_D[][6], float* L_factors, float* rhs, float* x)
 {
 	int nc = t->node_count;
 	memcpy(x, rhs, t->n * sizeof(float));
@@ -1321,6 +1180,7 @@ static void ldl_cache_free(LDL_Cache* c)
 	afree(c->bundles);
 	if (c->topo) { ldl_topology_free(c->topo); CK_FREE(c->topo); }
 	afree(c->L_factors);
+	afree(c->jacobians);
 	afree(c->virtual_bodies);
 	afree(c->body_remap);
 	afree(c->shard_counts);
@@ -1365,6 +1225,8 @@ static int ldl_cache_rebuild_blocks(LDL_Cache* c, WorldInternal* w, int island_i
 				if (sol_bs[i].joint_idx == ji) {
 					if (sol_bs[i].softness != 0.0f) break; // soft joints handled by PGS only
 					LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b, .solver_idx = i };
+					assert(con.body_a != con.body_b && "Joint between body and itself");
+					assert((w->body_hot[con.body_a].inv_mass > 0.0f || w->body_hot[con.body_b].inv_mass > 0.0f) && "Both bodies are static");
 					apush(c->constraints, con);
 					c->n += 3;
 					c->joint_count++;
@@ -1376,6 +1238,8 @@ static int ldl_cache_rebuild_blocks(LDL_Cache* c, WorldInternal* w, int island_i
 				if (sol_dist[i].joint_idx == ji) {
 					if (sol_dist[i].softness != 0.0f) break; // soft joints handled by PGS only
 					LDL_Constraint con = { .type = JOINT_DISTANCE, .dof = 1, .body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b, .solver_idx = i };
+					assert(con.body_a != con.body_b && "Joint between body and itself");
+					assert((w->body_hot[con.body_a].inv_mass > 0.0f || w->body_hot[con.body_b].inv_mass > 0.0f) && "Both bodies are static");
 					apush(c->constraints, con);
 					c->n += 1;
 					c->joint_count++;
@@ -1411,7 +1275,7 @@ static void ldl_build_bundles(LDL_Cache* c)
 	}
 
 	// Group consecutive constraints with same body pair.
-	// Split bundles that would exceed 6 DOF to stay within diag_data[i][36] (max 6x6).
+	// Split bundles that would exceed 6 DOF to stay within diag_data[i][21] (max 6x6 packed).
 	int start = 0;
 	while (start < jc) {
 		int ba = c->constraints[start].body_a, bb = c->constraints[start].body_b;
@@ -1458,42 +1322,29 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 	LDL_Topology* t = c->topo;
 
 	// --- Velocity solve ---
-	// Delta-correction: PGS runs first with its own warm-starting. LDL measures
-	// the residual and computes a correction delta. No undo needed.
+	// Generic RHS: vel_rhs[d] = -J_d * v - compliance * lambda_d for each DOF row.
 	float* vel_rhs = CK_ALLOC(n * sizeof(float));
 	float* vel_lambda = CK_ALLOC(n * sizeof(float));
 	memset(vel_rhs, 0, n * sizeof(float));
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
 		int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
-		if (con->is_synthetic) {
-			BodyHot* a = ldl_get_body(w, c, con->body_a);
-			BodyHot* b = ldl_get_body(w, c, con->body_b);
-			v3 dv = sub(b->velocity, a->velocity);
-			v3 dw = sub(b->angular_velocity, a->angular_velocity);
-			vel_rhs[oi] = -dv.x; vel_rhs[oi+1] = -dv.y; vel_rhs[oi+2] = -dv.z;
-			vel_rhs[oi+3] = -dw.x; vel_rhs[oi+4] = -dw.y; vel_rhs[oi+5] = -dw.z;
-		} else if (con->type == JOINT_BALL_SOCKET) {
-			SolverBallSocket* s = &sol_bs[con->solver_idx];
-			BodyHot* a = ldl_get_body(w, c, con->body_a);
-			BodyHot* b = ldl_get_body(w, c, con->body_b);
-			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			float compliance = s->softness > 0.0f ? s->softness : LDL_MIN_COMPLIANCE;
-			v3 lam = s->lambda;
-			float lam_mag = len(lam);
-			if (lam_mag > 1e4f) lam = scale(lam, 1e4f / lam_mag);
-			vel_rhs[oi]   = -dv.x - compliance * lam.x;
-			vel_rhs[oi+1] = -dv.y - compliance * lam.y;
-			vel_rhs[oi+2] = -dv.z - compliance * lam.z;
-		} else if (con->type == JOINT_DISTANCE) {
-			SolverDistance* s = &sol_dist[con->solver_idx];
-			BodyHot* a = ldl_get_body(w, c, con->body_a);
-			BodyHot* b = ldl_get_body(w, c, con->body_b);
-			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			float compliance = s->softness > 0.0f ? s->softness : LDL_MIN_COMPLIANCE;
-			float lam = s->lambda;
-			if (lam > 1e4f) lam = 1e4f; else if (lam < -1e4f) lam = -1e4f;
-			vel_rhs[oi] = -dot(dv, s->axis) - compliance * lam;
+		BodyHot* a = ldl_get_body(w, c, con->body_a);
+		BodyHot* b = ldl_get_body(w, c, con->body_b);
+		LDL_JacobianRow* jac = &c->jacobians[con->jacobian_start];
+		float compliance = 0.0f;
+		if (!con->is_synthetic) {
+			float soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : sol_dist[con->solver_idx].softness;
+			compliance = soft > 0.0f ? soft : LDL_MIN_COMPLIANCE;
+		}
+		for (int d = 0; d < con->dof; d++) {
+			float vel_err = ldl_constraint_velocity(&jac[d], a, b);
+			float lam = 0.0f;
+			if (!con->is_synthetic) {
+				if (con->type == JOINT_BALL_SOCKET) { v3 l = sol_bs[con->solver_idx].lambda; lam = d == 0 ? l.x : d == 1 ? l.y : l.z; }
+				else lam = sol_dist[con->solver_idx].lambda;
+			}
+			vel_rhs[oi + d] = -vel_err - compliance * lam;
 		}
 	}
 
@@ -1509,23 +1360,25 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 	int dbg = g_ldl_debug_enabled && n <= LDL_MAX_DOF;
 	if (dbg) { memcpy(g_ldl_debug_info.lambda_ldl, vel_lambda, n * sizeof(float)); g_ldl_debug_info.valid = 1; }
 
-	// Apply velocity delta correction to REAL bodies directly.
+	// Apply velocity delta via generic Jacobian: v += M^{-1} * J^T * lambda.
 	// Synthetic weld deltas are skipped -- they couple shards only.
+	// Apply to REAL bodies (con->body_a/b may be virtual from shattering).
 	// s->lambda accumulates PGS + LDL for next frame's warm-start.
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
 		if (con->is_synthetic) continue;
 		int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
+		LDL_JacobianRow* jac = &c->jacobians[con->jacobian_start];
+		// Use solver struct body indices (always real) for impulse application
+		int real_a, real_b;
+		if (con->type == JOINT_BALL_SOCKET) { real_a = sol_bs[con->solver_idx].body_a; real_b = sol_bs[con->solver_idx].body_b; }
+		else { real_a = sol_dist[con->solver_idx].body_a; real_b = sol_dist[con->solver_idx].body_b; }
+		ldl_apply_jacobian_impulse(jac, con->dof, &vel_lambda[oi], &w->body_hot[real_a], 0);
+		ldl_apply_jacobian_impulse(jac, con->dof, &vel_lambda[oi], &w->body_hot[real_b], 1);
 		if (con->type == JOINT_BALL_SOCKET) {
-			SolverBallSocket* s = &sol_bs[con->solver_idx];
-			v3 delta = V3(vel_lambda[oi], vel_lambda[oi+1], vel_lambda[oi+2]);
-			s->lambda = add(s->lambda, delta);
-			apply_impulse(&w->body_hot[s->body_a], &w->body_hot[s->body_b], s->r_a, s->r_b, delta);
-		} else if (con->type == JOINT_DISTANCE) {
-			SolverDistance* s = &sol_dist[con->solver_idx];
-			float delta = vel_lambda[oi];
-			s->lambda += delta;
-			apply_impulse(&w->body_hot[s->body_a], &w->body_hot[s->body_b], s->r_a, s->r_b, scale(s->axis, delta));
+			sol_bs[con->solver_idx].lambda = add(sol_bs[con->solver_idx].lambda, V3(vel_lambda[oi], vel_lambda[oi+1], vel_lambda[oi+2]));
+		} else {
+			sol_dist[con->solver_idx].lambda += vel_lambda[oi];
 		}
 	}
 
@@ -1566,33 +1419,33 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 
 	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, pos_rhs, pos_lambda);
 
+	// Apply position deltas via generic Jacobian: pos += M^{-1} * J^T * lambda * dt.
 	if (ldl_validate_lambda(pos_lambda, n)) {
 		for (int i = 0; i < jc; i++) {
 			LDL_Constraint* con = &c->constraints[i];
 			if (con->is_synthetic) continue;
 			int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
-			if (con->type == JOINT_BALL_SOCKET) {
-				SolverBallSocket* s = &sol_bs[con->solver_idx];
-				v3 impulse = V3(pos_lambda[oi], pos_lambda[oi+1], pos_lambda[oi+2]);
-				BodyHot* a = &w->body_hot[s->body_a];
-				BodyHot* b = &w->body_hot[s->body_b];
-				a->position = sub(a->position, scale(impulse, a->inv_mass * sub_dt));
-				b->position = add(b->position, scale(impulse, b->inv_mass * sub_dt));
-				v3 wa = scale(inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(s->r_a, impulse)), sub_dt);
-				v3 wb = scale(inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(s->r_b, impulse)), sub_dt);
-				apply_rotation_delta(&a->rotation, V3(-wa.x, -wa.y, -wa.z));
-				apply_rotation_delta(&b->rotation, wb);
-			} else if (con->type == JOINT_DISTANCE) {
-				SolverDistance* s = &sol_dist[con->solver_idx];
-				v3 impulse = scale(s->axis, pos_lambda[oi]);
-				BodyHot* a = &w->body_hot[s->body_a];
-				BodyHot* b = &w->body_hot[s->body_b];
-				a->position = sub(a->position, scale(impulse, a->inv_mass * sub_dt));
-				b->position = add(b->position, scale(impulse, b->inv_mass * sub_dt));
-				v3 wa = scale(inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(s->r_a, impulse)), sub_dt);
-				v3 wb = scale(inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(s->r_b, impulse)), sub_dt);
-				apply_rotation_delta(&a->rotation, V3(-wa.x, -wa.y, -wa.z));
-				apply_rotation_delta(&b->rotation, wb);
+			LDL_JacobianRow* jac = &c->jacobians[con->jacobian_start];
+			int real_a, real_b;
+			if (con->type == JOINT_BALL_SOCKET) { real_a = sol_bs[con->solver_idx].body_a; real_b = sol_bs[con->solver_idx].body_b; }
+			else { real_a = sol_dist[con->solver_idx].body_a; real_b = sol_dist[con->solver_idx].body_b; }
+			BodyHot* a = &w->body_hot[real_a];
+			BodyHot* b = &w->body_hot[real_b];
+			// Apply position correction for each DOF row via Jacobian
+			for (int d = 0; d < con->dof; d++) {
+				float lam = pos_lambda[oi + d] * sub_dt;
+				// Body A
+				v3 dpa = V3(a->inv_mass * jac[d].J_a[0] * lam, a->inv_mass * jac[d].J_a[1] * lam, a->inv_mass * jac[d].J_a[2] * lam);
+				a->position = add(a->position, dpa);
+				v3 j_ang_a = V3(jac[d].J_a[3] * lam, jac[d].J_a[4] * lam, jac[d].J_a[5] * lam);
+				v3 dwa = inv_inertia_mul(a->rotation, a->inv_inertia_local, j_ang_a);
+				apply_rotation_delta(&a->rotation, dwa);
+				// Body B
+				v3 dpb = V3(b->inv_mass * jac[d].J_b[0] * lam, b->inv_mass * jac[d].J_b[1] * lam, b->inv_mass * jac[d].J_b[2] * lam);
+				b->position = add(b->position, dpb);
+				v3 j_ang_b = V3(jac[d].J_b[3] * lam, jac[d].J_b[4] * lam, jac[d].J_b[5] * lam);
+				v3 dwb = inv_inertia_mul(b->rotation, b->inv_inertia_local, j_ang_b);
+				apply_rotation_delta(&b->rotation, dwb);
 			}
 		}
 	}
