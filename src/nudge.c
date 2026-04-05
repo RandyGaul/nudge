@@ -207,8 +207,7 @@ void world_step(World world, float dt)
 				for (int c = 0; c < color_count; c++)
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
 						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist);
-			// LDL position correction BEFORE integration (K is fresh)
-			ldl_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub_dt);
+			// Position correction handled by NGS after integration.
 		} else {
 			for (int iter = 0; iter < w->velocity_iters; iter++)
 				for (int c = 0; c < color_count; c++)
@@ -222,8 +221,10 @@ void world_step(World world, float dt)
 		if (w->solver_type == SOLVER_SOFT_STEP || w->solver_type == SOLVER_BLOCK)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
-		// NGS position correction for joints (non-LDL path only)
-		if (!w->ldl_enabled)
+		// Position correction after integration.
+		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0))
+			ldl_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub_dt);
+		else
 			joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), w->position_iters);
 	}
 

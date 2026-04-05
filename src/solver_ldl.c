@@ -19,7 +19,6 @@ static inline double dv3_dot(dv3 a, dv3 b) { return a.x*b.x + a.y*b.y + a.z*b.z;
 static inline double dv3_len(dv3 v) { return sqrt(v.x*v.x + v.y*v.y + v.z*v.z); }
 
 // Double-precision inv_inertia_mul: R * diag(inv_I) * R^T * v.
-// Reads float quat/inertia from body, computes entirely in double.
 static dv3 dinv_inertia_mul(quat rot, v3 inv_i, dv3 v)
 {
 	// rotate_inv(q, v): R^T * v in double
@@ -63,7 +62,6 @@ static void block_ldl(double* A, double* D, int n)
 	for (int j = 0; j < n; j++) {
 		double dj = A[LDL_TRI(j,j)];
 		for (int k = 0; k < j; k++) dj -= A[LDL_TRI(j,k)] * A[LDL_TRI(j,k)] * D[k];
-		// Diagonal boosting for near-zero pivots (double precision rarely needs this).
 		if (dj < 1e-12) dj = 1e-12;
 		D[j] = dj;
 		double inv_dj = 1.0 / D[j];
@@ -173,7 +171,7 @@ static double* ldl_sparse_get_edge(LDL_Sparse* s, int i, int j)
 }
 
 // Apply angular position correction: integrate rotation by angular velocity w for one step.
-// Takes dv3 (double) from LDL internals, writes to quat (float) body state.
+// Takes dv3 (double) from LDL internals, writes to quat body state.
 static void apply_rotation_delta(quat* q, dv3 w)
 {
 	if (w.x == 0 && w.y == 0 && w.z == 0) return;
@@ -232,7 +230,7 @@ static void ldl_fill_jacobian(LDL_Constraint* con, SolverBallSocket* sol_bs, Sol
 
 // Accumulate K contribution from one body: K += J * (w * M^{-1}) * J^T into packed lower-tri.
 // jac has dof rows, side: 0 = J_a, 1 = J_b. weight scales inv_mass/inv_inertia (shattering).
-static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_start, BodyHot* body, float weight, double* K_packed)
+static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_start, BodyHot* body, double weight, double* K_packed)
 {
 	double wm = (double)body->inv_mass * (double)weight;
 	double W[36];
@@ -256,7 +254,7 @@ static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_
 		}
 }
 
-static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_JacobianRow* jac_j, int dj, int side_j, BodyHot* body, float weight, double* out)
+static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_JacobianRow* jac_j, int dj, int side_j, BodyHot* body, double weight, double* out)
 {
 	double wm = (double)body->inv_mass * (double)weight;
 	double W[36];
@@ -284,7 +282,6 @@ static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_Jacob
 // Apply impulse generically: v += M^{-1} * J^T * lambda for one body.
 // jac has dof rows, lambda has dof scalars. side: 0 = J_a, 1 = J_b.
 // sign: +1 or -1 (convention: body_a gets -, body_b gets +... but sign is baked into J).
-// Apply impulse: double Jacobian × double lambda → float body state (API boundary cast).
 static void ldl_apply_jacobian_impulse(LDL_JacobianRow* jac, int dof, double* lambda, BodyHot* body, int side)
 {
 	for (int d = 0; d < dof; d++) {
@@ -303,7 +300,6 @@ static void ldl_apply_jacobian_impulse(LDL_JacobianRow* jac, int dof, double* la
 	}
 }
 
-// Constraint velocity: double Jacobian × float body state → double result.
 static double ldl_constraint_velocity(LDL_JacobianRow* jac, BodyHot* a, BodyHot* b)
 {
 	double* Ja = jac->J_a;
@@ -544,11 +540,11 @@ static void ldl_apply_shattering(LDL_Cache* c, WorldInternal* w)
 			if (c->constraints[ci].body_a == hub) {
 				c->constraints[ci].body_a = info->first_virtual + best;
 				// real_body_a stays as hub (set during rebuild), weight = S
-				c->constraints[ci].weight_a = (float)S;
+				c->constraints[ci].weight_a = (double)S;
 			}
 			if (c->constraints[ci].body_b == hub) {
 				c->constraints[ci].body_b = info->first_virtual + best;
-				c->constraints[ci].weight_b = (float)S;
+				c->constraints[ci].weight_b = (double)S;
 			}
 		}
 		afree(touching);
@@ -565,8 +561,8 @@ static void ldl_apply_shattering(LDL_Cache* c, WorldInternal* w)
 				.body_b = info->first_virtual + next,
 				.real_body_a = info->body,
 				.real_body_b = info->body,
-				.weight_a = (float)info->shard_count,
-				.weight_b = (float)info->shard_count,
+				.weight_a = (double)info->shard_count,
+				.weight_b = (double)info->shard_count,
 				.solver_idx = -1, .is_synthetic = 1,
 			};
 			apush(c->constraints, synth);
@@ -1504,6 +1500,24 @@ static void ldl_position_correct(WorldInternal* w, SolverBallSocket* sol_bs, int
 		}
 	}
 
+	// Refresh lever arms from current rotations (positions changed since pre-solve).
+	// Without this, K uses stale lever arms while the RHS uses current positions.
+	for (int i = 0; i < bs_count; i++) {
+		SolverBallSocket* s = &sol_bs[i];
+		s->r_a = rotate(w->body_hot[s->body_a].rotation, w->joints[s->joint_idx].ball_socket.local_a);
+		s->r_b = rotate(w->body_hot[s->body_b].rotation, w->joints[s->joint_idx].ball_socket.local_b);
+	}
+	for (int i = 0; i < dist_count; i++) {
+		SolverDistance* s = &sol_dist[i];
+		s->r_a = rotate(w->body_hot[s->body_a].rotation, w->joints[s->joint_idx].distance.local_a);
+		s->r_b = rotate(w->body_hot[s->body_b].rotation, w->joints[s->joint_idx].distance.local_b);
+		v3 anchor_a = add(w->body_hot[s->body_a].position, s->r_a);
+		v3 anchor_b = add(w->body_hot[s->body_b].position, s->r_b);
+		v3 delta = sub(anchor_b, anchor_a);
+		float d = len(delta);
+		s->axis = d > 1e-6f ? scale(delta, 1.0f / d) : V3(1, 0, 0);
+	}
+
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {
 		if (!(w->island_gen[ii] & 1)) continue;
@@ -1512,7 +1526,7 @@ static void ldl_position_correct(WorldInternal* w, SolverBallSocket* sol_bs, int
 		if (isl->joint_count == 0) continue;
 		LDL_Cache* c = &isl->ldl;
 		if (c->n == 0 || !c->topo) continue;
-		// Refactorize K with compressed masses
+		// Refactorize K with compressed masses and current lever arms
 		ldl_numeric_factor(c, w, sol_bs, sol_dist);
 		ldl_island_position_correct(c, w, sol_bs, sol_dist, sub_dt);
 	}
