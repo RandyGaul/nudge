@@ -211,6 +211,7 @@ typedef struct LDL_Cache
 	int virtual_body_count;          // number of virtual splinter bodies
 	CK_DYNA BodyHot* virtual_bodies; // temp velocity state for splinters
 	CK_DYNA int* body_remap;         // real_body_idx -> virtual_body_idx for shattered bodies
+	CK_DYNA int* shard_counts;       // real_body_idx -> number of shards (0 if not shattered)
 } LDL_Cache;
 
 // Island: group of connected bodies that can sleep/wake together.

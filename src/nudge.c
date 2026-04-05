@@ -210,7 +210,7 @@ void world_step(World world, float dt)
 					solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist);
 
 		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0))
-			ldl_correction(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub);
+			ldl_correction(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub, sub_dt);
 
 		integrate_positions(w, sub_dt);
 
@@ -219,7 +219,7 @@ void world_step(World world, float dt)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
 		if (w->ldl_enabled) {
-			joints_split_impulse(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub_dt, w->position_iters);
+			// LDL position stage replaces split impulse -- no-op here.
 		} else {
 			// PGS-only: zero bias after first sub-step (stale).
 			if (sub == 0) {
