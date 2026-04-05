@@ -210,10 +210,10 @@ void world_step(World world, float dt)
 		if (w->solver_type == SOLVER_SOFT_STEP || w->solver_type == SOLVER_BLOCK)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
-		if (!w->ldl_enabled) {
-			// PGS-only: NGS position correction for joints (no Baumgarte).
-			joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), w->position_iters);
-		}
+		// Position correction AFTER integration — corrects drift from velocity/rotation coupling.
+		// Use NGS for all modes: iterative correction with fresh lever arms each iteration.
+		// LDL position solve with stale K causes energy injection on multi-node chains.
+		joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), w->position_iters);
 	}
 
 	afree(crefs);

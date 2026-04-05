@@ -110,7 +110,6 @@ static bool g_sleep_enabled = true;
 static int g_friction_model = FRICTION_PATCH;
 static int g_solver_type = SOLVER_SOFT_STEP;
 static bool g_ldl_enabled = false;
-static bool g_ldl_debug = false;
 static int g_ldl_inspect_island = -1;   // selected island for LDL inspector (-1 = none)
 static int g_ldl_inspect_step = 0;      // factorization step slider
 static int g_ldl_hover_body = -1;       // body highlighted by matrix hover (-1 = none)
@@ -1378,9 +1377,9 @@ static void draw_ldl_solve(WorldInternal* w, Island* isl, LDL_Cache* c)
 				snprintf(lbl, sizeof(lbl), "B%d", i);
 			}
 			if (bun->dof == 3) {
-				ImGui_Text("  %s: (%.4f, %.4f, %.4f)", lbl, (double)info->lambda_pgs[oi], (double)info->lambda_pgs[oi+1], (double)info->lambda_pgs[oi+2]);
+				ImGui_Text("  %s: (%.4f, %.4f, %.4f)", lbl, (double)info->rhs[oi], (double)info->rhs[oi+1], (double)info->rhs[oi+2]);
 			} else if (bun->dof == 1) {
-				ImGui_Text("  %s: %.4f", lbl, (double)info->lambda_pgs[oi]);
+				ImGui_Text("  %s: %.4f", lbl, (double)info->rhs[oi]);
 			} else {
 				ImGui_Text("  %s: [%d DOF]", lbl, bun->dof);
 			}
@@ -1421,21 +1420,23 @@ static void draw_ldl_solve(WorldInternal* w, Island* isl, LDL_Cache* c)
 		ImGui_TreePop();
 	}
 
-	ImGui_SeparatorText("Correction Quality");
+	ImGui_SeparatorText("Solve Residual");
 	if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
-		ImGui_Text("How much did LDL improve over PGS?");
-		ImGui_Text("Small delta = PGS was accurate.");
-		ImGui_Text("Large delta = PGS was struggling.");
+		ImGui_Text("r = A*lambda - rhs");
+		ImGui_Text("Measures factorization/solve accuracy.");
+		ImGui_Text("Zero = exact solution (expected for LDL).");
 		ImGui_EndTooltip();
 	}
-	float max_delta = 0, rms = 0;
+	float max_res = 0, rms = 0;
 	for (int i = 0; i < n; i++) {
-		float d = fabsf(info->lambda_ldl[i] - info->lambda_pgs[i]);
-		if (d > max_delta) max_delta = d;
-		rms += d * d;
+		float Ax_i = 0;
+		for (int j = 0; j < n; j++) Ax_i += info->A[i * n + j] * info->lambda_ldl[j];
+		float r = fabsf(Ax_i - info->rhs[i]);
+		if (r > max_res) max_res = r;
+		rms += r * r;
 	}
 	rms = sqrtf(rms / (n > 0 ? n : 1));
-	ImGui_Text("Max delta: %.4g  RMS: %.4g", (double)max_delta, (double)rms);
+	ImGui_Text("Max residual: %.4g  RMS: %.4g", (double)max_res, (double)rms);
 }
 
 static void draw_ldl_inspector()
@@ -1479,208 +1480,6 @@ static void draw_ldl_inspector()
 			ImGui_EndTabItem();
 		}
 		ImGui_EndTabBar();
-	}
-
-	ImGui_End();
-}
-
-static ImU32 ldl_heat_color(float val, float max_val)
-{
-	if (max_val < 1e-12f) return ImGui_GetColorU32ImVec4((ImVec4){0.1f, 0.1f, 0.1f, 1.0f});
-	float t = fabsf(val) / max_val;
-	if (t > 1.0f) t = 1.0f;
-	float r, g, b;
-	if (t < 0.33f) { float s = t / 0.33f; r = 0; g = 0; b = s; }
-	else if (t < 0.66f) { float s = (t - 0.33f) / 0.33f; r = s; g = 0; b = 1.0f - s; }
-	else { float s = (t - 0.66f) / 0.34f; r = 1.0f; g = s; b = 0; }
-	return ImGui_GetColorU32ImVec4((ImVec4){r, g, b, 1.0f});
-}
-
-// Build a short label for node j (e.g. "BS0", "D1", "B2" for multi-constraint bundle).
-static void ldl_node_label(LDL_DebugInfo* info, int j, char* buf, int bufsize)
-{
-	if (info->block_types[j] == JOINT_BALL_SOCKET) {
-		snprintf(buf, bufsize, "BS%d", j);
-	} else if (info->block_types[j] == JOINT_DISTANCE) {
-		snprintf(buf, bufsize, "D%d", j);
-	} else {
-		snprintf(buf, bufsize, "B%d", j); // bundled node
-	}
-}
-
-// Find which joint owns a given DOF row index.
-static int ldl_node_for_row(LDL_DebugInfo* info, int row)
-{
-	for (int j = info->joint_count - 1; j >= 0; j--)
-		if (row >= info->block_rows[j]) return j;
-	return 0;
-}
-
-// Help marker: gray "(?) " that shows tooltip on hover.
-static void ldl_help(const char* text)
-{
-	ImGui_SameLine();
-	ImGui_TextDisabled("(?)");
-	if (ImGui_IsItemHovered(0)) ImGui_SetTooltipUnformatted(text);
-}
-
-static void draw_ldl_debug()
-{
-	LDL_DebugInfo* info = &g_ldl_debug_info;
-	if (!info->valid) { ImGui_Begin("LDL Debug", NULL, 0); ImGui_Text("No data yet"); ImGui_End(); return; }
-
-	ImGui_Begin("LDL Debug", NULL, 0);
-	int n = info->n;
-
-	// --- Stats ---
-	ImGui_SeparatorText("Stats");
-	ImGui_Text("DOFs: %d  Nodes: %d  Constraints: %d", n, info->joint_count, info->bs_count);
-	ldl_help("Total scalar degrees of freedom in the constraint system.\nNodes = graph nodes (bundles of same-body-pair constraints).\nConstraints = individual joints within bundles.");
-
-	float d_min = 1e18f, d_max = -1e18f;
-	for (int i = 0; i < n; i++) { if (info->D[i] < d_min) d_min = info->D[i]; if (info->D[i] > d_max) d_max = info->D[i]; }
-	float d_ratio = d_max / (d_min > 1e-12f ? d_min : 1e-12f);
-	ImGui_Text("Pivot D: min=%.4g  max=%.4g  ratio=%.1f", d_min, d_max, d_ratio);
-	ldl_help("Diagonal pivots from LDL^T factorization.\nHigh ratio = ill-conditioned system (large mass ratios\nor long chains). PGS struggles most when ratio is high.\nLDL solves exactly regardless of conditioning.");
-
-	float max_delta = 0, total_corr = 0;
-	for (int i = 0; i < n; i++) {
-		float d = fabsf(info->lambda_ldl[i] - info->lambda_pgs[i]);
-		if (d > max_delta) max_delta = d;
-		total_corr += d * d;
-	}
-	ImGui_Text("Max delta: %.4g  RMS correction: %.4g", max_delta, sqrtf(total_corr / (n > 0 ? n : 1)));
-	ldl_help("How much LDL changed the PGS result.\nSmall values = PGS was already accurate.\nLarge values = PGS was struggling, LDL is helping.");
-
-	// --- Matrix Heatmap ---
-	ImGui_SeparatorText("Constraint Matrix A");
-	ldl_help("A = J * M^-1 * J^T -- the joint coupling matrix.\nDiagonal blocks = each joint's effective mass.\nOff-diagonal = coupling between joints sharing a body.\nBrighter = larger magnitude. Hover cells for values.");
-
-	if (n > 0 && n <= LDL_MAX_DOF) {
-		float cell = 10.0f;
-		float margin = 30.0f; // space for labels
-		ImDrawList* dl = ImGui_GetWindowDrawList();
-		ImVec2 cursor = ImGui_GetCursorScreenPos();
-		float ox = cursor.x + margin; // matrix origin x (after labels)
-		float oy = cursor.y + margin; // matrix origin y (after labels)
-		ImU32 text_col = ImGui_GetColorU32ImVec4((ImVec4){0.7f, 0.7f, 0.7f, 1.0f});
-
-		// Find max magnitude for color scaling
-		float a_max = 0;
-		for (int i = 0; i < n * n; i++) { float v = fabsf(info->A[i]); if (v > a_max) a_max = v; }
-
-		// Top labels (one per joint block, centered over its columns)
-		for (int j = 0; j < info->joint_count; j++) {
-			char lbl[8]; ldl_node_label(info, j, lbl, sizeof(lbl));
-			float bx = ox + info->block_rows[j] * cell + info->block_dofs[j] * cell * 0.5f - 8;
-			ImDrawList_AddText(dl, (ImVec2){bx, cursor.y}, text_col, lbl);
-		}
-		// Left labels (one per joint block, centered vertically)
-		for (int j = 0; j < info->joint_count; j++) {
-			char lbl[8]; ldl_node_label(info, j, lbl, sizeof(lbl));
-			float by = oy + info->block_rows[j] * cell + info->block_dofs[j] * cell * 0.5f - 6;
-			ImDrawList_AddText(dl, (ImVec2){cursor.x, by}, text_col, lbl);
-		}
-
-		// Draw cells
-		int hover_row = -1, hover_col = -1;
-		ImVec2 mouse = ImGui_GetMousePos();
-		for (int row = 0; row < n; row++) {
-			for (int col = 0; col < n; col++) {
-				float x0 = ox + col * cell;
-				float y0 = oy + row * cell;
-				ImU32 c = ldl_heat_color(info->A[row * n + col], a_max);
-				ImDrawList_AddRectFilled(dl, (ImVec2){x0, y0}, (ImVec2){x0 + cell - 1, y0 + cell - 1}, c);
-				if (mouse.x >= x0 && mouse.x < x0 + cell && mouse.y >= y0 && mouse.y < y0 + cell) {
-					hover_row = row; hover_col = col;
-				}
-			}
-		}
-
-		// Block boundary lines
-		ImU32 line_col = ImGui_GetColorU32ImVec4((ImVec4){1, 1, 1, 0.3f});
-		for (int j = 0; j < info->joint_count; j++) {
-			float px = ox + info->block_rows[j] * cell;
-			float py = oy + info->block_rows[j] * cell;
-			ImDrawList_AddLine(dl, (ImVec2){px, oy}, (ImVec2){px, oy + n * cell}, line_col);
-			ImDrawList_AddLine(dl, (ImVec2){ox, py}, (ImVec2){ox + n * cell, py}, line_col);
-		}
-		// Outer border
-		ImDrawList_AddRect(dl, (ImVec2){ox, oy}, (ImVec2){ox + n * cell, oy + n * cell}, line_col);
-
-		ImGui_Dummy((ImVec2){margin + n * cell + 4, margin + n * cell + 4});
-
-		// Hover tooltip for matrix cell
-		if (hover_row >= 0 && ImGui_IsMouseHoveringRect((ImVec2){ox, oy}, (ImVec2){ox + n * cell, oy + n * cell})) {
-			int jr = ldl_node_for_row(info, hover_row);
-			int jc = ldl_node_for_row(info, hover_col);
-			char lr[8], lc[8];
-			ldl_node_label(info, jr, lr, sizeof(lr));
-			ldl_node_label(info, jc, lc, sizeof(lc));
-			int dr = hover_row - info->block_rows[jr];
-			int dc = hover_col - info->block_rows[jc];
-			const char* axes = "xyz";
-			if (ImGui_BeginTooltip()) {
-				ImGui_Text("A[%d,%d] = %.6g", hover_row, hover_col, (double)info->A[hover_row * n + hover_col]);
-				if (jr == jc)
-					ImGui_Text("Diagonal: %s (DOF %c,%c)", lr, axes[dr % 3], axes[dc % 3]);
-				else
-					ImGui_Text("Coupling: %s.%c <-> %s.%c (shared body)", lr, axes[dr % 3], lc, axes[dc % 3]);
-				ImGui_EndTooltip();
-			}
-		}
-
-		// Color legend
-		ImGui_TextDisabled("Color: black=0  blue=small  red=medium  yellow=large");
-	}
-
-	// --- Lambda Comparison ---
-	ImGui_SeparatorText("Lambda Impulses");
-	ldl_help("Accumulated constraint impulses per DOF.\nGreen = warm-start (previous frame).\nYellow = LDL exact result.\nLarge differences = system is changing rapidly.");
-
-	if (n > 0) {
-		float bar_h = 10.0f, bar_max_w = 150.0f, row_h = bar_h * 2 + 6, label_w = 50.0f, value_x = label_w + bar_max_w + 8;
-		ImDrawList* dl = ImGui_GetWindowDrawList();
-		ImVec2 cursor = ImGui_GetCursorScreenPos();
-
-		float l_max = 1e-6f;
-		for (int i = 0; i < n; i++) { float v = fabsf(info->lambda_pgs[i]); if (v > l_max) l_max = v; v = fabsf(info->lambda_ldl[i]); if (v > l_max) l_max = v; }
-
-		ImU32 pgs_col = ImGui_GetColorU32ImVec4((ImVec4){0.2f, 0.8f, 0.2f, 0.9f});
-		ImU32 ldl_col = ImGui_GetColorU32ImVec4((ImVec4){1.0f, 0.9f, 0.1f, 0.9f});
-		ImU32 text_col = ImGui_GetColorU32ImVec4((ImVec4){1, 1, 1, 1});
-		ImU32 dim_col = ImGui_GetColorU32ImVec4((ImVec4){0.5f, 0.5f, 0.5f, 1.0f});
-		int dof_idx = 0;
-		for (int j = 0; j < info->joint_count; j++) {
-			for (int d = 0; d < info->block_dofs[j]; d++) {
-				float y = cursor.y + dof_idx * row_h;
-				int ri = info->block_rows[j] + d;
-				char label[16];
-				char node_lbl[8];
-				ldl_node_label(info, j, node_lbl, sizeof(node_lbl));
-				snprintf(label, sizeof(label), "%s.%d", node_lbl, d);
-				ImDrawList_AddText(dl, (ImVec2){cursor.x, y}, text_col, label);
-
-				// PGS bar (green)
-				float pgs_val = info->lambda_pgs[ri];
-				float pgs_w = (fabsf(pgs_val) / l_max) * bar_max_w;
-				ImDrawList_AddRectFilled(dl, (ImVec2){cursor.x + label_w, y}, (ImVec2){cursor.x + label_w + pgs_w, y + bar_h}, pgs_col);
-
-				// LDL bar (yellow)
-				float ldl_val = info->lambda_ldl[ri];
-				float ldl_w = (fabsf(ldl_val) / l_max) * bar_max_w;
-				ImDrawList_AddRectFilled(dl, (ImVec2){cursor.x + label_w, y + bar_h + 2}, (ImVec2){cursor.x + label_w + ldl_w, y + bar_h + 2 + bar_h}, ldl_col);
-
-				// Numeric values
-				char vals[32];
-				snprintf(vals, sizeof(vals), "%.3f", (double)ldl_val);
-				ImDrawList_AddText(dl, (ImVec2){cursor.x + value_x, y + bar_h * 0.5f - 4}, dim_col, vals);
-
-				dof_idx++;
-			}
-		}
-
-		ImGui_Dummy((ImVec2){value_x + 60, dof_idx * row_h + 4});
 	}
 
 	ImGui_End();

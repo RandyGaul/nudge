@@ -215,6 +215,7 @@ typedef struct LDL_Cache
 	LDL_Topology* topo; // cached topology (NULL until built)
 	CK_DYNA float* L_factors; // contiguous off-diagonal L-factor blocks
 	CK_DYNA LDL_JacobianRow* jacobians; // per-DOF Jacobian rows (filled each substep)
+	CK_DYNA float* scale;               // diagonal equilibration: S[i] = 1/sqrt(K_ii) per DOF
 	float diag_data[LDL_MAX_NODES][21]; // diagonal blocks: packed lower-triangular (max 6x6 = 21)
 	float diag_D[LDL_MAX_NODES][6];    // D pivots (max 6 per block)
 	int topo_version;   // world topo version when blocks were built
@@ -479,16 +480,11 @@ typedef struct AVBD_BodyState
 
 typedef struct LDL_DebugInfo
 {
-	int n;                    // total DOFs
-	int joint_count;
-	int bs_count, dist_count;
-	float A[LDL_MAX_DOF * LDL_MAX_DOF]; // constraint matrix snapshot
-	float D[LDL_MAX_DOF];               // diagonal pivots after factorization
-	float lambda_pgs[LDL_MAX_DOF];      // PGS lambdas before correction
-	float lambda_ldl[LDL_MAX_DOF];      // exact lambdas after LDL solve
-	int block_dofs[64];                  // per-joint DOF (3 or 1)
-	int block_rows[64];                  // per-joint row offset
-	int block_types[64];                 // JOINT_BALL_SOCKET or JOINT_DISTANCE
+	int n;                                // total DOFs
+	float A[LDL_MAX_DOF * LDL_MAX_DOF];  // constraint matrix snapshot
+	float D[LDL_MAX_DOF];                // diagonal pivots after factorization
+	float rhs[LDL_MAX_DOF];              // RHS (constraint violations) before solve
+	float lambda_ldl[LDL_MAX_DOF];       // exact lambdas after LDL solve
 	int valid;
 } LDL_DebugInfo;
 

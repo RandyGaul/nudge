@@ -4,96 +4,12 @@
 // Solves K * lambda = b where K = J * M^-1 * J^T (constraint-space effective mass),
 // lambda = constraint impulses, b = velocity/position error. K is symmetric positive
 // definite (regularized) with block structure from the constraint graph.
-//
-// Jacobian-based API: constraints provide Jacobian rows (J_a, J_b per DOF).
-// K assembly, RHS, and impulse application are fully generic -- no per-type dispatch.
-// Adding a new constraint type requires only a new case in ldl_fill_jacobian.
-//
-// Packed lower-triangular storage: diagonal blocks use n*(n+1)/2 elements.
-// Symmetric by construction -- no symmetrize passes needed.
-//
-// Architecture: symbolic/numeric split with cached topology.
-//
-//   Structs (nudge_internal.h)                                Lifetime
-//   -------------------------------------------------------------------
-//   LDL_Cache          Per-island root: constraints, topology,  island
-//                      jacobians, L_factors, diag_data, diag_D
-//   LDL_JacobianRow    Per-DOF row: J_a[6], J_b[6]             substep
-//   LDL_Constraint     One per joint. DOF, body pair, weights,  topo change
-//                      solver index, bundle/jacobian offsets.
-//   LDL_Bundle         Same-body-pair constraint group. One     topo change
-//                      graph node per bundle (reduces graph).
-//   LDL_Topology       Cached symbolic analysis. Ordering,      topo change
-//                      sparsity, precomputed offsets.
-//   LDL_Pivot          Per elimination step. Index ranges       topo change
-//                      into neighbor/column/schur arrays.
-//   LDL_Neighbor       Adjacency for solve. Node, DOF,          topo change
-//                      row offset, L_factors offset.
-//   LDL_Column         L-block target during factorization.     topo change
-//   LDL_Schur          Schur complement update target.          topo change
-//   LDL_Coupling       Shared-body K contribution.              topo change
-//   LDL_Sparse         Temporary graph for ordering + fill-in.  transient
-//
-//                      topology change
-//                            |
-//                            v
-//   joints --------> LDL_Constraint[] --------> ldl_build_bundles
-//                                                     |
-//                                                LDL_Bundle[]
-//                                                     |
-//                                                     v
-//                                                ldl_build_topology
-//                                                     |
-//                                      +----> LDL_Sparse (temp, freed)
-//                                      |      min-fill ordering + DFS reorder
-//                                      |
-//                                      +----> LDL_Topology (cached)
-//                                               LDL_Pivot[]
-//                                               LDL_Neighbor[] (fwd + back)
-//                                               LDL_Column[], LDL_Schur[]
-//                                               LDL_Coupling[]
-//                                                     |
-//                           each substep              |
-//                               |                     |
-//                               v                     v
-//                         ldl_numeric_factor -------> L_factors[]
-//                           ldl_fill_jacobian -> J[]   diag_data[] (packed)
-//                           ldl_K_body_contrib  -> K   diag_D[]
-//                           ldl_K_body_off      -> edges
-//                           E_backup * L^T Schur
-//                                                     |
-//                                                     v
-//                                             ldl_island_solve
-//                                               |            |
-//                                          vel solve    pos solve
-//                                          (J * v RHS)  (error RHS)
-//                                               |            |
-//                                               v            v
-//                                          ldl_solve_topo  ldl_solve_topo
-//                                          (same factored K for both)
-//                                               |            |
-//                                               v            v
-//                                          apply to vel  apply to pos
-//                                          via J^T       via J^T * dt
-//
-//   Delta-correction mode:
-//     PGS runs first with its own warm-starting and clamping.
-//     LDL measures the residual error and computes a correction delta.
-//     delta_lambda is ADDED to bodies on top of PGS result.
-//     s->lambda accumulates PGS + LDL for next frame's warm-start.
-//
-//   Body shattering (weight-based):
-//     Splits hub bodies into virtual shard graph nodes with synthetic rigid welds.
-//     Constraints get shard weights (inv_mass * S, inv_inertia * S) instead of
-//     virtual body copies. No sync needed -- real body state read directly.
-//     Greedy bin-packing assigns constraints to shards. Wrap-around weld chain
-//     couples all shards.
 
 static LDL_DebugInfo g_ldl_debug_info;
 int g_ldl_debug_enabled;
 int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = none)
 
-#define SHATTER_THRESHOLD 15 // DOF threshold: 6+ ball-sockets (18 DOF) triggers shattering
+#define SHATTER_THRESHOLD 999 // DISABLED: shattering needs debugging. Was 15.
 #define SHARD_TARGET      6 // target DOF per shard
 #define LDL_MIN_COMPLIANCE 5e-5f // min regularization floor: compliance * trace(K) / dim on K diagonal + compliance*lambda in RHS
 
@@ -1003,6 +919,48 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 		}
 	}
 
+	// Diagonal equilibration (Golub & Van Loan): scale K so all diagonal entries are O(1).
+	// Prevents K^{-1} from amplifying residuals proportionally to mass ratio.
+	// S[i] = 1/sqrt(K_ii). K'[r,c] = S[r] * K[r,c] * S[c].
+	{
+		int n = t->n;
+		afree(c->scale);
+		c->scale = NULL;
+		afit(c->scale, n);
+		asetlen(c->scale, n);
+		// Compute scale factors from assembled diagonal
+		for (int i = 0; i < nc; i++) {
+			int di = t->dof[i], oi = t->row_offset[i];
+			for (int d = 0; d < di; d++) {
+				float kd = c->diag_data[i][LDL_TRI(d, d)];
+				c->scale[oi + d] = kd > 1e-12f ? 1.0f / sqrtf(kd) : 1.0f;
+			}
+		}
+		// Scale diagonal blocks
+		for (int i = 0; i < nc; i++) {
+			int di = t->dof[i], oi = t->row_offset[i];
+			for (int r = 0; r < di; r++)
+				for (int col = 0; col <= r; col++)
+					c->diag_data[i][LDL_TRI(r, col)] *= c->scale[oi+r] * c->scale[oi+col];
+		}
+		// Scale off-diagonal edge blocks
+		int fc = asize(t->couplings);
+		for (int fi = 0; fi < fc; fi++) {
+			LDL_Coupling* f = &t->couplings[fi];
+			int bun_i = f->block_i, bun_j = f->block_j;
+			int di = t->dof[bun_i], dj = t->dof[bun_j];
+			int oi = t->row_offset[bun_i], oj = t->row_offset[bun_j];
+			float* eij = &c->L_factors[f->L_offset_ij];
+			float* eji = &c->L_factors[f->L_offset_ji];
+			for (int r = 0; r < di; r++)
+				for (int col = 0; col < dj; col++)
+					eij[r*dj + col] *= c->scale[oi+r] * c->scale[oj+col];
+			for (int r = 0; r < dj; r++)
+				for (int col = 0; col < di; col++)
+					eji[r*di + col] *= c->scale[oj+r] * c->scale[oi+col];
+		}
+	}
+
 	// Factorize using precomputed pivot sequence.
 	// Diagonal blocks are packed lower-triangular — symmetric by construction.
 	for (int step = 0; step < nc; step++) {
@@ -1076,17 +1034,9 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 	// Post-factorization: verify all pivots are healthy
 	ldl_condition_check(c, t);
 
-	// Debug: capture D pivots and block info after factorization
+	// Debug: capture D pivots after factorization
 	if (dbg) {
 		g_ldl_debug_info.n = t->n;
-		g_ldl_debug_info.joint_count = nc; // node (bundle) count
-		g_ldl_debug_info.bs_count = c->joint_count; // total constraint count
-		g_ldl_debug_info.dist_count = 0;
-		for (int i = 0; i < nc; i++) {
-			g_ldl_debug_info.block_dofs[i] = t->dof[i];
-			g_ldl_debug_info.block_rows[i] = t->row_offset[i];
-			g_ldl_debug_info.block_types[i] = c->bundles[i].count == 1 ? c->constraints[c->bundles[i].start].type : -1;
-		}
 		for (int i = 0; i < nc; i++) {
 			int di = t->dof[i], oi = t->row_offset[i];
 			for (int d = 0; d < di; d++) {
@@ -1154,6 +1104,7 @@ static void ldl_cache_free(LDL_Cache* c)
 	if (c->topo) { ldl_topology_free(c->topo); CK_FREE(c->topo); }
 	afree(c->L_factors);
 	afree(c->jacobians);
+	afree(c->scale);
 	afree(c->body_remap);
 	afree(c->shard_counts);
 	memset(c, 0, sizeof(*c));
@@ -1167,6 +1118,8 @@ static void ldl_cache_sleep(LDL_Cache* c)
 	c->L_factors = NULL;
 	afree(c->jacobians);
 	c->jacobians = NULL;
+	afree(c->scale);
+	c->scale = NULL;
 }
 
 // Build blocks for an island's joints.
@@ -1272,6 +1225,19 @@ static void ldl_build_bundles(LDL_Cache* c)
 	}
 }
 
+// Scaled solve: applies diagonal equilibration. rhs and x are in original (unscaled) space.
+// Internally: rhs' = S * rhs, solve K' * y = rhs', x = S * y.
+static void ldl_solve_scaled(LDL_Cache* c, float* rhs, float* x)
+{
+	LDL_Topology* t = c->topo;
+	int n = t->n;
+	float* srhs = CK_ALLOC(n * sizeof(float));
+	for (int i = 0; i < n; i++) srhs[i] = c->scale[i] * rhs[i];
+	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, srhs, x);
+	for (int i = 0; i < n; i++) x[i] *= c->scale[i];
+	CK_FREE(srhs);
+}
+
 // Validate solve output: returns 0 if any NaN/inf/huge values found.
 static int ldl_validate_lambda(float* lambda, int n)
 {
@@ -1299,23 +1265,16 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 		BodyHot* a = &w->body_hot[con->real_body_a];
 		BodyHot* b = &w->body_hot[con->real_body_b];
 		LDL_JacobianRow* jac = &c->jacobians[con->jacobian_start];
-		float compliance = 0.0f;
-		if (!con->is_synthetic) {
-			float soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : sol_dist[con->solver_idx].softness;
-			compliance = soft > 0.0f ? soft : LDL_MIN_COMPLIANCE;
-		}
+		// Delta-correction RHS: just the velocity residual after PGS.
+		// No compliance * lambda term — that's for full-solve mode.
+		// Compliance is already in K (regularization), which controls correction stiffness.
 		for (int d = 0; d < con->dof; d++) {
 			float vel_err = ldl_constraint_velocity(&jac[d], a, b);
-			float lam = 0.0f;
-			if (!con->is_synthetic) {
-				if (con->type == JOINT_BALL_SOCKET) { v3 l = sol_bs[con->solver_idx].lambda; lam = d == 0 ? l.x : d == 1 ? l.y : l.z; }
-				else lam = sol_dist[con->solver_idx].lambda;
-			}
-			vel_rhs[oi + d] = -vel_err - compliance * lam;
+			vel_rhs[oi + d] = -vel_err;
 		}
 	}
 
-	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, vel_rhs, vel_lambda);
+	ldl_solve_scaled(c, vel_rhs, vel_lambda);
 
 	if (!ldl_validate_lambda(vel_lambda, n)) {
 		CK_FREE(vel_rhs);
@@ -1325,7 +1284,7 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 
 	// Debug
 	int dbg = g_ldl_debug_enabled && n <= LDL_MAX_DOF;
-	if (dbg) { memcpy(g_ldl_debug_info.lambda_ldl, vel_lambda, n * sizeof(float)); g_ldl_debug_info.valid = 1; }
+	if (dbg) { memcpy(g_ldl_debug_info.rhs, vel_rhs, n * sizeof(float)); memcpy(g_ldl_debug_info.lambda_ldl, vel_lambda, n * sizeof(float)); g_ldl_debug_info.valid = 1; }
 
 	// Apply velocity delta via generic Jacobian: v += M^{-1} * J^T * lambda.
 	// Synthetic weld deltas are skipped -- they couple shards only.
@@ -1351,11 +1310,16 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 
 	CK_FREE(vel_rhs);
 	CK_FREE(vel_lambda);
+}
 
-	// --- Position solve ---
-	// Reuses the same factored K. Builds position-error RHS, solves, applies
-	// corrections directly to positions (no Baumgarte velocity contamination).
-	// Replaces joints_split_impulse.
+// Position correction using factored K. Called AFTER integrate_positions to correct
+// drift from velocity/rotation coupling. Reuses the K factored in ldl_numeric_factor.
+static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBallSocket* sol_bs, SolverDistance* sol_dist, float sub_dt)
+{
+	int jc = c->joint_count;
+	int n = c->n;
+	LDL_Topology* t = c->topo;
+
 	float* pos_rhs = CK_ALLOC(n * sizeof(float));
 	float* pos_lambda = CK_ALLOC(n * sizeof(float));
 	memset(pos_rhs, 0, n * sizeof(float));
@@ -1365,11 +1329,14 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 		LDL_Constraint* con = &c->constraints[i];
 		if (con->is_synthetic) continue;
 		int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
+		// Recompute lever arms from current rotation (positions changed since pre_solve)
 		if (con->type == JOINT_BALL_SOCKET) {
 			SolverBallSocket* s = &sol_bs[con->solver_idx];
 			BodyHot* a = &w->body_hot[s->body_a];
 			BodyHot* b = &w->body_hot[s->body_b];
-			v3 err = sub(add(b->position, s->r_b), add(a->position, s->r_a));
+			v3 ra = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
+			v3 rb = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
+			v3 err = sub(add(b->position, rb), add(a->position, ra));
 			pos_rhs[oi]   = -ptv * err.x;
 			pos_rhs[oi+1] = -ptv * err.y;
 			pos_rhs[oi+2] = -ptv * err.z;
@@ -1377,16 +1344,17 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 			SolverDistance* s = &sol_dist[con->solver_idx];
 			BodyHot* a = &w->body_hot[s->body_a];
 			BodyHot* b = &w->body_hot[s->body_b];
-			v3 d = sub(add(b->position, s->r_b), add(a->position, s->r_a));
+			v3 ra = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
+			v3 rb = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
+			v3 d = sub(add(b->position, rb), add(a->position, ra));
 			float dist_val = len(d);
 			float err = dist_val - w->joints[s->joint_idx].distance.rest_length;
 			pos_rhs[oi] = -ptv * err;
 		}
 	}
 
-	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, pos_rhs, pos_lambda);
+	ldl_solve_scaled(c, pos_rhs, pos_lambda);
 
-	// Apply position deltas via generic Jacobian: pos += M^{-1} * J^T * lambda * dt.
 	if (ldl_validate_lambda(pos_lambda, n)) {
 		for (int i = 0; i < jc; i++) {
 			LDL_Constraint* con = &c->constraints[i];
@@ -1398,21 +1366,16 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 			else { real_a = sol_dist[con->solver_idx].body_a; real_b = sol_dist[con->solver_idx].body_b; }
 			BodyHot* a = &w->body_hot[real_a];
 			BodyHot* b = &w->body_hot[real_b];
-			// Apply position correction for each DOF row via Jacobian
 			for (int d = 0; d < con->dof; d++) {
 				float lam = pos_lambda[oi + d] * sub_dt;
-				// Body A
 				v3 dpa = V3(a->inv_mass * jac[d].J_a[0] * lam, a->inv_mass * jac[d].J_a[1] * lam, a->inv_mass * jac[d].J_a[2] * lam);
 				a->position = add(a->position, dpa);
 				v3 j_ang_a = V3(jac[d].J_a[3] * lam, jac[d].J_a[4] * lam, jac[d].J_a[5] * lam);
-				v3 dwa = inv_inertia_mul(a->rotation, a->inv_inertia_local, j_ang_a);
-				apply_rotation_delta(&a->rotation, dwa);
-				// Body B
+				apply_rotation_delta(&a->rotation, inv_inertia_mul(a->rotation, a->inv_inertia_local, j_ang_a));
 				v3 dpb = V3(b->inv_mass * jac[d].J_b[0] * lam, b->inv_mass * jac[d].J_b[1] * lam, b->inv_mass * jac[d].J_b[2] * lam);
 				b->position = add(b->position, dpb);
 				v3 j_ang_b = V3(jac[d].J_b[3] * lam, jac[d].J_b[4] * lam, jac[d].J_b[5] * lam);
-				v3 dwb = inv_inertia_mul(b->rotation, b->inv_inertia_local, j_ang_b);
-				apply_rotation_delta(&b->rotation, dwb);
+				apply_rotation_delta(&b->rotation, inv_inertia_mul(b->rotation, b->inv_inertia_local, j_ang_b));
 			}
 		}
 	}
@@ -1459,7 +1422,23 @@ static void ldl_correction(WorldInternal* w, SolverBallSocket* sol_bs, int bs_co
 		// Numeric factorization every substep (lever arms change after integrate_positions)
 		ldl_numeric_factor(c, w, sol_bs, sol_dist);
 
-		// Velocity + position solve every substep
+		// Velocity solve (position solve runs after integrate_positions)
 		ldl_island_solve(c, w, sol_bs, bs_count, sol_dist, dist_count, sub_dt);
+	}
+}
+
+// Position correction pass. Called after integrate_positions to correct drift.
+// Reuses the K factored during ldl_correction.
+static void ldl_position_correct(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, float sub_dt)
+{
+	int island_count = asize(w->islands);
+	for (int ii = 0; ii < island_count; ii++) {
+		if (!(w->island_gen[ii] & 1)) continue;
+		Island* isl = &w->islands[ii];
+		if (!isl->awake) continue;
+		if (isl->joint_count == 0) continue;
+		LDL_Cache* c = &isl->ldl;
+		if (c->n == 0 || !c->topo) continue;
+		ldl_island_position_correct(c, w, sol_bs, sol_dist, sub_dt);
 	}
 }
