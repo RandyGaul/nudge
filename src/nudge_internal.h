@@ -95,7 +95,9 @@ typedef struct LDL_Constraint
 {
 	int type;         // JOINT_BALL_SOCKET or JOINT_DISTANCE (or -1 for synthetic)
 	int dof;          // 3 or 1
-	int body_a, body_b; // body indices (real or virtual)
+	int body_a, body_b;         // body indices (may be virtual shard indices for graph topology)
+	int real_body_a, real_body_b; // always real body indices (for physics data lookup)
+	float weight_a, weight_b;   // shard weight (1.0 = normal, S = shattered into S shards)
 	int solver_idx;   // index into sol_bs[] or sol_dist[] (-1 for synthetic)
 	int is_synthetic;
 	int bundle_idx;   // which bundle this constraint belongs to
@@ -217,10 +219,9 @@ typedef struct LDL_Cache
 	float diag_D[LDL_MAX_NODES][6];    // D pivots (max 6 per block)
 	int topo_version;   // world topo version when blocks were built
 
-	// Shattering state
-	int virtual_body_count;          // number of virtual splinter bodies
-	CK_DYNA BodyHot* virtual_bodies; // temp velocity state for splinters
-	CK_DYNA int* body_remap;         // real_body_idx -> virtual_body_idx for shattered bodies
+	// Shattering state (weight-based: no virtual body copies)
+	int virtual_body_count;          // count of virtual shard indices (for graph topology)
+	CK_DYNA int* body_remap;         // real_body_idx -> first virtual shard index (-1 if not shattered)
 	CK_DYNA int* shard_counts;       // real_body_idx -> number of shards (0 if not shattered)
 } LDL_Cache;
 

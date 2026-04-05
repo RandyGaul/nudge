@@ -994,14 +994,7 @@ static void draw_ldl_overview(WorldInternal* w, Island* isl, LDL_Cache* c)
 		int bi = isl->head_body;
 		while (bi >= 0) {
 			if (c->body_remap[bi] >= 0) {
-				int first_v = c->body_remap[bi] - real_count;
-				// Count shards for this body
-				int shard_n = 0;
-				for (int v = first_v; v < c->virtual_body_count; v++) {
-					float S = c->virtual_bodies[v].inv_mass / (w->body_hot[bi].inv_mass > 0 ? w->body_hot[bi].inv_mass : 1.0f);
-					if (S < 1.5f) break;
-					shard_n++;
-				}
+				int shard_n = c->shard_counts[bi];
 				float real_mass = w->body_hot[bi].inv_mass > 0 ? 1.0f / w->body_hot[bi].inv_mass : 0;
 				ImGui_Text("  Body %d (mass=%.1f) -> %d shards", bi, (double)real_mass, shard_n);
 				if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
