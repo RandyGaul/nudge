@@ -31,6 +31,7 @@ World create_world(WorldParams params)
 	w->contact_damping_ratio = params.contact_damping_ratio > 0.0f ? params.contact_damping_ratio : 3.0f;
 	w->max_push_velocity = params.max_push_velocity > 0.0f ? params.max_push_velocity : 3.0f;
 	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 4;
+	w->ldl_correction_iter = -2; // -2 = auto: velocity_iters/2 (mid-loop, PGS can recover after LDL)
 	w->avbd_alpha = 0.99f;
 	w->avbd_beta_lin = 10000.0f;
 	w->avbd_beta_ang = 100.0f;
@@ -161,12 +162,11 @@ void world_step(World world, float dt)
 	SolverHinge*       sol_hinge = NULL;
 	joints_pre_solve(w, sub_dt, &sol_bs, &sol_dist, &sol_hinge);
 
-	// PGS warm-start joints only when LDL is off (LDL manages its own lambda).
-	if (!w->ldl_enabled)
-		joints_warm_start(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge));
+	// Always warm-start joints: PGS needs warm-started impulses, LDL corrects mid-loop.
+	joints_warm_start(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge));
 
 	// --- Graph color (once per frame) ---
-	// When LDL is primary solver for joints, PGS only handles contacts.
+	// Joints always participate in PGS coloring; LDL provides mid-loop K^-1 correction.
 	int count = asize(w->body_hot);
 	CK_DYNA ConstraintRef* crefs = NULL;
 	int sm_count = asize(sm);
@@ -175,22 +175,20 @@ void world_step(World world, float dt)
 			.body_a = sm[i].body_a, .body_b = sm[i].body_b };
 		apush(crefs, r);
 	}
-	if (!w->ldl_enabled) {
-		for (int i = 0; i < asize(sol_bs); i++) {
-			ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
-				.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
-			apush(crefs, r);
-		}
-		for (int i = 0; i < asize(sol_dist); i++) {
-			ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
-				.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
-			apush(crefs, r);
-		}
-		for (int i = 0; i < asize(sol_hinge); i++) {
-			ConstraintRef r = { .type = CTYPE_HINGE, .index = i,
-				.body_a = sol_hinge[i].body_a, .body_b = sol_hinge[i].body_b };
-			apush(crefs, r);
-		}
+	for (int i = 0; i < asize(sol_bs); i++) {
+		ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
+			.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
+		apush(crefs, r);
+	}
+	for (int i = 0; i < asize(sol_dist); i++) {
+		ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
+			.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
+		apush(crefs, r);
+	}
+	for (int i = 0; i < asize(sol_hinge); i++) {
+		ConstraintRef r = { .type = CTYPE_HINGE, .index = i,
+			.body_a = sol_hinge[i].body_a, .body_b = sol_hinge[i].body_b };
+		apush(crefs, r);
 	}
 
 	int cref_count = asize(crefs);
@@ -200,26 +198,36 @@ void world_step(World world, float dt)
 		color_constraints(crefs, cref_count, count, batch_starts, &color_count);
 
 	// --- Sub-step loop ---
-	// Primary LDL: LDL solves joints, PGS solves contacts, outer loop couples them.
-	// Non-LDL: PGS solves everything, NGS corrects position.
+	// Unified path: PGS iterates all constraints (contacts + joints).
+	// When LDL enabled, K is factored once at substep start, and a mid-loop
+	// K^-1 residual correction is applied at the configured iteration.
 	for (int sub = 0; sub < n_sub; sub++) {
 		if (sub > 0)
 			integrate_velocities(w, sub_dt);
 
-		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0 || asize(sol_hinge) > 0)) {
-			// Primary LDL: factor K, then iterate LDL joints + PGS contacts
-			ldl_correction(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub, sub_dt);
-			for (int iter = 0; iter < w->velocity_iters; iter++)
-				for (int c = 0; c < color_count; c++)
-					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist, sol_hinge);
-			// Position correction handled by NGS after integration.
-		} else {
-			for (int iter = 0; iter < w->velocity_iters; iter++)
-				for (int c = 0; c < color_count; c++)
-					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist, sol_hinge);
+		int has_ldl = w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0 || asize(sol_hinge) > 0);
+
+		// Resolve LDL correction iteration: -2 = auto (velocity_iters/2), -1 = after loop
+		int ldl_iter = w->ldl_correction_iter;
+		if (ldl_iter == -2) ldl_iter = w->velocity_iters / 2;
+
+		// LDL: factor K once at start of substep (topology + numeric)
+		if (has_ldl)
+			ldl_factor(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub);
+
+		for (int iter = 0; iter < w->velocity_iters; iter++) {
+			// PGS on all constraints (contacts + joints)
+			for (int c = 0; c < color_count; c++)
+				for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+					solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist, sol_hinge);
+
+			// Mid-loop LDL K^-1 correction for joints
+			if (has_ldl && iter == ldl_iter)
+				ldl_velocity_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub_dt);
 		}
+		// After-loop LDL correction (if correction_iter == -1 or >= velocity_iters)
+		if (has_ldl && (ldl_iter < 0 || ldl_iter >= w->velocity_iters))
+			ldl_velocity_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub_dt);
 
 		integrate_positions(w, sub_dt);
 
@@ -229,7 +237,7 @@ void world_step(World world, float dt)
 
 		// Position correction after integration.
 		// LDL: direct solve projects out bulk error, NGS cleans up residual.
-		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0 || asize(sol_hinge) > 0))
+		if (has_ldl)
 			ldl_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub_dt);
 		joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), w->position_iters);
 	}

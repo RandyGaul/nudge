@@ -119,17 +119,18 @@ typedef struct LDL_Bundle
 // Each node i has a diagonal block (dof[i] x dof[i]) and off-diagonal
 // blocks to its neighbors. Stored as flat float arrays.
 #define LDL_MAX_NODES 128
+#define LDL_MAX_BLOCK_DIM 12  // max DOF per bundle (12*13/2 = 78 packed elements)
 
 typedef struct LDL_Sparse
 {
 	int node_count;
-	int dof[LDL_MAX_NODES];          // DOF per node (3 or 1)
+	int dof[LDL_MAX_NODES];          // DOF per node
 	int row_offset[LDL_MAX_NODES+1]; // cumulative DOF offset
 	int n;                            // total scalar DOFs
 
 	// Diagonal blocks: packed lower-triangular, dof*(dof+1)/2 doubles per node.
-	double diag_data[LDL_MAX_NODES][6]; // max 3x3 packed (6 elements)
-	double diag_D[LDL_MAX_NODES][3];   // D pivots from block LDL (max 3 per 3x3 block)
+	double diag_data[LDL_MAX_NODES][78]; // max 12x12 packed (78 elements)
+	double diag_D[LDL_MAX_NODES][12];   // D pivots from block LDL (max 12 per block)
 
 	// Off-diagonal: per-node neighbor list.
 	// adj[i][k] = neighbor node index, adj_data[i][k] = block data (dof[i]*dof[j] doubles).
@@ -217,9 +218,8 @@ typedef struct LDL_Cache
 	LDL_Topology* topo; // cached topology (NULL until built)
 	CK_DYNA double* L_factors; // contiguous off-diagonal L-factor blocks (double precision)
 	CK_DYNA LDL_JacobianRow* jacobians; // per-DOF Jacobian rows (filled each substep)
-	CK_DYNA double* scale;              // diagonal equilibration scale factors
-	double diag_data[LDL_MAX_NODES][21]; // diagonal blocks: packed lower-triangular (max 6x6 = 21)
-	double diag_D[LDL_MAX_NODES][6];    // D pivots (max 6 per block)
+	double diag_data[LDL_MAX_NODES][78]; // diagonal blocks: packed lower-triangular (max 12x12 = 78)
+	double diag_D[LDL_MAX_NODES][12];   // D pivots (max 12 per block)
 	int topo_version;   // world topo version when blocks were built
 
 	// Shattering state (weight-based: no virtual body copies)
@@ -270,6 +270,7 @@ typedef struct WorldInternal
 	int sleep_enabled; // 1 = island sleep active (default)
 	int ldl_enabled;   // 1 = LDL direct correction for joints (dual solvers only)
 	int ldl_topo_version; // incremented on joint create/destroy
+	int ldl_correction_iter; // which PGS iter triggers LDL correction (-1 = after all PGS iters)
 	FrictionModel friction_model;
 	SolverType solver_type;
 	int velocity_iters;
@@ -499,11 +500,11 @@ typedef struct AVBD_BodyState
 
 typedef struct LDL_DebugInfo
 {
-	int n;                                // total DOFs
-	float A[LDL_MAX_DOF * LDL_MAX_DOF];  // constraint matrix snapshot
-	float D[LDL_MAX_DOF];                // diagonal pivots after factorization
-	float rhs[LDL_MAX_DOF];              // RHS (constraint violations) before solve
-	float lambda_ldl[LDL_MAX_DOF];       // exact lambdas after LDL solve
+	int n;                                 // total DOFs
+	double A[LDL_MAX_DOF * LDL_MAX_DOF];  // constraint matrix snapshot
+	double D[LDL_MAX_DOF];                // diagonal pivots after factorization
+	double rhs[LDL_MAX_DOF];              // RHS (constraint violations) before solve
+	double lambda_ldl[LDL_MAX_DOF];       // exact lambdas after LDL solve
 	int valid;
 } LDL_DebugInfo;
 

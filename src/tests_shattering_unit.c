@@ -7,19 +7,19 @@
 static void test_shatter_below_threshold()
 {
 	TEST_BEGIN("shatter_below_threshold");
-	// 4 ball-sockets on hub = 12 DOF < SHATTER_THRESHOLD (15). No shattering.
-	BodyHot bodies[5];
-	for (int i = 0; i < 5; i++) bodies[i] = make_body((float)(1 + i), (float)(2 + i));
+	// 2 ball-sockets on hub = 6 DOF <= SHATTER_THRESHOLD (6). No shattering.
+	BodyHot bodies[3];
+	for (int i = 0; i < 3; i++) bodies[i] = make_body((float)(1 + i), (float)(2 + i));
 	WorldInternal w = {0};
-	afit(w.body_hot, 5); asetlen(w.body_hot, 5);
-	for (int i = 0; i < 5; i++) w.body_hot[i] = bodies[i];
+	afit(w.body_hot, 3); asetlen(w.body_hot, 3);
+	for (int i = 0; i < 3; i++) w.body_hot[i] = bodies[i];
 
 	LDL_Cache c = {0};
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 2; i++) {
 		LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = i + 1, .real_body_a = 0, .real_body_b = i + 1, .weight_a = 1, .weight_b = 1, .solver_idx = i };
 		apush(c.constraints, con);
 	}
-	c.joint_count = 4;
+	c.joint_count = 2;
 
 	ldl_apply_shattering(&c, &w);
 
@@ -30,7 +30,7 @@ static void test_shatter_below_threshold()
 		TEST_ASSERT(c.constraints[i].weight_b == 1.0);
 		TEST_ASSERT(!c.constraints[i].is_synthetic);
 	}
-	TEST_ASSERT(c.joint_count == 4); // no synthetic welds added
+	TEST_ASSERT(c.joint_count == 2); // no synthetic welds added
 
 	afree(c.constraints); afree(c.body_remap); afree(c.shard_counts);
 	afree(w.body_hot);

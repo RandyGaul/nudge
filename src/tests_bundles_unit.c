@@ -96,7 +96,7 @@ static void test_bundles_split_at_6_dof()
 {
 	TEST_BEGIN("bundles_split_at_6_dof");
 	// Same pair: ball-socket (3) + ball-socket (3) + distance (1) = 7 DOF.
-	// First bundle takes 3+3=6, second bundle takes 1.
+	// With LDL_MAX_BLOCK_DIM=12, 7 fits in one bundle (no split).
 	LDL_Constraint cons[3] = {
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1 },
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1 },
@@ -106,19 +106,15 @@ static void test_bundles_split_at_6_dof()
 	bundles_setup(&c, cons, 3);
 	ldl_build_bundles(&c);
 
-	TEST_ASSERT(c.bundle_count == 2);
-	TEST_ASSERT(c.bundles[0].dof == 6);
-	TEST_ASSERT(c.bundles[0].count == 2);
-	TEST_ASSERT(c.bundles[1].dof == 1);
-	TEST_ASSERT(c.bundles[1].count == 1);
+	TEST_ASSERT(c.bundle_count == 1);
+	TEST_ASSERT(c.bundles[0].dof == 7);
+	TEST_ASSERT(c.bundles[0].count == 3);
 
-	// Offsets within first bundle
+	// Offsets within single bundle
 	TEST_ASSERT(c.constraints[0].bundle_offset == 0);
 	TEST_ASSERT(c.constraints[1].bundle_offset == 3);
-
-	// Second bundle
-	TEST_ASSERT(c.constraints[2].bundle_idx == 1);
-	TEST_ASSERT(c.constraints[2].bundle_offset == 0);
+	TEST_ASSERT(c.constraints[2].bundle_idx == 0);
+	TEST_ASSERT(c.constraints[2].bundle_offset == 6);
 
 	bundles_teardown(&c);
 }
@@ -163,8 +159,7 @@ static void test_bundles_hinge_plus_distance_split()
 static void test_bundles_hinge_plus_ball_socket_split()
 {
 	TEST_BEGIN("bundles_hinge_plus_ball_socket_split");
-	// Same pair: hinge (5) + ball-socket (3) = 8 DOF > 6. Must split.
-	// First bundle takes hinge (5), second takes ball-socket (3).
+	// Same pair: hinge (5) + ball-socket (3) = 8 DOF <= 12. Fits in one bundle.
 	LDL_Constraint cons[2] = {
 		{ .type = JOINT_HINGE, .dof = 5, .body_a = 0, .body_b = 1 },
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1 },
@@ -173,13 +168,13 @@ static void test_bundles_hinge_plus_ball_socket_split()
 	bundles_setup(&c, cons, 2);
 	ldl_build_bundles(&c);
 
-	TEST_ASSERT(c.bundle_count == 2);
-	TEST_ASSERT(c.bundles[0].dof == 5);
-	TEST_ASSERT(c.bundles[0].count == 1);
-	TEST_ASSERT(c.bundles[1].dof == 3);
-	TEST_ASSERT(c.bundles[1].count == 1);
+	TEST_ASSERT(c.bundle_count == 1);
+	TEST_ASSERT(c.bundles[0].dof == 8);
+	TEST_ASSERT(c.bundles[0].count == 2);
 	TEST_ASSERT(c.constraints[0].bundle_idx == 0);
-	TEST_ASSERT(c.constraints[1].bundle_idx == 1);
+	TEST_ASSERT(c.constraints[0].bundle_offset == 0);
+	TEST_ASSERT(c.constraints[1].bundle_idx == 0);
+	TEST_ASSERT(c.constraints[1].bundle_offset == 5);
 
 	bundles_teardown(&c);
 }

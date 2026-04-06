@@ -3216,7 +3216,7 @@ static void test_ldl_solve_topo_vs_dense()
 	}
 
 	// Fill from dense A, factorize, solve (packed lower-triangular diag_data)
-	double diag_data[LDL_MAX_NODES][21] = {0}, diag_D[LDL_MAX_NODES][6] = {0};
+	double diag_data[LDL_MAX_NODES][78] = {0}, diag_D[LDL_MAX_NODES][12] = {0};
 	CK_DYNA double* L_factors = NULL;
 	afit(L_factors, topo.L_factors_size); asetlen(L_factors, topo.L_factors_size);
 	memset(L_factors, 0, topo.L_factors_size * sizeof(double));
@@ -3225,9 +3225,9 @@ static void test_ldl_solve_topo_vs_dense()
 
 	for (int step = 0; step < nc; step++) {
 		LDL_Pivot* pv = &topo.pivots[step]; int k = pv->node, dk = 3;
-		double Dk[6]; block_ldl(diag_data[k], Dk, dk); for (int d = 0; d < dk; d++) diag_D[k][d] = Dk[d];
+		double Dk[LDL_MAX_BLOCK_DIM]; block_ldl(diag_data[k], Dk, dk); for (int d = 0; d < dk; d++) diag_D[k][d] = Dk[d];
 		// Back up edges before overwriting with L blocks
-		double edge_bk[LDL_MAX_NODES][36];
+		double edge_bk[LDL_MAX_NODES][LDL_MAX_BLOCK_DIM * LDL_MAX_BLOCK_DIM];
 		for (int ei = 0; ei < pv->col_count; ei++) { LDL_Column* en = &topo.columns[pv->col_start+ei]; memcpy(edge_bk[ei], &L_factors[en->L_offset], en->dn*dk*sizeof(double)); }
 		for (int ei = 0; ei < pv->col_count; ei++) {
 			LDL_Column* en = &topo.columns[pv->col_start+ei]; double* Eik = &L_factors[en->L_offset]; double Lik[36];
@@ -3472,12 +3472,12 @@ static void test_ldl_solve_topo_identity()
 	topo.pivots[0] = (LDL_Pivot){ .node = 0, .dk = 3, .ok = 0 };
 	topo.L_factors_size = 0;
 
-	double diag_data[LDL_MAX_NODES][21] = {0};
-	double diag_D[LDL_MAX_NODES][6] = {0};
+	double diag_data[LDL_MAX_NODES][78] = {0};
+	double diag_D[LDL_MAX_NODES][12] = {0};
 	// K = 10*I (packed lower-triangular)
 	diag_data[0][LDL_TRI(0,0)] = 10; diag_data[0][LDL_TRI(1,1)] = 10; diag_data[0][LDL_TRI(2,2)] = 10;
 	// Factorize in place
-	double Dk[6];
+	double Dk[12];
 	block_ldl(diag_data[0], Dk, 3);
 	for (int d = 0; d < 3; d++) diag_D[0][d] = Dk[d];
 
@@ -3503,10 +3503,10 @@ static void test_ldl_solve_topo_identity()
 	topo2.pivots[1] = (LDL_Pivot){ .node = 1, .dk = 3, .ok = 3 };
 	topo2.L_factors_size = 0;
 
-	double dd2[LDL_MAX_NODES][21] = {0}, dD2[LDL_MAX_NODES][6] = {0};
+	double dd2[LDL_MAX_NODES][78] = {0}, dD2[LDL_MAX_NODES][12] = {0};
 	dd2[0][LDL_TRI(0,0)] = 5; dd2[0][LDL_TRI(1,1)] = 5; dd2[0][LDL_TRI(2,2)] = 5;
 	dd2[1][LDL_TRI(0,0)] = 8; dd2[1][LDL_TRI(1,1)] = 8; dd2[1][LDL_TRI(2,2)] = 8;
-	double Dk2[6];
+	double Dk2[12];
 	block_ldl(dd2[0], Dk2, 3); for (int d = 0; d < 3; d++) dD2[0][d] = Dk2[d];
 	block_ldl(dd2[1], Dk2, 3); for (int d = 0; d < 3; d++) dD2[1][d] = Dk2[d];
 

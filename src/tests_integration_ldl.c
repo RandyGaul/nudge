@@ -67,7 +67,7 @@ static void integration_sparse_solve(LDL_Cache* c, IntegrationWorld* iw, double*
 	ldl_build_bundles(c);
 	ldl_build_topology(c, &w);
 	ldl_numeric_factor(c, &w, iw->sol_bs, iw->sol_dist, iw->sol_hinge);
-	ldl_solve_scaled(c, rhs, x);
+	ldl_solve_topo(c->topo, c->diag_data, c->diag_D, c->L_factors, rhs, x);
 
 	afree(w.body_hot);
 }
@@ -186,7 +186,6 @@ static void integration_cache_free(LDL_Cache* c)
 	if (c->topo) { ldl_topology_free(c->topo); CK_FREE(c->topo); }
 	afree(c->L_factors);
 	afree(c->jacobians);
-	afree(c->scale);
 	afree(c->body_remap);
 	afree(c->shard_counts);
 }
