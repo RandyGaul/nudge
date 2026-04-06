@@ -1294,10 +1294,12 @@ static void ldl_solve_scaled(LDL_Cache* c, double* rhs, double* x)
 }
 
 // Validate solve output: returns 0 if any NaN/inf/huge values found.
+// Threshold 1e6: for a 1000 kg body at 60Hz/4 substeps, max reasonable
+// lambda is ~mass*g*dt ≈ 40. Even extreme scenarios stay well under 1e6.
 static int ldl_validate_lambda(double* lambda, int n)
 {
 	for (int i = 0; i < n; i++) {
-		if (!(lambda[i] == lambda[i]) || lambda[i] > 1e15 || lambda[i] < -1e15) return 0;
+		if (!(lambda[i] == lambda[i]) || lambda[i] > 1e6 || lambda[i] < -1e6) return 0;
 	}
 	return 1;
 }
@@ -1332,8 +1334,21 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 			double bias = 0.0;
 			if (!con->is_synthetic) {
 				if (con->type == JOINT_BALL_SOCKET) {
-					v3 l = sol_bs[con->solver_idx].lambda; lam = d == 0 ? l.x : d == 1 ? l.y : l.z;
-					v3 bb = sol_bs[con->solver_idx].bias; bias = d == 0 ? bb.x : d == 1 ? bb.y : bb.z;
+					SolverBallSocket* s = &sol_bs[con->solver_idx];
+					v3 l = s->lambda; lam = d == 0 ? l.x : d == 1 ? l.y : l.z;
+					// For soft constraints, recompute bias from CURRENT positions each substep.
+					// The pre-computed bias is stale after position integration.
+					if (s->softness > 0.0f) {
+						v3 ra = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
+						v3 rb = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
+						v3 err = sub(add(b->position, rb), add(a->position, ra));
+						float ptv_f, soft_f;
+						spring_compute(w->joints[s->joint_idx].ball_socket.spring, sub_dt, &ptv_f, &soft_f);
+						v3 bb = scale(err, ptv_f);
+						bias = d == 0 ? bb.x : d == 1 ? bb.y : bb.z;
+					} else {
+						v3 bb = s->bias; bias = d == 0 ? bb.x : d == 1 ? bb.y : bb.z;
+					}
 				} else if (con->type == JOINT_DISTANCE) {
 					lam = sol_dist[con->solver_idx].lambda;
 					bias = sol_dist[con->solver_idx].bias;

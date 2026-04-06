@@ -5646,6 +5646,157 @@ static void test_ldl_delta_correction_accuracy()
 // and sharp yank recovery.
 // -----------------------------------------------------------------------------
 
+// Soft spring with box: the angular inertia of a box interacts with the
+// spring compliance differently than a sphere. Basic sanity check.
+static void test_ldl_soft_box()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body box = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = box, .local_offset_a = V3(0,-1,0), .local_offset_b = V3(0,1,0), .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, box);
+		if (!is_valid(p)) { printf("  [LDL soft box] NaN at frame %d\n", f); break; }
+	}
+
+	v3 p = body_get_position(w, box);
+	v3 v = wi->body_hot[handle_index(box)].velocity;
+	printf("  [LDL soft box] pos=(%.2f,%.2f,%.2f) vel=(%.4f,%.4f,%.4f) speed=%.4f\n", p.x, p.y, p.z, v.x, v.y, v.z, len(v));
+
+	TEST_BEGIN("LDL soft box: body valid");
+	TEST_ASSERT(is_valid(p) && p.y > -50.0f);
+	TEST_BEGIN("LDL soft box: settled");
+	TEST_ASSERT(len(v) < 5.0f);
+
+	destroy_world(w);
+}
+
+// Soft spring box drag: simulates the app's mouse drag on a box.
+// Off-center attachment, anchor teleported each frame, box has contacts with floor.
+static void test_ldl_soft_box_drag()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	// Floor
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+
+	// Box sitting on floor
+	Body box = create_body(w, (BodyParams){ .position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+
+	// Let it settle
+	step_n(w, 30);
+
+	// Create mouse-style spring at off-center point on box top
+	v3 local_hit = V3(0.3f, 0.5f, 0.2f); // off-center top surface
+	v3 box_pos = body_get_position(w, box);
+	quat box_rot = body_get_rotation(w, box);
+	v3 hit_world = add(box_pos, rotate(box_rot, local_hit));
+
+	Body mouse_anchor = create_body(w, (BodyParams){ .position = hit_world, .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, mouse_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+	Joint mj = create_ball_socket(w, (BallSocketParams){ .body_a = mouse_anchor, .body_b = box, .local_offset_a = V3(0,0,0), .local_offset_b = local_hit, .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+
+	int mi = handle_index(mouse_anchor);
+	int bi = handle_index(box);
+	int ji = handle_index(mj);
+	printf("  [drag setup] box_island=%d joint_island=%d joint_count=%d\n", wi->body_cold[bi].island_id, wi->joints[ji].island_id, wi->joints[ji].island_id >= 0 ? wi->islands[wi->joints[ji].island_id].joint_count : -1);
+	int nan_frame = -1;
+
+	// Drag upward and sideways (simulating mouse movement)
+	int explode_frame = -1;
+	for (int f = 0; f < 120; f++) {
+		float t = (float)f / 120.0f;
+		wi->body_hot[mi].position = V3(2.0f * t, 3.0f + 2.0f * t, 1.0f * sinf(t * 6.28f));
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, box);
+		if (!is_valid(p)) { nan_frame = f; break; }
+		v3 bv = wi->body_hot[handle_index(box)].velocity;
+		if (f < 25) printf("  [drag f%d] pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f) speed=%.1f\n", f, p.x, p.y, p.z, bv.x, bv.y, bv.z, len(bv));
+		if (explode_frame < 0 && len(p) > 50.0f) { explode_frame = f; printf("  [LDL soft box drag] EXPLODE at frame %d pos=(%.2f,%.2f,%.2f)\n", f, p.x, p.y, p.z); }
+	}
+
+	v3 p_drag = body_get_position(w, box);
+
+	// Release and let settle
+	destroy_joint(w, mj);
+	destroy_body(w, mouse_anchor);
+	step_n(w, 60);
+
+	v3 p_after = body_get_position(w, box);
+	v3 v_after = wi->body_hot[handle_index(box)].velocity;
+
+	printf("  [LDL soft box drag] nan=%d during_drag=(%.2f,%.2f,%.2f) after=(%.2f,%.2f,%.2f) speed=%.4f\n",
+		nan_frame, p_drag.x, p_drag.y, p_drag.z, p_after.x, p_after.y, p_after.z, len(v_after));
+
+	TEST_BEGIN("LDL soft box drag: no NaN during drag");
+	TEST_ASSERT(nan_frame < 0);
+	TEST_BEGIN("LDL soft box drag: body stays bounded during drag");
+	TEST_ASSERT(is_valid(p_drag) && len(p_drag) < 100.0f);
+	TEST_BEGIN("LDL soft box drag: body valid after release");
+	TEST_ASSERT(is_valid(p_after) && fabsf(p_after.y) < 50.0f);
+
+	destroy_world(w);
+}
+
+// Soft spring box with rigid chain: box on spring attached to a rigid chain.
+// Tests the coupling of soft box compliance with rigid LDL constraints.
+static void test_ldl_soft_box_chain()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	// Rigid chain: anchor -> link -> link
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body link1 = create_body(w, (BodyParams){ .position = V3(0, 9, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, link1, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body link2 = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, link2, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = link1, .local_offset_a = V3(0,-0.5f,0), .local_offset_b = V3(0,0.5f,0) });
+	create_ball_socket(w, (BallSocketParams){ .body_a = link1, .body_b = link2, .local_offset_a = V3(0,-0.5f,0), .local_offset_b = V3(0,0.5f,0) });
+
+	// Box on soft spring attached to end of chain
+	Body box = create_body(w, (BodyParams){ .position = V3(0, 7, 0), .rotation = quat_identity(), .mass = 2.0f });
+	body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
+	create_ball_socket(w, (BallSocketParams){ .body_a = link2, .body_b = box, .local_offset_a = V3(0,-0.5f,0), .local_offset_b = V3(0,0.4f,0), .spring = { .frequency = 3.0f, .damping_ratio = 0.5f } });
+
+	int nan_frame = -1;
+	for (int f = 0; f < 300; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, box);
+		if (!is_valid(p)) { nan_frame = f; break; }
+	}
+
+	v3 p = body_get_position(w, box);
+	v3 v = wi->body_hot[handle_index(box)].velocity;
+	float rigid_gap = anchor_distance(w, anchor, V3(0,-0.5f,0), link1, V3(0,0.5f,0));
+
+	printf("  [LDL soft box chain] nan=%d pos=(%.2f,%.2f,%.2f) speed=%.4f rigid_gap=%.4f\n",
+		nan_frame, p.x, p.y, p.z, len(v), rigid_gap);
+
+	TEST_BEGIN("LDL soft box chain: no NaN");
+	TEST_ASSERT(nan_frame < 0);
+	TEST_BEGIN("LDL soft box chain: body valid");
+	TEST_ASSERT(is_valid(p) && p.y > -50.0f);
+	TEST_BEGIN("LDL soft box chain: rigid joints tight");
+	TEST_ASSERT(rigid_gap < 0.5f);
+
+	destroy_world(w);
+}
+
 // Soft spring chain: all joints are soft springs. Bodies should settle at an
 // equilibrium under gravity, NOT at zero gap.
 static void test_ldl_soft_chain()
@@ -7137,6 +7288,9 @@ static void run_solver_tests()
 	test_ldl_long_chain();
 	test_ldl_block_near_singular();
 	test_ldl_delta_correction_accuracy();
+	test_ldl_soft_box();
+	test_ldl_soft_box_drag();
+	test_ldl_soft_box_chain();
 	test_ldl_soft_chain();
 	test_ldl_mixed_rigid_soft();
 	test_ldl_soft_hub();
