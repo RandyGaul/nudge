@@ -1326,6 +1326,7 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 
 	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, vel_rhs, vel_lambda);
 
+
 	if (g_ldl_trace_solve && n <= 6) {
 		printf("  [TRACE] n=%d jc=%d compliance=%.4g\n", n, jc, jc > 0 && !c->constraints[0].is_synthetic ? (c->constraints[0].type == JOINT_BALL_SOCKET ? (double)sol_bs[c->constraints[0].solver_idx].softness : 0.0) : 0.0);
 		printf("  [TRACE] rhs=(%.4g, %.4g, %.4g)\n", vel_rhs[0], n>1?vel_rhs[1]:0, n>2?vel_rhs[2]:0);
@@ -1365,17 +1366,18 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 		else { real_a = sol_hinge[con->solver_idx].body_a; real_b = sol_hinge[con->solver_idx].body_b; }
 		ldl_apply_jacobian_impulse(jac, con->dof, &vel_lambda[oi], &w->body_hot[real_a], 0);
 		ldl_apply_jacobian_impulse(jac, con->dof, &vel_lambda[oi], &w->body_hot[real_b], 1);
-		// Mid-PGS mode: lambda is a delta correction. Accumulate onto PGS-accumulated lambda.
+		// LDL primary mode: vel_lambda is the full impulse, not a delta. SET lambda.
 		if (con->type == JOINT_BALL_SOCKET) {
-			sol_bs[con->solver_idx].lambda = add(sol_bs[con->solver_idx].lambda, V3((float)vel_lambda[oi], (float)vel_lambda[oi+1], (float)vel_lambda[oi+2]));
+			sol_bs[con->solver_idx].lambda = V3((float)vel_lambda[oi], (float)vel_lambda[oi+1], (float)vel_lambda[oi+2]);
 		} else if (con->type == JOINT_DISTANCE) {
-			sol_dist[con->solver_idx].lambda += (float)vel_lambda[oi];
+			sol_dist[con->solver_idx].lambda = (float)vel_lambda[oi];
 		} else {
-			sol_hinge[con->solver_idx].lin_lambda = add(sol_hinge[con->solver_idx].lin_lambda, V3((float)vel_lambda[oi], (float)vel_lambda[oi+1], (float)vel_lambda[oi+2]));
-			sol_hinge[con->solver_idx].ang_lambda[0] += (float)vel_lambda[oi+3];
-			sol_hinge[con->solver_idx].ang_lambda[1] += (float)vel_lambda[oi+4];
+			sol_hinge[con->solver_idx].lin_lambda = V3((float)vel_lambda[oi], (float)vel_lambda[oi+1], (float)vel_lambda[oi+2]);
+			sol_hinge[con->solver_idx].ang_lambda[0] = (float)vel_lambda[oi+3];
+			sol_hinge[con->solver_idx].ang_lambda[1] = (float)vel_lambda[oi+4];
 		}
 	}
+
 
 	CK_FREE(vel_rhs);
 	CK_FREE(vel_lambda);
@@ -1392,9 +1394,9 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 	double* pos_rhs = CK_ALLOC(n * sizeof(double));
 	double* pos_lambda = CK_ALLOC(n * sizeof(double));
 	memset(pos_rhs, 0, n * sizeof(double));
-	// Baumgarte factor: correct a fraction of the error per substep to prevent
-	// energy injection from overcorrection. Matches NGS's SOLVER_POS_BAUMGARTE.
-	double beta = SOLVER_POS_BAUMGARTE;
+	// LDL solves the coupled system exactly — correct 100% of position error.
+	// Unlike sequential NGS, there's no risk of overcorrection from coupled joints.
+	double beta = 1.0;
 	double ptv = beta / sub_dt;
 
 	for (int i = 0; i < jc; i++) {
@@ -1409,10 +1411,6 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 			v3 ra = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
 			v3 rb = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
 			v3 err = sub(add(b->position, rb), add(a->position, ra));
-			// Clamp error magnitude to prevent overcorrection after large perturbations.
-			double el = sqrt(err.x*err.x + err.y*err.y + err.z*err.z);
-			double max_err = SOLVER_POS_MAX_CORRECTION / beta;
-			if (el > max_err) { double s2 = max_err / el; err = scale(err, (float)s2); }
 			pos_rhs[oi]   = -ptv * err.x;
 			pos_rhs[oi+1] = -ptv * err.y;
 			pos_rhs[oi+2] = -ptv * err.z;
@@ -1425,9 +1423,6 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 			v3 d = sub(add(b->position, rb), add(a->position, ra));
 			double dist_val = len(d);
 			double err = dist_val - w->joints[s->joint_idx].distance.rest_length;
-			double max_err_d = SOLVER_POS_MAX_CORRECTION / beta;
-			if (err > max_err_d) err = max_err_d;
-			if (err < -max_err_d) err = -max_err_d;
 			pos_rhs[oi] = -ptv * err;
 		} else if (con->type == JOINT_HINGE) {
 			SolverHinge* s = &sol_hinge[con->solver_idx];
@@ -1436,9 +1431,6 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 			v3 ra = rotate(a->rotation, w->joints[s->joint_idx].hinge.local_a);
 			v3 rb = rotate(b->rotation, w->joints[s->joint_idx].hinge.local_b);
 			v3 err = sub(add(b->position, rb), add(a->position, ra));
-			double el = sqrt(err.x*err.x + err.y*err.y + err.z*err.z);
-			double max_err = SOLVER_POS_MAX_CORRECTION / beta;
-			if (el > max_err) { double s2 = max_err / el; err = scale(err, (float)s2); }
 			pos_rhs[oi]   = -ptv * err.x;
 			pos_rhs[oi+1] = -ptv * err.y;
 			pos_rhs[oi+2] = -ptv * err.z;
@@ -1545,7 +1537,7 @@ static void ldl_factor(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count,
 	}
 }
 
-// Velocity correction using already-factored K. Solves and applies delta impulses.
+// Velocity correction using already-factored K. Solves and applies impulses.
 static void ldl_velocity_correct(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, SolverHinge* sol_hinge, int hinge_count, float sub_dt)
 {
 	if (bs_count == 0 && dist_count == 0 && hinge_count == 0) return;

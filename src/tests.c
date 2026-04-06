@@ -2757,6 +2757,79 @@ static void test_ldl_heavy_chain()
 	TEST_ASSERT(gap_no_ldl < 50.0f);
 }
 
+// Reproduce demo: lift heavy ball above anchor via mouse, release, check recovery.
+static void test_ldl_lift_and_drop()
+{
+	int chain_len = 10;
+	float link_len = 0.8f;
+	v3 off_a = V3(link_len * 0.5f, 0, 0);
+	v3 off_b = V3(-link_len * 0.5f, 0, 0);
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	Body chain[10];
+	Body prev = anchor;
+	for (int i = 0; i < chain_len; i++) {
+		float mass = (i == chain_len - 1) ? 100.0f : 1.0f;
+		chain[i] = create_body(w, (BodyParams){ .position = V3((i + 1) * link_len, 10, 0), .rotation = quat_identity(), .mass = mass });
+		body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+		prev = chain[i];
+	}
+
+	// Let chain settle
+	step_n(w, 120);
+
+	// Grab heavy ball with mouse spring, lift it above the anchor
+	Body mouse_anchor = create_body(w, (BodyParams){ .position = body_get_position(w, chain[chain_len - 1]), .rotation = quat_identity(), .mass = 0 });
+	Joint mouse_joint = create_ball_socket(w, (BallSocketParams){
+		.body_a = mouse_anchor,
+		.body_b = chain[chain_len - 1],
+		.local_offset_a = V3(0, 0, 0),
+		.local_offset_b = V3(0, 0, 0),
+		.spring = { .frequency = 5.0f, .damping_ratio = 0.7f },
+	});
+
+	// Gradually lift heavy ball above anchor over 120 frames
+	int anchor_idx = handle_index(mouse_anchor);
+	for (int f = 0; f < 120; f++) {
+		float t = (float)f / 120.0f;
+		// Move from current position up to (0, 20, 0) — above the anchor
+		wi->body_hot[anchor_idx].position = V3(0, 10 + 10 * t, 0);
+		world_step(w, 1.0f / 60.0f);
+	}
+
+	// Release
+	destroy_joint(w, mouse_joint);
+	destroy_body(w, mouse_anchor);
+
+	// Let chain recover for 5 seconds
+	step_n(w, 300);
+
+	// Check: chain should be hanging from anchor, all bodies valid
+	int finite = 1;
+	float min_y = 1000;
+	for (int i = 0; i < chain_len; i++) {
+		v3 p = body_get_position(w, chain[i]);
+		if (!(p.x == p.x) || !(p.y == p.y) || !(p.z == p.z)) finite = 0;
+		if (p.y < min_y) min_y = p.y;
+	}
+	v3 p0 = body_get_position(w, chain[0]);
+	printf("  [LDL lift-drop] finite=%d body0_y=%.2f min_y=%.2f\n", finite, p0.y, min_y);
+
+	TEST_BEGIN("LDL lift and drop: no NaN");
+	TEST_ASSERT(finite);
+	TEST_BEGIN("LDL lift and drop: chain doesn't fall to oblivion");
+	TEST_ASSERT(min_y > -50.0f);
+
+	destroy_world(w);
+}
+
 // Simulate mouse yank on heavy chain: attach a soft spring joint to the end
 // body, teleport the anchor far away, and step. The soft joint must NOT enter
 // the LDL factorization -- if it does, LDL over-corrects and the chain diverges
@@ -7272,6 +7345,7 @@ static void run_solver_tests()
 	test_ball_socket_pin_converges();
 	test_ball_socket_pendulum();
 	test_ldl_heavy_chain();
+	test_ldl_lift_and_drop();
 	test_ldl_mouse_yank_chain();
 	test_ldl_vertical_heavy_chain_drop();
 	test_ldl_two_independent_chains();

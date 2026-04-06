@@ -162,11 +162,12 @@ void world_step(World world, float dt)
 	SolverHinge*       sol_hinge = NULL;
 	joints_pre_solve(w, sub_dt, &sol_bs, &sol_dist, &sol_hinge);
 
-	// Always warm-start joints: PGS needs warm-started impulses, LDL corrects mid-loop.
+	// Always warm-start joints (LDL needs warm-started lambda for residual computation).
 	joints_warm_start(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge));
 
 	// --- Graph color (once per frame) ---
-	// Joints always participate in PGS coloring; LDL provides mid-loop K^-1 correction.
+	// When LDL enabled: rigid joints excluded from PGS (they get diagonal GS + LDL K^-1).
+	// Soft spring joints stay in PGS (LDL handles them via softness term).
 	int count = asize(w->body_hot);
 	CK_DYNA ConstraintRef* crefs = NULL;
 	int sm_count = asize(sm);
@@ -175,20 +176,46 @@ void world_step(World world, float dt)
 			.body_a = sm[i].body_a, .body_b = sm[i].body_b };
 		apush(crefs, r);
 	}
-	for (int i = 0; i < asize(sol_bs); i++) {
-		ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
-			.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
-		apush(crefs, r);
-	}
-	for (int i = 0; i < asize(sol_dist); i++) {
-		ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
-			.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
-		apush(crefs, r);
-	}
-	for (int i = 0; i < asize(sol_hinge); i++) {
-		ConstraintRef r = { .type = CTYPE_HINGE, .index = i,
-			.body_a = sol_hinge[i].body_a, .body_b = sol_hinge[i].body_b };
-		apush(crefs, r);
+	if (!w->ldl_enabled) {
+		// No LDL: all joints go into PGS
+		for (int i = 0; i < asize(sol_bs); i++) {
+			ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
+				.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
+			apush(crefs, r);
+		}
+		for (int i = 0; i < asize(sol_dist); i++) {
+			ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
+				.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
+			apush(crefs, r);
+		}
+		for (int i = 0; i < asize(sol_hinge); i++) {
+			ConstraintRef r = { .type = CTYPE_HINGE, .index = i,
+				.body_a = sol_hinge[i].body_a, .body_b = sol_hinge[i].body_b };
+			apush(crefs, r);
+		}
+	} else {
+		// LDL enabled: only soft spring joints go into PGS
+		for (int i = 0; i < asize(sol_bs); i++) {
+			if (sol_bs[i].softness > 0.0f) {
+				ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
+					.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
+				apush(crefs, r);
+			}
+		}
+		for (int i = 0; i < asize(sol_dist); i++) {
+			if (sol_dist[i].softness > 0.0f) {
+				ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
+					.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
+				apush(crefs, r);
+			}
+		}
+		for (int i = 0; i < asize(sol_hinge); i++) {
+			if (sol_hinge[i].softness > 0.0f) {
+				ConstraintRef r = { .type = CTYPE_HINGE, .index = i,
+					.body_a = sol_hinge[i].body_a, .body_b = sol_hinge[i].body_b };
+				apush(crefs, r);
+			}
+		}
 	}
 
 	int cref_count = asize(crefs);
@@ -215,19 +242,19 @@ void world_step(World world, float dt)
 		if (has_ldl)
 			ldl_factor(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub);
 
-		for (int iter = 0; iter < w->velocity_iters; iter++) {
-			// PGS on all constraints (contacts + joints)
-			for (int c = 0; c < color_count; c++)
-				for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-					solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist, sol_hinge);
-
-			// Mid-loop LDL K^-1 correction for joints
-			if (has_ldl && iter == ldl_iter)
-				ldl_velocity_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub_dt);
-		}
-		// After-loop LDL correction (if correction_iter == -1 or >= velocity_iters)
-		if (has_ldl && (ldl_iter < 0 || ldl_iter >= w->velocity_iters))
+		if (has_ldl) {
+			// LDL primary: solve joints first, then PGS on contacts
 			ldl_velocity_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub_dt);
+			for (int iter = 0; iter < w->velocity_iters; iter++)
+				for (int c = 0; c < color_count; c++)
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist, sol_hinge);
+		} else {
+			for (int iter = 0; iter < w->velocity_iters; iter++)
+				for (int c = 0; c < color_count; c++)
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist, sol_hinge);
+		}
 
 		integrate_positions(w, sub_dt);
 

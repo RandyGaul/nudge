@@ -109,7 +109,7 @@ static bool g_show_shadows = true;
 static bool g_sleep_enabled = true;
 static int g_friction_model = FRICTION_PATCH;
 static int g_solver_type = SOLVER_SOFT_STEP;
-static bool g_ldl_enabled = false;
+static bool g_ldl_enabled = true;
 static int g_ldl_inspect_island = -1;   // selected island for LDL inspector (-1 = none)
 static int g_ldl_inspect_step = 0;      // factorization step slider
 static int g_ldl_hover_body = -1;       // body highlighted by matrix hover (-1 = none)
