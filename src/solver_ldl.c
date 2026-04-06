@@ -198,7 +198,7 @@ static void apply_rotation_delta(quat* q, dv3 w)
 // K = J * M^{-1} * J^T is computed generically for all constraint types.
 
 // Fill Jacobian rows for a constraint. Writes dof rows starting at jac[0].
-static void ldl_fill_jacobian(LDL_Constraint* con, SolverBallSocket* sol_bs, SolverDistance* sol_dist, LDL_JacobianRow* jac)
+static void ldl_fill_jacobian(LDL_Constraint* con, SolverBallSocket* sol_bs, SolverDistance* sol_dist, SolverHinge* sol_hinge, LDL_JacobianRow* jac)
 {
 	int dof = con->dof;
 	for (int d = 0; d < dof; d++) { memset(jac[d].J_a, 0, 6 * sizeof(double)); memset(jac[d].J_b, 0, 6 * sizeof(double)); }
@@ -216,7 +216,7 @@ static void ldl_fill_jacobian(LDL_Constraint* con, SolverBallSocket* sol_bs, Sol
 		jac[0].J_b[0] =  1; jac[0].J_b[4] =  rb.z; jac[0].J_b[5] = -rb.y;
 		jac[1].J_b[1] =  1; jac[1].J_b[3] = -rb.z; jac[1].J_b[5] =  rb.x;
 		jac[2].J_b[2] =  1; jac[2].J_b[3] =  rb.y; jac[2].J_b[4] = -rb.x;
-	} else { // JOINT_DISTANCE
+	} else if (con->type == JOINT_DISTANCE) {
 		SolverDistance* s = &sol_dist[con->solver_idx];
 		v3 ax = s->axis;
 		v3 rxa = cross(s->r_a, ax), rxb = cross(s->r_b, ax);
@@ -225,6 +225,21 @@ static void ldl_fill_jacobian(LDL_Constraint* con, SolverBallSocket* sol_bs, Sol
 		jac[0].J_a[3] = -rxa.x; jac[0].J_a[4] = -rxa.y; jac[0].J_a[5] = -rxa.z;
 		jac[0].J_b[0] = ax.x; jac[0].J_b[1] = ax.y; jac[0].J_b[2] = ax.z;
 		jac[0].J_b[3] = rxb.x; jac[0].J_b[4] = rxb.y; jac[0].J_b[5] = rxb.z;
+	} else { // JOINT_HINGE
+		SolverHinge* s = &sol_hinge[con->solver_idx];
+		v3 ra = s->r_a, rb = s->r_b;
+		// Linear rows 0-2: same as ball socket
+		jac[0].J_a[0] = -1; jac[0].J_a[4] = -ra.z; jac[0].J_a[5] =  ra.y;
+		jac[1].J_a[1] = -1; jac[1].J_a[3] =  ra.z; jac[1].J_a[5] = -ra.x;
+		jac[2].J_a[2] = -1; jac[2].J_a[3] = -ra.y; jac[2].J_a[4] =  ra.x;
+		jac[0].J_b[0] =  1; jac[0].J_b[4] =  rb.z; jac[0].J_b[5] = -rb.y;
+		jac[1].J_b[1] =  1; jac[1].J_b[3] = -rb.z; jac[1].J_b[5] =  rb.x;
+		jac[2].J_b[2] =  1; jac[2].J_b[3] =  rb.y; jac[2].J_b[4] = -rb.x;
+		// Angular rows 3-4: J_a = [0, u_d], J_b = [0, -u_d]
+		jac[3].J_a[3] = s->u1.x; jac[3].J_a[4] = s->u1.y; jac[3].J_a[5] = s->u1.z;
+		jac[3].J_b[3] = -s->u1.x; jac[3].J_b[4] = -s->u1.y; jac[3].J_b[5] = -s->u1.z;
+		jac[4].J_a[3] = s->u2.x; jac[4].J_a[4] = s->u2.y; jac[4].J_a[5] = s->u2.z;
+		jac[4].J_b[3] = -s->u2.x; jac[4].J_b[4] = -s->u2.y; jac[4].J_b[5] = -s->u2.z;
 	}
 }
 
@@ -797,7 +812,7 @@ static double ldl_condition_check(LDL_Cache* c, LDL_Topology* t)
 // Numeric factorization using cached topology.
 
 // Fill K matrix and factorize using precomputed topology.
-static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket* sol_bs, SolverDistance* sol_dist)
+static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket* sol_bs, SolverDistance* sol_dist, SolverHinge* sol_hinge)
 {
 	LDL_Topology* t = c->topo;
 	int nc = t->node_count;
@@ -817,7 +832,7 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
 		con->jacobian_start = t->row_offset[con->bundle_idx] + con->bundle_offset;
-		ldl_fill_jacobian(con, sol_bs, sol_dist, &c->jacobians[con->jacobian_start]);
+		ldl_fill_jacobian(con, sol_bs, sol_dist, sol_hinge, &c->jacobians[con->jacobian_start]);
 	}
 
 	// Fill diagonal K blocks via generic K = J * M^{-1} * J^T.
@@ -839,7 +854,7 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 			// Regularization: soft constraints add softness directly to K diagonal
 			// (matching PGS convention). Rigid constraints use trace-scaled minimum compliance.
 			if (!con->is_synthetic) {
-				double soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : sol_dist[con->solver_idx].softness;
+				double soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : con->type == JOINT_DISTANCE ? sol_dist[con->solver_idx].softness : sol_hinge[con->solver_idx].softness;
 				if (soft > 0.0f) {
 					for (int d = 0; d < dk; d++) c->diag_data[bi][LDL_TRI(off+d, off+d)] += soft;
 				} else {
@@ -1152,7 +1167,7 @@ static void ldl_cache_sleep(LDL_Cache* c)
 }
 
 // Build blocks for an island's joints.
-static int ldl_cache_rebuild_blocks(LDL_Cache* c, WorldInternal* w, int island_idx, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count)
+static int ldl_cache_rebuild_blocks(LDL_Cache* c, WorldInternal* w, int island_idx, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, SolverHinge* sol_hinge, int hinge_count)
 {
 	afree(c->constraints);
 	afree(c->bundles);
@@ -1191,6 +1206,18 @@ static int ldl_cache_rebuild_blocks(LDL_Cache* c, WorldInternal* w, int island_i
 					assert((w->body_hot[con.body_a].inv_mass > 0.0f || w->body_hot[con.body_b].inv_mass > 0.0f) && "Both bodies are static");
 					apush(c->constraints, con);
 					c->n += 1;
+					c->joint_count++;
+					break;
+				}
+			}
+		} else if (j->type == JOINT_HINGE) {
+			for (int i = 0; i < hinge_count; i++) {
+				if (sol_hinge[i].joint_idx == ji) {
+					LDL_Constraint con = { .type = JOINT_HINGE, .dof = 5, .body_a = sol_hinge[i].body_a, .body_b = sol_hinge[i].body_b, .real_body_a = sol_hinge[i].body_a, .real_body_b = sol_hinge[i].body_b, .weight_a = 1.0f, .weight_b = 1.0f, .solver_idx = i };
+					assert(con.body_a != con.body_b && "Joint between body and itself");
+					assert((w->body_hot[con.body_a].inv_mass > 0.0f || w->body_hot[con.body_b].inv_mass > 0.0f) && "Both bodies are static");
+					apush(c->constraints, con);
+					c->n += 5;
 					c->joint_count++;
 					break;
 				}
@@ -1276,7 +1303,7 @@ static int ldl_validate_lambda(double* lambda, int n)
 }
 
 // Solve: build RHS, forward/back-sub via topology, apply velocity + position lambdas.
-static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, float sub_dt)
+static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, SolverHinge* sol_hinge, int hinge_count, float sub_dt)
 {
 	int jc = c->joint_count;
 	int n = c->n;
@@ -1296,7 +1323,7 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 		// Primary mode RHS: full constraint velocity error + compliance spring-back.
 		double compliance = 0.0;
 		if (!con->is_synthetic) {
-			double soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : sol_dist[con->solver_idx].softness;
+			double soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : con->type == JOINT_DISTANCE ? sol_dist[con->solver_idx].softness : sol_hinge[con->solver_idx].softness;
 			compliance = soft > 0.0f ? soft : LDL_MIN_COMPLIANCE;
 		}
 		for (int d = 0; d < con->dof; d++) {
@@ -1307,9 +1334,13 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 				if (con->type == JOINT_BALL_SOCKET) {
 					v3 l = sol_bs[con->solver_idx].lambda; lam = d == 0 ? l.x : d == 1 ? l.y : l.z;
 					v3 bb = sol_bs[con->solver_idx].bias; bias = d == 0 ? bb.x : d == 1 ? bb.y : bb.z;
-				} else {
+				} else if (con->type == JOINT_DISTANCE) {
 					lam = sol_dist[con->solver_idx].lambda;
 					bias = sol_dist[con->solver_idx].bias;
+				} else {
+					SolverHinge* sh = &sol_hinge[con->solver_idx];
+					if (d < 3) { lam = d == 0 ? sh->lin_lambda.x : d == 1 ? sh->lin_lambda.y : sh->lin_lambda.z; bias = d == 0 ? sh->lin_bias.x : d == 1 ? sh->lin_bias.y : sh->lin_bias.z; }
+					else { lam = sh->ang_lambda[d - 3]; bias = sh->ang_bias[d - 3]; }
 				}
 			}
 			vel_rhs[oi + d] = -vel_err - bias - compliance * lam;
@@ -1340,14 +1371,19 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 		// Use solver struct body indices (always real) for impulse application
 		int real_a, real_b;
 		if (con->type == JOINT_BALL_SOCKET) { real_a = sol_bs[con->solver_idx].body_a; real_b = sol_bs[con->solver_idx].body_b; }
-		else { real_a = sol_dist[con->solver_idx].body_a; real_b = sol_dist[con->solver_idx].body_b; }
+		else if (con->type == JOINT_DISTANCE) { real_a = sol_dist[con->solver_idx].body_a; real_b = sol_dist[con->solver_idx].body_b; }
+		else { real_a = sol_hinge[con->solver_idx].body_a; real_b = sol_hinge[con->solver_idx].body_b; }
 		ldl_apply_jacobian_impulse(jac, con->dof, &vel_lambda[oi], &w->body_hot[real_a], 0);
 		ldl_apply_jacobian_impulse(jac, con->dof, &vel_lambda[oi], &w->body_hot[real_b], 1);
 		// Primary mode: lambda is the full impulse, not a delta. SET, don't accumulate.
 		if (con->type == JOINT_BALL_SOCKET) {
 			sol_bs[con->solver_idx].lambda = V3(vel_lambda[oi], vel_lambda[oi+1], vel_lambda[oi+2]);
-		} else {
+		} else if (con->type == JOINT_DISTANCE) {
 			sol_dist[con->solver_idx].lambda = vel_lambda[oi];
+		} else {
+			sol_hinge[con->solver_idx].lin_lambda = V3((float)vel_lambda[oi], (float)vel_lambda[oi+1], (float)vel_lambda[oi+2]);
+			sol_hinge[con->solver_idx].ang_lambda[0] = (float)vel_lambda[oi+3];
+			sol_hinge[con->solver_idx].ang_lambda[1] = (float)vel_lambda[oi+4];
 		}
 	}
 
@@ -1357,7 +1393,7 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 
 // Position correction using factored K. Called AFTER integrate_positions to correct
 // drift from velocity/rotation coupling. Reuses the K factored in ldl_numeric_factor.
-static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBallSocket* sol_bs, SolverDistance* sol_dist, float sub_dt)
+static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBallSocket* sol_bs, SolverDistance* sol_dist, SolverHinge* sol_hinge, float sub_dt)
 {
 	int jc = c->joint_count;
 	int n = c->n;
@@ -1366,7 +1402,10 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 	double* pos_rhs = CK_ALLOC(n * sizeof(double));
 	double* pos_lambda = CK_ALLOC(n * sizeof(double));
 	memset(pos_rhs, 0, n * sizeof(double));
-	double ptv = 1.0 / sub_dt;
+	// Baumgarte factor: correct a fraction of the error per substep to prevent
+	// energy injection from overcorrection. Matches NGS's SOLVER_POS_BAUMGARTE.
+	double beta = SOLVER_POS_BAUMGARTE;
+	double ptv = beta / sub_dt;
 
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
@@ -1380,6 +1419,10 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 			v3 ra = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
 			v3 rb = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
 			v3 err = sub(add(b->position, rb), add(a->position, ra));
+			// Clamp error magnitude to prevent overcorrection after large perturbations.
+			double el = sqrt(err.x*err.x + err.y*err.y + err.z*err.z);
+			double max_err = SOLVER_POS_MAX_CORRECTION / beta;
+			if (el > max_err) { double s2 = max_err / el; err = scale(err, (float)s2); }
 			pos_rhs[oi]   = -ptv * err.x;
 			pos_rhs[oi+1] = -ptv * err.y;
 			pos_rhs[oi+2] = -ptv * err.z;
@@ -1392,7 +1435,30 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 			v3 d = sub(add(b->position, rb), add(a->position, ra));
 			double dist_val = len(d);
 			double err = dist_val - w->joints[s->joint_idx].distance.rest_length;
+			double max_err_d = SOLVER_POS_MAX_CORRECTION / beta;
+			if (err > max_err_d) err = max_err_d;
+			if (err < -max_err_d) err = -max_err_d;
 			pos_rhs[oi] = -ptv * err;
+		} else if (con->type == JOINT_HINGE) {
+			SolverHinge* s = &sol_hinge[con->solver_idx];
+			BodyHot* a = &w->body_hot[s->body_a];
+			BodyHot* b = &w->body_hot[s->body_b];
+			v3 ra = rotate(a->rotation, w->joints[s->joint_idx].hinge.local_a);
+			v3 rb = rotate(b->rotation, w->joints[s->joint_idx].hinge.local_b);
+			v3 err = sub(add(b->position, rb), add(a->position, ra));
+			double el = sqrt(err.x*err.x + err.y*err.y + err.z*err.z);
+			double max_err = SOLVER_POS_MAX_CORRECTION / beta;
+			if (el > max_err) { double s2 = max_err / el; err = scale(err, (float)s2); }
+			pos_rhs[oi]   = -ptv * err.x;
+			pos_rhs[oi+1] = -ptv * err.y;
+			pos_rhs[oi+2] = -ptv * err.z;
+			// Angular error: dot(t_d, axis_b) should be 0 when aligned
+			v3 axis_a = norm(rotate(a->rotation, w->joints[s->joint_idx].hinge.local_axis_a));
+			v3 axis_b = norm(rotate(b->rotation, w->joints[s->joint_idx].hinge.local_axis_b));
+			v3 t1, t2;
+			hinge_tangent_basis(axis_a, &t1, &t2);
+			pos_rhs[oi+3] = -ptv * dot(t1, axis_b);
+			pos_rhs[oi+4] = -ptv * dot(t2, axis_b);
 		}
 	}
 
@@ -1415,7 +1481,8 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 			LDL_JacobianRow* jac = &c->jacobians[con->jacobian_start];
 			int real_a, real_b;
 			if (con->type == JOINT_BALL_SOCKET) { real_a = sol_bs[con->solver_idx].body_a; real_b = sol_bs[con->solver_idx].body_b; }
-			else { real_a = sol_dist[con->solver_idx].body_a; real_b = sol_dist[con->solver_idx].body_b; }
+			else if (con->type == JOINT_DISTANCE) { real_a = sol_dist[con->solver_idx].body_a; real_b = sol_dist[con->solver_idx].body_b; }
+			else { real_a = sol_hinge[con->solver_idx].body_a; real_b = sol_hinge[con->solver_idx].body_b; }
 			double inv_ma = (double)w->body_hot[real_a].inv_mass;
 			double inv_mb = (double)w->body_hot[real_b].inv_mass;
 			for (int d = 0; d < con->dof; d++) {
@@ -1448,9 +1515,9 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 // -----------------------------------------------------------------------------
 // Top-level entry point.
 
-static void ldl_correction(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, int sub, float sub_dt)
+static void ldl_correction(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, SolverHinge* sol_hinge, int hinge_count, int sub, float sub_dt)
 {
-	if (bs_count == 0 && dist_count == 0) return;
+	if (bs_count == 0 && dist_count == 0 && hinge_count == 0) return;
 
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {
@@ -1463,7 +1530,7 @@ static void ldl_correction(WorldInternal* w, SolverBallSocket* sol_bs, int bs_co
 
 		// Rebuild blocks on first substep or topology change
 		if (sub == 0 || c->topo_version != w->ldl_topo_version) {
-			ldl_cache_rebuild_blocks(c, w, ii, sol_bs, bs_count, sol_dist, dist_count);
+			ldl_cache_rebuild_blocks(c, w, ii, sol_bs, bs_count, sol_dist, dist_count, sol_hinge, hinge_count);
 			ldl_apply_shattering(c, w);
 			ldl_build_bundles(c);
 			ldl_build_topology(c, w);
@@ -1481,10 +1548,10 @@ static void ldl_correction(WorldInternal* w, SolverBallSocket* sol_bs, int bs_co
 		}
 
 		// Numeric factorization every substep (lever arms change after integrate_positions)
-		ldl_numeric_factor(c, w, sol_bs, sol_dist);
+		ldl_numeric_factor(c, w, sol_bs, sol_dist, sol_hinge);
 
 		// Velocity solve (position solve runs after integrate_positions)
-		ldl_island_solve(c, w, sol_bs, bs_count, sol_dist, dist_count, sub_dt);
+		ldl_island_solve(c, w, sol_bs, bs_count, sol_dist, dist_count, sol_hinge, hinge_count, sub_dt);
 	}
 }
 
@@ -1495,7 +1562,7 @@ static void ldl_correction(WorldInternal* w, SolverBallSocket* sol_bs, int bs_co
 // Position correction pass. Refactorizes K with compressed masses for better
 // conditioning at extreme mass ratios. Position correction is stabilization,
 // not dynamics — using compressed masses is safe.
-static void ldl_position_correct(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, float sub_dt)
+static void ldl_position_correct(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, SolverHinge* sol_hinge, int hinge_count, float sub_dt)
 {
 	// Compress inv_mass and inv_inertia for position stage
 	int body_count = asize(w->body_hot);
@@ -1527,6 +1594,18 @@ static void ldl_position_correct(WorldInternal* w, SolverBallSocket* sol_bs, int
 		float d = len(delta);
 		s->axis = d > 1e-6f ? scale(delta, 1.0f / d) : V3(1, 0, 0);
 	}
+	for (int i = 0; i < hinge_count; i++) {
+		SolverHinge* s = &sol_hinge[i];
+		BodyHot* a = &w->body_hot[s->body_a];
+		BodyHot* b = &w->body_hot[s->body_b];
+		s->r_a = rotate(a->rotation, w->joints[s->joint_idx].hinge.local_a);
+		s->r_b = rotate(b->rotation, w->joints[s->joint_idx].hinge.local_b);
+		v3 axis_a = norm(rotate(a->rotation, w->joints[s->joint_idx].hinge.local_axis_a));
+		s->axis_b = norm(rotate(b->rotation, w->joints[s->joint_idx].hinge.local_axis_b));
+		hinge_tangent_basis(axis_a, &s->t1, &s->t2);
+		s->u1 = cross(s->t1, s->axis_b);
+		s->u2 = cross(s->t2, s->axis_b);
+	}
 
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {
@@ -1537,8 +1616,8 @@ static void ldl_position_correct(WorldInternal* w, SolverBallSocket* sol_bs, int
 		LDL_Cache* c = &isl->ldl;
 		if (c->n == 0 || !c->topo) continue;
 		// Refactorize K with compressed masses and current lever arms
-		ldl_numeric_factor(c, w, sol_bs, sol_dist);
-		ldl_island_position_correct(c, w, sol_bs, sol_dist, sub_dt);
+		ldl_numeric_factor(c, w, sol_bs, sol_dist, sol_hinge);
+		ldl_island_position_correct(c, w, sol_bs, sol_dist, sol_hinge, sub_dt);
 	}
 
 	// Restore real masses

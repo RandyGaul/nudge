@@ -158,11 +158,12 @@ void world_step(World world, float dt)
 
 	SolverBallSocket* sol_bs = NULL;
 	SolverDistance*    sol_dist = NULL;
-	joints_pre_solve(w, sub_dt, &sol_bs, &sol_dist);
+	SolverHinge*       sol_hinge = NULL;
+	joints_pre_solve(w, sub_dt, &sol_bs, &sol_dist, &sol_hinge);
 
 	// PGS warm-start joints only when LDL is off (LDL manages its own lambda).
 	if (!w->ldl_enabled)
-		joints_warm_start(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist));
+		joints_warm_start(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge));
 
 	// --- Graph color (once per frame) ---
 	// When LDL is primary solver for joints, PGS only handles contacts.
@@ -185,6 +186,11 @@ void world_step(World world, float dt)
 				.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
 			apush(crefs, r);
 		}
+		for (int i = 0; i < asize(sol_hinge); i++) {
+			ConstraintRef r = { .type = CTYPE_HINGE, .index = i,
+				.body_a = sol_hinge[i].body_a, .body_b = sol_hinge[i].body_b };
+			apush(crefs, r);
+		}
 	}
 
 	int cref_count = asize(crefs);
@@ -200,19 +206,19 @@ void world_step(World world, float dt)
 		if (sub > 0)
 			integrate_velocities(w, sub_dt);
 
-		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0)) {
+		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0 || asize(sol_hinge) > 0)) {
 			// Primary LDL: factor K, then iterate LDL joints + PGS contacts
-			ldl_correction(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub, sub_dt);
+			ldl_correction(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub, sub_dt);
 			for (int iter = 0; iter < w->velocity_iters; iter++)
 				for (int c = 0; c < color_count; c++)
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist);
+						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist, sol_hinge);
 			// Position correction handled by NGS after integration.
 		} else {
 			for (int iter = 0; iter < w->velocity_iters; iter++)
 				for (int c = 0; c < color_count; c++)
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist);
+						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist, sol_hinge);
 		}
 
 		integrate_positions(w, sub_dt);
@@ -223,9 +229,9 @@ void world_step(World world, float dt)
 
 		// Position correction after integration.
 		// LDL: direct solve projects out bulk error, NGS cleans up residual.
-		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0))
-			ldl_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sub_dt);
-		joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), w->position_iters);
+		if (w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0 || asize(sol_hinge) > 0))
+			ldl_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub_dt);
+		joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), w->position_iters);
 	}
 
 	afree(crefs);
@@ -238,7 +244,7 @@ void world_step(World world, float dt)
 
 	// Post-solve (once per frame)
 	solver_post_solve(w, sm, asize(sm), sc, manifolds, manifold_count);
-	joints_post_solve(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist));
+	joints_post_solve(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge));
 
 	if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
 
@@ -498,6 +504,47 @@ Joint create_distance(World world, DistanceParams params)
 			.local_a = params.local_offset_a,
 			.local_b = params.local_offset_b,
 			.rest_length = rest,
+			.spring = params.spring,
+		},
+		.island_id = -1, .island_prev = -1, .island_next = -1,
+	};
+	link_joint_to_islands(w, idx);
+	w->ldl_topo_version++;
+	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
+}
+
+Joint create_hinge(World world, HingeParams params)
+{
+	assert(is_valid(params.local_offset_a) && "create_hinge: local_offset_a is NaN/inf");
+	assert(is_valid(params.local_offset_b) && "create_hinge: local_offset_b is NaN/inf");
+	assert(is_valid(params.local_axis_a) && "create_hinge: local_axis_a is NaN/inf");
+	assert(is_valid(params.local_axis_b) && "create_hinge: local_axis_b is NaN/inf");
+
+	WorldInternal* w = (WorldInternal*)world.id;
+	int ba = handle_index(params.body_a);
+	int bb = handle_index(params.body_b);
+	assert(split_valid(w->body_gen, params.body_a));
+	assert(split_valid(w->body_gen, params.body_b));
+
+	int idx;
+	if (asize(w->joint_free) > 0) {
+		idx = apop(w->joint_free);
+		w->joint_gen[idx]++;
+	} else {
+		idx = asize(w->joints);
+		JointInternal zero = {0};
+		apush(w->joints, zero);
+		apush(w->joint_gen, 1);
+	}
+
+	w->joints[idx] = (JointInternal){
+		.type = JOINT_HINGE,
+		.body_a = ba, .body_b = bb,
+		.hinge = {
+			.local_a = params.local_offset_a,
+			.local_b = params.local_offset_b,
+			.local_axis_a = norm(params.local_axis_a),
+			.local_axis_b = norm(params.local_axis_b),
 			.spring = params.spring,
 		},
 		.island_id = -1, .island_prev = -1, .island_next = -1,
