@@ -11,3 +11,10 @@ CLAUDE.md
 *.exp
 *.ilk
 autoresearch-results.tsv
+*.txt
+!CMakeLists.txt
+*.bat
+*.xml
+coverage/
+STABILITY_NOTES.md
+note.txt
