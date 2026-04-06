@@ -55,7 +55,7 @@ typedef struct WarmManifold WarmManifold; // forward decl for warm cache
 typedef struct AVBD_WarmManifold AVBD_WarmManifold;
 
 // Joint persistent storage (handle-based, parallel arrays like bodies).
-typedef enum JointType { JOINT_BALL_SOCKET, JOINT_DISTANCE } JointType;
+typedef enum JointType { JOINT_BALL_SOCKET, JOINT_DISTANCE, JOINT_HINGE } JointType;
 
 typedef struct JointInternal
 {
@@ -64,11 +64,13 @@ typedef struct JointInternal
 	union {
 		struct { v3 local_a, local_b; SpringParams spring; } ball_socket;
 		struct { v3 local_a, local_b; float rest_length; SpringParams spring; } distance;
+		struct { v3 local_a, local_b; v3 local_axis_a, local_axis_b; SpringParams spring; } hinge;
 	};
 	// Warm starting: accumulated impulses persisted across frames.
 	union {
 		v3 warm_lambda3;   // ball socket (3 DOF)
 		float warm_lambda1; // distance (1 DOF)
+		struct { v3 lin; float ang[2]; } warm_hinge; // hinge (5 DOF)
 	};
 	// AVBD warm state (penalty/lambda for augmented Lagrangian)
 	v3 avbd_penalty_lin;
@@ -93,11 +95,11 @@ typedef struct LDL_JacobianRow
 
 typedef struct LDL_Constraint
 {
-	int type;         // JOINT_BALL_SOCKET or JOINT_DISTANCE (or -1 for synthetic)
+	int type;         // JOINT_BALL_SOCKET, JOINT_DISTANCE, or JOINT_HINGE (or -1 for synthetic)
 	int dof;          // 3 or 1
 	int body_a, body_b;         // body indices (may be virtual shard indices for graph topology)
 	int real_body_a, real_body_b; // always real body indices (for physics data lookup)
-	float weight_a, weight_b;   // shard weight (1.0 = normal, S = shattered into S shards)
+	double weight_a, weight_b;   // shard weight (1.0 = normal, S = shattered into S shards)
 	int solver_idx;   // index into sol_bs[] or sol_dist[] (-1 for synthetic)
 	int is_synthetic;
 	int bundle_idx;   // which bundle this constraint belongs to
@@ -386,8 +388,25 @@ typedef struct SolverDistance
 	int joint_idx;
 } SolverDistance;
 
+typedef struct SolverHinge
+{
+	int body_a, body_b;
+	v3 r_a, r_b;
+	float lin_eff_mass[6];   // symmetric 3x3 inverse
+	v3 lin_bias;
+	v3 lin_lambda;
+	v3 t1, t2;              // tangent axes (perp to axis_a world)
+	v3 axis_b;              // body B hinge axis in world space
+	v3 u1, u2;              // angular constraint axes: cross(t_d, axis_b)
+	float ang_eff_mass1, ang_eff_mass2;
+	float ang_bias[2];
+	float ang_lambda[2];
+	float softness;
+	int joint_idx;
+} SolverHinge;
+
 // Constraint ref for graph coloring dispatch.
-enum { CTYPE_CONTACT, CTYPE_BALL_SOCKET, CTYPE_DISTANCE };
+enum { CTYPE_CONTACT, CTYPE_BALL_SOCKET, CTYPE_DISTANCE, CTYPE_HINGE };
 
 typedef struct ConstraintRef
 {

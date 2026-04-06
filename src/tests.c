@@ -5715,10 +5715,13 @@ static void test_ldl_soft_box_drag()
 
 	// Drag upward and sideways (simulating mouse movement)
 	int explode_frame = -1;
+	extern int g_ldl_trace_solve;
 	for (int f = 0; f < 120; f++) {
 		float t = (float)f / 120.0f;
 		wi->body_hot[mi].position = V3(2.0f * t, 3.0f + 2.0f * t, 1.0f * sinf(t * 6.28f));
+		g_ldl_trace_solve = (f >= 7 && f <= 8);
 		world_step(w, 1.0f / 60.0f);
+		g_ldl_trace_solve = 0;
 		v3 p = body_get_position(w, box);
 		if (!is_valid(p)) { nan_frame = f; break; }
 		v3 bv = wi->body_hot[handle_index(box)].velocity;
@@ -7259,6 +7262,7 @@ static void test_ldl_mixed_chain_and_hub()
 static void run_solver_tests()
 {
 	printf("--- nudge solver tests ---\n");
+	test_ldl_soft_box_drag();
 	test_solver_nan_rejection();
 	test_contact_sphere_rests_on_floor();
 	test_contact_box_rests_on_floor();

@@ -622,9 +622,10 @@ apply:;
 // Forward declarations for joint solvers (defined in joints.c, included after solver.c).
 static void solve_ball_socket(WorldInternal* w, SolverBallSocket* s);
 static void solve_distance(WorldInternal* w, SolverDistance* s);
+static void solve_hinge(WorldInternal* w, SolverHinge* s);
 
 // Dispatch a single constraint solve by type.
-static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifold* sm, SolverContact* sc, SolverBallSocket* bs, SolverDistance* dist)
+static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifold* sm, SolverContact* sc, SolverBallSocket* bs, SolverDistance* dist, SolverHinge* hinge)
 {
 	switch (ref->type) {
 	case CTYPE_CONTACT: {
@@ -713,5 +714,6 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 	}
 	case CTYPE_BALL_SOCKET: solve_ball_socket(w, &bs[ref->index]); break;
 	case CTYPE_DISTANCE:    solve_distance(w, &dist[ref->index]); break;
+	case CTYPE_HINGE:       solve_hinge(w, &hinge[ref->index]); break;
 	}
 }

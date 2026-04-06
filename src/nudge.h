@@ -283,8 +283,19 @@ typedef struct DistanceParams
 	SpringParams spring;
 } DistanceParams;
 
+typedef struct HingeParams
+{
+	Body body_a, body_b;
+	v3 local_offset_a;    // anchor in body A local space
+	v3 local_offset_b;    // anchor in body B local space
+	v3 local_axis_a;      // hinge axis in body A local space
+	v3 local_axis_b;      // hinge axis in body B local space
+	SpringParams spring;  // {0,0} = rigid
+} HingeParams;
+
 Joint create_ball_socket(World world, BallSocketParams params);
 Joint create_distance(World world, DistanceParams params);
+Joint create_hinge(World world, HingeParams params);
 void destroy_joint(World world, Joint joint);
 
 // Debug: iterate BVH nodes. Calls fn(min, max, depth, is_leaf, user) for each node child.

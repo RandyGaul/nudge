@@ -199,6 +199,7 @@ static void avbd_joints_pre_solve(WorldInternal* w, float alpha, float gamma, fl
 	for (int i = 0; i < count; i++) {
 		if (!split_alive(w->joint_gen, i)) continue;
 		JointInternal* j = &w->joints[i];
+		if (j->type == JOINT_HINGE) continue;
 		BodyHot* a = &w->body_hot[j->body_a];
 		BodyHot* b = &w->body_hot[j->body_b];
 
@@ -479,6 +480,7 @@ static void avbd_primal_step(WorldInternal* w, AVBD_Manifold* am, int am_count, 
 		for (int j = jt_start[i]; j < jt_start[i + 1]; j++) {
 			AVBD_JointAdj* ja = &jt_adj[j];
 			JointInternal* jt = &w->joints[ja->joint_idx];
+			if (jt->type == JOINT_HINGE) continue;
 			BodyHot* a = &w->body_hot[jt->body_a];
 			BodyHot* b = &w->body_hot[jt->body_b];
 			if (jt->type == JOINT_BALL_SOCKET)
@@ -557,6 +559,7 @@ static void avbd_joints_dual_step(WorldInternal* w, float alpha)
 	for (int i = 0; i < count; i++) {
 		if (!split_alive(w->joint_gen, i)) continue;
 		JointInternal* j = &w->joints[i];
+		if (j->type == JOINT_HINGE) continue;
 		BodyHot* a = &w->body_hot[j->body_a];
 		BodyHot* b = &w->body_hot[j->body_b];
 

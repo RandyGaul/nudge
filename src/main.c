@@ -954,6 +954,7 @@ static const char* ldl_constraint_type_name(int type)
 {
 	if (type == JOINT_BALL_SOCKET) return "BS";
 	if (type == JOINT_DISTANCE) return "Dist";
+	if (type == JOINT_HINGE) return "Hinge";
 	return "Weld";
 }
 

@@ -40,6 +40,7 @@ static dv3 dinv_inertia_mul(quat rot, v3 inv_i, dv3 v)
 static LDL_DebugInfo g_ldl_debug_info;
 int g_ldl_debug_enabled;
 int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = none)
+int g_ldl_trace_solve; // set to 1 to print detailed solve info for next LDL call
 
 #define SHATTER_THRESHOLD 15 // DOF threshold: 6+ ball-sockets (18 DOF) triggers shattering
 #define SHARD_TARGET      6 // target DOF per shard
@@ -1363,6 +1364,20 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 	}
 
 	ldl_solve_scaled(c, vel_rhs, vel_lambda);
+
+	if (g_ldl_trace_solve && n <= 6) {
+		printf("  [TRACE] n=%d jc=%d compliance=%.4g\n", n, jc, jc > 0 && !c->constraints[0].is_synthetic ? (c->constraints[0].type == JOINT_BALL_SOCKET ? (double)sol_bs[c->constraints[0].solver_idx].softness : 0.0) : 0.0);
+		printf("  [TRACE] rhs=(%.4g, %.4g, %.4g)\n", vel_rhs[0], n>1?vel_rhs[1]:0, n>2?vel_rhs[2]:0);
+		printf("  [TRACE] lam=(%.4g, %.4g, %.4g)\n", vel_lambda[0], n>1?vel_lambda[1]:0, n>2?vel_lambda[2]:0);
+		printf("  [TRACE] scale=(%.4g, %.4g, %.4g)\n", c->scale[0], n>1?c->scale[1]:0, n>2?c->scale[2]:0);
+		printf("  [TRACE] D=(%.4g, %.4g, %.4g)\n", c->diag_D[0][0], c->diag_D[0][1], c->diag_D[0][2]);
+		printf("  [TRACE] K_diag=(%.4g, %.4g, %.4g)\n", c->diag_data[0][LDL_TRI(0,0)], c->diag_data[0][LDL_TRI(1,1)], c->diag_data[0][LDL_TRI(2,2)]);
+		LDL_Constraint* c0 = &c->constraints[0];
+		BodyHot* ba = &w->body_hot[c0->real_body_a];
+		BodyHot* bb = &w->body_hot[c0->real_body_b];
+		printf("  [TRACE] vel_a=(%.4g,%.4g,%.4g) vel_b=(%.4g,%.4g,%.4g)\n", ba->velocity.x, ba->velocity.y, ba->velocity.z, bb->velocity.x, bb->velocity.y, bb->velocity.z);
+		printf("  [TRACE] pos_b=(%.4g,%.4g,%.4g) rot_b=(%.4g,%.4g,%.4g,%.4g)\n", bb->position.x, bb->position.y, bb->position.z, bb->rotation.x, bb->rotation.y, bb->rotation.z, bb->rotation.w);
+	}
 
 	if (!ldl_validate_lambda(vel_lambda, n)) {
 		CK_FREE(vel_rhs);
