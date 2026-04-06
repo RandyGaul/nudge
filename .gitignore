@@ -15,6 +15,7 @@ autoresearch-results.tsv
 !CMakeLists.txt
 *.bat
 *.xml
+*.log
 coverage/
 STABILITY_NOTES.md
 note.txt
