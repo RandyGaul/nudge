@@ -3174,7 +3174,7 @@ static void test_ldl_solve_topo_vs_dense()
 	for (int i = 0; i < nc; i++) { sp.dof[i] = 3; sp.row_offset[i] = i * 3; }
 	sp.row_offset[nc] = n;
 	for (int i = 0; i < nc; i++) for (int j = i + 1; j < nc; j++) ldl_sparse_get_or_create_edge(&sp, i, j);
-	ldl_sparse_min_fill_order(&sp);
+	ldl_sparse_min_degree_order(&sp);
 
 	// Build topology
 	LDL_Topology topo;

@@ -25,11 +25,10 @@ static dv3 dinv_inertia_mul(quat rot, v3 inv_i, dv3 v)
 	double qx = rot.x, qy = rot.y, qz = rot.z, qw = rot.w;
 	double vx = v.x, vy = v.y, vz = v.z;
 	double tx = 2.0*(qy*vz - qz*vy), ty = 2.0*(qz*vx - qx*vz), tz = 2.0*(qx*vy - qy*vx);
-	// inv(q) = conjugate for unit quat: negate xyz
-	double ix = -qx, iy = -qy, iz = -qz;
-	double rx = vx + qw*tx + (iy*tz - iz*ty);
-	double ry = vy + qw*ty + (iz*tx - ix*tz);
-	double rz = vz + qw*tz + (ix*ty - iy*tx);
+	// inv rotation: v - w*T + u x T (differs from forward only in sign of w*T)
+	double rx = vx - qw*tx + (qy*tz - qz*ty);
+	double ry = vy - qw*ty + (qz*tx - qx*tz);
+	double rz = vz - qw*tz + (qx*ty - qy*tx);
 	// scale by diagonal inertia
 	double sx = rx * (double)inv_i.x, sy = ry * (double)inv_i.y, sz = rz * (double)inv_i.z;
 	// rotate(q, scaled): R * scaled in double
@@ -326,45 +325,35 @@ static double ldl_constraint_velocity(LDL_JacobianRow* jac, BodyHot* a, BodyHot*
 // -----------------------------------------------------------------------------
 // Sparse LDL factorize and solve.
 
-// Count fill-in edges that would be created by eliminating node i.
-static int ldl_sparse_fill_count(LDL_Sparse* s, int i, int* eliminated)
+// Count non-eliminated neighbors of node i (current degree in elimination graph).
+static int ldl_sparse_degree(LDL_Sparse* s, int i, int* eliminated)
 {
 	int cnt = asize(s->adj[i]);
-	int fill = 0;
-	for (int ii = 0; ii < cnt; ii++) {
-		int ni = s->adj[i][ii];
-		if (eliminated[ni]) continue;
-		for (int jj = ii + 1; jj < cnt; jj++) {
-			int nj = s->adj[i][jj];
-			if (eliminated[nj]) continue;
-			if (ldl_sparse_find_edge(s, ni, nj) < 0) {
-				fill++;
-			}
-		}
-	}
-	return fill;
+	int deg = 0;
+	for (int k = 0; k < cnt; k++)
+		if (!eliminated[s->adj[i][k]]) deg++;
+	return deg;
 }
 
-// Minimum local fill elimination ordering.
-// Picks the node whose elimination creates the fewest new edges (fill-in).
-// Better than minimum degree for chain-ending-in-clique topologies (ragdolls).
-static void ldl_sparse_min_fill_order(LDL_Sparse* s)
+// Minimum degree elimination ordering.
+// At each step, eliminates the node with the fewest non-eliminated neighbors.
+// O(n^2) total for sparse graphs, O(n * d) per step where d = max degree.
+// Produces fill-in edges that connect all remaining neighbors of the eliminated node.
+static void ldl_sparse_min_degree_order(LDL_Sparse* s)
 {
 	int nc = s->node_count;
 	int eliminated[LDL_MAX_NODES] = {0};
-	int fill_cost[LDL_MAX_NODES];
+	int degree[LDL_MAX_NODES];
 
-	// Initial fill cost for each node
-	for (int i = 0; i < nc; i++) {
-		fill_cost[i] = ldl_sparse_fill_count(s, i, eliminated);
-	}
+	for (int i = 0; i < nc; i++)
+		degree[i] = ldl_sparse_degree(s, i, eliminated);
 
 	for (int step = 0; step < nc; step++) {
-		// Pick node with minimum fill cost
-		int best = -1, best_fill = 0x7FFFFFFF;
+		// Pick node with minimum degree, breaking ties by lowest DOF then lowest index
+		int best = -1, best_deg = 0x7FFFFFFF, best_dof = 0x7FFFFFFF;
 		for (int i = 0; i < nc; i++) {
 			if (eliminated[i]) continue;
-			if (fill_cost[i] < best_fill) { best_fill = fill_cost[i]; best = i; }
+			if (degree[i] < best_deg || (degree[i] == best_deg && s->dof[i] < best_dof)) { best_deg = degree[i]; best_dof = s->dof[i]; best = i; }
 		}
 		s->elim_order[step] = best;
 		eliminated[best] = 1;
@@ -383,11 +372,11 @@ static void ldl_sparse_min_fill_order(LDL_Sparse* s)
 			}
 		}
 
-		// Recompute fill cost only for neighbors of eliminated node
+		// Update degree for neighbors of eliminated node
 		for (int ii = 0; ii < cnt; ii++) {
 			int ni = s->adj[best][ii];
 			if (eliminated[ni]) continue;
-			fill_cost[ni] = ldl_sparse_fill_count(s, ni, eliminated);
+			degree[ni] = ldl_sparse_degree(s, ni, eliminated);
 		}
 	}
 
@@ -659,7 +648,7 @@ static void ldl_build_topology(LDL_Cache* c, WorldInternal* w)
 	}
 
 	// Run elimination ordering (adds fill-in edges)
-	ldl_sparse_min_fill_order(&tmp);
+	ldl_sparse_min_degree_order(&tmp);
 	ldl_sparse_dfs_reorder(&tmp);
 
 	// Copy ordering
@@ -854,8 +843,9 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 
 			// Regularization: soft constraints add softness directly to K diagonal
 			// (matching PGS convention). Rigid constraints use trace-scaled minimum compliance.
-			if (!con->is_synthetic) {
-				double soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : con->type == JOINT_DISTANCE ? sol_dist[con->solver_idx].softness : sol_hinge[con->solver_idx].softness;
+			{
+				double soft = 0;
+				if (!con->is_synthetic) soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : con->type == JOINT_DISTANCE ? sol_dist[con->solver_idx].softness : sol_hinge[con->solver_idx].softness;
 				if (soft > 0.0f) {
 					for (int d = 0; d < dk; d++) c->diag_data[bi][LDL_TRI(off+d, off+d)] += soft;
 				} else {

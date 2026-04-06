@@ -8,6 +8,19 @@
 #include "nudge.h"
 #include "nudge.c"
 #include "tests.c"
+#include "tests_ldl_unit.c"
+#include "tests_inertia_unit.c"
+#include "tests_jacobian_unit.c"
+#include "tests_k_matrix_unit.c"
+#include "tests_impulse_unit.c"
+#include "tests_misc_ldl_unit.c"
+#include "tests_sparse_unit.c"
+#include "tests_ordering_unit.c"
+#include "tests_dfs_reorder_unit.c"
+#include "tests_bundles_unit.c"
+#include "tests_integration_ldl.c"
+#include "tests_spring_unit.c"
+#include "tests_shattering_unit.c"
 
 int main(int argc, char* argv[])
 {
@@ -54,6 +67,34 @@ int main(int argc, char* argv[])
 		printf("--- quickhull fuzz (%d iterations per shape) ---\n", fuzz_iters);
 		test_quickhull_fuzz(fuzz_iters);
 		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
+	} else if (argc > 1 && strcmp(argv[1], "--unit") == 0) {
+		test_pass = 0;
+		test_fail = 0;
+		for (int i = 1; i < argc; i++) {
+			if (strcmp(argv[i], "--bail") == 0) test_bail = 1;
+		}
+		run_ldl_unit_tests();
+		run_inertia_unit_tests();
+		run_jacobian_unit_tests();
+		run_k_matrix_unit_tests();
+		run_impulse_unit_tests();
+		run_misc_ldl_unit_tests();
+		run_sparse_unit_tests();
+		run_ordering_unit_tests();
+		run_dfs_reorder_unit_tests();
+		run_bundles_unit_tests();
+		run_integration_ldl_tests();
+		run_spring_unit_tests();
+		run_shattering_unit_tests();
+		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
+	} else if (argc > 1 && strcmp(argv[1], "--ldl-unit") == 0) {
+		test_pass = 0;
+		test_fail = 0;
+		for (int i = 1; i < argc; i++) {
+			if (strcmp(argv[i], "--bail") == 0) test_bail = 1;
+		}
+		run_ldl_unit_tests();
+		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	} else if (argc > 1 && strcmp(argv[1], "--quick") == 0) {
 		test_ldl_stress_single_constraint();
 		test_ldl_heavy_chain();
@@ -73,6 +114,19 @@ int main(int argc, char* argv[])
 			if (strcmp(argv[i], "--bail") == 0) test_bail = 1;
 		}
 		run_tests();
+		run_ldl_unit_tests();
+		run_inertia_unit_tests();
+		run_jacobian_unit_tests();
+		run_k_matrix_unit_tests();
+		run_impulse_unit_tests();
+		run_misc_ldl_unit_tests();
+		run_sparse_unit_tests();
+		run_ordering_unit_tests();
+		run_dfs_reorder_unit_tests();
+		run_bundles_unit_tests();
+		run_integration_ldl_tests();
+		run_spring_unit_tests();
+		run_shattering_unit_tests();
 	}
 	return test_fail > 0 ? 1 : 0;
 }
