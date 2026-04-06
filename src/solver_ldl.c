@@ -41,7 +41,7 @@ int g_ldl_debug_enabled;
 int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = none)
 int g_ldl_trace_solve; // set to 1 to print detailed solve info for next LDL call
 
-#define SHATTER_THRESHOLD 15 // DOF threshold: 6+ ball-sockets (18 DOF) triggers shattering
+#define SHATTER_THRESHOLD 9999 // DOF threshold: disabled pending shattering redesign
 #define SHARD_TARGET      6 // target DOF per shard
 #define LDL_MIN_COMPLIANCE 5e-5f // min regularization floor: compliance * trace(K) / dim on K diagonal + compliance*lambda in RHS
 
@@ -62,7 +62,7 @@ static void block_ldl(double* A, double* D, int n)
 	for (int j = 0; j < n; j++) {
 		double dj = A[LDL_TRI(j,j)];
 		for (int k = 0; k < j; k++) dj -= A[LDL_TRI(j,k)] * A[LDL_TRI(j,k)] * D[k];
-		if (dj < 1e-12) dj = 1e-12;
+		assert(dj > 0 && "block_ldl: non-positive pivot, input not SPD");
 		D[j] = dj;
 		double inv_dj = 1.0 / D[j];
 		for (int i = j + 1; i < n; i++) {
@@ -843,9 +843,8 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverBallSocket*
 
 			// Regularization: soft constraints add softness directly to K diagonal
 			// (matching PGS convention). Rigid constraints use trace-scaled minimum compliance.
-			{
-				double soft = 0;
-				if (!con->is_synthetic) soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : con->type == JOINT_DISTANCE ? sol_dist[con->solver_idx].softness : sol_hinge[con->solver_idx].softness;
+			if (!con->is_synthetic) {
+				double soft = con->type == JOINT_BALL_SOCKET ? sol_bs[con->solver_idx].softness : con->type == JOINT_DISTANCE ? sol_dist[con->solver_idx].softness : sol_hinge[con->solver_idx].softness;
 				if (soft > 0.0f) {
 					for (int d = 0; d < dk; d++) c->diag_data[bi][LDL_TRI(off+d, off+d)] += soft;
 				} else {

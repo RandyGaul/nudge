@@ -21,6 +21,7 @@
 #include "tests_integration_ldl.c"
 #include "tests_spring_unit.c"
 #include "tests_shattering_unit.c"
+#include "tests_pgs_vs_ldl.c"
 
 int main(int argc, char* argv[])
 {
@@ -86,6 +87,7 @@ int main(int argc, char* argv[])
 		run_integration_ldl_tests();
 		run_spring_unit_tests();
 		run_shattering_unit_tests();
+		run_pgs_vs_ldl_tests();
 		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	} else if (argc > 1 && strcmp(argv[1], "--ldl-unit") == 0) {
 		test_pass = 0;
@@ -127,6 +129,7 @@ int main(int argc, char* argv[])
 		run_integration_ldl_tests();
 		run_spring_unit_tests();
 		run_shattering_unit_tests();
+		run_pgs_vs_ldl_tests();
 	}
 	return test_fail > 0 ? 1 : 0;
 }
