@@ -817,7 +817,6 @@ static void scene_joint_demo_setup()
 	float bridge_len = plank_count * spacing;
 	float bridge_y = 5.0f;
 	float tower_h = 4.0f;
-	float cable_sag = 1.5f;
 
 	// Two static towers
 	float tower_x_l = -bridge_len * 0.5f - 1.0f;
@@ -857,27 +856,6 @@ static void scene_joint_demo_setup()
 			.local_offset_a = V3(plank_d, 0, side * plank_w),
 			.local_offset_b = V3(-0.3f, -tower_h * 0.5f, side * plank_w),
 			.rest_length = spacing - plank_d * 2, .spring = rope });
-	}
-
-	// Suspension cables: distance joints from tower tops to each plank
-	float top_y = bridge_y + tower_h;
-	for (int i = 0; i < plank_count; i++) {
-		float x = -bridge_len * 0.5f + spacing * 0.5f + i * spacing;
-		// Parabolic cable length (longer in the middle)
-		float t = (float)i / (plank_count - 1) - 0.5f; // -0.5 to 0.5
-		float sag = cable_sag * (1.0f - 4.0f * t * t);  // peak in middle
-		float cable_len_l = sqrtf((x - tower_x_l) * (x - tower_x_l) + (top_y - bridge_y + sag) * (top_y - bridge_y + sag));
-		float cable_len_r = sqrtf((tower_x_r - x) * (tower_x_r - x) + (top_y - bridge_y + sag) * (top_y - bridge_y + sag));
-
-		// Left cable (both sides of plank for stability)
-		for (int side = -1; side <= 1; side += 2) {
-			float z = side * plank_w;
-			Body cable_top_l = create_body(g_world, (BodyParams){ .position = V3(tower_x_l, top_y, z), .rotation = quat_identity(), .mass = 0 });
-			create_distance(g_world, (DistanceParams){ .body_a = cable_top_l, .body_b = planks[i], .local_offset_b = V3(0, 0, z), .rest_length = cable_len_l });
-
-			Body cable_top_r = create_body(g_world, (BodyParams){ .position = V3(tower_x_r, top_y, z), .rotation = quat_identity(), .mass = 0 });
-			create_distance(g_world, (DistanceParams){ .body_a = cable_top_r, .body_b = planks[i], .local_offset_b = V3(0, 0, z), .rest_length = cable_len_r });
-		}
 	}
 
 	// A heavy ball sitting on the bridge to stress it
