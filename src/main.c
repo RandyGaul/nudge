@@ -541,11 +541,10 @@ static void scene_showcase_setup()
 			.type = SHAPE_SPHERE,
 			.sphere.radius = 0.2f,
 		});
-		create_ball_socket(g_world, (BallSocketParams){
+		create_distance(g_world, (DistanceParams){
 			.body_a = prev,
 			.body_b = g_chain[i],
-			.local_offset_a = V3(link_len * 0.5f, 0, 0),
-			.local_offset_b = V3(-link_len * 0.5f, 0, 0),
+			.rest_length = link_len,
 		});
 		apush(g_draw_list, ((DrawEntry){ g_chain[i], MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.8f, 0.4f, 0.9f) }));
 		prev = g_chain[i];
@@ -751,11 +750,10 @@ static void scene_heavy_chain_setup()
 			.type = SHAPE_SPHERE,
 			.sphere.radius = radius,
 		});
-		create_ball_socket(g_world, (BallSocketParams){
+		create_distance(g_world, (DistanceParams){
 			.body_a = prev,
 			.body_b = g_hchain[i],
-			.local_offset_a = V3(link_len * 0.5f, 0, 0),
-			.local_offset_b = V3(-link_len * 0.5f, 0, 0),
+			.rest_length = link_len,
 		});
 		apush(g_draw_list, ((DrawEntry){ g_hchain[i], MESH_SPHERE, V3(radius, radius, radius), color }));
 		prev = g_hchain[i];
@@ -795,9 +793,9 @@ static void scene_mini_chain_setup()
 	g_mini_c = create_body(g_world, (BodyParams){ .position = V3(link_len * 3, 8, 0), .rotation = quat_identity(), .mass = 100.0f });
 	body_add_shape(g_world, g_mini_c, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
 
-	create_ball_socket(g_world, (BallSocketParams){ .body_a = g_mini_anchor, .body_b = g_mini_a, .local_offset_a = V3(link_len * 0.5f, 0, 0), .local_offset_b = V3(-link_len * 0.5f, 0, 0) });
-	create_ball_socket(g_world, (BallSocketParams){ .body_a = g_mini_a, .body_b = g_mini_b, .local_offset_a = V3(link_len * 0.5f, 0, 0), .local_offset_b = V3(-link_len * 0.5f, 0, 0) });
-	create_ball_socket(g_world, (BallSocketParams){ .body_a = g_mini_b, .body_b = g_mini_c, .local_offset_a = V3(link_len * 0.5f, 0, 0), .local_offset_b = V3(-link_len * 0.5f, 0, 0) });
+	create_distance(g_world, (DistanceParams){ .body_a = g_mini_anchor, .body_b = g_mini_a, .rest_length = link_len });
+	create_distance(g_world, (DistanceParams){ .body_a = g_mini_a, .body_b = g_mini_b, .rest_length = link_len });
+	create_distance(g_world, (DistanceParams){ .body_a = g_mini_b, .body_b = g_mini_c, .rest_length = link_len });
 
 	apush(g_draw_list, ((DrawEntry){ g_mini_a, MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.6f, 0.6f, 0.9f) }));
 	apush(g_draw_list, ((DrawEntry){ g_mini_b, MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.6f, 0.6f, 0.9f) }));
