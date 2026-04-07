@@ -118,6 +118,16 @@ int main(int argc, char* argv[])
 			else printf("unknown test: %s\n", argv[i]);
 		}
 		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
+	} else if (argc > 1 && strcmp(argv[1], "--cr-bench") == 0) {
+		test_cr_precond_comparison();
+	} else if (argc > 1 && strcmp(argv[1], "--cr") == 0) {
+		test_pass = 0; test_fail = 0;
+		for (int i = 2; i < argc; i++) {
+			if (strcmp(argv[i], "--bail") == 0) test_bail = 1;
+		}
+		run_block_lcp_tests();
+		run_cr_tests();
+		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	} else if (argc > 1 && strcmp(argv[1], "--quick") == 0) {
 		test_ldl_stress_single_constraint();
 		test_ldl_heavy_chain();

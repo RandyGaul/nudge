@@ -244,7 +244,7 @@ typedef struct Island
 
 typedef struct WorldInternal
 {
-	int frame;         // monotonically increasing frame counter
+	int frame; // monotonically increasing frame counter
 	v3 gravity;
 	CK_DYNA BodyCold*    body_cold;
 	CK_DYNA BodyHot*     body_hot;
@@ -267,9 +267,9 @@ typedef struct WorldInternal
 	CK_DYNA uint32_t*   island_gen;
 	CK_DYNA int*        island_free;
 	CK_MAP(uint8_t)     prev_touching; // body_pair_key -> 1 for pairs touching last frame
-	int sleep_enabled; // 1 = island sleep active (default)
-	int ldl_enabled;   // 1 = LDL direct correction for joints (dual solvers only)
-	int ldl_topo_version; // incremented on joint create/destroy
+	int sleep_enabled;       // 1 = island sleep active (default)
+	int ldl_enabled;         // 1 = LDL direct correction for joints (dual solvers only)
+	int ldl_topo_version;    // incremented on joint create/destroy
 	int ldl_correction_iter; // which PGS iter triggers LDL correction (-1 = after all PGS iters)
 	FrictionModel friction_model;
 	SolverType solver_type;
@@ -279,12 +279,19 @@ typedef struct WorldInternal
 	float contact_damping_ratio;
 	float max_push_velocity;
 	int sub_steps;
+	// CR (Conjugate Residual) solver parameters
+	int cr_enabled;          // 1 = use CR for velocity solve (replaces PGS iterations)
+	int cr_max_iters;        // max CR iterations per island (default 30)
+	float cr_tolerance;      // convergence tolerance on residual norm (default 1e-6)
+	int cr_active_set_mask;  // 1 = skip inactive contacts (lambda_n=0 after PGS warmup)
+	int cr_reclamp_interval; // reclamp every N CR iterations (default 5, 0 = disable)
+	int cr_mass_scale;       // 1 = symmetric diagonal scaling to normalize mass ratios
 	// AVBD parameters
-	float avbd_alpha;       // stabilization (0.95-0.99)
-	float avbd_beta_lin;    // penalty ramp, linear constraints
-	float avbd_beta_ang;    // penalty ramp, angular constraints
-	float avbd_gamma;       // warm-start decay
-	int avbd_iterations;    // solver iterations
+	float avbd_alpha;        // stabilization (0.95-0.99)
+	float avbd_beta_lin;     // penalty ramp, linear constraints
+	float avbd_beta_ang;     // penalty ramp, angular constraints
+	float avbd_gamma;        // warm-start decay
+	int avbd_iterations;     // solver iterations
 } WorldInternal;
 
 // -----------------------------------------------------------------------------
@@ -418,10 +425,10 @@ typedef struct ConstraintRef
 // AVBD (Augmented Vertex Block Descent) solver types.
 
 #define AVBD_STABLE_THRESH 0.05f // adaptive alpha: below this error, use full stabilization
-#define AVBD_PENALTY_MIN  1.0f
-#define AVBD_PENALTY_MAX  1e10f
-#define AVBD_MARGIN       0.0f   // must be 0: nudge penetration is always positive, margin would hide it
-#define AVBD_STICK_THRESH 0.00001f
+#define AVBD_PENALTY_MIN   1.0f
+#define AVBD_PENALTY_MAX   1e10f
+#define AVBD_MARGIN        0.0f   // must be 0: nudge penetration is always positive, margin would hide it
+#define AVBD_STICK_THRESH  0.00001f
 
 typedef struct AVBD_Contact
 {

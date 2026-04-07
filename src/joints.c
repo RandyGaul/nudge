@@ -1,5 +1,35 @@
 // joints.c -- joint constraint solvers (ball socket, distance, hinge)
 
+// Block K-matrix builder for JacobianRow arrays.
+// Accumulates one body's contribution to the packed symmetric K block:
+//   K[BTRI(r,c)] += J_r * M^{-1} * J_c  (for the given side: 0=A, 1=B).
+// Call twice (side=0, side=1) to get the full K = J M^{-1} J^T.
+static void block_K_body_f(const JacobianRow* rows, int dof, int side,
+                            const BodyHot* body, float* K_packed)
+{
+	float im = body->inv_mass;
+	float W[6 * BLOCK_MAX_DOF]; // W[6][dof]: M^{-1} * J^T columns
+	for (int d = 0; d < dof; d++) {
+		const float* J = side ? rows[d].J_b : rows[d].J_a;
+		W[0*dof+d] = im * J[0];
+		W[1*dof+d] = im * J[1];
+		W[2*dof+d] = im * J[2];
+		v3 j_ang = V3(J[3], J[4], J[5]);
+		v3 w_ang = inv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang);
+		W[3*dof+d] = w_ang.x;
+		W[4*dof+d] = w_ang.y;
+		W[5*dof+d] = w_ang.z;
+	}
+	for (int r = 0; r < dof; r++) {
+		const float* Jr = side ? rows[r].J_b : rows[r].J_a;
+		for (int c = 0; c <= r; c++) {
+			float sum = 0;
+			for (int k = 0; k < 6; k++) sum += Jr[k] * W[k*dof + c];
+			K_packed[BTRI(r, c)] += sum;
+		}
+	}
+}
+
 // Symmetric 3x3 stored as 6 floats: [xx, xy, xz, yy, yz, zz].
 static void sym3x3_inverse(const float* in, float* out)
 {
@@ -270,16 +300,47 @@ static void joints_warm_start(WorldInternal* w, SolverJoint* joints, int count)
 }
 
 // Generic PGS joint solve: no type switch.
+// Multi-DOF joints (ball-socket 3, hinge 5) use a coupled block solve
+// for the full K-matrix instead of the diagonal (eff_mass) approximation.
 static void solve_joint(WorldInternal* w, SolverJoint* s)
 {
 	BodyHot* a = &w->body_hot[s->body_a];
 	BodyHot* b = &w->body_hot[s->body_b];
-	for (int d = 0; d < s->dof; d++) {
-		float vel_err = jac_velocity_f(&s->rows[d], a, b);
-		float rhs = -vel_err - s->bias[d] - s->softness * s->lambda[d];
-		float delta = s->rows[d].eff_mass * rhs;
-		s->lambda[d] += delta;
-		jac_apply(&s->rows[d], delta, a, b);
+	if (s->dof == 1) {
+		// Scalar path (distance joints)
+		float vel_err = jac_velocity_f(&s->rows[0], a, b);
+		float rhs = -vel_err - s->bias[0] - s->softness * s->lambda[0];
+		float delta = s->rows[0].eff_mass * rhs;
+		s->lambda[0] += delta;
+		jac_apply(&s->rows[0], delta, a, b);
+	} else {
+		// Block path: build coupled K, factor, solve
+		float K[21] = {0}; // packed lower-tri, max 6x6
+		float D[6], rhs[6], delta[6];
+		block_K_body_f(s->rows, s->dof, 0, a, K);
+		block_K_body_f(s->rows, s->dof, 1, b, K);
+		for (int d = 0; d < s->dof; d++)
+			K[BTRI(d,d)] += s->softness;
+		if (block_ldl_f(K, D, s->dof) != 0) {
+			// Factorization failed — fall back to diagonal (scalar per-DOF)
+			for (int d = 0; d < s->dof; d++) {
+				float vel_err = jac_velocity_f(&s->rows[d], a, b);
+				float r = -vel_err - s->bias[d] - s->softness * s->lambda[d];
+				float dl = s->rows[d].eff_mass * r;
+				s->lambda[d] += dl;
+				jac_apply(&s->rows[d], dl, a, b);
+			}
+			return;
+		}
+		for (int d = 0; d < s->dof; d++) {
+			float vel_err = jac_velocity_f(&s->rows[d], a, b);
+			rhs[d] = -vel_err - s->bias[d] - s->softness * s->lambda[d];
+		}
+		block_solve_f(K, D, rhs, delta, s->dof);
+		for (int d = 0; d < s->dof; d++) {
+			s->lambda[d] += delta[d];
+			jac_apply(&s->rows[d], delta[d], a, b);
+		}
 	}
 }
 

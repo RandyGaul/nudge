@@ -401,4 +401,206 @@ static inline void solve_6x6_ldl(m3x3 aLin, m3x3 aAng, m3x3 aCross,
 	xLin->x = z1 - L21*xLin->y - L31*xLin->z - L41*xAng->x - L51*xAng->y - L61*xAng->z;
 }
 
+// ---------------------------------------------------------------------------
+// Generic NxN block LDL^T, single precision, packed lower-triangular storage.
+// Max n = 6 (21 packed floats). Suitable for solving coupled multi-DOF
+// constraints (joints, contact blocks, preconditioner blocks).
+
+#define BLOCK_MAX_DOF 16 // max DOFs per block (contacts can exceed 6 per body pair)
+
+// Packed lower-triangular index. Symmetric: BTRI(r,c) == BTRI(c,r).
+#define BTRI(r, c) ((r) >= (c) ? (r)*((r)+1)/2 + (c) : (c)*((c)+1)/2 + (r))
+
+// In-place LDL^T factorization. A is packed lower-tri (overwritten with L,
+// unit diagonal implicit). D is separate diagonal. Returns 0 on success,
+// -1 if a non-positive pivot is encountered. n up to BLOCK_MAX_DOF.
+static inline int block_ldl_f(float* A, float* D, int n)
+{
+	for (int j = 0; j < n; j++) {
+		float dj = A[BTRI(j,j)];
+		for (int k = 0; k < j; k++)
+			dj -= A[BTRI(j,k)] * A[BTRI(j,k)] * D[k];
+		if (dj <= 1e-12f) return -1;
+		D[j] = dj;
+		float inv_dj = 1.0f / dj;
+		for (int i = j + 1; i < n; i++) {
+			float lij = A[BTRI(i,j)];
+			for (int k = 0; k < j; k++)
+				lij -= A[BTRI(i,k)] * A[BTRI(j,k)] * D[k];
+			A[BTRI(i,j)] = lij * inv_dj;
+		}
+	}
+	return 0;
+}
+
+// Solve LDL^T x = b. L and D from block_ldl_f. b is not modified.
+static inline void block_solve_f(const float* L, const float* D,
+                                  const float* b, float* x, int n)
+{
+	// Forward: L y = b
+	for (int i = 0; i < n; i++) {
+		x[i] = b[i];
+		for (int k = 0; k < i; k++) x[i] -= L[BTRI(i,k)] * x[k];
+	}
+	// Diagonal: D z = y
+	for (int i = 0; i < n; i++) x[i] /= D[i];
+	// Backward: L^T x = z
+	for (int i = n - 1; i >= 0; i--)
+		for (int k = i + 1; k < n; k++)
+			x[i] -= L[BTRI(k,i)] * x[k];
+}
+
+// ---------------------------------------------------------------------------
+// Total enumeration block LCP/MCP solver (Murty-style).
+//
+// Solves the mixed complementarity problem for up to BLOCK_MAX_DOF DOFs:
+//   A * x + b = w
+//   For each DOF i:
+//     if lo[i] == -FLT_MAX && hi[i] == FLT_MAX:  bilateral (w[i] = 0, x[i] free)
+//     else:  x[i] in [lo[i], hi[i]], complementarity with w[i]
+//
+// Enumerates all 2^m active-set combinations (m = number of bounded DOFs).
+// For each combination, solves the reduced equality system and checks validity.
+// Returns 1 if a valid solution was found, 0 if no valid case (falls back to x=0).
+//
+// A is packed lower-triangular (n*(n+1)/2 floats), same as block_ldl_f input.
+// lo[i], hi[i] define bounds. Use -FLT_MAX/FLT_MAX for bilateral DOFs.
+// b is the RHS vector (not modified). x is the output solution vector.
+// Max bounded DOFs: 12 (4096 cases). Bilateral DOFs don't count.
+#define BLOCK_LCP_MAX_BOUNDED 12
+
+static inline int block_lcp_solve(const float* A_in, const float* b, float* x,
+                                   const float* lo, const float* hi, int n)
+{
+	// Identify bounded DOFs and their possible states.
+	// Each bounded DOF can be: at_lo (0), active (1), or at_hi (2).
+	// Bilateral DOFs (lo=-inf, hi=inf) are always active.
+	int bounded[BLOCK_MAX_DOF];
+	int has_lo[BLOCK_MAX_DOF], has_hi[BLOCK_MAX_DOF]; // which bounds exist
+	int n_states[BLOCK_MAX_DOF]; // 2 or 3 states per bounded DOF
+	int m = 0;
+	for (int i = 0; i < n; i++) {
+		if (lo[i] > -1e18f || hi[i] < 1e18f) {
+			bounded[m] = i;
+			has_lo[m] = (lo[i] > -1e18f);
+			has_hi[m] = (hi[i] < 1e18f);
+			n_states[m] = 1 + has_lo[m] + has_hi[m]; // active + at_lo + at_hi
+			m++;
+		}
+	}
+	if (m > BLOCK_LCP_MAX_BOUNDED) m = BLOCK_LCP_MAX_BOUNDED;
+
+	// Count total combinations and compute multipliers for mixed-radix encoding
+	int total_cases = 1;
+	int radix_mul[BLOCK_LCP_MAX_BOUNDED];
+	for (int k = 0; k < m; k++) {
+		radix_mul[k] = total_cases;
+		total_cases *= n_states[k];
+	}
+	if (total_cases > 65536) total_cases = 65536; // safety cap
+
+	float A_scratch[BLOCK_MAX_DOF * (BLOCK_MAX_DOF + 1) / 2];
+	float D_scratch[BLOCK_MAX_DOF];
+	float rhs[BLOCK_MAX_DOF];
+
+	// Enumerate. case_idx=0 maps to all-active (state=active for each bounded DOF).
+	for (int case_idx = 0; case_idx < total_cases; case_idx++) {
+		// Decode mixed-radix: for each bounded DOF, determine state.
+		// State encoding per DOF: 0=active, 1=at_lo (if exists), 2=at_hi (if exists)
+		int state[BLOCK_LCP_MAX_BOUNDED]; // 0=active, 1=at_lo, 2=at_hi
+		{
+			int tmp = case_idx;
+			for (int k = m - 1; k >= 0; k--) {
+				state[k] = tmp / radix_mul[k];
+				tmp -= state[k] * radix_mul[k];
+			}
+		}
+		// Map state codes to actual meaning:
+		// If n_states=3: 0=active, 1=at_lo, 2=at_hi
+		// If n_states=2 (lo only): 0=active, 1=at_lo
+		// If n_states=2 (hi only): 0=active, 1=at_hi
+
+		// Set x for inactive DOFs
+		for (int i = 0; i < n; i++) x[i] = 0.0f;
+		for (int k = 0; k < m; k++) {
+			int idx = bounded[k];
+			int s = state[k];
+			if (s == 0) continue; // active
+			if (has_lo[k] && has_hi[k]) {
+				x[idx] = (s == 1) ? lo[idx] : hi[idx];
+			} else if (has_lo[k]) {
+				x[idx] = lo[idx]; // s=1 → at_lo
+			} else {
+				x[idx] = hi[idx]; // s=1 → at_hi
+			}
+		}
+
+		// Build RHS: rhs = -b - A * x_inactive
+		for (int i = 0; i < n; i++) rhs[i] = -b[i];
+		for (int k = 0; k < m; k++) {
+			if (state[k] == 0) continue;
+			int j = bounded[k];
+			float xj = x[j];
+			if (xj == 0.0f) continue;
+			for (int i = 0; i < n; i++)
+				rhs[i] -= A_in[BTRI(i, j)] * xj;
+		}
+
+		// Collect active DOFs
+		int active[BLOCK_MAX_DOF];
+		int na = 0;
+		for (int i = 0; i < n; i++) {
+			int inactive = 0;
+			for (int k = 0; k < m; k++)
+				if (bounded[k] == i && state[k] != 0) { inactive = 1; break; }
+			if (!inactive) active[na++] = i;
+		}
+
+		if (na > 0) {
+			// Build and solve reduced system
+			for (int r = 0; r < na; r++)
+				for (int c = 0; c <= r; c++)
+					A_scratch[BTRI(r, c)] = A_in[BTRI(active[r], active[c])];
+
+			float rhs_r[BLOCK_MAX_DOF];
+			for (int i = 0; i < na; i++) rhs_r[i] = rhs[active[i]];
+
+			if (block_ldl_f(A_scratch, D_scratch, na) != 0) continue;
+
+			float x_r[BLOCK_MAX_DOF];
+			block_solve_f(A_scratch, D_scratch, rhs_r, x_r, na);
+
+			for (int i = 0; i < na; i++) x[active[i]] = x_r[i];
+		}
+
+		// Validate
+		int valid = 1;
+
+		// Active bounded DOFs must be within their bounds
+		for (int k = 0; k < m && valid; k++) {
+			if (state[k] != 0) continue;
+			int idx = bounded[k];
+			if (x[idx] < lo[idx] - 1e-6f || x[idx] > hi[idx] + 1e-6f) valid = 0;
+		}
+
+		// Inactive DOFs: check complementarity (w has correct sign at bound)
+		for (int k = 0; k < m && valid; k++) {
+			if (state[k] == 0) continue;
+			int idx = bounded[k];
+			float wi = b[idx];
+			for (int j = 0; j < n; j++) wi += A_in[BTRI(idx, j)] * x[j];
+			int at_lo = (has_lo[k] && has_hi[k]) ? (state[k] == 1) : has_lo[k];
+			if (at_lo && wi < -1e-6f) valid = 0;  // at lower: w >= 0
+			if (!at_lo && wi > 1e-6f) valid = 0;  // at upper: w <= 0
+		}
+
+		if (valid) return 1;
+	}
+
+	// Fallback: set bounded DOFs to nearest bound
+	for (int k = 0; k < m; k++)
+		x[bounded[k]] = has_lo[k] ? lo[bounded[k]] : hi[bounded[k]];
+	return 0;
+}
+
 #endif

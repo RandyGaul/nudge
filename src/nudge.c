@@ -10,6 +10,7 @@
 #include "solver_pgs.c"
 #include "joints.c"
 #include "solver_ldl.c"
+#include "solver_cr.c"
 #include "islands.c"
 #include "solver_avbd.c"
 
@@ -32,6 +33,11 @@ World create_world(WorldParams params)
 	w->max_push_velocity = params.max_push_velocity > 0.0f ? params.max_push_velocity : 3.0f;
 	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 4;
 	w->ldl_correction_iter = -2; // -2 = auto: velocity_iters/2 (mid-loop, PGS can recover after LDL)
+	w->cr_max_iters = 10;
+	w->cr_tolerance = 1e-6f;
+	w->cr_active_set_mask = 1;
+	w->cr_reclamp_interval = 5;
+	w->cr_mass_scale = 1;
 	w->avbd_alpha = 0.99f;
 	w->avbd_beta_lin = 10000.0f;
 	w->avbd_beta_ang = 100.0f;
@@ -208,7 +214,8 @@ void world_step(World world, float dt)
 		if (sub > 0)
 			integrate_velocities(w, sub_dt);
 
-		int has_ldl = w->ldl_enabled && asize(sol_joints) > 0;
+		int has_ldl = w->ldl_enabled && !w->cr_enabled && asize(sol_joints) > 0;
+		int has_cr = w->cr_enabled;
 
 		// Resolve LDL correction iteration: -2 = auto (velocity_iters/2), -1 = after loop
 		int ldl_iter = w->ldl_correction_iter;
@@ -218,7 +225,19 @@ void world_step(World world, float dt)
 		if (has_ldl)
 			ldl_factor(w, sol_joints, asize(sol_joints), sub, sub_dt);
 
-		if (has_ldl) {
+		if (has_cr) {
+			// PGS warmup: a few sweeps to stabilize the contact active set
+			// before CR takes over. PGS naturally clamps contacts and discovers
+			// which normals should be active.
+			int pgs_warmup = 3;
+			for (int iter = 0; iter < pgs_warmup; iter++)
+				for (int c = 0; c < color_count; c++)
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
+			// CR: solve all constraints (contacts + joints) per island.
+			// Body velocities and lambda values now reflect PGS warmup.
+			cr_velocity_solve(w, sm, asize(sm), sc, sol_joints, asize(sol_joints), sub_dt);
+		} else if (has_ldl) {
 			// Sub > 0: clear soft joint lambda so ACCUMULATE starts fresh
 			// (no warm-start on sub > 0). Rigid joints use SET, no clearing needed.
 			if (sub > 0) {

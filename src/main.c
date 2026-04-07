@@ -110,6 +110,7 @@ static bool g_sleep_enabled = true;
 static int g_friction_model = FRICTION_PATCH;
 static int g_solver_type = SOLVER_SOFT_STEP;
 static bool g_ldl_enabled = true;
+static bool g_cr_enabled = false;
 static int g_ldl_inspect_island = -1;   // selected island for LDL inspector (-1 = none)
 static int g_ldl_inspect_step = 0;      // factorization step slider
 static int g_ldl_hover_body = -1;       // body highlighted by matrix hover (-1 = none)
@@ -419,6 +420,7 @@ static void setup_scene()
 
 	((WorldInternal*)g_world.id)->sleep_enabled = g_sleep_enabled;
 	((WorldInternal*)g_world.id)->ldl_enabled = g_ldl_enabled;
+	((WorldInternal*)g_world.id)->cr_enabled = g_cr_enabled;
 	world_set_friction_model(g_world, (FrictionModel)g_friction_model);
 	world_set_solver_type(g_world, (SolverType)g_solver_type);
 	g_scenes[g_scene_index].setup();
@@ -620,15 +622,23 @@ void update()
 	if (ImGui_Combo("Solver", &g_solver_type, "Soft Step\0SI Soft\0SI\0Block\0AVBD\0"))
 		world_set_solver_type(g_world, (SolverType)g_solver_type);
 	if (g_solver_type != SOLVER_AVBD) {
-		if (ImGui_Checkbox("LDL Joints", &g_ldl_enabled))
+		if (ImGui_Checkbox("LDL Joints", &g_ldl_enabled)) {
 			dbg_w->ldl_enabled = g_ldl_enabled;
+			if (g_ldl_enabled) { g_cr_enabled = false; dbg_w->cr_enabled = 0; }
+		}
 		if (!g_ldl_enabled) {
 			g_ldl_inspect_island = -1;
 		}
+		if (ImGui_Checkbox("CR Solver", &g_cr_enabled)) {
+			dbg_w->cr_enabled = g_cr_enabled;
+			if (g_cr_enabled) { g_ldl_enabled = false; dbg_w->ldl_enabled = 0; g_ldl_inspect_island = -1; }
+		}
 	} else {
 		g_ldl_enabled = false;
+		g_cr_enabled = false;
 		g_ldl_inspect_island = -1;
 		dbg_w->ldl_enabled = 0;
+		dbg_w->cr_enabled = 0;
 		g_ldl_debug_enabled = 0;
 	}
 

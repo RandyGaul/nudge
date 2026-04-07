@@ -9952,6 +9952,671 @@ static void test_replay_recording(const char* path)
 	free(frames);
 }
 
+// ============================================================================
+// CR solver smoke tests: run basic scenarios with cr_enabled = 1.
+
+// Box settles on floor under gravity (contacts only, no joints).
+static void test_cr_box_on_floor()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->cr_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body box = create_body(w, (BodyParams){
+		.position = V3(0, 2, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	step_n(w, 300);
+
+	v3 p = body_get_position(w, box);
+	TEST_BEGIN("CR box on floor: no NaN");
+	TEST_ASSERT(is_valid(p));
+	TEST_BEGIN("CR box on floor: settled near y=0.5");
+	TEST_ASSERT(p.y > 0.0f && p.y < 1.5f);
+	TEST_BEGIN("CR box on floor: near-zero velocity");
+	float vel = len(wi->body_hot[handle_index(box)].velocity);
+	TEST_ASSERT(vel < 0.5f);
+
+	destroy_world(w);
+}
+
+// Ball-socket chain hanging from static anchor (joints only, no contacts).
+static void test_cr_joint_chain()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->cr_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	float link_len = 1.0f;
+	v3 off_a = V3(0, -link_len * 0.5f, 0);
+	v3 off_b = V3(0,  link_len * 0.5f, 0);
+	int chain_len = 5;
+
+	Body anchor = create_body(w, (BodyParams){
+		.position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, anchor, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
+	});
+
+	Body bodies[5];
+	Body prev = anchor;
+	for (int i = 0; i < chain_len; i++) {
+		bodies[i] = create_body(w, (BodyParams){
+			.position = V3(0, 9.0f - i * link_len, 0),
+			.rotation = quat_identity(), .mass = 0.5f,
+		});
+		body_add_shape(w, bodies[i], (ShapeParams){
+			.type = SHAPE_SPHERE, .sphere.radius = 0.2f,
+		});
+		create_ball_socket(w, (BallSocketParams){
+			.body_a = prev, .body_b = bodies[i],
+			.local_offset_a = off_a, .local_offset_b = off_b,
+		});
+		prev = bodies[i];
+	}
+
+	step_n(w, 300);
+
+	TEST_BEGIN("CR joint chain: no NaN");
+	for (int i = 0; i < chain_len; i++) {
+		v3 p = body_get_position(w, bodies[i]);
+		TEST_ASSERT(is_valid(p));
+	}
+	TEST_BEGIN("CR joint chain: links stay connected");
+	float max_gap = 0.0f;
+	float gap0 = anchor_distance(w, anchor, off_a, bodies[0], off_b);
+	if (gap0 > max_gap) max_gap = gap0;
+	for (int i = 0; i < chain_len - 1; i++) {
+		float gap = anchor_distance(w, bodies[i], off_a, bodies[i + 1], off_b);
+		if (gap > max_gap) max_gap = gap;
+	}
+	TEST_ASSERT(max_gap < 1.0f);
+	TEST_BEGIN("CR joint chain: tail below anchor");
+	v3 tail = body_get_position(w, bodies[chain_len - 1]);
+	v3 anch = body_get_position(w, anchor);
+	TEST_ASSERT(tail.y < anch.y);
+
+	destroy_world(w);
+}
+
+// Stacked boxes (contacts only): tests that contacts push properly.
+static void test_cr_box_stack()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->cr_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+
+	Body boxes[3];
+	for (int i = 0; i < 3; i++) {
+		boxes[i] = create_body(w, (BodyParams){
+			.position = V3(0, 0.5f + i * 1.0f, 0), .rotation = quat_identity(), .mass = 1.0f,
+		});
+		body_add_shape(w, boxes[i], (ShapeParams){
+			.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+		});
+	}
+
+	step_n(w, 300);
+
+	TEST_BEGIN("CR box stack: no NaN");
+	for (int i = 0; i < 3; i++) {
+		v3 p = body_get_position(w, boxes[i]);
+		TEST_ASSERT(is_valid(p));
+	}
+	TEST_BEGIN("CR box stack: boxes above floor");
+	for (int i = 0; i < 3; i++) {
+		v3 p = body_get_position(w, boxes[i]);
+		TEST_ASSERT(p.y > -0.1f);
+	}
+	TEST_BEGIN("CR box stack: boxes roughly stacked (ascending y)");
+	v3 p0 = body_get_position(w, boxes[0]);
+	v3 p2 = body_get_position(w, boxes[2]);
+	TEST_ASSERT(p2.y > p0.y - 0.5f);
+
+	destroy_world(w);
+}
+
+// Mixed: chain dangling and hitting floor (joints + contacts).
+static void test_cr_chain_on_floor()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->cr_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+
+	Body anchor = create_body(w, (BodyParams){
+		.position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, anchor, (ShapeParams){
+		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
+	});
+
+	// 3-link chain that should dangle and collide with floor
+	Body bodies[3];
+	Body prev = anchor;
+	v3 off_a = V3(0, -0.4f, 0), off_b = V3(0, 0.4f, 0);
+	for (int i = 0; i < 3; i++) {
+		bodies[i] = create_body(w, (BodyParams){
+			.position = V3(0, 2.2f - i * 0.8f, 0), .rotation = quat_identity(), .mass = 1.0f,
+		});
+		body_add_shape(w, bodies[i], (ShapeParams){
+			.type = SHAPE_SPHERE, .sphere.radius = 0.3f,
+		});
+		create_ball_socket(w, (BallSocketParams){
+			.body_a = prev, .body_b = bodies[i],
+			.local_offset_a = off_a, .local_offset_b = off_b,
+		});
+		prev = bodies[i];
+	}
+
+	step_n(w, 300);
+
+	TEST_BEGIN("CR chain on floor: no NaN");
+	for (int i = 0; i < 3; i++) {
+		v3 p = body_get_position(w, bodies[i]);
+		TEST_ASSERT(is_valid(p));
+	}
+	TEST_BEGIN("CR chain on floor: all above floor");
+	for (int i = 0; i < 3; i++) {
+		v3 p = body_get_position(w, bodies[i]);
+		TEST_ASSERT(p.y > -0.5f);
+	}
+	TEST_BEGIN("CR chain on floor: below anchor");
+	for (int i = 0; i < 3; i++) {
+		v3 p = body_get_position(w, bodies[i]);
+		TEST_ASSERT(p.y < 3.5f);
+	}
+
+	destroy_world(w);
+}
+
+// CR with FRICTION_COULOMB mode (per-point friction).
+static void test_cr_coulomb_friction()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->cr_enabled = 1;
+	wi->sleep_enabled = 0;
+	wi->friction_model = FRICTION_COULOMB;
+
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+	Body box = create_body(w, (BodyParams){
+		.position = V3(0, 2, 0), .rotation = quat_identity(), .mass = 1.0f,
+	});
+	body_add_shape(w, box, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+
+	step_n(w, 300);
+
+	v3 p = body_get_position(w, box);
+	TEST_BEGIN("CR Coulomb: no NaN");
+	TEST_ASSERT(is_valid(p));
+	TEST_BEGIN("CR Coulomb: box settled");
+	TEST_ASSERT(p.y > 0.0f && p.y < 1.5f);
+
+	destroy_world(w);
+}
+
+// Box pyramid (5-layer, matches the "Box Pyramid" scene).
+// This is the key stress test: many contacts, many bodies in one island.
+static void test_cr_pyramid()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->cr_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	// Floor
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
+	});
+
+	// Pyramid: 5 layers, each layer is (base-layer) x (base-layer) boxes
+	float box_size = 0.5f;
+	float spacing = 1.05f;
+	int base = 5;
+	int total_boxes = 0;
+	Body boxes[55]; // 25+16+9+4+1 = 55
+
+	for (int layer = 0; layer < base; layer++) {
+		int count = base - layer;
+		float offset = -(count - 1) * 0.5f * spacing;
+		float y = box_size + layer * spacing;
+		for (int r = 0; r < count; r++) {
+			for (int c = 0; c < count; c++) {
+				boxes[total_boxes] = create_body(w, (BodyParams){
+					.position = V3(offset + c * spacing, y, offset + r * spacing),
+					.rotation = quat_identity(), .mass = 1.0f,
+				});
+				body_add_shape(w, boxes[total_boxes], (ShapeParams){
+					.type = SHAPE_BOX, .box.half_extents = V3(box_size, box_size, box_size),
+				});
+				total_boxes++;
+			}
+		}
+	}
+
+	// Run 2 seconds (120 frames)
+	step_n(w, 120);
+
+	TEST_BEGIN("CR pyramid: no NaN");
+	int nan_count = 0;
+	for (int i = 0; i < total_boxes; i++) {
+		v3 p = body_get_position(w, boxes[i]);
+		if (!is_valid(p)) nan_count++;
+	}
+	TEST_ASSERT(nan_count == 0);
+
+	TEST_BEGIN("CR pyramid: all boxes above floor");
+	int below_floor = 0;
+	for (int i = 0; i < total_boxes; i++) {
+		v3 p = body_get_position(w, boxes[i]);
+		if (is_valid(p) && p.y < -2.0f) below_floor++;
+	}
+	TEST_ASSERT(below_floor == 0);
+
+	TEST_BEGIN("CR pyramid: no explosion (all boxes within bounds)");
+	int exploded = 0;
+	for (int i = 0; i < total_boxes; i++) {
+		v3 p = body_get_position(w, boxes[i]);
+		if (!is_valid(p) || fabsf(p.x) > 20.0f || p.y > 20.0f || fabsf(p.z) > 20.0f)
+			exploded++;
+	}
+	TEST_ASSERT(exploded == 0);
+
+	TEST_BEGIN("CR pyramid: boxes roughly settled (low velocity)");
+	float max_vel = 0;
+	for (int i = 0; i < total_boxes; i++) {
+		float v = len(wi->body_hot[handle_index(boxes[i])].velocity);
+		if (v > max_vel) max_vel = v;
+	}
+	// Relaxed threshold — CR v1 won't be as settled as PGS/LDL
+	TEST_ASSERT(max_vel < 10.0f);
+
+	destroy_world(w);
+}
+
+// Helper: create a pyramid world for convergence measurement.
+static World cr_bench_create_pyramid()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->cr_enabled = 1;
+	wi->sleep_enabled = 0;
+	wi->cr_max_iters = 30; // enough to see convergence tail
+
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
+	});
+
+	float box_size = 0.5f, spacing = 1.05f;
+	int base = 5;
+	for (int layer = 0; layer < base; layer++) {
+		int count = base - layer;
+		float offset = -(count - 1) * 0.5f * spacing;
+		float y = box_size + layer * spacing;
+		for (int r = 0; r < count; r++) {
+			for (int c = 0; c < count; c++) {
+				Body b = create_body(w, (BodyParams){
+					.position = V3(offset + c * spacing, y, offset + r * spacing),
+					.rotation = quat_identity(), .mass = 1.0f,
+				});
+				body_add_shape(w, b, (ShapeParams){
+					.type = SHAPE_BOX, .box.half_extents = V3(box_size, box_size, box_size),
+				});
+			}
+		}
+	}
+	return w;
+}
+
+// Convergence trace: compares mass scaling on vs off.
+static void cr_bench_scene(const char* name,
+	World (*create_fn)(void), int warmup_frames)
+{
+	printf("\n=== CR Convergence: %s ===\n", name);
+	const char* labels[] = { "Mass scale ON", "Mass scale OFF" };
+	for (int mode = 0; mode < 2; mode++) {
+		World w = create_fn();
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->cr_max_iters = 30;
+		wi->cr_mass_scale = (mode == 0) ? 1 : 0;
+		step_n(w, warmup_frames);
+		printf("\n--- %s ---\n", labels[mode]);
+		g_cr_trace = 1;
+		step_n(w, 1);
+		g_cr_trace = 0;
+		destroy_world(w);
+	}
+	printf("=== End %s ===\n", name);
+}
+
+static World cr_bench_create_mass_ratio()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->cr_enabled = 1;
+	wi->sleep_enabled = 0;
+	wi->cr_max_iters = 30;
+
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+
+	float sizes[] = { 0.15f, 0.25f, 0.4f, 0.55f, 0.75f };
+	float masses[] = { 0.5f, 2.0f, 8.0f, 30.0f, 100.0f };
+	float gap = 0.6f, y = 0.0f;
+	for (int i = 0; i < 5; i++) {
+		float h = sizes[i];
+		y += h + gap;
+		Body b = create_body(w, (BodyParams){
+			.position = V3(0, y, 0), .rotation = quat_identity(), .mass = masses[i],
+		});
+		body_add_shape(w, b, (ShapeParams){
+			.type = SHAPE_BOX, .box.half_extents = V3(h, h, h),
+		});
+		y += h;
+	}
+	return w;
+}
+
+static World cr_bench_create_big_pyramid()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->cr_enabled = 1;
+	wi->sleep_enabled = 0;
+	wi->cr_max_iters = 30;
+
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
+	});
+
+	float box_size = 0.5f, spacing = 1.05f;
+	int base = 8; // 8 layers: 64+49+36+25+16+9+4+1 = 204 boxes
+	for (int layer = 0; layer < base; layer++) {
+		int count = base - layer;
+		float offset = -(count - 1) * 0.5f * spacing;
+		float y = box_size + layer * spacing;
+		for (int r = 0; r < count; r++) {
+			for (int c = 0; c < count; c++) {
+				Body b = create_body(w, (BodyParams){
+					.position = V3(offset + c * spacing, y, offset + r * spacing),
+					.rotation = quat_identity(), .mass = 1.0f,
+				});
+				body_add_shape(w, b, (ShapeParams){
+					.type = SHAPE_BOX, .box.half_extents = V3(box_size, box_size, box_size),
+				});
+			}
+		}
+	}
+	return w;
+}
+
+static void test_cr_precond_comparison()
+{
+	cr_bench_scene("Pyramid 5", cr_bench_create_pyramid, 20);
+	cr_bench_scene("Pyramid 8", cr_bench_create_big_pyramid, 25);
+	cr_bench_scene("Mass Ratio", cr_bench_create_mass_ratio, 30);
+}
+
+// Mass ratio stack: 5 boxes with masses 0.5 to 100, stacked vertically.
+// Tests CR with extreme mass ratios (200:1) where preconditioning matters most.
+static void test_cr_mass_ratio()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->cr_enabled = 1;
+	wi->sleep_enabled = 0;
+
+	Body floor = create_body(w, (BodyParams){
+		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+	});
+	body_add_shape(w, floor, (ShapeParams){
+		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
+	});
+
+	float sizes[] = { 0.15f, 0.25f, 0.4f, 0.55f, 0.75f };
+	float masses[] = { 0.5f, 2.0f, 8.0f, 30.0f, 100.0f };
+	Body boxes[5];
+	float gap = 0.6f;
+	float y = 0.0f;
+	for (int i = 0; i < 5; i++) {
+		float h = sizes[i];
+		y += h + gap;
+		boxes[i] = create_body(w, (BodyParams){
+			.position = V3(0, y, 0), .rotation = quat_identity(), .mass = masses[i],
+		});
+		body_add_shape(w, boxes[i], (ShapeParams){
+			.type = SHAPE_BOX, .box.half_extents = V3(h, h, h),
+		});
+		y += h;
+	}
+
+	step_n(w, 300);
+
+	TEST_BEGIN("CR mass ratio: no NaN");
+	int nan_count = 0;
+	for (int i = 0; i < 5; i++) {
+		v3 p = body_get_position(w, boxes[i]);
+		if (!is_valid(p)) nan_count++;
+	}
+	TEST_ASSERT(nan_count == 0);
+
+	TEST_BEGIN("CR mass ratio: no explosion");
+	int exploded = 0;
+	for (int i = 0; i < 5; i++) {
+		v3 p = body_get_position(w, boxes[i]);
+		if (!is_valid(p) || fabsf(p.x) > 20.0f || p.y > 20.0f || fabsf(p.z) > 20.0f)
+			exploded++;
+	}
+	TEST_ASSERT(exploded == 0);
+
+	TEST_BEGIN("CR mass ratio: all above floor");
+	for (int i = 0; i < 5; i++) {
+		v3 p = body_get_position(w, boxes[i]);
+		TEST_ASSERT(is_valid(p) && p.y > -0.5f);
+	}
+
+	TEST_BEGIN("CR mass ratio: roughly stacked (ascending y)");
+	v3 p0 = body_get_position(w, boxes[0]);
+	v3 p4 = body_get_position(w, boxes[4]);
+	TEST_ASSERT(is_valid(p0) && is_valid(p4) && p4.y > p0.y - 1.0f);
+
+	destroy_world(w);
+}
+
+static void run_cr_tests()
+{
+	printf("--- CR solver tests ---\n");
+	test_cr_box_on_floor();
+	test_cr_joint_chain();
+	test_cr_box_stack();
+	test_cr_chain_on_floor();
+	test_cr_coulomb_friction();
+	test_cr_pyramid();
+	test_cr_mass_ratio();
+}
+
+// ============================================================================
+// Block LCP solver unit tests.
+
+// 1x1: simple lower-bounded contact (lambda >= 0)
+static void test_block_lcp_1x1_active()
+{
+	// A*x + b = 0 with x >= 0.  A = [10], b = [-5] → x = 0.5
+	float A[] = { 10.0f };
+	float b[] = { -5.0f };
+	float x[1], lo[] = { 0.0f }, hi[] = { 1e18f };
+	TEST_BEGIN("block_lcp 1x1 active");
+	int ok = block_lcp_solve(A, b, x, lo, hi, 1);
+	TEST_ASSERT(ok == 1);
+	TEST_ASSERT_FLOAT(x[0], 0.5f, 1e-4f);
+}
+
+static void test_block_lcp_1x1_inactive()
+{
+	// A*x + b = w, x >= 0.  A = [10], b = [5] → unconstrained x = -0.5 < 0 → x = 0
+	float A[] = { 10.0f };
+	float b[] = { 5.0f };
+	float x[1], lo[] = { 0.0f }, hi[] = { 1e18f };
+	TEST_BEGIN("block_lcp 1x1 inactive");
+	int ok = block_lcp_solve(A, b, x, lo, hi, 1);
+	TEST_ASSERT(ok == 1);
+	TEST_ASSERT_FLOAT(x[0], 0.0f, 1e-6f);
+}
+
+// 2x2: two contacts, one active one inactive
+static void test_block_lcp_2x2_mixed()
+{
+	// A = [[4, 1], [1, 4]], b = [-3, 1]
+	// Unconstrained: x = A^{-1} * (-b) = [4,-1;-1,4]/15 * [3,-1] = [13/15, -7/15]
+	// x[1] < 0, so x[1] = 0 (inactive). Reduced: 4*x[0] = 3 → x[0] = 0.75
+	// Check: w[1] = A[1,0]*0.75 + b[1] = 0.75 + 1 = 1.75 >= 0 ✓
+	float A[] = { 4.0f, 1.0f, 4.0f }; // packed: A00, A10, A11
+	float b[] = { -3.0f, 1.0f };
+	float x[2], lo[] = { 0.0f, 0.0f }, hi[] = { 1e18f, 1e18f };
+	TEST_BEGIN("block_lcp 2x2 mixed");
+	int ok = block_lcp_solve(A, b, x, lo, hi, 2);
+	TEST_ASSERT(ok == 1);
+	TEST_ASSERT_FLOAT(x[0], 0.75f, 1e-4f);
+	TEST_ASSERT_FLOAT(x[1], 0.0f, 1e-6f);
+}
+
+// 2x2: both contacts active
+static void test_block_lcp_2x2_both_active()
+{
+	// A = [[4, 1], [1, 4]], b = [-3, -2]
+	// x = A^{-1} * [3, 2] = [4,-1;-1,4]/15 * [3,2] = [10/15, 5/15] = [0.667, 0.333]
+	float A[] = { 4.0f, 1.0f, 4.0f };
+	float b[] = { -3.0f, -2.0f };
+	float x[2], lo[] = { 0.0f, 0.0f }, hi[] = { 1e18f, 1e18f };
+	TEST_BEGIN("block_lcp 2x2 both active");
+	int ok = block_lcp_solve(A, b, x, lo, hi, 2);
+	TEST_ASSERT(ok == 1);
+	TEST_ASSERT_FLOAT(x[0], 10.0f / 15.0f, 1e-4f);
+	TEST_ASSERT_FLOAT(x[1], 5.0f / 15.0f, 1e-4f);
+}
+
+// 3x3: mixed bilateral + inequality
+static void test_block_lcp_3x3_bilateral_plus_contact()
+{
+	// DOF 0: bilateral (joint), DOF 1,2: contacts (lo=0)
+	// A = [[5, 1, 0], [1, 4, 1], [0, 1, 4]], b = [-2, -3, 2]
+	// DOF 2 should go inactive (b[2] > 0 pushes x[2] negative).
+	float A[] = { 5.0f, 1.0f, 4.0f, 0.0f, 1.0f, 4.0f };
+	float b[] = { -2.0f, -3.0f, 2.0f };
+	float x[3];
+	float lo[] = { -1e18f, 0.0f, 0.0f };
+	float hi[] = { 1e18f, 1e18f, 1e18f };
+	TEST_BEGIN("block_lcp 3x3 bilateral+contact");
+	int ok = block_lcp_solve(A, b, x, lo, hi, 3);
+	TEST_ASSERT(ok == 1);
+	// x[2] should be 0 (inactive)
+	TEST_ASSERT_FLOAT(x[2], 0.0f, 1e-6f);
+	// x[0] is bilateral, x[1] >= 0
+	TEST_ASSERT(x[1] >= -1e-6f);
+	// Verify: A*x + b ≈ 0 for active, ≥ 0 for inactive
+	float w0 = A[BTRI(0,0)]*x[0] + A[BTRI(0,1)]*x[1] + A[BTRI(0,2)]*x[2] + b[0];
+	float w2 = A[BTRI(2,0)]*x[0] + A[BTRI(2,1)]*x[1] + A[BTRI(2,2)]*x[2] + b[2];
+	TEST_ASSERT(fabsf(w0) < 0.01f); // bilateral: w ≈ 0
+	TEST_ASSERT(w2 > -0.01f);        // inactive at lo: w >= 0
+}
+
+// Upper bound test: x <= hi
+static void test_block_lcp_upper_bound()
+{
+	// A = [10], b = [-20] → unconstrained x = 2.0, but hi = 1.0
+	float A[] = { 10.0f };
+	float b[] = { -20.0f };
+	float x[1];
+	float lo[] = { 0.0f }, hi[] = { 1.0f };
+	TEST_BEGIN("block_lcp upper bound");
+	int ok = block_lcp_solve(A, b, x, lo, hi, 1);
+	TEST_ASSERT(ok == 1);
+	TEST_ASSERT_FLOAT(x[0], 1.0f, 1e-4f);
+}
+
+// 4x4: four contacts, partial activity
+static void test_block_lcp_4x4()
+{
+	// Diagonally dominant 4x4, two contacts should be active
+	float A[] = {
+		8.0f,                        // A00
+		1.0f, 8.0f,                  // A10, A11
+		0.5f, 0.5f, 8.0f,            // A20, A21, A22
+		0.0f, 0.0f, 0.5f, 8.0f      // A30, A31, A32, A33
+	};
+	float b[] = { -4.0f, -2.0f, 1.0f, 3.0f }; // DOFs 2,3 pushed inactive
+	float x[4];
+	float lo[] = { 0, 0, 0, 0 }, hi[] = { 1e18f, 1e18f, 1e18f, 1e18f };
+	TEST_BEGIN("block_lcp 4x4 partial");
+	int ok = block_lcp_solve(A, b, x, lo, hi, 4);
+	TEST_ASSERT(ok == 1);
+	// DOFs 0,1 should be positive, DOFs 2,3 should be 0
+	TEST_ASSERT(x[0] > 0.0f);
+	TEST_ASSERT(x[1] > 0.0f);
+	TEST_ASSERT_FLOAT(x[2], 0.0f, 1e-6f);
+	TEST_ASSERT_FLOAT(x[3], 0.0f, 1e-6f);
+}
+
+static void run_block_lcp_tests()
+{
+	printf("--- block LCP unit tests ---\n");
+	test_block_lcp_1x1_active();
+	test_block_lcp_1x1_inactive();
+	test_block_lcp_2x2_mixed();
+	test_block_lcp_2x2_both_active();
+	test_block_lcp_3x3_bilateral_plus_contact();
+	test_block_lcp_upper_bound();
+	test_block_lcp_4x4();
+}
+
 static void run_tests()
 {
 	test_pass = 0;
@@ -9986,6 +10651,7 @@ static void run_tests()
 
 	run_solver_tests();
 	run_ldl_stress_tests();
+	run_cr_tests();
 	run_bvh_tests();
 	run_query_tests();
 	test_feature_ids();
