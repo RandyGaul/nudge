@@ -1319,43 +1319,15 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 	double beta = SOLVER_POS_BAUMGARTE;
 	double ptv = beta / sub_dt;
 
+	// pos_error[] was computed by joint_fill_rows() during ldl_refresh_lever_arms(),
+	// which runs at the start of ldl_position_correct() with current body state.
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
 		if (con->is_synthetic) continue;
 		int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
 		SolverJoint* sj = &sol_joints[con->solver_idx];
-		BodyHot* a = &w->body_hot[sj->body_a];
-		BodyHot* b = &w->body_hot[sj->body_b];
-		// Recompute lever arms from current rotation (positions changed since pre_solve)
-		if (con->type == JOINT_BALL_SOCKET) {
-			v3 ra = rotate(a->rotation, w->joints[sj->joint_idx].ball_socket.local_a);
-			v3 rb = rotate(b->rotation, w->joints[sj->joint_idx].ball_socket.local_b);
-			v3 err = sub(add(b->position, rb), add(a->position, ra));
-			pos_rhs[oi]   = -ptv * err.x;
-			pos_rhs[oi+1] = -ptv * err.y;
-			pos_rhs[oi+2] = -ptv * err.z;
-		} else if (con->type == JOINT_DISTANCE) {
-			v3 ra = rotate(a->rotation, w->joints[sj->joint_idx].distance.local_a);
-			v3 rb = rotate(b->rotation, w->joints[sj->joint_idx].distance.local_b);
-			v3 d = sub(add(b->position, rb), add(a->position, ra));
-			double dist_val = len(d);
-			double err = dist_val - w->joints[sj->joint_idx].distance.rest_length;
-			pos_rhs[oi] = -ptv * err;
-		} else if (con->type == JOINT_HINGE) {
-			v3 ra = rotate(a->rotation, w->joints[sj->joint_idx].hinge.local_a);
-			v3 rb = rotate(b->rotation, w->joints[sj->joint_idx].hinge.local_b);
-			v3 err = sub(add(b->position, rb), add(a->position, ra));
-			pos_rhs[oi]   = -ptv * err.x;
-			pos_rhs[oi+1] = -ptv * err.y;
-			pos_rhs[oi+2] = -ptv * err.z;
-			// Angular error: dot(t_d, axis_b) should be 0 when aligned
-			v3 axis_a = norm(rotate(a->rotation, w->joints[sj->joint_idx].hinge.local_axis_a));
-			v3 axis_b = norm(rotate(b->rotation, w->joints[sj->joint_idx].hinge.local_axis_b));
-			v3 t1, t2;
-			hinge_tangent_basis(axis_a, &t1, &t2);
-			pos_rhs[oi+3] = -ptv * dot(t1, axis_b);
-			pos_rhs[oi+4] = -ptv * dot(t2, axis_b);
-		}
+		for (int d = 0; d < con->dof; d++)
+			pos_rhs[oi + d] = -ptv * sj->pos_error[d];
 	}
 
 	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, pos_rhs, pos_lambda);

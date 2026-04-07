@@ -70,12 +70,8 @@ typedef struct JointInternal
 		struct { v3 local_a, local_b; float rest_length; SpringParams spring; } distance;
 		struct { v3 local_a, local_b; v3 local_axis_a, local_axis_b; SpringParams spring; } hinge;
 	};
-	// Warm starting: accumulated impulses persisted across frames.
-	union {
-		v3 warm_lambda3;   // ball socket (3 DOF)
-		float warm_lambda1; // distance (1 DOF)
-		struct { v3 lin; float ang[2]; } warm_hinge; // hinge (5 DOF)
-	};
+	// Warm starting: accumulated impulses persisted across frames (up to 6 DOF).
+	float warm_lambda[6];
 	// AVBD warm state (penalty/lambda for augmented Lagrangian)
 	v3 avbd_penalty_lin;
 	v3 avbd_lambda_lin;
@@ -397,6 +393,7 @@ typedef struct SolverJoint
 	v3 r_a, r_b;         // world-space lever arms
 	float lambda[JOINT_MAX_DOF];
 	float bias[JOINT_MAX_DOF];
+	float pos_error[JOINT_MAX_DOF]; // raw position error per DOF (bias = ptv * pos_error)
 
 	// Clamp bounds (for future joint limits / motors).
 	// Default: lo=-FLT_MAX, hi=+FLT_MAX (bilateral, unclamped).

@@ -156,12 +156,10 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 		s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
 		s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
 
-		for (int d = 0; d < 3; d++) s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, soft);
-
 		v3 anchor_a = add(a->position, s->r_a);
 		v3 anchor_b = add(b->position, s->r_b);
-		v3 bias_v = scale(sub(anchor_b, anchor_a), ptv);
-		s->bias[0] = bias_v.x; s->bias[1] = bias_v.y; s->bias[2] = bias_v.z;
+		v3 err = sub(anchor_b, anchor_a);
+		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
 	} else if (s->type == JOINT_DISTANCE) {
 		s->r_a = rotate(a->rotation, j->distance.local_a);
 		s->r_b = rotate(b->rotation, j->distance.local_b);
@@ -180,10 +178,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 		s->rows[0].J_b[0] =  axis.x; s->rows[0].J_b[1] =  axis.y; s->rows[0].J_b[2] =  axis.z;
 		s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
 
-		s->rows[0].eff_mass = jac_eff_mass(&s->rows[0], a, b, soft);
-
-		float error = dist_val - j->distance.rest_length;
-		s->bias[0] = ptv * error;
+		s->pos_error[0] = dist_val - j->distance.rest_length;
 	} else if (s->type == JOINT_HINGE) {
 		s->r_a = rotate(a->rotation, j->hinge.local_a);
 		s->r_b = rotate(b->rotation, j->hinge.local_b);
@@ -212,14 +207,18 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 		s->rows[4].J_a[3] =  u2.x; s->rows[4].J_a[4] =  u2.y; s->rows[4].J_a[5] =  u2.z;
 		s->rows[4].J_b[3] = -u2.x; s->rows[4].J_b[4] = -u2.y; s->rows[4].J_b[5] = -u2.z;
 
-		for (int d = 0; d < 5; d++) s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, soft);
-
 		v3 anchor_a = add(a->position, s->r_a);
 		v3 anchor_b = add(b->position, s->r_b);
-		v3 lin_bias = scale(sub(anchor_b, anchor_a), ptv);
-		s->bias[0] = lin_bias.x; s->bias[1] = lin_bias.y; s->bias[2] = lin_bias.z;
-		s->bias[3] = ptv * dot(t1, axis_b);
-		s->bias[4] = ptv * dot(t2, axis_b);
+		v3 err = sub(anchor_b, anchor_a);
+		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
+		s->pos_error[3] = dot(t1, axis_b);
+		s->pos_error[4] = dot(t2, axis_b);
+	}
+
+	// Generic: compute eff_mass and bias from pos_error for all DOFs
+	for (int d = 0; d < s->dof; d++) {
+		s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, soft);
+		s->bias[d] = ptv * s->pos_error[d];
 	}
 }
 
@@ -248,15 +247,7 @@ static void joints_pre_solve(WorldInternal* w, float dt, SolverJoint** out_joint
 		joint_fill_rows(&s, a, b, w, dt);
 
 		// Warm start from persistent storage
-		if (j->type == JOINT_BALL_SOCKET) {
-			s.lambda[0] = j->warm_lambda3.x; s.lambda[1] = j->warm_lambda3.y; s.lambda[2] = j->warm_lambda3.z;
-		} else if (j->type == JOINT_DISTANCE) {
-			s.lambda[0] = j->warm_lambda1;
-		} else if (j->type == JOINT_HINGE) {
-			s.lambda[0] = j->warm_hinge.lin.x; s.lambda[1] = j->warm_hinge.lin.y; s.lambda[2] = j->warm_hinge.lin.z;
-			s.lambda[3] = j->warm_hinge.ang[0];
-			s.lambda[4] = j->warm_hinge.ang[1];
-		}
+		for (int d = 0; d < s.dof; d++) s.lambda[d] = j->warm_lambda[d];
 
 		apush(joints, s);
 	}
@@ -314,72 +305,16 @@ static void joints_split_impulse(WorldInternal* w, SolverJoint* joints, int join
 		for (int d = 0; d < JOINT_MAX_DOF; d++) { saved_lambda[i * JOINT_MAX_DOF + d] = joints[i].lambda[d]; joints[i].lambda[d] = 0; }
 	}
 
-	// Set bias from current position error and refresh Jacobian rows
+	// Refresh Jacobians and position errors from current rotations, override bias with SI gain
 	float ptv = 0.1f / dt; // SI gain: 0.1 is stable for shattering; 0.15+ destabilizes hub_12
 	for (int i = 0; i < joint_count; i++) {
 		SolverJoint* s = &joints[i];
 		if (s->softness != 0.0f) continue;
 		BodyHot* a = &w->body_hot[s->body_a];
 		BodyHot* b = &w->body_hot[s->body_b];
-		JointInternal* j = &w->joints[s->joint_idx];
-
-		// Refresh lever arms and Jacobians from current rotations
-		for (int d = 0; d < s->dof; d++) { memset(s->rows[d].J_a, 0, 6 * sizeof(float)); memset(s->rows[d].J_b, 0, 6 * sizeof(float)); }
-
-		if (s->type == JOINT_BALL_SOCKET) {
-			s->r_a = rotate(a->rotation, j->ball_socket.local_a);
-			s->r_b = rotate(b->rotation, j->ball_socket.local_b);
-			v3 ra = s->r_a, rb = s->r_b;
-			s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
-			s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
-			s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
-			s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
-			s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
-			s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
-			for (int d = 0; d < 3; d++) s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, 0.0f);
-			v3 bias_v = scale(sub(add(b->position, s->r_b), add(a->position, s->r_a)), ptv);
-			s->bias[0] = bias_v.x; s->bias[1] = bias_v.y; s->bias[2] = bias_v.z;
-		} else if (s->type == JOINT_DISTANCE) {
-			s->r_a = rotate(a->rotation, j->distance.local_a);
-			s->r_b = rotate(b->rotation, j->distance.local_b);
-			v3 anchor_a = add(a->position, s->r_a);
-			v3 anchor_b = add(b->position, s->r_b);
-			v3 delta = sub(anchor_b, anchor_a);
-			float dist_val = len(delta);
-			v3 axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
-			v3 rxa = cross(s->r_a, axis), rxb = cross(s->r_b, axis);
-			s->rows[0].J_a[0] = -axis.x; s->rows[0].J_a[1] = -axis.y; s->rows[0].J_a[2] = -axis.z;
-			s->rows[0].J_a[3] = -rxa.x;  s->rows[0].J_a[4] = -rxa.y;  s->rows[0].J_a[5] = -rxa.z;
-			s->rows[0].J_b[0] =  axis.x; s->rows[0].J_b[1] =  axis.y; s->rows[0].J_b[2] =  axis.z;
-			s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
-			s->rows[0].eff_mass = jac_eff_mass(&s->rows[0], a, b, 0.0f);
-			s->bias[0] = ptv * (dist_val - j->distance.rest_length);
-		} else if (s->type == JOINT_HINGE) {
-			s->r_a = rotate(a->rotation, j->hinge.local_a);
-			s->r_b = rotate(b->rotation, j->hinge.local_b);
-			v3 ra = s->r_a, rb = s->r_b;
-			s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
-			s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
-			s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
-			s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
-			s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
-			s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
-			v3 axis_a = norm(rotate(a->rotation, j->hinge.local_axis_a));
-			v3 axis_b = norm(rotate(b->rotation, j->hinge.local_axis_b));
-			v3 t1, t2;
-			hinge_tangent_basis(axis_a, &t1, &t2);
-			v3 u1 = cross(t1, axis_b);
-			v3 u2 = cross(t2, axis_b);
-			s->rows[3].J_a[3] =  u1.x; s->rows[3].J_a[4] =  u1.y; s->rows[3].J_a[5] =  u1.z;
-			s->rows[3].J_b[3] = -u1.x; s->rows[3].J_b[4] = -u1.y; s->rows[3].J_b[5] = -u1.z;
-			s->rows[4].J_a[3] =  u2.x; s->rows[4].J_a[4] =  u2.y; s->rows[4].J_a[5] =  u2.z;
-			s->rows[4].J_b[3] = -u2.x; s->rows[4].J_b[4] = -u2.y; s->rows[4].J_b[5] = -u2.z;
-			for (int d = 0; d < 5; d++) s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, 0.0f);
-			v3 lin_bias = scale(sub(add(b->position, s->r_b), add(a->position, s->r_a)), ptv);
-			s->bias[0] = lin_bias.x; s->bias[1] = lin_bias.y; s->bias[2] = lin_bias.z;
-			s->bias[3] = ptv * dot(t1, axis_b);
-			s->bias[4] = ptv * dot(t2, axis_b);
-		}
+		joint_fill_rows(s, a, b, w, dt);
+		// Override bias: joint_fill_rows uses spring ptv (0 for rigid), we want SI gain
+		for (int d = 0; d < s->dof; d++) s->bias[d] = ptv * s->pos_error[d];
 	}
 
 	// PGS iterations on joints (pseudo-velocity solve)
@@ -480,15 +415,7 @@ static void joints_post_solve(WorldInternal* w, SolverJoint* joints, int count)
 {
 	for (int i = 0; i < count; i++) {
 		SolverJoint* s = &joints[i];
-		if (s->type == JOINT_BALL_SOCKET) {
-			w->joints[s->joint_idx].warm_lambda3 = V3(s->lambda[0], s->lambda[1], s->lambda[2]);
-		} else if (s->type == JOINT_DISTANCE) {
-			w->joints[s->joint_idx].warm_lambda1 = s->lambda[0];
-		} else if (s->type == JOINT_HINGE) {
-			w->joints[s->joint_idx].warm_hinge.lin = V3(s->lambda[0], s->lambda[1], s->lambda[2]);
-			w->joints[s->joint_idx].warm_hinge.ang[0] = s->lambda[3];
-			w->joints[s->joint_idx].warm_hinge.ang[1] = s->lambda[4];
-		}
+		for (int d = 0; d < s->dof; d++) w->joints[s->joint_idx].warm_lambda[d] = s->lambda[d];
 	}
 	afree(joints);
 }
