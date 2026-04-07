@@ -615,6 +615,35 @@ void world_debug_bvh(World world, BVHDebugFn fn, void* user)
 	if (w->bvh_static->root >= 0) bvh_debug_walk(w->bvh_static, w->bvh_static->root, 0, fn, user);
 }
 
+void world_debug_joints(World world, JointDebugFn fn, void* user)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int jcount = asize(w->joints);
+	for (int i = 0; i < jcount; i++) {
+		if (!split_alive(w->joint_gen, i)) continue;
+		JointInternal* j = &w->joints[i];
+		BodyHot* a = &w->body_hot[j->body_a];
+		BodyHot* b = &w->body_hot[j->body_b];
+		JointDebugInfo info = {0};
+		info.type = j->type;
+		if (j->type == JOINT_BALL_SOCKET) {
+			info.anchor_a = add(a->position, rotate(a->rotation, j->ball_socket.local_a));
+			info.anchor_b = add(b->position, rotate(b->rotation, j->ball_socket.local_b));
+			info.is_soft = j->ball_socket.spring.frequency > 0;
+		} else if (j->type == JOINT_DISTANCE) {
+			info.anchor_a = add(a->position, rotate(a->rotation, j->distance.local_a));
+			info.anchor_b = add(b->position, rotate(b->rotation, j->distance.local_b));
+			info.is_soft = j->distance.spring.frequency > 0;
+		} else if (j->type == JOINT_HINGE) {
+			info.anchor_a = add(a->position, rotate(a->rotation, j->hinge.local_a));
+			info.anchor_b = add(b->position, rotate(b->rotation, j->hinge.local_b));
+			info.axis_a = rotate(a->rotation, j->hinge.local_axis_a);
+			info.is_soft = j->hinge.spring.frequency > 0;
+		}
+		fn(info, user);
+	}
+}
+
 int world_get_contacts(World world, const Contact** out)
 {
 	WorldInternal* w = (WorldInternal*)world.id;

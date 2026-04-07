@@ -302,4 +302,16 @@ void destroy_joint(World world, Joint joint);
 typedef void (*BVHDebugFn)(v3 min, v3 max, int depth, int is_leaf, void* user);
 void world_debug_bvh(World world, BVHDebugFn fn, void* user);
 
+// Debug: iterate all joints. Calls fn with world-space anchor points.
+typedef struct JointDebugInfo
+{
+	int type;            // 0=ball_socket, 1=distance, 2=hinge
+	v3 anchor_a;     // world-space anchor on body A
+	v3 anchor_b;     // world-space anchor on body B
+	v3 axis_a;       // hinge axis in world space (hinge only)
+	int is_soft;     // 1 if spring.frequency > 0
+} JointDebugInfo;
+typedef void (*JointDebugFn)(JointDebugInfo info, void* user);
+void world_debug_joints(World world, JointDebugFn fn, void* user);
+
 #endif

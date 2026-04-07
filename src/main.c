@@ -127,7 +127,6 @@ static DrawEntry* g_draw_list; // ckit dynamic array
 typedef struct Scene {
 	const char* name;
 	void (*setup)();
-	void (*draw_extras)();
 } Scene;
 
 static int g_scene_index = 0;
@@ -168,31 +167,28 @@ static void recording_save();
 // Forward declarations
 static void setup_scene();
 static void scene_showcase_setup();
-static void scene_showcase_draw_extras();
 static void scene_pyramid_setup();
 static void scene_stacks_setup();
 static void scene_friction_setup();
 
 static void scene_mass_ratio_setup();
 static void scene_heavy_chain_setup();
-static void scene_heavy_chain_draw_extras();
 static void scene_mini_chain_setup();
 static void scene_joint_demo_setup();
 static void scene_hub_star_setup();
-static void scene_hub_star_draw_extras();
 static void scene_hull_pile_setup();
 
 static Scene g_scenes[] = {
-	{ "Shape Showcase",  scene_showcase_setup,  scene_showcase_draw_extras },
-	{ "Box Pyramid",     scene_pyramid_setup,   NULL },
-	{ "Varied Stacks",   scene_stacks_setup,    NULL },
-	{ "Friction Test",   scene_friction_setup,  NULL },
-	{ "Mass Ratio",      scene_mass_ratio_setup, NULL },
-	{ "Heavy Chain",     scene_heavy_chain_setup, scene_heavy_chain_draw_extras },
-	{ "Mini Chain",      scene_mini_chain_setup, NULL },
-	{ "Joint Demo",      scene_joint_demo_setup, NULL },
-	{ "Hub Star",        scene_hub_star_setup,  scene_hub_star_draw_extras },
-	{ "Hull Pile",       scene_hull_pile_setup,  NULL },
+	{ "Shape Showcase",  scene_showcase_setup },
+	{ "Box Pyramid",     scene_pyramid_setup },
+	{ "Varied Stacks",   scene_stacks_setup },
+	{ "Friction Test",   scene_friction_setup },
+	{ "Mass Ratio",      scene_mass_ratio_setup },
+	{ "Heavy Chain",     scene_heavy_chain_setup },
+	{ "Mini Chain",      scene_mini_chain_setup },
+	{ "Joint Demo",      scene_joint_demo_setup },
+	{ "Hub Star",        scene_hub_star_setup },
+	{ "Hull Pile",       scene_hull_pile_setup },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 
@@ -581,20 +577,6 @@ static void scene_showcase_setup()
 	apush(g_draw_list, ((DrawEntry){ g_spring_b, MESH_SPHERE, V3(0.15f, 0.15f, 0.15f), V3(0.7f, 0.7f, 0.7f) }));
 }
 
-static void scene_showcase_draw_extras()
-{
-	if (!g_show_joints) return;
-	v3 jcol = V3(1.0f, 0.4f, 0.1f);
-	for (int i = 0; i < CHAIN_LEN; i++) {
-		v3 p = body_get_position(g_world, g_chain[i]);
-		v3 above = i == 0 ? body_get_position(g_world, g_chain_anchor) : body_get_position(g_world, g_chain[i-1]);
-		render_debug_line(above, p, jcol);
-	}
-	v3 sa = body_get_position(g_world, g_spring_a);
-	v3 sb = body_get_position(g_world, g_spring_b);
-	render_debug_line(sa, sb, V3(0.1f, 0.9f, 1.0f));
-}
-
 // ---------------------------------------------------------------------------
 // Scene: Box Pyramid
 // ---------------------------------------------------------------------------
@@ -762,17 +744,6 @@ static void scene_heavy_chain_setup()
 	}
 }
 
-static void scene_heavy_chain_draw_extras()
-{
-	if (!g_show_joints) return;
-	v3 prev_pos = body_get_position(g_world, g_hchain_anchor);
-	for (int i = 0; i < HEAVY_CHAIN_LEN; i++) {
-		v3 pos = body_get_position(g_world, g_hchain[i]);
-		render_debug_line(prev_pos, pos, V3(1, 1, 0));
-		prev_pos = pos;
-	}
-}
-
 // --- Minimal Chain: static anchor + 2 dynamic bodies for debugging ---
 static Body g_mini_anchor;
 static Body g_mini_a, g_mini_b;
@@ -922,16 +893,6 @@ static void scene_hub_star_setup()
 			.local_offset_b = scale(dir, -arm_len + 0.5f),
 		});
 		apush(g_draw_list, ((DrawEntry){ g_hub_arms[i], MESH_SPHERE, V3(radius, radius, radius), color }));
-	}
-}
-
-static void scene_hub_star_draw_extras()
-{
-	if (!g_show_joints) return;
-	v3 hub_pos = body_get_position(g_world, g_hub_center);
-	for (int i = 0; i < HUB_STAR_ARMS; i++) {
-		v3 arm_pos = body_get_position(g_world, g_hub_arms[i]);
-		render_debug_line(hub_pos, arm_pos, V3(1, 1, 0));
 	}
 }
 
@@ -1892,6 +1853,25 @@ static void bvh_debug_draw_cb(v3 mn, v3 mx, int depth, int is_leaf, void* user)
 	draw_aabb_wireframe(mn, mx, col);
 }
 
+static void draw_joint_debug(JointDebugInfo info, void* user)
+{
+	(void)user;
+	v3 a = info.anchor_a, b = info.anchor_b;
+	if (info.type == JOINT_BALL_SOCKET) {
+		v3 col = info.is_soft ? V3(0.2f, 0.8f, 1.0f) : V3(1.0f, 0.6f, 0.1f);
+		render_debug_line(a, b, col);
+	} else if (info.type == JOINT_DISTANCE) {
+		v3 col = info.is_soft ? V3(0.2f, 1.0f, 0.4f) : V3(1.0f, 1.0f, 0.2f);
+		render_debug_line(a, b, col);
+	} else if (info.type == JOINT_HINGE) {
+		v3 col = V3(1.0f, 0.3f, 0.8f);
+		render_debug_line(a, b, col);
+		// Draw axis indicator
+		v3 mid = scale(add(a, b), 0.5f);
+		render_debug_line(mid, add(mid, scale(info.axis_a, 0.3f)), col);
+	}
+}
+
 void draw()
 {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -1952,8 +1932,10 @@ void draw()
 		}
 	}
 
-	// Scene-specific extras (joint lines, etc.)
-	if (g_scenes[g_scene_index].draw_extras) g_scenes[g_scene_index].draw_extras();
+	// Generic joint debug rendering
+	if (g_show_joints) {
+		world_debug_joints(g_world, draw_joint_debug, NULL);
+	}
 
 	// Mouse constraint visual
 	if (g_mouse_body.id) {
