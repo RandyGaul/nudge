@@ -88,12 +88,14 @@ static void cr_add_dof(CR_System* sys, JacobianRow jac, int ba, int bb, float so
 }
 
 // Count total DOFs for an island to pre-allocate.
-static int cr_count_island_dofs(WorldInternal* w, int island_idx, SolverManifold* sm, int sm_count, SolverContact* sc, SolverJoint* sol_joints, int joint_count)
+// contacts_only: skip joints (when LDL handles them separately).
+static int cr_count_island_dofs(WorldInternal* w, int island_idx, SolverManifold* sm, int sm_count, SolverContact* sc, SolverJoint* sol_joints, int joint_count, int contacts_only)
 {
 	Island* isl = &w->islands[island_idx];
 	int n = 0;
 
 	// Joints
+	if (!contacts_only) {
 	int ji = isl->head_joint;
 	while (ji >= 0) {
 		for (int i = 0; i < joint_count; i++) {
@@ -103,6 +105,7 @@ static int cr_count_island_dofs(WorldInternal* w, int island_idx, SolverManifold
 			}
 		}
 		ji = w->joints[ji].island_next;
+	}
 	}
 
 	// Contacts
@@ -122,7 +125,8 @@ static int cr_count_island_dofs(WorldInternal* w, int island_idx, SolverManifold
 }
 
 // Build the CR system for an island: collect joints and contacts into flat DOF arrays.
-static void cr_build_island_system(CR_System* sys, WorldInternal* w, int island_idx, SolverManifold* sm, int sm_count, SolverContact* sc, SolverJoint* sol_joints, int joint_count, int max_dofs)
+// contacts_only: skip joints (when LDL handles them separately).
+static void cr_build_island_system(CR_System* sys, WorldInternal* w, int island_idx, SolverManifold* sm, int sm_count, SolverContact* sc, SolverJoint* sol_joints, int joint_count, int max_dofs, int contacts_only)
 {
 	// Allocate all arrays at max size
 	sys->n = 0;
@@ -143,7 +147,8 @@ static void cr_build_island_system(CR_System* sys, WorldInternal* w, int island_
 	Island* isl = &w->islands[island_idx];
 	int patch = (w->friction_model == FRICTION_PATCH);
 
-	// --- Joints ---
+	// --- Joints (skipped when LDL handles them) ---
+	if (!contacts_only) {
 	int ji = isl->head_joint;
 	while (ji >= 0) {
 		for (int i = 0; i < joint_count; i++) {
@@ -155,6 +160,7 @@ static void cr_build_island_system(CR_System* sys, WorldInternal* w, int island_
 			break;
 		}
 		ji = w->joints[ji].island_next;
+	}
 	}
 
 	// --- Contacts ---
@@ -358,11 +364,11 @@ static void cr_post_clamp(CR_System* sys)
 	}
 }
 
-// --- CR solve for one island ---
-static void cr_island_solve(CR_System* sys, WorldInternal* w)
+// --- CR solve for one island. Returns iteration count. ---
+static int cr_island_solve(CR_System* sys, WorldInternal* w)
 {
 	int n = sys->n;
-	if (n == 0) return;
+	if (n == 0) return 0;
 
 	int body_count = asize(w->body_hot);
 	int max_iters = w->cr_max_iters;
@@ -579,6 +585,7 @@ static void cr_island_solve(CR_System* sys, WorldInternal* w)
 	CK_FREE(sinv);
 	CK_FREE(f_lin);
 	CK_FREE(f_ang);
+	return final_iter + 1;
 }
 
 // --- Writeback: apply delta impulses to body velocities ---
@@ -596,27 +603,32 @@ static void cr_writeback(CR_System* sys, WorldInternal* w)
 }
 
 // --- Outer driver: solve all awake islands ---
+// contacts_only: when LDL handles joints, CR only solves contact DOFs.
 static void cr_velocity_solve(WorldInternal* w,
 	SolverManifold* sm, int sm_count, SolverContact* sc,
-	SolverJoint* sol_joints, int joint_count, float sub_dt)
+	SolverJoint* sol_joints, int joint_count, float sub_dt, int contacts_only)
 {
 	(void)sub_dt;
+	int max_iters_this_solve = 0;
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {
 		if (!(w->island_gen[ii] & 1)) continue;
 		Island* isl = &w->islands[ii];
 		if (!isl->awake) continue;
 
-		int max_dofs = cr_count_island_dofs(w, ii, sm, sm_count, sc, sol_joints, joint_count);
+		int max_dofs = cr_count_island_dofs(w, ii, sm, sm_count, sc, sol_joints, joint_count, contacts_only);
 		if (max_dofs == 0) continue;
 
 		CR_System sys = {0};
-		cr_build_island_system(&sys, w, ii, sm, sm_count, sc, sol_joints, joint_count, max_dofs);
+		cr_build_island_system(&sys, w, ii, sm, sm_count, sc, sol_joints, joint_count, max_dofs, contacts_only);
 
-		cr_island_solve(&sys, w);
+		int iters = cr_island_solve(&sys, w);
+		if (iters > max_iters_this_solve) max_iters_this_solve = iters;
 		cr_post_clamp(&sys);
 		cr_writeback(&sys, w);
 
 		cr_free_system(&sys);
 	}
+	w->cr_last_iters = max_iters_this_solve;
+	if (max_iters_this_solve > w->cr_peak_iters) w->cr_peak_iters = max_iters_this_solve;
 }

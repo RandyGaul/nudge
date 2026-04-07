@@ -286,6 +286,8 @@ typedef struct WorldInternal
 	int cr_active_set_mask;  // 1 = skip inactive contacts (lambda_n=0 after PGS warmup)
 	int cr_reclamp_interval; // reclamp every N CR iterations (default 5, 0 = disable)
 	int cr_mass_scale;       // 1 = symmetric diagonal scaling to normalize mass ratios
+	int cr_last_iters;       // max CR iterations across islands in most recent solve
+	int cr_peak_iters;       // highest cr_last_iters seen (reset on scene swap)
 	// AVBD parameters
 	float avbd_alpha;        // stabilization (0.95-0.99)
 	float avbd_beta_lin;     // penalty ramp, linear constraints

@@ -421,6 +421,7 @@ static void setup_scene()
 	((WorldInternal*)g_world.id)->sleep_enabled = g_sleep_enabled;
 	((WorldInternal*)g_world.id)->ldl_enabled = g_ldl_enabled;
 	((WorldInternal*)g_world.id)->cr_enabled = g_cr_enabled;
+	((WorldInternal*)g_world.id)->cr_peak_iters = 0;
 	world_set_friction_model(g_world, (FrictionModel)g_friction_model);
 	world_set_solver_type(g_world, (SolverType)g_solver_type);
 	g_scenes[g_scene_index].setup();
@@ -624,14 +625,12 @@ void update()
 	if (g_solver_type != SOLVER_AVBD) {
 		if (ImGui_Checkbox("LDL Joints", &g_ldl_enabled)) {
 			dbg_w->ldl_enabled = g_ldl_enabled;
-			if (g_ldl_enabled) { g_cr_enabled = false; dbg_w->cr_enabled = 0; }
 		}
 		if (!g_ldl_enabled) {
 			g_ldl_inspect_island = -1;
 		}
-		if (ImGui_Checkbox("CR Solver", &g_cr_enabled)) {
+		if (ImGui_Checkbox("CR Contacts", &g_cr_enabled)) {
 			dbg_w->cr_enabled = g_cr_enabled;
-			if (g_cr_enabled) { g_ldl_enabled = false; dbg_w->ldl_enabled = 0; g_ldl_inspect_island = -1; }
 		}
 	} else {
 		g_ldl_enabled = false;
@@ -666,6 +665,8 @@ void update()
 		ImGui_Text("Islands: %d (%d sleeping)", n_islands, n_sleeping);
 	}
 	ImGui_Text("Bodies: %d", asize(g_draw_list));
+	if (g_cr_enabled)
+		ImGui_Text("CR iters: %d (peak %d)", dbg_w->cr_last_iters, dbg_w->cr_peak_iters);
 	if (g_ldl_inspect_island >= 0) {
 		ImGui_TextDisabled("Inspecting island %d", g_ldl_inspect_island);
 	} else {

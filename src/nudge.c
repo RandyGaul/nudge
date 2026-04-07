@@ -33,7 +33,7 @@ World create_world(WorldParams params)
 	w->max_push_velocity = params.max_push_velocity > 0.0f ? params.max_push_velocity : 3.0f;
 	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 4;
 	w->ldl_correction_iter = -2; // -2 = auto: velocity_iters/2 (mid-loop, PGS can recover after LDL)
-	w->cr_max_iters = 10;
+	w->cr_max_iters = 30;
 	w->cr_tolerance = 1e-6f;
 	w->cr_active_set_mask = 1;
 	w->cr_reclamp_interval = 5;
@@ -214,7 +214,7 @@ void world_step(World world, float dt)
 		if (sub > 0)
 			integrate_velocities(w, sub_dt);
 
-		int has_ldl = w->ldl_enabled && !w->cr_enabled && asize(sol_joints) > 0;
+		int has_ldl = w->ldl_enabled && asize(sol_joints) > 0;
 		int has_cr = w->cr_enabled;
 
 		// Resolve LDL correction iteration: -2 = auto (velocity_iters/2), -1 = after loop
@@ -225,6 +225,15 @@ void world_step(World world, float dt)
 		if (has_ldl)
 			ldl_factor(w, sol_joints, asize(sol_joints), sub, sub_dt);
 
+		// LDL: direct solve for joints (velocity correction).
+		// Runs before PGS/CR so joint impulses are already applied.
+		if (has_ldl) {
+			if (sub > 0) {
+				for (int i = 0; i < asize(sol_joints); i++) if (sol_joints[i].softness > 0.0f) for (int d = 0; d < sol_joints[i].dof; d++) sol_joints[i].lambda[d] = 0;
+			}
+			ldl_velocity_correct(w, sol_joints, asize(sol_joints), sub_dt);
+		}
+
 		if (has_cr) {
 			// PGS warmup: a few sweeps to stabilize the contact active set
 			// before CR takes over. PGS naturally clamps contacts and discovers
@@ -234,21 +243,18 @@ void world_step(World world, float dt)
 				for (int c = 0; c < color_count; c++)
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
 						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
-			// CR: solve all constraints (contacts + joints) per island.
-			// Body velocities and lambda values now reflect PGS warmup.
-			cr_velocity_solve(w, sm, asize(sm), sc, sol_joints, asize(sol_joints), sub_dt);
-		} else if (has_ldl) {
-			// Sub > 0: clear soft joint lambda so ACCUMULATE starts fresh
-			// (no warm-start on sub > 0). Rigid joints use SET, no clearing needed.
-			if (sub > 0) {
-				for (int i = 0; i < asize(sol_joints); i++) if (sol_joints[i].softness > 0.0f) for (int d = 0; d < sol_joints[i].dof; d++) sol_joints[i].lambda[d] = 0;
-			}
-			ldl_velocity_correct(w, sol_joints, asize(sol_joints), sub_dt);
+			// CR: when LDL is on, solve contacts only (LDL already handled joints).
+			// When LDL is off, solve everything (contacts + joints).
+			int contacts_only = has_ldl;
+			cr_velocity_solve(w, sm, asize(sm), sc, sol_joints, asize(sol_joints), sub_dt, contacts_only);
+		} else if (!has_ldl) {
+			// Plain PGS: no LDL, no CR.
 			for (int iter = 0; iter < w->velocity_iters; iter++)
 				for (int c = 0; c < color_count; c++)
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
 						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
 		} else {
+			// LDL only (no CR): PGS handles contacts, LDL already handled joints above.
 			for (int iter = 0; iter < w->velocity_iters; iter++)
 				for (int c = 0; c < color_count; c++)
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
@@ -262,7 +268,7 @@ void world_step(World world, float dt)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
 		// Position correction after integration.
-		// LDL: direct solve projects out bulk error, NGS cleans up residual.
+		// LDL: direct solve projects out bulk joint error, NGS cleans up residual.
 		if (has_ldl)
 			ldl_position_correct(w, sol_joints, asize(sol_joints), sub_dt);
 		joints_position_correct(w, sol_joints, asize(sol_joints), w->position_iters);

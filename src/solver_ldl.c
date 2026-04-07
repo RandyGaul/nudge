@@ -5,6 +5,17 @@
 // lambda = constraint impulses, b = velocity/position error. K is symmetric positive
 // definite (regularized) with block structure from the constraint graph.
 
+// Analysis: The LDL solver is extremely nice for topologically constant islands, like ragdolls,
+// cars, etc. However, for destruction, or incremental sub-island sleeping systems, the change in graph
+// connections (constraints) re-triggers the expensive symbolic phase and factorization, thrashing
+// CPU cache. So, direct solving here is just not great when constraints are more ephemeral, as LDL
+// really relies on the island topology being constant for good perf.
+//
+// It's possible to extend LDL with some brute-force SIMD solvers to handle limits on joints. This
+// can use direct enumeration, and work well for smaller numbers of limits, which is common such as
+// ragdoll setups. However, at this point, other solvers may be preferable since it starts going against
+// the crystalized-island design that makes LDL really shine.
+
 // Double-precision vector/quat types for LDL internals.
 typedef struct dv3 { double x, y, z; } dv3;
 typedef struct dquat { double x, y, z, w; } dquat;

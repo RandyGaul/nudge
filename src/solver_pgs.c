@@ -1,5 +1,10 @@
 // solver.c -- contact constraint solver
 
+// Analysis: Extremely well-studied and robust solver. Very simple, converges predictably. Has
+// trouble propogating down longer chains, and dealing with large mass ratios. However, it's just
+// so modular and well-understood it often becomes useful as a supporting algorithm in other more
+// advanced solvers, or hybrid approaches.
+
 static uint64_t body_pair_key(int a, int b)
 {
 	uint32_t lo = a < b ? a : b;
