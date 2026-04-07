@@ -1,11 +1,31 @@
 // solver_cr.c -- Conjugate Residual
 //
-// Preconditioner is identity for now. Jacobi (diagonal) gave ~1.4x improvement
-// on large uniform-mass systems (pyramid) but was neutral-to-harmful on small
-// systems. Block-diagonal caused rAz sign breakdown on high mass ratios due to
-// P^{-1}A losing positive spectrum -- would need PCG (not CR) to fix.
-// PGS sweeps at reclamp points provide coupling propagation that a diagonal PC
-// cannot, making explicit preconditioning less critical.
+// Analysis: Global Krylov solver for contact velocity constraints. Builds the full island
+// Delassus system A = J M^-1 J^T + Sigma and solves via conjugate residual with inequality
+// projection. When LDL is active, CR handles contacts only (LDL direct-solves joints).
+// When LDL is off, CR handles both contacts and joints.
+//
+// Evolution:
+//   v1: whole-island CR with warm-start and post-clamp
+//   v2: PGS warmup (3 sweeps) to discover active set before CR
+//   v3: active-set masking (skip inactive contacts from PGS warmup)
+//   v4: mid-solve reclamp every 5 iters with CR direction restart
+//
+// Failed experiments:
+//   PGS inside CR: tried as SSOR preconditioning (every iter) and at reclamp points.
+//   Both worse than plain clamping. PGS every iteration destroys conjugate directions,
+//   reducing CR to steepest descent. PGS at reclamp created larger residual bumps than
+//   simple constraint-space clamping.
+//
+//   Block-diagonal preconditioning: better spectral approximation than Jacobi, but
+//   P^-1 A lost positive spectrum on high mass ratios, breaking CR's inner product.
+//   Would need PCG to fix. Pivoted to symmetric scaling instead.
+//
+// Symmetric diagonal scaling (current approach):
+//   S = diag(1/sqrt(A_dd)) transforms system to unit diagonal: A_tilde = SAS. Algebraically
+//   identical to Jacobi preconditioning but preserves SPD (no sign breakdown). Cost: two
+//   O(n) vector scales per mat-vec. Result: 2.3-3.7x convergence improvement on pyramids
+//   (55-204 boxes), neutral on small systems.
 
 #define CR_MIN_COMPLIANCE 5e-5f
 
