@@ -1394,9 +1394,7 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 	double* pos_rhs = CK_ALLOC(n * sizeof(double));
 	double* pos_lambda = CK_ALLOC(n * sizeof(double));
 	memset(pos_rhs, 0, n * sizeof(double));
-	// LDL solves the coupled system exactly — correct 100% of position error.
-	// Unlike sequential NGS, there's no risk of overcorrection from coupled joints.
-	double beta = 1.0;
+	double beta = SOLVER_POS_BAUMGARTE;
 	double ptv = beta / sub_dt;
 
 	for (int i = 0; i < jc; i++) {
@@ -1497,10 +1495,48 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverBa
 // -----------------------------------------------------------------------------
 // Top-level entry point.
 
+// Refresh solver-struct lever arms from current body rotations.
+// Must be called before LDL factorization on substeps > 0, since integrate_positions
+// rotates bodies but joints_pre_solve only computes lever arms once per frame.
+static void ldl_refresh_lever_arms(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, SolverHinge* sol_hinge, int hinge_count)
+{
+	for (int i = 0; i < bs_count; i++) {
+		SolverBallSocket* s = &sol_bs[i];
+		s->r_a = rotate(w->body_hot[s->body_a].rotation, w->joints[s->joint_idx].ball_socket.local_a);
+		s->r_b = rotate(w->body_hot[s->body_b].rotation, w->joints[s->joint_idx].ball_socket.local_b);
+	}
+	for (int i = 0; i < dist_count; i++) {
+		SolverDistance* s = &sol_dist[i];
+		s->r_a = rotate(w->body_hot[s->body_a].rotation, w->joints[s->joint_idx].distance.local_a);
+		s->r_b = rotate(w->body_hot[s->body_b].rotation, w->joints[s->joint_idx].distance.local_b);
+		v3 anchor_a = add(w->body_hot[s->body_a].position, s->r_a);
+		v3 anchor_b = add(w->body_hot[s->body_b].position, s->r_b);
+		v3 delta = sub(anchor_b, anchor_a);
+		float d = len(delta);
+		s->axis = d > 1e-6f ? scale(delta, 1.0f / d) : V3(1, 0, 0);
+	}
+	for (int i = 0; i < hinge_count; i++) {
+		SolverHinge* s = &sol_hinge[i];
+		BodyHot* a = &w->body_hot[s->body_a];
+		BodyHot* b = &w->body_hot[s->body_b];
+		s->r_a = rotate(a->rotation, w->joints[s->joint_idx].hinge.local_a);
+		s->r_b = rotate(b->rotation, w->joints[s->joint_idx].hinge.local_b);
+		v3 axis_a = norm(rotate(a->rotation, w->joints[s->joint_idx].hinge.local_axis_a));
+		s->axis_b = norm(rotate(b->rotation, w->joints[s->joint_idx].hinge.local_axis_b));
+		hinge_tangent_basis(axis_a, &s->t1, &s->t2);
+		s->u1 = cross(s->t1, s->axis_b);
+		s->u2 = cross(s->t2, s->axis_b);
+	}
+}
+
 // Factor K for all islands (topology rebuild + numeric factorization). No solve.
 static void ldl_factor(WorldInternal* w, SolverBallSocket* sol_bs, int bs_count, SolverDistance* sol_dist, int dist_count, SolverHinge* sol_hinge, int hinge_count, int sub)
 {
 	if (bs_count == 0 && dist_count == 0 && hinge_count == 0) return;
+
+	// Refresh lever arms on substeps after the first (positions/rotations changed)
+	if (sub > 0)
+		ldl_refresh_lever_arms(w, sol_bs, bs_count, sol_dist, dist_count, sol_hinge, hinge_count);
 
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {
@@ -1555,8 +1591,8 @@ static void ldl_velocity_correct(WorldInternal* w, SolverBallSocket* sol_bs, int
 	}
 }
 
-// Mass ratio compression exponent for position correction (Roblox-style).
-// Compresses 100:1 → ~4:1 for better conditioning in position stage.
+// Mass ratio compression exponent for position correction.
+// 0.5 = sqrt compression (100:1 → 10:1). 1.0 = no compression (real masses).
 #define LDL_POS_MASS_EXP 0.5f
 
 // Position correction pass. Refactorizes K with compressed masses for better
