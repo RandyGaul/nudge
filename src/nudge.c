@@ -204,6 +204,8 @@ void world_step(World world, float dt)
 		// Soft joints get compliance regularization via their softness parameter.
 		// Do NOT add them to PGS -- double-solving causes the SET lambda from LDL
 		// to be misinterpreted by PGS's accumulate, injecting spurious impulse.
+		// TODO: joints with limits (once implemented) won't go through LDL and
+		// need to be added to PGS crefs here.
 	}
 
 	int cref_count = asize(crefs);
