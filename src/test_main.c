@@ -97,6 +97,27 @@ int main(int argc, char* argv[])
 		}
 		run_ldl_unit_tests();
 		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
+	} else if (argc > 1 && strcmp(argv[1], "--replay") == 0) {
+		// Replay a mouse_recording.bin captured with F5 in the app.
+		// Usage: nudge_tests --replay [file.bin]
+		const char* path = argc > 2 ? argv[2] : "mouse_recording.bin";
+		test_pass = 0; test_fail = 0;
+		test_replay_recording(path);
+		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
+	} else if (argc > 1 && strcmp(argv[1], "--run") == 0 && argc > 2) {
+		test_pass = 0; test_fail = 0;
+		for (int i = 2; i < argc; i++) {
+			if (strcmp(argv[i], "--bail") == 0) { test_bail = 1; continue; }
+			// Call test by name (add entries as needed)
+			if (strcmp(argv[i], "pull-down") == 0) test_ldl_pull_down_heavy_chain();
+			else if (strcmp(argv[i], "trace") == 0) test_stretched_joint_trace();
+			else if (strcmp(argv[i], "showcase-stretch") == 0) test_ldl_showcase_chain_stretch();
+			else if (strcmp(argv[i], "lift-drop") == 0) test_ldl_lift_and_drop();
+			else if (strcmp(argv[i], "heavy-chain") == 0) test_ldl_heavy_chain();
+			else if (strcmp(argv[i], "mouse-yank") == 0) test_ldl_mouse_yank_chain();
+			else printf("unknown test: %s\n", argv[i]);
+		}
+		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	} else if (argc > 1 && strcmp(argv[1], "--quick") == 0) {
 		test_ldl_stress_single_constraint();
 		test_ldl_heavy_chain();

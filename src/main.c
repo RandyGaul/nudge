@@ -146,6 +146,25 @@ static v3 g_mouse_local_hit;     // hit point in body's local space
 static float g_mouse_ray_dist;   // camera distance at pick time
 static int g_mouse_dragging;     // 1 while right-click is held (even if no body hit)
 
+// --- Mouse input recorder ---
+// Records mouse drag events per frame for deterministic test replay.
+// Toggle with F5. Saves to mouse_recording.c on stop.
+typedef struct
+{
+	int type;  // 0=step (no drag), 1=begin, 2=update, 3=end
+	int body_draw_idx;   // index into g_draw_list at pick time (-1 if none)
+	v3 local_hit;        // hit point in body-local space
+	v3 anchor_pos;       // world-space anchor position this frame
+	float ray_dist;      // camera distance at pick time
+} RecordedFrame;
+
+static CK_DYNA RecordedFrame* g_recorded_frames;
+static int g_recording;
+static int g_rec_body_draw_idx;  // draw list index of picked body
+static int g_rec_start_frame;    // world frame counter when recording started
+
+static void recording_save();
+
 // Forward declarations
 static void setup_scene();
 static void scene_showcase_setup();
@@ -157,6 +176,7 @@ static void scene_friction_setup();
 static void scene_mass_ratio_setup();
 static void scene_heavy_chain_setup();
 static void scene_heavy_chain_draw_extras();
+static void scene_mini_chain_setup();
 static void scene_hub_star_setup();
 static void scene_hub_star_draw_extras();
 static void scene_hull_pile_setup();
@@ -168,10 +188,26 @@ static Scene g_scenes[] = {
 	{ "Friction Test",   scene_friction_setup,  NULL },
 	{ "Mass Ratio",      scene_mass_ratio_setup, NULL },
 	{ "Heavy Chain",     scene_heavy_chain_setup, scene_heavy_chain_draw_extras },
+	{ "Mini Chain",      scene_mini_chain_setup, NULL },
 	{ "Hub Star",        scene_hub_star_setup,  scene_hub_star_draw_extras },
 	{ "Hull Pile",       scene_hull_pile_setup,  NULL },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
+
+static void recording_save()
+{
+	int n = asize(g_recorded_frames);
+	if (n == 0) return;
+	FILE* f = fopen("mouse_recording.bin", "wb");
+	if (!f) { printf("Failed to open mouse_recording.bin for writing\n"); return; }
+	int scene = g_scene_index;
+	fwrite(&scene, sizeof(int), 1, f);
+	fwrite(&g_rec_start_frame, sizeof(int), 1, f);
+	fwrite(&n, sizeof(int), 1, f);
+	fwrite(g_recorded_frames, sizeof(RecordedFrame), n, f);
+	fclose(f);
+	printf("Saved %d frames to mouse_recording.bin (scene=%d start_frame=%d nframes=%d)\n", n, scene, g_rec_start_frame, n);
+}
 
 // Maya-style orbit camera: yaw/pitch angles, quaternion rebuilt each frame.
 // Y-locked: up is always world (0,1,0), no roll.
@@ -735,6 +771,37 @@ static void scene_heavy_chain_draw_extras()
 		render_debug_line(prev_pos, pos, V3(1, 1, 0));
 		prev_pos = pos;
 	}
+}
+
+// --- Minimal Chain: static anchor + 2 dynamic bodies for debugging ---
+static Body g_mini_anchor;
+static Body g_mini_a, g_mini_b;
+
+static Body g_mini_c;
+
+static void scene_mini_chain_setup()
+{
+	float link_len = 0.8f;
+
+	g_mini_anchor = create_body(g_world, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(g_world, g_mini_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+
+	g_mini_a = create_body(g_world, (BodyParams){ .position = V3(link_len, 8, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(g_world, g_mini_a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+
+	g_mini_b = create_body(g_world, (BodyParams){ .position = V3(link_len * 2, 8, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(g_world, g_mini_b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+
+	g_mini_c = create_body(g_world, (BodyParams){ .position = V3(link_len * 3, 8, 0), .rotation = quat_identity(), .mass = 100.0f });
+	body_add_shape(g_world, g_mini_c, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+	create_ball_socket(g_world, (BallSocketParams){ .body_a = g_mini_anchor, .body_b = g_mini_a, .local_offset_a = V3(link_len * 0.5f, 0, 0), .local_offset_b = V3(-link_len * 0.5f, 0, 0) });
+	create_ball_socket(g_world, (BallSocketParams){ .body_a = g_mini_a, .body_b = g_mini_b, .local_offset_a = V3(link_len * 0.5f, 0, 0), .local_offset_b = V3(-link_len * 0.5f, 0, 0) });
+	create_ball_socket(g_world, (BallSocketParams){ .body_a = g_mini_b, .body_b = g_mini_c, .local_offset_a = V3(link_len * 0.5f, 0, 0), .local_offset_b = V3(-link_len * 0.5f, 0, 0) });
+
+	apush(g_draw_list, ((DrawEntry){ g_mini_a, MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.6f, 0.6f, 0.9f) }));
+	apush(g_draw_list, ((DrawEntry){ g_mini_b, MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.6f, 0.6f, 0.9f) }));
+	apush(g_draw_list, ((DrawEntry){ g_mini_c, MESH_SPHERE, V3(0.5f, 0.5f, 0.5f), V3(0.9f, 0.2f, 0.2f) }));
 }
 
 // --- Hub Star: central body with 8 radial joints (exercises body shattering) ---
@@ -1503,17 +1570,43 @@ void update()
 			if (!g_mouse_dragging) {
 				mouse_begin_drag(io->MousePos.x, io->MousePos.y);
 				g_mouse_dragging = 1;
+				if (g_recording && g_mouse_body.id) {
+					g_rec_body_draw_idx = -1;
+					for (int di = 0; di < asize(g_draw_list); di++) {
+						if (g_draw_list[di].body.id == g_mouse_body.id) { g_rec_body_draw_idx = di; break; }
+					}
+					WorldInternal* rw = (WorldInternal*)g_world.id;
+					int ai = handle_index(g_mouse_anchor);
+					RecordedFrame rf = { .type = 1, .body_draw_idx = g_rec_body_draw_idx, .local_hit = g_mouse_local_hit, .anchor_pos = rw->body_hot[ai].position, .ray_dist = g_mouse_ray_dist };
+					apush(g_recorded_frames, rf);
+				} else if (g_recording) {
+					apush(g_recorded_frames, ((RecordedFrame){ .type = 0 }));
+				}
 			} else {
 				mouse_update_drag(io->MousePos.x, io->MousePos.y);
+				if (g_recording && g_mouse_body.id) {
+					WorldInternal* rw = (WorldInternal*)g_world.id;
+					int ai = handle_index(g_mouse_anchor);
+					RecordedFrame rf = { .type = 2, .anchor_pos = rw->body_hot[ai].position };
+					apush(g_recorded_frames, rf);
+				} else if (g_recording) {
+					apush(g_recorded_frames, ((RecordedFrame){ .type = 0 }));
+				}
 			}
 		} else if (g_mouse_dragging) {
 			mouse_end_drag();
 			g_mouse_dragging = 0;
+			if (g_recording) apush(g_recorded_frames, ((RecordedFrame){ .type = 3 }));
+		} else if (g_recording) {
+			apush(g_recorded_frames, ((RecordedFrame){ .type = 0 }));
 		}
 	} else if (g_mouse_dragging) {
 		// Release if mouse moves over UI while dragging
 		mouse_end_drag();
 		g_mouse_dragging = 0;
+		if (g_recording) apush(g_recorded_frames, ((RecordedFrame){ .type = 3 }));
+	} else if (g_recording) {
+		apush(g_recorded_frames, ((RecordedFrame){ .type = 0 }));
 	}
 
 	// LDL Inspector: Ctrl+left-click picks island
@@ -1546,6 +1639,45 @@ void update()
 		}
 	}
 
+	// F5: toggle recording
+	if (ImGui_IsKeyPressedEx(ImGuiKey_F5, false)) {
+		if (!g_recording) {
+			afree(g_recorded_frames);
+			g_recorded_frames = NULL;
+			g_recording = 1;
+			g_rec_start_frame = ((WorldInternal*)g_world.id)->frame;
+			printf("[REC] Recording started (scene=%d '%s' frame=%d)\n", g_scene_index, g_scenes[g_scene_index].name, g_rec_start_frame);
+		} else {
+			g_recording = 0;
+			recording_save();
+		}
+	}
+
+	// Playback mode: drive mouse events from recording
+	static int playback_frame = 0;
+	if (g_recording == 2) {
+		int n = asize(g_recorded_frames);
+		if (playback_frame < n) {
+			RecordedFrame* rf = &g_recorded_frames[playback_frame];
+			WorldInternal* pw = (WorldInternal*)g_world.id;
+			if (rf->type == 1 && rf->body_draw_idx >= 0 && rf->body_draw_idx < asize(g_draw_list)) {
+				Body target = g_draw_list[rf->body_draw_idx].body;
+				g_mouse_anchor = create_body(g_world, (BodyParams){ .position = rf->anchor_pos, .rotation = quat_identity(), .mass = 0 });
+				g_mouse_joint = create_ball_socket(g_world, (BallSocketParams){ .body_a = g_mouse_anchor, .body_b = target, .local_offset_a = V3(0,0,0), .local_offset_b = rf->local_hit, .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+				g_mouse_body = target;
+			} else if (rf->type == 2 && g_mouse_anchor.id) {
+				pw->body_hot[handle_index(g_mouse_anchor)].position = rf->anchor_pos;
+			} else if (rf->type == 3 && g_mouse_anchor.id) {
+				mouse_end_drag();
+			}
+			playback_frame++;
+		} else {
+			g_recording = 0;
+			playback_frame = 0;
+			printf("[PLAY] done\n");
+		}
+	}
+
 	if (!g_paused || g_step_once) { world_step(g_world, 1.0f / 60.0f); g_step_once = false; }
 
 	// Debug panel
@@ -1562,6 +1694,34 @@ void update()
 	ImGui_SameLine();
 	ImGui_Checkbox("Pause", &g_paused);
 	if (g_paused) { ImGui_SameLine(); if (ImGui_Button("Step")) g_step_once = true; }
+	if (g_recording) { ImGui_SameLine(); ImGui_TextColored((ImVec4){1,0.2f,0.2f,1}, "REC %d", asize(g_recorded_frames)); }
+	if (ImGui_Button("Play Recording")) {
+		FILE* rf = fopen("mouse_recording.bin", "rb");
+		if (rf) {
+			int rec_scene, rec_start, rec_n;
+			fread(&rec_scene, sizeof(int), 1, rf);
+			fread(&rec_start, sizeof(int), 1, rf);
+			fread(&rec_n, sizeof(int), 1, rf);
+			afree(g_recorded_frames);
+			g_recorded_frames = NULL;
+			afit(g_recorded_frames, rec_n);
+			asetlen(g_recorded_frames, rec_n);
+			fread(g_recorded_frames, sizeof(RecordedFrame), rec_n, rf);
+			fclose(rf);
+			g_rec_start_frame = rec_start;
+			g_scene_index = rec_scene;
+			setup_scene();
+			// Run the exact settle frames
+			WorldInternal* pw = (WorldInternal*)g_world.id;
+			for (int i = pw->frame; i < rec_start; i++) world_step(g_world, 1.0f / 60.0f);
+			g_recording = 2; // 2 = playback mode
+			g_rec_body_draw_idx = -1;
+			playback_frame = 0;
+			printf("[PLAY] loaded %d frames, scene=%d start=%d\n", rec_n, rec_scene, rec_start);
+		} else {
+			printf("[PLAY] no mouse_recording.bin found\n");
+		}
+	}
 
 	// Resolve after scene buttons -- setup_scene() may destroy/recreate the world
 	WorldInternal* dbg_w = (WorldInternal*)g_world.id;

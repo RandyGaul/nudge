@@ -1327,17 +1327,22 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, vel_rhs, vel_lambda);
 
 
-	if (g_ldl_trace_solve && n <= 6) {
-		printf("  [TRACE] n=%d jc=%d compliance=%.4g\n", n, jc, jc > 0 && !c->constraints[0].is_synthetic ? (c->constraints[0].type == JOINT_BALL_SOCKET ? (double)sol_bs[c->constraints[0].solver_idx].softness : 0.0) : 0.0);
-		printf("  [TRACE] rhs=(%.4g, %.4g, %.4g)\n", vel_rhs[0], n>1?vel_rhs[1]:0, n>2?vel_rhs[2]:0);
-		printf("  [TRACE] lam=(%.4g, %.4g, %.4g)\n", vel_lambda[0], n>1?vel_lambda[1]:0, n>2?vel_lambda[2]:0);
-		printf("  [TRACE] D=(%.4g, %.4g, %.4g)\n", c->diag_D[0][0], c->diag_D[0][1], c->diag_D[0][2]);
-		printf("  [TRACE] K_diag=(%.4g, %.4g, %.4g)\n", c->diag_data[0][LDL_TRI(0,0)], c->diag_data[0][LDL_TRI(1,1)], c->diag_data[0][LDL_TRI(2,2)]);
-		LDL_Constraint* c0 = &c->constraints[0];
-		BodyHot* ba = &w->body_hot[c0->real_body_a];
-		BodyHot* bb = &w->body_hot[c0->real_body_b];
-		printf("  [TRACE] vel_a=(%.4g,%.4g,%.4g) vel_b=(%.4g,%.4g,%.4g)\n", ba->velocity.x, ba->velocity.y, ba->velocity.z, bb->velocity.x, bb->velocity.y, bb->velocity.z);
-		printf("  [TRACE] pos_b=(%.4g,%.4g,%.4g) rot_b=(%.4g,%.4g,%.4g,%.4g)\n", bb->position.x, bb->position.y, bb->position.z, bb->rotation.x, bb->rotation.y, bb->rotation.z, bb->rotation.w);
+	if (g_ldl_trace_solve) {
+		printf("  [TRACE] n=%d jc=%d frame=%d\n", n, jc, w->frame);
+		for (int i = 0; i < jc; i++) {
+			LDL_Constraint* con = &c->constraints[i];
+			if (con->is_synthetic) continue;
+			int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
+			printf("    joint[%d] bodies=%d-%d inv_m=%.4f/%.4f rhs=(%.2f,%.2f,%.2f) lam=(%.2f,%.2f,%.2f)\n", i, con->real_body_a, con->real_body_b, w->body_hot[con->real_body_a].inv_mass, w->body_hot[con->real_body_b].inv_mass, vel_rhs[oi], vel_rhs[oi+1], vel_rhs[oi+2], vel_lambda[oi], vel_lambda[oi+1], vel_lambda[oi+2]);
+		}
+		for (int i = 0; i < jc; i++) {
+			LDL_Constraint* con = &c->constraints[i];
+			if (con->is_synthetic) continue;
+			int ra = con->real_body_a, rb = con->real_body_b;
+			BodyHot* a = &w->body_hot[ra]; BodyHot* b = &w->body_hot[rb];
+			if (a->inv_mass > 0) printf("    body[%d] pos=(%.3f,%.3f,%.3f) vel=(%.2f,%.2f,%.2f) angvel=(%.2f,%.2f,%.2f)\n", ra, a->position.x, a->position.y, a->position.z, a->velocity.x, a->velocity.y, a->velocity.z, a->angular_velocity.x, a->angular_velocity.y, a->angular_velocity.z);
+			if (b->inv_mass > 0) printf("    body[%d] pos=(%.3f,%.3f,%.3f) vel=(%.2f,%.2f,%.2f) angvel=(%.2f,%.2f,%.2f)\n", rb, b->position.x, b->position.y, b->position.z, b->velocity.x, b->velocity.y, b->velocity.z, b->angular_velocity.x, b->angular_velocity.y, b->angular_velocity.z);
+		}
 	}
 
 	if (!ldl_validate_lambda(vel_lambda, n)) {

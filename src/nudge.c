@@ -162,7 +162,13 @@ void world_step(World world, float dt)
 	SolverHinge*       sol_hinge = NULL;
 	joints_pre_solve(w, sub_dt, &sol_bs, &sol_dist, &sol_hinge);
 
-	// Always warm-start joints (LDL needs warm-started lambda for residual computation).
+	// LDL is a direct solver -- rigid joints don't need warm-start. Stale
+	// warm-start impulses inject energy when lever arms rotate between frames.
+	if (w->ldl_enabled) {
+		for (int i = 0; i < asize(sol_bs); i++) if (sol_bs[i].softness == 0.0f) sol_bs[i].lambda = V3(0, 0, 0);
+		for (int i = 0; i < asize(sol_dist); i++) if (sol_dist[i].softness == 0.0f) sol_dist[i].lambda = 0;
+		for (int i = 0; i < asize(sol_hinge); i++) if (sol_hinge[i].softness == 0.0f) { sol_hinge[i].lin_lambda = V3(0, 0, 0); sol_hinge[i].ang_lambda[0] = 0; sol_hinge[i].ang_lambda[1] = 0; }
+	}
 	joints_warm_start(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge));
 
 	// --- Graph color (once per frame) ---

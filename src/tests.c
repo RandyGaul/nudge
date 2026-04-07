@@ -2919,6 +2919,207 @@ static void test_ldl_mouse_yank_chain()
 	destroy_world(w);
 }
 
+// Lift heavy ball UP with mouse, release, let gravity slam it past the chain's
+// full extension. The ball overshoots because of momentum + gravity, stretching
+// every ball socket well beyond its offset. The chain must recover without
+// violent shaking.
+static void test_ldl_pull_down_heavy_chain()
+{
+	int chain_len = 10;
+	float link_len = 0.8f;
+	v3 off_a = V3(0, -link_len * 0.5f, 0);
+	v3 off_b = V3(0,  link_len * 0.5f, 0);
+
+	float gravities[] = { -9.81f, -30.0f, -60.0f };
+	for (int gi = 0; gi < 3; gi++) {
+	for (int mode = 0; mode < 2; mode++) {
+		int use_ldl = (mode == 0);
+		float grav = gravities[gi];
+		World w = create_world((WorldParams){ .gravity = V3(0, grav, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = use_ldl;
+
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+		Body chain[10];
+		Body prev = anchor;
+		for (int i = 0; i < chain_len; i++) {
+			float mass = (i == chain_len - 1) ? 100.0f : 1.0f;
+			chain[i] = create_body(w, (BodyParams){ .position = V3(0, 10 - (i + 1) * link_len, 0), .rotation = quat_identity(), .mass = mass });
+			body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+			prev = chain[i];
+		}
+
+		step_n(w, 120);
+		v3 ball_pos = body_get_position(w, chain[chain_len - 1]);
+
+		// Phase 1: Lift heavy ball UP with mouse, then fling it down
+		Body mouse_anchor = create_body(w, (BodyParams){ .position = ball_pos, .rotation = quat_identity(), .mass = 0 });
+		Joint mouse_joint = create_ball_socket(w, (BallSocketParams){
+			.body_a = mouse_anchor, .body_b = chain[chain_len - 1],
+			.local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0),
+			.spring = { .frequency = 5.0f, .damping_ratio = 0.7f },
+		});
+		int anchor_idx = handle_index(mouse_anchor);
+		int nan_frame = -1;
+		// Lift up for 30 frames
+		for (int f = 0; f < 30; f++) {
+			float t = (float)(f + 1) / 30.0f;
+			wi->body_hot[anchor_idx].position = V3(0, ball_pos.y + 4.0f * t, 0);
+			world_step(w, 1.0f / 60.0f);
+		}
+		// Fling down for 15 frames (mouse yanks downward fast)
+		v3 top = wi->body_hot[anchor_idx].position;
+		for (int f = 0; f < 15; f++) {
+			float t = (float)(f + 1) / 15.0f;
+			wi->body_hot[anchor_idx].position = V3(0, top.y - 10.0f * t, 0);
+			world_step(w, 1.0f / 60.0f);
+		}
+
+		// Phase 2: Release -- ball has downward velocity + gravity
+		destroy_joint(w, mouse_joint);
+		destroy_body(w, mouse_anchor);
+
+		// Phase 3: Measure recovery for 10 seconds
+		float max_speed = 0;
+		float speed_at_3s = 0, speed_at_5s = 0, speed_at_10s = 0;
+		int logged = 0;
+		for (int f = 0; f < 600 && nan_frame < 0; f++) {
+			world_step(w, 1.0f / 60.0f);
+			float frame_speed = 0;
+			int worst_body = 0;
+			for (int i = 0; i < chain_len; i++) {
+				v3 v = wi->body_hot[handle_index(chain[i])].velocity;
+				if (!(v.x == v.x)) { nan_frame = f; break; }
+				float speed = len(v);
+				if (speed > max_speed) max_speed = speed;
+				if (speed > frame_speed) { frame_speed = speed; worst_body = i; }
+			}
+			if (f == 179) speed_at_3s = frame_speed;
+			if (f == 299) speed_at_5s = frame_speed;
+			if (f == 599) speed_at_10s = frame_speed;
+			// Dump detailed state on first few high-speed frames
+			if (use_ldl && frame_speed > 2.0f && logged < 5) {
+				logged++;
+				printf("    FRAME %d (t=%.2fs) max_speed=%.2f body=%d\n", f, f/60.0f, frame_speed, worst_body);
+				for (int i = 0; i < chain_len; i++) {
+					int bi = handle_index(chain[i]);
+					v3 p = wi->body_hot[bi].position;
+					v3 v = wi->body_hot[bi].velocity;
+					v3 av = wi->body_hot[bi].angular_velocity;
+					printf("      body[%d] pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f) angvel=(%.3f,%.3f,%.3f)\n", i, p.x, p.y, p.z, v.x, v.y, v.z, av.x, av.y, av.z);
+				}
+				// Joint gaps
+				Body p2 = anchor;
+				for (int i = 0; i < chain_len; i++) {
+					float gap = anchor_distance(w, p2, off_a, chain[i], off_b);
+					printf("      joint[%d] gap=%.4f\n", i, gap);
+					p2 = chain[i];
+				}
+			}
+		}
+
+		float min_y = 1000;
+		for (int i = 0; i < chain_len; i++) {
+			v3 p = body_get_position(w, chain[i]);
+			if (p.y < min_y) min_y = p.y;
+		}
+
+		printf("  [lift-release %s g=%.0f] nan=%d max=%.1f @3s=%.2f @5s=%.2f @10s=%.2f min_y=%.1f\n",
+			use_ldl ? "LDL" : "PGS", grav, nan_frame, max_speed, speed_at_3s, speed_at_5s, speed_at_10s, min_y);
+
+		if (use_ldl) {
+			TEST_BEGIN("LDL lift-release: no NaN");
+			TEST_ASSERT(nan_frame < 0);
+			TEST_BEGIN("LDL lift-release: settles by 5s (speed < 5)");
+			TEST_ASSERT(speed_at_5s < 5.0f);
+		}
+
+		destroy_world(w);
+	}
+	}
+}
+
+// Showcase-style light chain: 5 uniform 0.5kg links. Pull one end sideways
+// to stretch ball sockets past their offset lengths. Tests for flailing.
+static void test_ldl_showcase_chain_stretch()
+{
+	int chain_len = 5;
+	float link_len = 1.0f;
+	v3 off_a = V3(link_len * 0.5f, 0, 0);
+	v3 off_b = V3(-link_len * 0.5f, 0, 0);
+
+	for (int mode = 0; mode < 2; mode++) {
+		int use_ldl = (mode == 0);
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = use_ldl;
+
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+		Body chain[5];
+		Body prev = anchor;
+		for (int i = 0; i < chain_len; i++) {
+			chain[i] = create_body(w, (BodyParams){ .position = V3((i + 1) * link_len, 8, 0), .rotation = quat_identity(), .mass = 0.5f });
+			body_add_shape(w, chain[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i], .local_offset_a = off_a, .local_offset_b = off_b });
+			prev = chain[i];
+		}
+
+		step_n(w, 120);
+		v3 tip = body_get_position(w, chain[chain_len - 1]);
+
+		// Grab tip and yank it far sideways+down (stretching well past offsets)
+		Body mouse_anchor = create_body(w, (BodyParams){ .position = tip, .rotation = quat_identity(), .mass = 0 });
+		Joint mouse_joint = create_ball_socket(w, (BallSocketParams){
+			.body_a = mouse_anchor, .body_b = chain[chain_len - 1],
+			.local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0),
+			.spring = { .frequency = 5.0f, .damping_ratio = 0.7f },
+		});
+		int anchor_idx = handle_index(mouse_anchor);
+
+		// Yank sideways fast (stretch ~8m in 10 frames — very aggressive)
+		for (int f = 0; f < 10; f++) {
+			float t = (float)(f + 1) / 10.0f;
+			wi->body_hot[anchor_idx].position = V3(tip.x + 8.0f * t, tip.y - 5.0f * t, 0);
+			world_step(w, 1.0f / 60.0f);
+		}
+
+		// Hold stretched and measure flailing for 5 seconds
+		v3 hold = V3(tip.x + 8.0f, tip.y - 5.0f, 0);
+		float max_speed = 0;
+		int nan_frame = -1;
+		for (int f = 0; f < 300; f++) {
+			wi->body_hot[anchor_idx].position = hold;
+			world_step(w, 1.0f / 60.0f);
+			for (int i = 0; i < chain_len; i++) {
+				v3 v = wi->body_hot[handle_index(chain[i])].velocity;
+				v3 av = wi->body_hot[handle_index(chain[i])].angular_velocity;
+				if (!(v.x == v.x)) { nan_frame = f; break; }
+				float speed = len(v) + len(av);
+				if (speed > max_speed) max_speed = speed;
+			}
+			if (nan_frame >= 0) break;
+		}
+
+		printf("  [showcase-stretch %s] nan=%d hold_max_speed=%.2f\n",
+			use_ldl ? "LDL" : "PGS", nan_frame, max_speed);
+
+		destroy_joint(w, mouse_joint);
+		destroy_body(w, mouse_anchor);
+
+		if (use_ldl) {
+			TEST_BEGIN("LDL showcase stretch: no NaN");
+			TEST_ASSERT(nan_frame < 0);
+		}
+
+		destroy_world(w);
+	}
+}
+
 // Vertical heavy chain drop: chain starts vertical with heavy ball at bottom.
 // Tests that LDL handles the extreme mass-ratio stress when gravity is aligned
 // with the chain axis. The user reported this causes NaN divergence.
@@ -7347,6 +7548,8 @@ static void run_solver_tests()
 	test_ldl_heavy_chain();
 	test_ldl_lift_and_drop();
 	test_ldl_mouse_yank_chain();
+	test_ldl_pull_down_heavy_chain();
+	test_ldl_showcase_chain_stretch();
 	test_ldl_vertical_heavy_chain_drop();
 	test_ldl_two_independent_chains();
 	test_ldl_topology_change();
@@ -9401,6 +9604,232 @@ static void run_ldl_stress_tests()
 	test_ldl_stress_constraint_loop();
 	test_ldl_stress_stretched_recovery();
 	test_ldl_stress_heavy_stretched_recovery();
+}
+
+// Minimal stretched joint diagnostic: static anchor + one heavy body connected
+// by a ball socket, displaced beyond the offset length. Traces per-frame
+// position/velocity to compare LDL vs PGS recovery behavior.
+static void test_stretched_joint_trace()
+{
+	float link_len = 0.8f;
+	v3 off_a = V3(0, -link_len * 0.5f, 0);
+	v3 off_b = V3(0,  link_len * 0.5f, 0);
+
+	// Test chains of increasing length to find where oscillation starts
+	int chain_lengths[] = { 1, 2, 3, 5, 10 };
+	for (int ci = 0; ci < 5; ci++) {
+	int chain_len = chain_lengths[ci];
+	for (int mode = 0; mode < 2; mode++) {
+		int use_ldl = (mode == 0);
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = use_ldl;
+
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+		// Build chain: N-1 light links + 1 heavy ball, all stretched 2x natural spacing
+		Body bodies[10];
+		Body prev = anchor;
+		for (int i = 0; i < chain_len; i++) {
+			int last = (i == chain_len - 1);
+			float mass = last ? 100.0f : 1.0f;
+			// Natural spacing = 0.8m, place at 2x = 1.6m apart (stretched)
+			bodies[i] = create_body(w, (BodyParams){ .position = V3(0, 10 - (i + 1) * 1.6f, 0), .rotation = quat_identity(), .mass = mass });
+			body_add_shape(w, bodies[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = bodies[i], .local_offset_a = off_a, .local_offset_b = off_b });
+			prev = bodies[i];
+		}
+
+		// Trace first 15 frames
+		float max_speed = 0;
+		for (int f = 0; f < 15; f++) {
+			world_step(w, 1.0f / 60.0f);
+			float frame_speed = 0;
+			for (int i = 0; i < chain_len; i++) {
+				v3 v = wi->body_hot[handle_index(bodies[i])].velocity;
+				float s = len(v);
+				if (s > frame_speed) frame_speed = s;
+				if (s > max_speed) max_speed = s;
+			}
+			int bi = handle_index(bodies[chain_len - 1]);
+			v3 p = wi->body_hot[bi].position;
+			if (f < 5 || frame_speed > 10.0f)
+				printf("  [trace %s n=%d] f=%d ball_y=%.3f speed=%.2f max=%.2f\n", use_ldl ? "LDL" : "PGS", chain_len, f, p.y, frame_speed, max_speed);
+		}
+		printf("  [trace %s n=%d] FINAL max_speed=%.2f\n", use_ldl ? "LDL" : "PGS", chain_len, max_speed);
+		destroy_world(w);
+	}
+	}
+}
+
+// --- Mouse recording replay ---
+// Reads a binary recording from the app (F5 to toggle) and replays it
+// deterministically, measuring velocities and joint gaps.
+
+typedef struct
+{
+	int type;  // 0=step (no drag), 1=begin, 2=update, 3=end
+	int body_draw_idx;
+	v3 local_hit;
+	v3 anchor_pos;
+	float ray_dist;
+} RecordedFrame;
+
+// Scene 5 = Heavy Chain (must match g_scenes[] in main.c)
+static void replay_setup_heavy_chain(World w, Body* bodies, int* body_count)
+{
+	float link_len = 0.8f;
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	bodies[0] = anchor;
+	int n = 1;
+	Body prev = anchor;
+	for (int i = 0; i < 10; i++) {
+		int last = (i == 9);
+		float mass = last ? 100.0f : 1.0f;
+		float radius = last ? 0.5f : 0.15f;
+		bodies[n] = create_body(w, (BodyParams){ .position = V3((i + 1) * link_len, 10, 0), .rotation = quat_identity(), .mass = mass });
+		body_add_shape(w, bodies[n], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = radius });
+		create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = bodies[n], .local_offset_a = V3(link_len * 0.5f, 0, 0), .local_offset_b = V3(-link_len * 0.5f, 0, 0) });
+		prev = bodies[n];
+		n++;
+	}
+	*body_count = n;
+}
+
+static void test_replay_recording(const char* path)
+{
+	FILE* f = fopen(path, "rb");
+	if (!f) { printf("Cannot open %s\n", path); return; }
+	int scene, start_frame, nframes;
+	fread(&scene, sizeof(int), 1, f);
+	fread(&start_frame, sizeof(int), 1, f);
+	fread(&nframes, sizeof(int), 1, f);
+	RecordedFrame* frames = (RecordedFrame*)malloc(nframes * sizeof(RecordedFrame));
+	fread(frames, sizeof(RecordedFrame), nframes, f);
+	fclose(f);
+	printf("[replay] loaded %d frames, scene=%d, start_frame=%d\n", nframes, scene, start_frame);
+
+	for (int mode = 0; mode < 2; mode++) {
+		int use_ldl = (mode == 0);
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->ldl_enabled = use_ldl;
+
+		Body bodies[64];
+		int body_count = 0;
+		if (scene == 5) replay_setup_heavy_chain(w, bodies, &body_count);
+		else if (scene == 6) {
+			// Mini Chain: anchor + 1kg + 1kg + 100kg
+			float ll = 0.8f;
+			bodies[0] = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 0 });
+			body_add_shape(w, bodies[0], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			bodies[1] = create_body(w, (BodyParams){ .position = V3(ll, 8, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, bodies[1], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+			bodies[2] = create_body(w, (BodyParams){ .position = V3(ll*2, 8, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, bodies[2], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+			bodies[3] = create_body(w, (BodyParams){ .position = V3(ll*3, 8, 0), .rotation = quat_identity(), .mass = 100.0f });
+			body_add_shape(w, bodies[3], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+			create_ball_socket(w, (BallSocketParams){ .body_a = bodies[0], .body_b = bodies[1], .local_offset_a = V3(ll*0.5f,0,0), .local_offset_b = V3(-ll*0.5f,0,0) });
+			create_ball_socket(w, (BallSocketParams){ .body_a = bodies[1], .body_b = bodies[2], .local_offset_a = V3(ll*0.5f,0,0), .local_offset_b = V3(-ll*0.5f,0,0) });
+			create_ball_socket(w, (BallSocketParams){ .body_a = bodies[2], .body_b = bodies[3], .local_offset_a = V3(ll*0.5f,0,0), .local_offset_b = V3(-ll*0.5f,0,0) });
+			body_count = 4;
+		}
+		else { printf("[replay] unsupported scene %d\n", scene); free(frames); destroy_world(w); return; }
+
+		// Run exact same number of frames the app ran before recording started
+		step_n(w, start_frame);
+
+		Body mouse_anchor = {0};
+		Joint mouse_joint = {0};
+		float max_speed = 0;
+		int nan_frame = -1;
+
+		for (int fi = 0; fi < nframes && nan_frame < 0; fi++) {
+			RecordedFrame* rf = &frames[fi];
+
+			if (rf->type == 1) {
+				// Begin drag
+				int bi = rf->body_draw_idx;
+				if (bi >= 0 && bi < body_count) {
+					v3 pos = body_get_position(w, bodies[bi]);
+					mouse_anchor = create_body(w, (BodyParams){ .position = rf->anchor_pos, .rotation = quat_identity(), .mass = 0 });
+					mouse_joint = create_ball_socket(w, (BallSocketParams){
+						.body_a = mouse_anchor, .body_b = bodies[bi],
+						.local_offset_a = V3(0,0,0), .local_offset_b = rf->local_hit,
+						.spring = { .frequency = 5.0f, .damping_ratio = 0.7f },
+					});
+				}
+			} else if (rf->type == 2 && mouse_anchor.id) {
+				// Update drag
+				wi->body_hot[handle_index(mouse_anchor)].position = rf->anchor_pos;
+			} else if (rf->type == 3 && mouse_anchor.id) {
+				// End drag
+				destroy_joint(w, mouse_joint);
+				destroy_body(w, mouse_anchor);
+				mouse_anchor = (Body){0};
+				mouse_joint = (Joint){0};
+			}
+
+			// Enable per-substep trace around the explosion frame
+			extern int g_ldl_trace_solve;
+			g_ldl_trace_solve = (use_ldl && fi >= 136 && fi <= 139) ? 1 : 0;
+
+			world_step(w, 1.0f / 60.0f);
+
+			g_ldl_trace_solve = 0;
+
+			// Measure max speed across all bodies
+			for (int i = 0; i < body_count; i++) {
+				int idx = handle_index(bodies[i]);
+				if (wi->body_hot[idx].inv_mass == 0.0f) continue;
+				v3 v = wi->body_hot[idx].velocity;
+				v3 av = wi->body_hot[idx].angular_velocity;
+				if (!(v.x == v.x)) { nan_frame = fi; break; }
+				float speed = len(v) + len(av);
+				if (speed > max_speed) max_speed = speed;
+			}
+
+			// Log every frame when speed is high, otherwise every second
+			float frame_speed = 0;
+			int worst_body = -1;
+			for (int i = 0; i < body_count; i++) {
+				int idx = handle_index(bodies[i]);
+				if (wi->body_hot[idx].inv_mass == 0.0f) continue;
+				v3 v = wi->body_hot[idx].velocity;
+				float s = len(v);
+				if (s > frame_speed) { frame_speed = s; worst_body = i; }
+			}
+			int should_log = (fi % 60 == 59 || fi == nframes - 1);
+			if (use_ldl && frame_speed > 50.0f && fi > 0) should_log = 1;
+			if (should_log) {
+				printf("  [replay %s] f=%d type=%d speed=%.1f body=%d max=%.1f\n", use_ldl ? "LDL" : "PGS", fi, frames[fi].type, frame_speed, worst_body, max_speed);
+				if (use_ldl && frame_speed > 50.0f) {
+					// Dump all body velocities and joint gaps
+					for (int i = 0; i < body_count; i++) {
+						int idx = handle_index(bodies[i]);
+						if (wi->body_hot[idx].inv_mass == 0.0f) continue;
+						v3 p = wi->body_hot[idx].position;
+						v3 v = wi->body_hot[idx].velocity;
+						printf("    b[%d] p=(%.2f,%.2f,%.2f) v=(%.2f,%.2f,%.2f) |v|=%.2f\n", i, p.x, p.y, p.z, v.x, v.y, v.z, len(v));
+					}
+				}
+			}
+		}
+
+		// Cleanup
+		if (mouse_anchor.id) { destroy_joint(w, mouse_joint); destroy_body(w, mouse_anchor); }
+
+		printf("  [replay %s] DONE nan=%d max_speed=%.2f\n", use_ldl ? "LDL" : "PGS", nan_frame, max_speed);
+		if (use_ldl) {
+			TEST_BEGIN("replay LDL: no NaN");
+			TEST_ASSERT(nan_frame < 0);
+		}
+
+		destroy_world(w);
+	}
+	free(frames);
 }
 
 static void run_tests()
