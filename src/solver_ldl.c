@@ -1312,8 +1312,20 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 						v3 bb = s->bias; bias = d == 0 ? bb.x : d == 1 ? bb.y : bb.z;
 					}
 				} else if (con->type == JOINT_DISTANCE) {
-					lam = sol_dist[con->solver_idx].lambda;
-					bias = sol_dist[con->solver_idx].bias;
+					SolverDistance* sd = &sol_dist[con->solver_idx];
+					lam = sd->lambda;
+					if (sd->softness > 0.0f) {
+						v3 ra = rotate(a->rotation, w->joints[sd->joint_idx].distance.local_a);
+						v3 rb = rotate(b->rotation, w->joints[sd->joint_idx].distance.local_b);
+						v3 delta = sub(add(b->position, rb), add(a->position, ra));
+						float dist_val = len(delta);
+						float err = dist_val - w->joints[sd->joint_idx].distance.rest_length;
+						float ptv_f, soft_f;
+						spring_compute(w->joints[sd->joint_idx].distance.spring, sub_dt, &ptv_f, &soft_f);
+						bias = -ptv_f * err;
+					} else {
+						bias = sd->bias;
+					}
 				} else {
 					SolverHinge* sh = &sol_hinge[con->solver_idx];
 					if (d < 3) { lam = d == 0 ? sh->lin_lambda.x : d == 1 ? sh->lin_lambda.y : sh->lin_lambda.z; bias = d == 0 ? sh->lin_bias.x : d == 1 ? sh->lin_bias.y : sh->lin_bias.z; }
