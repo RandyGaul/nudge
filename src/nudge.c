@@ -200,28 +200,10 @@ void world_step(World world, float dt)
 			apush(crefs, r);
 		}
 	} else {
-		// LDL enabled: only soft spring joints go into PGS
-		for (int i = 0; i < asize(sol_bs); i++) {
-			if (sol_bs[i].softness > 0.0f) {
-				ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
-					.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
-				apush(crefs, r);
-			}
-		}
-		for (int i = 0; i < asize(sol_dist); i++) {
-			if (sol_dist[i].softness > 0.0f) {
-				ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
-					.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
-				apush(crefs, r);
-			}
-		}
-		for (int i = 0; i < asize(sol_hinge); i++) {
-			if (sol_hinge[i].softness > 0.0f) {
-				ConstraintRef r = { .type = CTYPE_HINGE, .index = i,
-					.body_a = sol_hinge[i].body_a, .body_b = sol_hinge[i].body_b };
-				apush(crefs, r);
-			}
-		}
+		// LDL enabled: LDL handles ALL joints (rigid + soft) in a coupled solve.
+		// Soft joints get compliance regularization via their softness parameter.
+		// Do NOT add them to PGS -- double-solving causes the SET lambda from LDL
+		// to be misinterpreted by PGS's accumulate, injecting spurious impulse.
 	}
 
 	int cref_count = asize(crefs);
@@ -249,7 +231,13 @@ void world_step(World world, float dt)
 			ldl_factor(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub);
 
 		if (has_ldl) {
-			// LDL primary: solve joints first, then PGS on contacts
+			// Sub > 0: clear soft joint lambda so ACCUMULATE starts fresh
+			// (no warm-start on sub > 0). Rigid joints use SET, no clearing needed.
+			if (sub > 0) {
+				for (int i = 0; i < asize(sol_bs); i++) if (sol_bs[i].softness > 0.0f) sol_bs[i].lambda = V3(0, 0, 0);
+				for (int i = 0; i < asize(sol_dist); i++) if (sol_dist[i].softness > 0.0f) sol_dist[i].lambda = 0;
+				for (int i = 0; i < asize(sol_hinge); i++) if (sol_hinge[i].softness > 0.0f) { sol_hinge[i].lin_lambda = V3(0, 0, 0); sol_hinge[i].ang_lambda[0] = 0; sol_hinge[i].ang_lambda[1] = 0; }
+			}
 			ldl_velocity_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub_dt);
 			for (int iter = 0; iter < w->velocity_iters; iter++)
 				for (int c = 0; c < color_count; c++)

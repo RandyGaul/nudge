@@ -1371,15 +1371,22 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 		else { real_a = sol_hinge[con->solver_idx].body_a; real_b = sol_hinge[con->solver_idx].body_b; }
 		ldl_apply_jacobian_impulse(jac, con->dof, &vel_lambda[oi], &w->body_hot[real_a], 0);
 		ldl_apply_jacobian_impulse(jac, con->dof, &vel_lambda[oi], &w->body_hot[real_b], 1);
-		// LDL primary mode: vel_lambda is the full impulse, not a delta. SET lambda.
+		// Rigid joints: SET lambda (no warm-start, so vel_lambda is the total).
+		// Soft joints: ACCUMULATE (warm + delta = total). SET would lose the
+		// warm-start contribution, causing frame-to-frame oscillation.
 		if (con->type == JOINT_BALL_SOCKET) {
-			sol_bs[con->solver_idx].lambda = V3((float)vel_lambda[oi], (float)vel_lambda[oi+1], (float)vel_lambda[oi+2]);
+			float soft = sol_bs[con->solver_idx].softness;
+			v3 lam = V3((float)vel_lambda[oi], (float)vel_lambda[oi+1], (float)vel_lambda[oi+2]);
+			sol_bs[con->solver_idx].lambda = soft > 0.0f ? add(sol_bs[con->solver_idx].lambda, lam) : lam;
 		} else if (con->type == JOINT_DISTANCE) {
-			sol_dist[con->solver_idx].lambda = (float)vel_lambda[oi];
+			float soft = sol_dist[con->solver_idx].softness;
+			sol_dist[con->solver_idx].lambda = soft > 0.0f ? sol_dist[con->solver_idx].lambda + (float)vel_lambda[oi] : (float)vel_lambda[oi];
 		} else {
-			sol_hinge[con->solver_idx].lin_lambda = V3((float)vel_lambda[oi], (float)vel_lambda[oi+1], (float)vel_lambda[oi+2]);
-			sol_hinge[con->solver_idx].ang_lambda[0] = (float)vel_lambda[oi+3];
-			sol_hinge[con->solver_idx].ang_lambda[1] = (float)vel_lambda[oi+4];
+			float soft = sol_hinge[con->solver_idx].softness;
+			v3 lam = V3((float)vel_lambda[oi], (float)vel_lambda[oi+1], (float)vel_lambda[oi+2]);
+			sol_hinge[con->solver_idx].lin_lambda = soft > 0.0f ? add(sol_hinge[con->solver_idx].lin_lambda, lam) : lam;
+			if (soft > 0.0f) { sol_hinge[con->solver_idx].ang_lambda[0] += (float)vel_lambda[oi+3]; sol_hinge[con->solver_idx].ang_lambda[1] += (float)vel_lambda[oi+4]; }
+			else { sol_hinge[con->solver_idx].ang_lambda[0] = (float)vel_lambda[oi+3]; sol_hinge[con->solver_idx].ang_lambda[1] = (float)vel_lambda[oi+4]; }
 		}
 	}
 
