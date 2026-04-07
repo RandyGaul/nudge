@@ -122,12 +122,8 @@ typedef struct SoftTestWorld
 	int body_count;
 	JointInternal joints[16];
 	int joint_count;
-	SolverBallSocket sol_bs[16];
-	int bs_count;
-	SolverDistance sol_dist[16];
-	int dist_count;
-	SolverHinge sol_hinge[16];
-	int hinge_count;
+	SolverJoint sol_joints[16];
+	int sol_joint_count;
 } SoftTestWorld;
 
 static WorldInternal* soft_test_make_world(SoftTestWorld* sw)
@@ -164,6 +160,7 @@ static void test_soft_spring_pulls_together()
 	sw.bodies[1].position = V3(3, 0, 0);
 
 	sw.joint_count = 1;
+	sw.sol_joint_count = 1;
 	sw.joints[0] = (JointInternal){
 		.type = JOINT_BALL_SOCKET,
 		.body_a = 0, .body_b = 1,
@@ -174,15 +171,16 @@ static void test_soft_spring_pulls_together()
 	float ptv, soft;
 	spring_compute(sw.joints[0].ball_socket.spring, sub_dt, &ptv, &soft);
 
-	sw.bs_count = 1;
-	sw.sol_bs[0] = (SolverBallSocket){
+	sw.joint_count = 1;
+	sw.sol_joint_count = 1;
+	sw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3,
 		.body_a = 0, .body_b = 1,
 		.r_a = V3(0,0,0), .r_b = V3(0,0,0),
 		.softness = soft,
-		.bias = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv), // error * ptv
-		.lambda = V3(0,0,0),
+		 // error * ptv
 		.joint_idx = 0,
 	};
+	{ v3 _b = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
 
 	LDL_Cache c = {0};
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .real_body_a = 0, .real_body_b = 1, .weight_a = 1, .weight_b = 1, .solver_idx = 0 };
@@ -193,8 +191,8 @@ static void test_soft_spring_pulls_together()
 
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_bs, sw.sol_dist, sw.sol_hinge);
-	ldl_island_solve(&c, w, sw.sol_bs, sw.bs_count, sw.sol_dist, sw.dist_count, sw.sol_hinge, sw.hinge_count, sub_dt);
+	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// After solve: body A should have gained +X velocity, body B should have gained -X velocity.
 	// Both moving toward each other = spring pulling.
@@ -222,6 +220,7 @@ static void test_soft_spring_no_overshoot()
 	sw.bodies[1].position = V3(1, 0, 0); // 1 unit separation
 
 	sw.joint_count = 1;
+	sw.sol_joint_count = 1;
 	sw.joints[0] = (JointInternal){
 		.type = JOINT_BALL_SOCKET,
 		.body_a = 0, .body_b = 1,
@@ -232,15 +231,16 @@ static void test_soft_spring_no_overshoot()
 	float ptv, soft;
 	spring_compute(sw.joints[0].ball_socket.spring, sub_dt, &ptv, &soft);
 
-	sw.bs_count = 1;
-	sw.sol_bs[0] = (SolverBallSocket){
+	sw.joint_count = 1;
+	sw.sol_joint_count = 1;
+	sw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3,
 		.body_a = 0, .body_b = 1,
 		.r_a = V3(0,0,0), .r_b = V3(0,0,0),
 		.softness = soft,
-		.bias = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv),
-		.lambda = V3(0,0,0),
+		
 		.joint_idx = 0,
 	};
+	{ v3 _b = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
 
 	LDL_Cache c = {0};
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .real_body_a = 0, .real_body_b = 1, .weight_a = 1, .weight_b = 1, .solver_idx = 0 };
@@ -250,8 +250,8 @@ static void test_soft_spring_no_overshoot()
 	WorldInternal* w = soft_test_make_world(&sw);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_bs, sw.sol_dist, sw.sol_hinge);
-	ldl_island_solve(&c, w, sw.sol_bs, sw.bs_count, sw.sol_dist, sw.dist_count, sw.sol_hinge, sw.hinge_count, sub_dt);
+	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// Velocity should be moderate -- not shooting off. At sub_dt = 1/240,
 	// even aggressive correction shouldn't exceed a few m/s for 1m separation.
@@ -279,6 +279,7 @@ static void test_soft_spring_heavy_light()
 	sw.bodies[1].position = V3(2, 0, 0);
 
 	sw.joint_count = 1;
+	sw.sol_joint_count = 1;
 	sw.joints[0] = (JointInternal){
 		.type = JOINT_BALL_SOCKET,
 		.body_a = 0, .body_b = 1,
@@ -289,15 +290,16 @@ static void test_soft_spring_heavy_light()
 	float ptv, soft;
 	spring_compute(sw.joints[0].ball_socket.spring, sub_dt, &ptv, &soft);
 
-	sw.bs_count = 1;
-	sw.sol_bs[0] = (SolverBallSocket){
+	sw.joint_count = 1;
+	sw.sol_joint_count = 1;
+	sw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3,
 		.body_a = 0, .body_b = 1,
 		.r_a = V3(0,0,0), .r_b = V3(0,0,0),
 		.softness = soft,
-		.bias = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv),
-		.lambda = V3(0,0,0),
+		
 		.joint_idx = 0,
 	};
+	{ v3 _b = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
 
 	LDL_Cache c = {0};
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .real_body_a = 0, .real_body_b = 1, .weight_a = 1, .weight_b = 1, .solver_idx = 0 };
@@ -307,8 +309,8 @@ static void test_soft_spring_heavy_light()
 	WorldInternal* w = soft_test_make_world(&sw);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_bs, sw.sol_dist, sw.sol_hinge);
-	ldl_island_solve(&c, w, sw.sol_bs, sw.bs_count, sw.sol_dist, sw.dist_count, sw.sol_hinge, sw.hinge_count, sub_dt);
+	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// Both should move toward each other
 	TEST_ASSERT(w->body_hot[0].velocity.x > 0.0f);
@@ -337,19 +339,19 @@ static void test_rigid_constraint_zeroes_velocity()
 	sw.bodies[1].velocity = V3(1, 0, 0); // moving apart
 
 	sw.joint_count = 1;
+	sw.sol_joint_count = 1;
 	sw.joints[0] = (JointInternal){
 		.type = JOINT_BALL_SOCKET,
 		.body_a = 0, .body_b = 1,
 		.ball_socket = { .local_a = V3(0,0,0), .local_b = V3(0,0,0), .spring = { .frequency = 0, .damping_ratio = 0 } },
 	};
 
-	sw.bs_count = 1;
-	sw.sol_bs[0] = (SolverBallSocket){
+	sw.joint_count = 1;
+	sw.sol_joint_count = 1;
+	sw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3,
 		.body_a = 0, .body_b = 1,
 		.r_a = V3(0,0,0), .r_b = V3(0,0,0),
-		.softness = 0,
-		.bias = V3(0,0,0), // rigid: no position bias in velocity solve
-		.lambda = V3(0,0,0),
+		.softness = 0, // rigid: no position bias in velocity solve
 		.joint_idx = 0,
 	};
 
@@ -363,8 +365,8 @@ static void test_rigid_constraint_zeroes_velocity()
 	WorldInternal* w = soft_test_make_world(&sw);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_bs, sw.sol_dist, sw.sol_hinge);
-	ldl_island_solve(&c, w, sw.sol_bs, sw.bs_count, sw.sol_dist, sw.dist_count, sw.sol_hinge, sw.hinge_count, sub_dt);
+	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// After solve: constraint velocity should be near zero.
 	// Bodies were separating at 2 m/s relative; the rigid constraint should cancel that.
@@ -391,6 +393,7 @@ static void test_rigid_constraint_with_lever()
 	sw.bodies[1].position = V3(2, 0, 0);
 
 	sw.joint_count = 1;
+	sw.sol_joint_count = 1;
 	sw.joints[0] = (JointInternal){
 		.type = JOINT_BALL_SOCKET,
 		.body_a = 0, .body_b = 1,
@@ -398,11 +401,12 @@ static void test_rigid_constraint_with_lever()
 	};
 
 	v3 r_a = V3(1, 0, 0); // local_a rotated by identity
-	sw.bs_count = 1;
-	sw.sol_bs[0] = (SolverBallSocket){
+	sw.joint_count = 1;
+	sw.sol_joint_count = 1;
+	sw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3,
 		.body_a = 0, .body_b = 1,
 		.r_a = r_a, .r_b = V3(0,0,0),
-		.softness = 0, .bias = V3(0,0,0), .lambda = V3(0,0,0), .joint_idx = 0,
+		.softness = 0, .joint_idx = 0,
 	};
 
 	float sub_dt = 1.0f / 240.0f;
@@ -414,15 +418,15 @@ static void test_rigid_constraint_with_lever()
 	WorldInternal* w = soft_test_make_world(&sw);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_bs, sw.sol_dist, sw.sol_hinge);
+	ldl_numeric_factor(&c, w, sw.sol_joints);
 
 	// Compute constraint velocity before solve
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&c.constraints[0], sw.sol_bs, NULL, NULL, jac);
+	ldl_fill_jacobian(&c.constraints[0], sw.sol_joints, jac);
 	double cv_before[3];
 	for (int d = 0; d < 3; d++) cv_before[d] = ldl_constraint_velocity(&jac[d], &w->body_hot[0], &w->body_hot[1]);
 
-	ldl_island_solve(&c, w, sw.sol_bs, sw.bs_count, sw.sol_dist, sw.dist_count, sw.sol_hinge, sw.hinge_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// Recompute constraint velocity after solve
 	double cv_after[3];

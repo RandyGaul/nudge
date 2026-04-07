@@ -200,7 +200,7 @@ static void test_sparse_K_roundtrip()
 	bodies[2] = make_body(3, 6);   // B2
 
 	// Build solver data
-	SolverBallSocket sols[2] = {
+	SolverJoint sols[2] = {
 		{ .r_a = V3(0.5f, 0, 0), .r_b = V3(-0.5f, 0, 0), .body_a = 0, .body_b = 1 },
 		{ .r_a = V3(0.5f, 0, 0), .r_b = V3(-0.5f, 0, 0), .body_a = 1, .body_b = 2 },
 	};
@@ -211,8 +211,8 @@ static void test_sparse_K_roundtrip()
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 1 },
 	};
 	LDL_JacobianRow jac0[3], jac1[3];
-	ldl_fill_jacobian(&cons[0], sols, NULL, NULL, jac0);
-	ldl_fill_jacobian(&cons[1], sols, NULL, NULL, jac1);
+	ldl_fill_jacobian(&cons[0], sols, jac0);
+	ldl_fill_jacobian(&cons[1], sols, jac1);
 
 	// Build diagonal K blocks (using tested ldl_K_body_contrib)
 	double K0[6] = {0}; // node 0: joint 0's K block
@@ -292,7 +292,7 @@ static void test_sparse_K_roundtrip_extreme_mass()
 	bodies[1] = make_body(10, 10);
 	bodies[2] = make_body(1, 1);
 
-	SolverBallSocket sols[2] = {
+	SolverJoint sols[2] = {
 		{ .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .body_a = 0, .body_b = 1 },
 		{ .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .body_a = 1, .body_b = 2 },
 	};
@@ -301,8 +301,8 @@ static void test_sparse_K_roundtrip_extreme_mass()
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 1 },
 	};
 	LDL_JacobianRow jac0[3], jac1[3];
-	ldl_fill_jacobian(&cons[0], sols, NULL, NULL, jac0);
-	ldl_fill_jacobian(&cons[1], sols, NULL, NULL, jac1);
+	ldl_fill_jacobian(&cons[0], sols, jac0);
+	ldl_fill_jacobian(&cons[1], sols, jac1);
 
 	// Diagonal K blocks
 	double K0[6] = {0}, K1[6] = {0};
@@ -364,7 +364,7 @@ static void test_sparse_K_roundtrip_large_levers()
 	bodies[1] = make_body(1, 1);
 	bodies[2] = make_body(1, 1);
 
-	SolverBallSocket sols[2] = {
+	SolverJoint sols[2] = {
 		{ .r_a = V3(50, 0, 0), .r_b = V3(-50, 0, 0), .body_a = 0, .body_b = 1 },
 		{ .r_a = V3(0, 50, 0), .r_b = V3(0, -50, 0), .body_a = 1, .body_b = 2 },
 	};
@@ -373,8 +373,8 @@ static void test_sparse_K_roundtrip_large_levers()
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 1 },
 	};
 	LDL_JacobianRow jac0[3], jac1[3];
-	ldl_fill_jacobian(&cons[0], sols, NULL, NULL, jac0);
-	ldl_fill_jacobian(&cons[1], sols, NULL, NULL, jac1);
+	ldl_fill_jacobian(&cons[0], sols, jac0);
+	ldl_fill_jacobian(&cons[1], sols, jac1);
 
 	double K0[6] = {0}, K1[6] = {0};
 	ldl_K_body_contrib(jac0, 3, 0, 0, &bodies[0], 1.0, K0);
@@ -434,15 +434,15 @@ static void test_sparse_K_roundtrip_mixed_types()
 	bodies[1] = make_body(5, 10);
 	bodies[2] = make_body(3, 6);
 
-	SolverBallSocket sol_bs = { .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .body_a = 0, .body_b = 1 };
+	SolverJoint sol_bs = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .body_a = 0, .body_b = 1 };
 	v3 ax = norm(V3(1, 0, 0));
-	SolverDistance sol_d = { .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .axis = ax, .body_a = 1, .body_b = 2 };
+	SolverJoint sol_d = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .dist.axis = ax, .body_a = 1, .body_b = 2 };
 
 	LDL_Constraint con_bs = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_Constraint con_d = { .type = JOINT_DISTANCE, .dof = 1, .solver_idx = 0 };
 	LDL_JacobianRow jac_bs[3], jac_d[1];
-	ldl_fill_jacobian(&con_bs, &sol_bs, NULL, NULL, jac_bs);
-	ldl_fill_jacobian(&con_d, NULL, &sol_d, NULL, jac_d);
+	ldl_fill_jacobian(&con_bs, &sol_bs, jac_bs);
+	ldl_fill_jacobian(&con_d, &sol_d, jac_d);
 
 	// Diagonal K blocks
 	double K_bs[6] = {0}; // 3x3 packed
@@ -515,7 +515,7 @@ static void test_sparse_K_roundtrip_rotated_asymmetric()
 	bodies[1] = make_body_full(100, V3(10, 50, 200), rot_b);
 	bodies[2] = make_body_full(1, V3(1, 1, 1), quat_identity());
 
-	SolverBallSocket sols[2] = {
+	SolverJoint sols[2] = {
 		{ .r_a = V3(5, -3, 2), .r_b = V3(-2, 8, 1), .body_a = 0, .body_b = 1 },
 		{ .r_a = V3(3, 1, -4), .r_b = V3(-1, 0, 6), .body_a = 1, .body_b = 2 },
 	};
@@ -524,8 +524,8 @@ static void test_sparse_K_roundtrip_rotated_asymmetric()
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 1 },
 	};
 	LDL_JacobianRow jac0[3], jac1[3];
-	ldl_fill_jacobian(&cons[0], sols, NULL, NULL, jac0);
-	ldl_fill_jacobian(&cons[1], sols, NULL, NULL, jac1);
+	ldl_fill_jacobian(&cons[0], sols, jac0);
+	ldl_fill_jacobian(&cons[1], sols, jac1);
 
 	double K0[6] = {0}, K1[6] = {0};
 	ldl_K_body_contrib(jac0, 3, 0, 0, &bodies[0], 1.0, K0);

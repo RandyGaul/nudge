@@ -46,12 +46,8 @@ typedef struct IntegrationWorld
 {
 	BodyHot bodies[16];
 	int body_count;
-	SolverBallSocket sol_bs[16];
-	int bs_count;
-	SolverDistance sol_dist[16];
-	int dist_count;
-	SolverHinge sol_hinge[16];
-	int hinge_count;
+	SolverJoint sol_joints[16];
+	int joint_count;
 } IntegrationWorld;
 
 static void integration_sparse_solve(LDL_Cache* c, IntegrationWorld* iw, double* rhs, double* x)
@@ -66,7 +62,7 @@ static void integration_sparse_solve(LDL_Cache* c, IntegrationWorld* iw, double*
 
 	ldl_build_bundles(c);
 	ldl_build_topology(c, &w);
-	ldl_numeric_factor(c, &w, iw->sol_bs, iw->sol_dist, iw->sol_hinge);
+	ldl_numeric_factor(c, &w, iw->sol_joints);
 	ldl_solve_topo(c->topo, c->diag_data, c->diag_D, c->L_factors, rhs, x);
 
 	afree(w.body_hot);
@@ -105,9 +101,7 @@ static void integration_dense_solve(LDL_Cache* c, IntegrationWorld* iw, double* 
 		double trace = 0;
 		for (int d = 0; d < di; d++) trace += K[(oi + d) * n + (oi + d)];
 		double soft = 0;
-		if (ci->type == JOINT_BALL_SOCKET) soft = iw->sol_bs[ci->solver_idx].softness;
-		else if (ci->type == JOINT_DISTANCE) soft = iw->sol_dist[ci->solver_idx].softness;
-		else soft = iw->sol_hinge[ci->solver_idx].softness;
+		soft = iw->sol_joints[ci->solver_idx].softness;
 		double reg = (soft > 0) ? soft : LDL_MIN_COMPLIANCE * trace / di;
 		for (int d = 0; d < di; d++) K[(oi + d) * n + (oi + d)] += reg;
 	}
@@ -211,8 +205,8 @@ static void test_integ_single_ball_socket()
 	iw.body_count = 2;
 	iw.bodies[0] = make_body(2, 4);
 	iw.bodies[1] = make_body(5, 10);
-	iw.bs_count = 1;
-	iw.sol_bs[0] = (SolverBallSocket){ .r_a = V3(1,0,0), .r_b = V3(0,1,0), .body_a = 0, .body_b = 1 };
+	// joint_count set below (was bs: 1
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(0,1,0), .body_a = 0, .body_b = 1 };
 
 	LDL_Cache c = {0};
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .real_body_a = 0, .real_body_b = 1, .weight_a = 1, .weight_b = 1, .solver_idx = 0 };
@@ -239,9 +233,9 @@ static void test_integ_chain_2()
 	iw.bodies[0] = make_body(2, 4);
 	iw.bodies[1] = make_body(5, 10);
 	iw.bodies[2] = make_body(3, 6);
-	iw.bs_count = 2;
-	iw.sol_bs[0] = (SolverBallSocket){ .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = 0, .body_b = 1 };
-	iw.sol_bs[1] = (SolverBallSocket){ .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = 1, .body_b = 2 };
+	// joint_count set below (was bs: 2
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = 1, .body_b = 2 };
 
 	LDL_Cache c = {0};
 	LDL_Constraint cons[2] = {
@@ -268,9 +262,9 @@ static void test_integ_chain_3()
 	IntegrationWorld iw = {0};
 	iw.body_count = 4;
 	for (int i = 0; i < 4; i++) iw.bodies[i] = make_body((float)(2 + i), (float)(4 + i));
-	iw.bs_count = 3;
+	// joint_count set below (was bs: 3
 	for (int i = 0; i < 3; i++)
-		iw.sol_bs[i] = (SolverBallSocket){ .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = i, .body_b = i + 1 };
+		iw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = i, .body_b = i + 1 };
 
 	LDL_Cache c = {0};
 	for (int i = 0; i < 3; i++) {
@@ -296,9 +290,9 @@ static void test_integ_chain_5()
 	IntegrationWorld iw = {0};
 	iw.body_count = 6;
 	for (int i = 0; i < 6; i++) iw.bodies[i] = make_body((float)(1 + i), (float)(2 + i));
-	iw.bs_count = 5;
+	// joint_count set below (was bs: 5
 	for (int i = 0; i < 5; i++)
-		iw.sol_bs[i] = (SolverBallSocket){ .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = i, .body_b = i + 1 };
+		iw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = i, .body_b = i + 1 };
 
 	LDL_Cache c = {0};
 	for (int i = 0; i < 5; i++) {
@@ -328,10 +322,10 @@ static void test_integ_triangle()
 	iw.bodies[0] = make_body(2, 4);
 	iw.bodies[1] = make_body(3, 6);
 	iw.bodies[2] = make_body(4, 8);
-	iw.bs_count = 3;
-	iw.sol_bs[0] = (SolverBallSocket){ .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = 0, .body_b = 1 };
-	iw.sol_bs[1] = (SolverBallSocket){ .r_a = V3(0,0.5f,0), .r_b = V3(0,-0.5f,0), .body_a = 1, .body_b = 2 };
-	iw.sol_bs[2] = (SolverBallSocket){ .r_a = V3(0,0,0.5f), .r_b = V3(0,0,-0.5f), .body_a = 0, .body_b = 2 };
+	// joint_count set below (was bs: 3
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0.5f,0), .r_b = V3(0,-0.5f,0), .body_a = 1, .body_b = 2 };
+	iw.sol_joints[2] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0.5f), .r_b = V3(0,0,-0.5f), .body_a = 0, .body_b = 2 };
 
 	LDL_Cache c = {0};
 	LDL_Constraint cons[3] = {
@@ -363,10 +357,10 @@ static void test_integ_star_4()
 	iw.bodies[1] = make_body(2, 4);
 	iw.bodies[2] = make_body(3, 6);
 	iw.bodies[3] = make_body(4, 8);
-	iw.bs_count = 3;
-	iw.sol_bs[0] = (SolverBallSocket){ .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
-	iw.sol_bs[1] = (SolverBallSocket){ .r_a = V3(0,1,0), .r_b = V3(0,-1,0), .body_a = 0, .body_b = 2 };
-	iw.sol_bs[2] = (SolverBallSocket){ .r_a = V3(0,0,1), .r_b = V3(0,0,-1), .body_a = 0, .body_b = 3 };
+	// joint_count set below (was bs: 3
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,1,0), .r_b = V3(0,-1,0), .body_a = 0, .body_b = 2 };
+	iw.sol_joints[2] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,1), .r_b = V3(0,0,-1), .body_a = 0, .body_b = 3 };
 
 	LDL_Cache c = {0};
 	for (int i = 0; i < 3; i++) {
@@ -396,10 +390,10 @@ static void test_integ_star_6()
 	iw.body_count = 7;
 	iw.bodies[0] = make_body(10, 20); // hub
 	for (int i = 1; i <= 6; i++) iw.bodies[i] = make_body((float)(1 + i), (float)(2 + i));
-	iw.bs_count = 6;
+	// joint_count set below (was bs: 6
 	v3 dirs[6] = { V3(1,0,0), V3(-1,0,0), V3(0,1,0), V3(0,-1,0), V3(0,0,1), V3(0,0,-1) };
 	for (int i = 0; i < 6; i++)
-		iw.sol_bs[i] = (SolverBallSocket){ .r_a = dirs[i], .r_b = scale(dirs[i], -1), .body_a = 0, .body_b = i + 1 };
+		iw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = dirs[i], .r_b = scale(dirs[i], -1), .body_a = 0, .body_b = i + 1 };
 
 	LDL_Cache c = {0};
 	for (int i = 0; i < 6; i++) {
@@ -429,11 +423,11 @@ static void test_integ_star_extreme_mass()
 	iw.body_count = 5;
 	iw.bodies[0] = make_body(10000, 10000); // heavy hub
 	for (int i = 1; i <= 4; i++) iw.bodies[i] = make_body(1, 1);
-	iw.bs_count = 4;
-	iw.sol_bs[0] = (SolverBallSocket){ .r_a = V3(2,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
-	iw.sol_bs[1] = (SolverBallSocket){ .r_a = V3(-2,0,0), .r_b = V3(1,0,0), .body_a = 0, .body_b = 2 };
-	iw.sol_bs[2] = (SolverBallSocket){ .r_a = V3(0,2,0), .r_b = V3(0,-1,0), .body_a = 0, .body_b = 3 };
-	iw.sol_bs[3] = (SolverBallSocket){ .r_a = V3(0,-2,0), .r_b = V3(0,1,0), .body_a = 0, .body_b = 4 };
+	// joint_count set below (was bs: 4
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(2,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(-2,0,0), .r_b = V3(1,0,0), .body_a = 0, .body_b = 2 };
+	iw.sol_joints[2] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,2,0), .r_b = V3(0,-1,0), .body_a = 0, .body_b = 3 };
+	iw.sol_joints[3] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,-2,0), .r_b = V3(0,1,0), .body_a = 0, .body_b = 4 };
 
 	LDL_Cache c = {0};
 	for (int i = 0; i < 4; i++) {
@@ -465,18 +459,17 @@ static void test_integ_star_mixed_types()
 	iw.bodies[1] = make_body(2, 4);
 	iw.bodies[2] = make_body(3, 6);
 	iw.bodies[3] = make_body(4, 8);
-	iw.bs_count = 1;
-	iw.sol_bs[0] = (SolverBallSocket){ .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
-	iw.dist_count = 1;
-	iw.sol_dist[0] = (SolverDistance){ .r_a = V3(0,1,0), .r_b = V3(0,-1,0), .axis = norm(V3(0,1,0)), .body_a = 0, .body_b = 2 };
-	iw.hinge_count = 1;
-	iw.sol_hinge[0] = (SolverHinge){ .r_a = V3(0,0,1), .r_b = V3(0,0,-1), .u1 = V3(1,0,0), .u2 = V3(0,1,0), .body_a = 0, .body_b = 3 };
+	// joint_count set below (was bs: 1
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(0,1,0), .r_b = V3(0,-1,0), .dist.axis = norm(V3(0,1,0)), .body_a = 0, .body_b = 2 };
+	iw.sol_joints[2] = (SolverJoint){ .type = JOINT_HINGE, .dof = 5, .r_a = V3(0,0,1), .r_b = V3(0,0,-1), .hinge.u1 = V3(1,0,0), .hinge.u2 = V3(0,1,0), .body_a = 0, .body_b = 3 };
+	iw.joint_count = 3;
 
 	LDL_Cache c = {0};
 	LDL_Constraint cons[3] = {
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .real_body_a = 0, .real_body_b = 1, .weight_a = 1, .weight_b = 1, .solver_idx = 0 },
-		{ .type = JOINT_DISTANCE, .dof = 1, .body_a = 0, .body_b = 2, .real_body_a = 0, .real_body_b = 2, .weight_a = 1, .weight_b = 1, .solver_idx = 0 },
-		{ .type = JOINT_HINGE, .dof = 5, .body_a = 0, .body_b = 3, .real_body_a = 0, .real_body_b = 3, .weight_a = 1, .weight_b = 1, .solver_idx = 0 },
+		{ .type = JOINT_DISTANCE, .dof = 1, .body_a = 0, .body_b = 2, .real_body_a = 0, .real_body_b = 2, .weight_a = 1, .weight_b = 1, .solver_idx = 1 },
+		{ .type = JOINT_HINGE, .dof = 5, .body_a = 0, .body_b = 3, .real_body_a = 0, .real_body_b = 3, .weight_a = 1, .weight_b = 1, .solver_idx = 2 },
 	};
 	for (int i = 0; i < 3; i++) apush(c.constraints, cons[i]);
 	c.joint_count = 3;
@@ -503,9 +496,9 @@ static void test_integ_chain_2_extreme_mass()
 	iw.bodies[0] = make_body(1, 1);        // light
 	iw.bodies[1] = make_body(10000, 10000); // heavy
 	iw.bodies[2] = make_body(1, 1);         // light
-	iw.bs_count = 2;
-	iw.sol_bs[0] = (SolverBallSocket){ .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
-	iw.sol_bs[1] = (SolverBallSocket){ .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 1, .body_b = 2 };
+	// joint_count set below (was bs: 2
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 1, .body_b = 2 };
 
 	LDL_Cache c = {0};
 	LDL_Constraint cons[2] = {
@@ -533,9 +526,9 @@ static void test_integ_chain_2_large_levers()
 	IntegrationWorld iw = {0};
 	iw.body_count = 3;
 	for (int i = 0; i < 3; i++) iw.bodies[i] = make_body(1, 1);
-	iw.bs_count = 2;
-	iw.sol_bs[0] = (SolverBallSocket){ .r_a = V3(50,0,0), .r_b = V3(-50,0,0), .body_a = 0, .body_b = 1 };
-	iw.sol_bs[1] = (SolverBallSocket){ .r_a = V3(0,50,0), .r_b = V3(0,-50,0), .body_a = 1, .body_b = 2 };
+	// joint_count set below (was bs: 2
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(50,0,0), .r_b = V3(-50,0,0), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,50,0), .r_b = V3(0,-50,0), .body_a = 1, .body_b = 2 };
 
 	LDL_Cache c = {0};
 	LDL_Constraint cons[2] = {
@@ -566,9 +559,9 @@ static void test_integ_chain_2_rotated_asymmetric()
 	iw.bodies[0] = make_body_full(2, V3(0.5f, 5, 20), r1);
 	iw.bodies[1] = make_body_full(8, V3(3, 10, 1), r2);
 	iw.bodies[2] = make_body_full(1, V3(1, 1, 1), quat_identity());
-	iw.bs_count = 2;
-	iw.sol_bs[0] = (SolverBallSocket){ .r_a = V3(3,-1,2), .r_b = V3(-2,1,0), .body_a = 0, .body_b = 1 };
-	iw.sol_bs[1] = (SolverBallSocket){ .r_a = V3(1,2,-1), .r_b = V3(0,-1,3), .body_a = 1, .body_b = 2 };
+	// joint_count set below (was bs: 2
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(3,-1,2), .r_b = V3(-2,1,0), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,2,-1), .r_b = V3(0,-1,3), .body_a = 1, .body_b = 2 };
 
 	LDL_Cache c = {0};
 	LDL_Constraint cons[2] = {
@@ -599,9 +592,9 @@ static void test_integ_chain_3_mixed_mass()
 	iw.bodies[1] = make_body(100, 100);
 	iw.bodies[2] = make_body(1, 1);
 	iw.bodies[3] = make_body(100, 100);
-	iw.bs_count = 3;
+	// joint_count set below (was bs: 3
 	for (int i = 0; i < 3; i++)
-		iw.sol_bs[i] = (SolverBallSocket){ .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = i, .body_b = i + 1 };
+		iw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = i, .body_b = i + 1 };
 
 	LDL_Cache c = {0};
 	for (int i = 0; i < 3; i++) {
@@ -629,10 +622,10 @@ static void test_integ_triangle_extreme_mass()
 	iw.bodies[0] = make_body(1, 1);
 	iw.bodies[1] = make_body(10000, 10000);
 	iw.bodies[2] = make_body(1, 1);
-	iw.bs_count = 3;
-	iw.sol_bs[0] = (SolverBallSocket){ .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
-	iw.sol_bs[1] = (SolverBallSocket){ .r_a = V3(0,1,0), .r_b = V3(0,-1,0), .body_a = 1, .body_b = 2 };
-	iw.sol_bs[2] = (SolverBallSocket){ .r_a = V3(0,0,1), .r_b = V3(0,0,-1), .body_a = 0, .body_b = 2 };
+	// joint_count set below (was bs: 3
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,1,0), .r_b = V3(0,-1,0), .body_a = 1, .body_b = 2 };
+	iw.sol_joints[2] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,1), .r_b = V3(0,0,-1), .body_a = 0, .body_b = 2 };
 
 	LDL_Cache c = {0};
 	LDL_Constraint cons[3] = {
@@ -664,9 +657,9 @@ static void test_integ_chain_distance()
 	IntegrationWorld iw = {0};
 	iw.body_count = 3;
 	for (int i = 0; i < 3; i++) iw.bodies[i] = make_body(2, 4);
-	iw.dist_count = 2;
-	iw.sol_dist[0] = (SolverDistance){ .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .axis = norm(V3(1,0,0)), .body_a = 0, .body_b = 1 };
-	iw.sol_dist[1] = (SolverDistance){ .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .axis = norm(V3(1,0,0)), .body_a = 1, .body_b = 2 };
+	// joint_count set below (was dist: 2
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .dist.axis = norm(V3(1,0,0)), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .dist.axis = norm(V3(1,0,0)), .body_a = 1, .body_b = 2 };
 
 	LDL_Cache c = {0};
 	LDL_Constraint cons[2] = {
@@ -694,9 +687,9 @@ static void test_integ_chain_hinge()
 	IntegrationWorld iw = {0};
 	iw.body_count = 3;
 	for (int i = 0; i < 3; i++) iw.bodies[i] = make_body(3, 6);
-	iw.hinge_count = 2;
-	iw.sol_hinge[0] = (SolverHinge){ .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .u1 = V3(1,0,0), .u2 = V3(0,1,0), .body_a = 0, .body_b = 1 };
-	iw.sol_hinge[1] = (SolverHinge){ .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .u1 = V3(1,0,0), .u2 = V3(0,1,0), .body_a = 1, .body_b = 2 };
+	// joint_count set below (was hinge: 2
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_HINGE, .dof = 5, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .hinge.u1 = V3(1,0,0), .hinge.u2 = V3(0,1,0), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_HINGE, .dof = 5, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .hinge.u1 = V3(1,0,0), .hinge.u2 = V3(0,1,0), .body_a = 1, .body_b = 2 };
 
 	LDL_Cache c = {0};
 	LDL_Constraint cons[2] = {
@@ -724,18 +717,17 @@ static void test_integ_mixed_all()
 	IntegrationWorld iw = {0};
 	iw.body_count = 4;
 	for (int i = 0; i < 4; i++) iw.bodies[i] = make_body((float)(2 + i), (float)(4 + i * 2));
-	iw.bs_count = 1;
-	iw.sol_bs[0] = (SolverBallSocket){ .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
-	iw.dist_count = 1;
-	iw.sol_dist[0] = (SolverDistance){ .r_a = V3(0,1,0), .r_b = V3(0,-1,0), .axis = norm(V3(0,1,0)), .body_a = 1, .body_b = 2 };
-	iw.hinge_count = 1;
-	iw.sol_hinge[0] = (SolverHinge){ .r_a = V3(0,0,1), .r_b = V3(0,0,-1), .u1 = V3(1,0,0), .u2 = V3(0,1,0), .body_a = 2, .body_b = 3 };
+	// joint_count set below (was bs: 1
+	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
+	iw.sol_joints[1] = (SolverJoint){ .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(0,1,0), .r_b = V3(0,-1,0), .dist.axis = norm(V3(0,1,0)), .body_a = 1, .body_b = 2 };
+	iw.sol_joints[2] = (SolverJoint){ .type = JOINT_HINGE, .dof = 5, .r_a = V3(0,0,1), .r_b = V3(0,0,-1), .hinge.u1 = V3(1,0,0), .hinge.u2 = V3(0,1,0), .body_a = 2, .body_b = 3 };
+	iw.joint_count = 3;
 
 	LDL_Cache c = {0};
 	LDL_Constraint cons[3] = {
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .real_body_a = 0, .real_body_b = 1, .weight_a = 1, .weight_b = 1, .solver_idx = 0 },
-		{ .type = JOINT_DISTANCE, .dof = 1, .body_a = 1, .body_b = 2, .real_body_a = 1, .real_body_b = 2, .weight_a = 1, .weight_b = 1, .solver_idx = 0 },
-		{ .type = JOINT_HINGE, .dof = 5, .body_a = 2, .body_b = 3, .real_body_a = 2, .real_body_b = 3, .weight_a = 1, .weight_b = 1, .solver_idx = 0 },
+		{ .type = JOINT_DISTANCE, .dof = 1, .body_a = 1, .body_b = 2, .real_body_a = 1, .real_body_b = 2, .weight_a = 1, .weight_b = 1, .solver_idx = 1 },
+		{ .type = JOINT_HINGE, .dof = 5, .body_a = 2, .body_b = 3, .real_body_a = 2, .real_body_b = 3, .weight_a = 1, .weight_b = 1, .solver_idx = 2 },
 	};
 	for (int i = 0; i < 3; i++) apush(c.constraints, cons[i]);
 	c.joint_count = 3;

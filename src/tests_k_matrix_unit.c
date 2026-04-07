@@ -91,10 +91,10 @@ static void test_K_ball_socket_unit_mass_origin()
 	// Unit mass body, uniform unit inertia, anchor at origin.
 	// J_a = [-I, 0]. K_a = J_a * I * J_a^T = I_3.
 	BodyHot body = make_body(1, 1);
-	SolverBallSocket sol = { .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body, 1.0, K);
@@ -113,10 +113,10 @@ static void test_K_ball_socket_heavy_body()
 	TEST_BEGIN("K_ball_socket_heavy_body");
 	// Heavy body (mass=1000), anchor at origin. K = inv_mass * I = 0.001 * I.
 	BodyHot body = make_body(1000, 1000);
-	SolverBallSocket sol = { .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body, 1.0, K);
@@ -134,10 +134,10 @@ static void test_K_ball_socket_with_lever()
 	// With unit mass and unit inertia, M^{-1} = I_6.
 	// K = J * J^T (since M^{-1} = I).
 	BodyHot body = make_body(1, 1);
-	SolverBallSocket sol = { .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body, 1.0, K);
@@ -161,10 +161,10 @@ static void test_K_ball_socket_two_bodies()
 	// Full K = K_a + K_b from both bodies. Different masses.
 	BodyHot body_a = make_body(2, 4);   // lighter
 	BodyHot body_b = make_body(10, 20); // heavier
-	SolverBallSocket sol = { .r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body_a, 1.0, K);
@@ -188,10 +188,10 @@ static void test_K_static_body()
 	// Static body (inv_mass = 0, inv_inertia = 0). Contribution should be zero.
 	BodyHot body = {0};
 	body.rotation = quat_identity();
-	SolverBallSocket sol = { .r_a = V3(1,2,3), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,2,3), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body, 1.0, K);
@@ -206,10 +206,10 @@ static void test_K_extreme_mass_ratio()
 	// 10000:1 mass ratio. K is dominated by the light body's contribution.
 	BodyHot light = make_body(1, 1);
 	BodyHot heavy = make_body(10000, 10000);
-	SolverBallSocket sol = { .r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &light, 1.0, K);
@@ -235,10 +235,10 @@ static void test_K_asymmetric_inertia()
 	// Non-uniform inertia: thin rod along X (small Ix, large Iy=Iz).
 	// This creates anisotropic angular response.
 	BodyHot body = make_body_full(1, V3(0.1f, 10, 10), quat_identity());
-	SolverBallSocket sol = { .r_a = V3(0, 0, 1), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0, 0, 1), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body, 1.0, K);
@@ -259,10 +259,10 @@ static void test_K_rotated_body()
 	// which affects angular K contributions.
 	quat rot = quat_axis_angle(norm(V3(1, 1, 1)), 1.0f);
 	BodyHot body = make_body_full(1, V3(1, 5, 10), rot);
-	SolverBallSocket sol = { .r_a = V3(1, 2, 0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 2, 0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body, 1.0, K);
@@ -282,10 +282,10 @@ static void test_K_shattering_weight()
 	TEST_BEGIN("K_shattering_weight");
 	// Shattering: weight = 4 (4 shards). K should be 4x a weight=1 computation.
 	BodyHot body = make_body(10, 5);
-	SolverBallSocket sol = { .r_a = V3(1, 0.5f, 0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0.5f, 0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K1[6] = {0}, K4[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body, 1.0, K1);
@@ -301,10 +301,10 @@ static void test_K_mixed_scale_lever()
 	// Lever arm r = (0.01, 0, 50): huge coupling on one angular axis,
 	// near-zero on another. K diagonal entries will span ~4 orders of magnitude.
 	BodyHot body = make_body(1, 1);
-	SolverBallSocket sol = { .r_a = V3(0.01f, 0, 50), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.01f, 0, 50), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body, 1.0, K);
@@ -339,17 +339,17 @@ static void test_K_lever_along_weak_inertia()
 	BodyHot body = make_body_full(1, V3(0.1f, 10, 10), quat_identity());
 
 	// Lever along X (weak inertia axis)
-	SolverBallSocket sol_x = { .r_a = V3(5,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol_x = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(5,0,0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac_x[3];
-	ldl_fill_jacobian(&con, &sol_x, NULL, NULL, jac_x);
+	ldl_fill_jacobian(&con, &sol_x, jac_x);
 	double Kx[6] = {0};
 	ldl_K_body_contrib(jac_x, 3, 0, 0, &body, 1.0, Kx);
 
 	// Lever along Y (strong inertia axis)
-	SolverBallSocket sol_y = { .r_a = V3(0,5,0), .r_b = V3(0,0,0) };
+	SolverJoint sol_y = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,5,0), .r_b = V3(0,0,0) };
 	LDL_JacobianRow jac_y[3];
-	ldl_fill_jacobian(&con, &sol_y, NULL, NULL, jac_y);
+	ldl_fill_jacobian(&con, &sol_y, jac_y);
 	double Ky[6] = {0};
 	ldl_K_body_contrib(jac_y, 3, 0, 0, &body, 1.0, Ky);
 
@@ -389,10 +389,10 @@ static void test_K_floor_dynamic_pair()
 	floor_body.rotation = quat_identity();
 	BodyHot box = make_body_full(1, V3(box_inertia, box_inertia, box_inertia), quat_identity());
 
-	SolverBallSocket sol = { .r_a = V3(0, -0.5f, 0), .r_b = V3(0, 0, 0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0, -0.5f, 0), .r_b = V3(0, 0, 0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &box, 1.0, K);       // dynamic body
@@ -422,10 +422,10 @@ static void test_K_mismatched_lever_lengths()
 	// This is a common ragdoll/chain scenario.
 	BodyHot body_a = make_body(1, 1);
 	BodyHot body_b = make_body(1, 1);
-	SolverBallSocket sol = { .r_a = V3(0,0,0), .r_b = V3(50,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(50,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body_a, 1.0, K);
@@ -468,10 +468,10 @@ static void test_K_negative_offdiag()
 	// so that world-space I^{-1} has large off-diagonals.
 	quat rot = quat_axis_angle(norm(V3(1, 0, 0)), 0.7854f); // 45 deg about X
 	BodyHot body = make_body_full(1, V3(0.1f, 50, 0.1f), rot);
-	SolverBallSocket sol = { .r_a = V3(5, 5, 0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(5, 5, 0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body, 1.0, K);
@@ -508,10 +508,10 @@ static void test_K_mass_ratio_1e6()
 	// Combined K must still be SPD and factorable.
 	BodyHot light = make_body(1, 1);
 	BodyHot heavy = make_body(1e6f, 1e6f);
-	SolverBallSocket sol = { .r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &light, 1.0, K);
@@ -541,10 +541,10 @@ static void test_K_nearly_static_body()
 	// K entries become enormous. Paired with a normal body.
 	BodyHot normal = make_body(1, 1);
 	BodyHot near_static = make_body(1e-8f, 1e-8f);
-	SolverBallSocket sol = { .r_a = V3(0.5f, 0, 0), .r_b = V3(0, 0.5f, 0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f, 0, 0), .r_b = V3(0, 0.5f, 0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &normal, 1.0, K);
@@ -572,10 +572,10 @@ static void test_K_both_levers_zero()
 	// No angular coupling at all. Well-conditioned, easy case.
 	BodyHot a = make_body(2, 5);
 	BodyHot b = make_body(8, 12);
-	SolverBallSocket sol = { .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &a, 1.0, K);
@@ -598,10 +598,10 @@ static void test_K_parallel_levers()
 	// from both bodies are along the same axes. K should still be SPD.
 	BodyHot a = make_body(1, 1);
 	BodyHot b = make_body(1, 1);
-	SolverBallSocket sol = { .r_a = V3(0, 0, 3), .r_b = V3(0, 0, 5) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0, 0, 3), .r_b = V3(0, 0, 5) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &a, 1.0, K);
@@ -633,10 +633,10 @@ static void test_K_extreme_mass_ratio_with_lever()
 	quat rot = quat_axis_angle(norm(V3(1, 2, 3)), 0.5f);
 	BodyHot light = make_body_full(1, V3(0.5f, 2, 8), rot);
 	BodyHot heavy = make_body_full(1e5f, V3(1000, 5000, 2000), quat_identity());
-	SolverBallSocket sol = { .r_a = V3(5, -3, 8), .r_b = V3(-2, 10, 1) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(5, -3, 8), .r_b = V3(-2, 10, 1) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &light, 1.0, K);
@@ -666,10 +666,10 @@ static void test_K_distance_constraint()
 	BodyHot body_a = make_body(2, 3);
 	BodyHot body_b = make_body(5, 8);
 	v3 ax = norm(V3(1, 1, 0));
-	SolverDistance sol = { .r_a = V3(1,0,0), .r_b = V3(0,1,0), .axis = ax };
+	SolverJoint sol = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(1,0,0), .r_b = V3(0,1,0), .dist.axis = ax };
 	LDL_Constraint con = { .type = JOINT_DISTANCE, .dof = 1, .solver_idx = 0 };
 	LDL_JacobianRow jac[1];
-	ldl_fill_jacobian(&con, NULL, &sol, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[1] = {0};
 	ldl_K_body_contrib(jac, 1, 0, 0, &body_a, 1.0, K);
@@ -689,13 +689,13 @@ static void test_K_hinge_constraint()
 	// Hinge: 5 DOF (3 linear + 2 angular). Largest non-weld block.
 	BodyHot body_a = make_body(3, 6);
 	BodyHot body_b = make_body(8, 12);
-	SolverHinge sol = {
+	SolverJoint sol = { .type = JOINT_HINGE, .dof = 5,
 		.r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0),
-		.u1 = norm(V3(1, 0, 0)), .u2 = norm(V3(0, 1, 0)),
+		.hinge.u1 = norm(V3(1, 0, 0)), .hinge.u2 = norm(V3(0, 1, 0)),
 	};
 	LDL_Constraint con = { .type = JOINT_HINGE, .dof = 5, .solver_idx = 0 };
 	LDL_JacobianRow jac[5];
-	ldl_fill_jacobian(&con, NULL, NULL, &sol, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[15] = {0}; // 5*(5+1)/2 = 15 packed elements
 	ldl_K_body_contrib(jac, 5, 0, 0, &body_a, 1.0, K);
@@ -719,10 +719,10 @@ static void test_K_large_lever_arm()
 	// r = 100. Angular K entries scale with |r|^2 ~ 10000.
 	// Tests that large values don't cause precision issues.
 	BodyHot body = make_body(1, 1);
-	SolverBallSocket sol = { .r_a = V3(100, 0, 0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(100, 0, 0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 0, 0, &body, 1.0, K);
@@ -745,10 +745,10 @@ static void test_K_accumulates()
 	TEST_BEGIN("K_accumulates");
 	// K_body_contrib ADDS to the existing K array. Verify accumulation.
 	BodyHot body = make_body(1, 1);
-	SolverBallSocket sol = { .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// Call twice with same body -> should be 2x single call.
 	double K_single[6] = {0}, K_double[6] = {0};
@@ -766,10 +766,10 @@ static void test_K_dof_start_offset()
 	// dof_start != 0: constraint writes to a sub-block within a larger packed array.
 	// This happens when a bundle has multiple constraints.
 	BodyHot body = make_body(1, 1);
-	SolverBallSocket sol = { .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// Write at offset 0
 	double K0[21] = {0}; // 6x6 packed = 21
@@ -795,10 +795,10 @@ static void test_K_side_b()
 	TEST_BEGIN("K_side_b");
 	// side=1 should use J_b columns. Verify by comparing against reference.
 	BodyHot body = make_body(3, 7);
-	SolverBallSocket sol = { .r_a = V3(1,2,0), .r_b = V3(-1,0,3) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,2,0), .r_b = V3(-1,0,3) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	double K[6] = {0};
 	ldl_K_body_contrib(jac, 3, 1, 0, &body, 1.0, K);
@@ -820,15 +820,15 @@ static void test_K_off_ball_socket_pair()
 	TEST_BEGIN("K_off_ball_socket_pair");
 	// Two ball-sockets sharing one body. Off-diagonal = coupling through shared body.
 	BodyHot body = make_body(2, 5);
-	SolverBallSocket sol_i = { .r_a = V3(1, 0, 0), .r_b = V3(0,0,0) };
-	SolverBallSocket sol_j = { .r_a = V3(0, 1, 0), .r_b = V3(0,0,0) };
+	SolverJoint sol_i = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(0,0,0) };
+	SolverJoint sol_j = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0, 1, 0), .r_b = V3(0,0,0) };
 	LDL_Constraint con_i = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_Constraint con_j = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 1 };
 	LDL_JacobianRow jac_i[3], jac_j[3];
-	SolverBallSocket sols[2] = { sol_i, sol_j };
-	ldl_fill_jacobian(&con_i, sols, NULL, NULL, jac_i);
+	SolverJoint sols[2] = { sol_i, sol_j };
+	ldl_fill_jacobian(&con_i, sols, jac_i);
 	con_j.solver_idx = 1;
-	ldl_fill_jacobian(&con_j, sols, NULL, NULL, jac_j);
+	ldl_fill_jacobian(&con_j, sols, jac_j);
 
 	double out[9] = {0};
 	ldl_K_body_off(jac_i, 3, 0, jac_j, 3, 0, &body, 1.0, out);
@@ -856,15 +856,15 @@ static void test_K_off_mixed_dof()
 	// Ball-socket (3 DOF) coupled with distance (1 DOF) through shared body.
 	// Off-diagonal is 3x1.
 	BodyHot body = make_body(5, 10);
-	SolverBallSocket sol_bs = { .r_a = V3(1, 0, 0), .r_b = V3(0,0,0) };
+	SolverJoint sol_bs = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(0,0,0) };
 	v3 ax = norm(V3(0, 1, 0));
-	SolverDistance sol_d = { .r_a = V3(0, 1, 0), .r_b = V3(0,0,0), .axis = ax };
+	SolverJoint sol_d = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(0, 1, 0), .r_b = V3(0,0,0), .dist.axis = ax };
 
 	LDL_Constraint con_bs = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_Constraint con_d = { .type = JOINT_DISTANCE, .dof = 1, .solver_idx = 0 };
 	LDL_JacobianRow jac_bs[3], jac_d[1];
-	ldl_fill_jacobian(&con_bs, &sol_bs, NULL, NULL, jac_bs);
-	ldl_fill_jacobian(&con_d, NULL, &sol_d, NULL, jac_d);
+	ldl_fill_jacobian(&con_bs, &sol_bs, jac_bs);
+	ldl_fill_jacobian(&con_d, &sol_d, jac_d);
 
 	// Both on side A of the shared body
 	double out[3] = {0}; // 3x1
@@ -892,14 +892,14 @@ static void test_K_off_static_body()
 	BodyHot body = {0};
 	body.rotation = quat_identity();
 
-	SolverBallSocket sol_i = { .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
-	SolverBallSocket sol_j = { .r_a = V3(0,1,0), .r_b = V3(0,0,0) };
+	SolverJoint sol_i = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol_j = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,1,0), .r_b = V3(0,0,0) };
 	LDL_JacobianRow jac_i[3], jac_j[3];
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
-	SolverBallSocket sols[2] = { sol_i, sol_j };
-	ldl_fill_jacobian(&con, sols, NULL, NULL, jac_i);
+	SolverJoint sols[2] = { sol_i, sol_j };
+	ldl_fill_jacobian(&con, sols, jac_i);
 	con.solver_idx = 1;
-	ldl_fill_jacobian(&con, sols, NULL, NULL, jac_j);
+	ldl_fill_jacobian(&con, sols, jac_j);
 
 	double out[9] = {0};
 	ldl_K_body_off(jac_i, 3, 0, jac_j, 3, 0, &body, 1.0, out);
@@ -913,14 +913,14 @@ static void test_K_off_shattering_weight()
 	TEST_BEGIN("K_off_shattering_weight");
 	// Weight=5 should produce 5x the weight=1 result.
 	BodyHot body = make_body(3, 7);
-	SolverBallSocket sol_i = { .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
-	SolverBallSocket sol_j = { .r_a = V3(0,1,0), .r_b = V3(0,0,0) };
+	SolverJoint sol_i = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol_j = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,1,0), .r_b = V3(0,0,0) };
 	LDL_JacobianRow jac_i[3], jac_j[3];
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
-	SolverBallSocket sols[2] = { sol_i, sol_j };
-	ldl_fill_jacobian(&con, sols, NULL, NULL, jac_i);
+	SolverJoint sols[2] = { sol_i, sol_j };
+	ldl_fill_jacobian(&con, sols, jac_i);
 	con.solver_idx = 1;
-	ldl_fill_jacobian(&con, sols, NULL, NULL, jac_j);
+	ldl_fill_jacobian(&con, sols, jac_j);
 
 	double out1[9] = {0}, out5[9] = {0};
 	ldl_K_body_off(jac_i, 3, 0, jac_j, 3, 0, &body, 1.0, out1);
@@ -935,14 +935,14 @@ static void test_K_off_accumulates()
 	TEST_BEGIN("K_off_accumulates");
 	// K_body_off ADDS to existing array. Two calls = 2x single.
 	BodyHot body = make_body(2, 4);
-	SolverBallSocket sol_i = { .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
-	SolverBallSocket sol_j = { .r_a = V3(0,1,0), .r_b = V3(0,0,0) };
+	SolverJoint sol_i = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol_j = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,1,0), .r_b = V3(0,0,0) };
 	LDL_JacobianRow jac_i[3], jac_j[3];
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
-	SolverBallSocket sols[2] = { sol_i, sol_j };
-	ldl_fill_jacobian(&con, sols, NULL, NULL, jac_i);
+	SolverJoint sols[2] = { sol_i, sol_j };
+	ldl_fill_jacobian(&con, sols, jac_i);
 	con.solver_idx = 1;
-	ldl_fill_jacobian(&con, sols, NULL, NULL, jac_j);
+	ldl_fill_jacobian(&con, sols, jac_j);
 
 	double single[9] = {0}, twice[9] = {0};
 	ldl_K_body_off(jac_i, 3, 0, jac_j, 3, 0, &body, 1.0, single);
@@ -959,14 +959,14 @@ static void test_K_off_cross_sides()
 	// Constraint i on side A, constraint j on side B of the same body.
 	// This is the typical case: body is body_a for one joint and body_b for another.
 	BodyHot body = make_body(4, 8);
-	SolverBallSocket sol_i = { .r_a = V3(2, 0, 0), .r_b = V3(0,0,0) };
-	SolverBallSocket sol_j = { .r_a = V3(0,0,0), .r_b = V3(0, 3, 0) };
+	SolverJoint sol_i = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(2, 0, 0), .r_b = V3(0,0,0) };
+	SolverJoint sol_j = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0, 3, 0) };
 	LDL_JacobianRow jac_i[3], jac_j[3];
 	LDL_Constraint con_i = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_Constraint con_j = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 1 };
-	SolverBallSocket sols[2] = { sol_i, sol_j };
-	ldl_fill_jacobian(&con_i, sols, NULL, NULL, jac_i);
-	ldl_fill_jacobian(&con_j, sols, NULL, NULL, jac_j);
+	SolverJoint sols[2] = { sol_i, sol_j };
+	ldl_fill_jacobian(&con_i, sols, jac_i);
+	ldl_fill_jacobian(&con_j, sols, jac_j);
 
 	// i uses side A (J_a), j uses side B (J_b) of the shared body
 	double out[9] = {0};
@@ -996,14 +996,14 @@ static void test_K_off_rotated_asymmetric()
 	// dinv_inertia_mul correctness to matter in K assembly.
 	quat rot = quat_axis_angle(norm(V3(1, 2, -1)), 0.8f);
 	BodyHot body = make_body_full(3, V3(1, 5, 20), rot);
-	SolverBallSocket sol_i = { .r_a = V3(2, -1, 0.5f), .r_b = V3(0,0,0) };
-	SolverBallSocket sol_j = { .r_a = V3(-1, 0, 3), .r_b = V3(0,0,0) };
+	SolverJoint sol_i = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(2, -1, 0.5f), .r_b = V3(0,0,0) };
+	SolverJoint sol_j = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(-1, 0, 3), .r_b = V3(0,0,0) };
 	LDL_JacobianRow jac_i[3], jac_j[3];
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
-	SolverBallSocket sols[2] = { sol_i, sol_j };
-	ldl_fill_jacobian(&con, sols, NULL, NULL, jac_i);
+	SolverJoint sols[2] = { sol_i, sol_j };
+	ldl_fill_jacobian(&con, sols, jac_i);
 	con.solver_idx = 1;
-	ldl_fill_jacobian(&con, sols, NULL, NULL, jac_j);
+	ldl_fill_jacobian(&con, sols, jac_j);
 
 	double out[9] = {0};
 	ldl_K_body_off(jac_i, 3, 0, jac_j, 3, 0, &body, 1.0, out);

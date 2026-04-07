@@ -118,13 +118,15 @@ static void test_shatter_hub_star_pipeline()
 	sw.body_count = 7;
 	sw.bodies[0] = make_body(5, 10); // hub
 	for (int i = 1; i <= 6; i++) sw.bodies[i] = make_body(1, 1); // leaves
-	sw.bs_count = 6;
+	sw.joint_count = 6;
+	sw.sol_joint_count = 6;
 	v3 dirs[6] = { V3(1,0,0), V3(-1,0,0), V3(0,1,0), V3(0,-1,0), V3(0,0,1), V3(0,0,-1) };
 	for (int i = 0; i < 6; i++) {
-		sw.sol_bs[i] = (SolverBallSocket){ .r_a = dirs[i], .r_b = scale(dirs[i], -1), .body_a = 0, .body_b = i + 1, .joint_idx = i };
+		sw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = dirs[i], .r_b = scale(dirs[i], -1), .body_a = 0, .body_b = i + 1, .joint_idx = i };
 	}
 
 	sw.joint_count = 6;
+	sw.sol_joint_count = 6;
 	for (int i = 0; i < 6; i++) {
 		sw.joints[i] = (JointInternal){
 			.type = JOINT_BALL_SOCKET, .body_a = 0, .body_b = i + 1,
@@ -146,7 +148,7 @@ static void test_shatter_hub_star_pipeline()
 	ldl_apply_shattering(&c, w);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_bs, sw.sol_dist, sw.sol_hinge);
+	ldl_numeric_factor(&c, w, sw.sol_joints);
 
 	// Verify all pivots are positive (the assert that was crashing)
 	LDL_Topology* t = c.topo;
@@ -156,7 +158,7 @@ static void test_shatter_hub_star_pipeline()
 
 	// If we get here without assert, try solving
 	float sub_dt = 1.0f / 240.0f;
-	ldl_island_solve(&c, w, sw.sol_bs, sw.bs_count, sw.sol_dist, sw.dist_count, sw.sol_hinge, sw.hinge_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// Verify no NaN in body velocities
 	for (int i = 0; i < sw.body_count; i++) {
@@ -177,12 +179,14 @@ static void test_shatter_hub_star_extreme_mass()
 	sw.body_count = 7;
 	sw.bodies[0] = make_body(1000, 1000); // heavy hub
 	for (int i = 1; i <= 6; i++) sw.bodies[i] = make_body(1, 1);
-	sw.bs_count = 6;
+	sw.joint_count = 6;
+	sw.sol_joint_count = 6;
 	v3 dirs[6] = { V3(1,0,0), V3(-1,0,0), V3(0,1,0), V3(0,-1,0), V3(0,0,1), V3(0,0,-1) };
 	for (int i = 0; i < 6; i++) {
-		sw.sol_bs[i] = (SolverBallSocket){ .r_a = dirs[i], .r_b = scale(dirs[i], -1), .body_a = 0, .body_b = i + 1, .joint_idx = i };
+		sw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = dirs[i], .r_b = scale(dirs[i], -1), .body_a = 0, .body_b = i + 1, .joint_idx = i };
 	}
 	sw.joint_count = 6;
+	sw.sol_joint_count = 6;
 	for (int i = 0; i < 6; i++) {
 		sw.joints[i] = (JointInternal){
 			.type = JOINT_BALL_SOCKET, .body_a = 0, .body_b = i + 1,
@@ -201,7 +205,7 @@ static void test_shatter_hub_star_extreme_mass()
 	ldl_apply_shattering(&c, w);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_bs, sw.sol_dist, sw.sol_hinge);
+	ldl_numeric_factor(&c, w, sw.sol_joints);
 
 	// Check pivots
 	LDL_Topology* t = c.topo;
@@ -210,7 +214,7 @@ static void test_shatter_hub_star_extreme_mass()
 			TEST_ASSERT(c.diag_D[i][d] > 0);
 
 	float sub_dt = 1.0f / 240.0f;
-	ldl_island_solve(&c, w, sw.sol_bs, sw.bs_count, sw.sol_dist, sw.dist_count, sw.sol_hinge, sw.hinge_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	for (int i = 0; i < sw.body_count; i++) {
 		TEST_ASSERT(w->body_hot[i].velocity.x == w->body_hot[i].velocity.x);
@@ -232,7 +236,8 @@ static void test_shatter_hub_with_soft_springs()
 		sw.bodies[i] = make_body(1, 1);
 		sw.bodies[i].position = V3((float)(i % 3 - 1) * 2, (float)(i / 3) * 2, 0);
 	}
-	sw.bs_count = 6;
+	sw.joint_count = 6;
+	sw.sol_joint_count = 6;
 	float sub_dt = 1.0f / 240.0f;
 	v3 dirs[6] = { V3(1,0,0), V3(-1,0,0), V3(0,1,0), V3(0,-1,0), V3(0,0,1), V3(0,0,-1) };
 	for (int i = 0; i < 6; i++) {
@@ -240,14 +245,15 @@ static void test_shatter_hub_with_soft_springs()
 		SpringParams sp = { .frequency = 30, .damping_ratio = 1 };
 		spring_compute(sp, sub_dt, &ptv, &soft);
 		v3 err = sub(sw.bodies[i + 1].position, sw.bodies[0].position);
-		sw.sol_bs[i] = (SolverBallSocket){
+		sw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3,
 			.r_a = dirs[i], .r_b = scale(dirs[i], -1),
 			.body_a = 0, .body_b = i + 1,
-			.softness = soft, .bias = scale(err, ptv),
-			.lambda = V3(0,0,0), .joint_idx = i,
+			.softness = soft, .joint_idx = i,
 		};
+		{ v3 _b = scale(err, ptv); sw.sol_joints[i].bias[0] = _b.x; sw.sol_joints[i].bias[1] = _b.y; sw.sol_joints[i].bias[2] = _b.z; }
 	}
 	sw.joint_count = 6;
+	sw.sol_joint_count = 6;
 	for (int i = 0; i < 6; i++) {
 		sw.joints[i] = (JointInternal){
 			.type = JOINT_BALL_SOCKET, .body_a = 0, .body_b = i + 1,
@@ -266,14 +272,14 @@ static void test_shatter_hub_with_soft_springs()
 	ldl_apply_shattering(&c, w);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_bs, sw.sol_dist, sw.sol_hinge);
+	ldl_numeric_factor(&c, w, sw.sol_joints);
 
 	LDL_Topology* t = c.topo;
 	for (int i = 0; i < t->node_count; i++)
 		for (int d = 0; d < t->dof[i]; d++)
 			TEST_ASSERT(c.diag_D[i][d] > 0);
 
-	ldl_island_solve(&c, w, sw.sol_bs, sw.bs_count, sw.sol_dist, sw.dist_count, sw.sol_hinge, sw.hinge_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// Velocities should be finite and bounded
 	for (int i = 0; i < sw.body_count; i++) {

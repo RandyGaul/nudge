@@ -33,10 +33,10 @@ static void test_jac_ball_socket_origin()
 	TEST_BEGIN("jac_ball_socket_origin");
 	// Both anchors at body origins (r_a = r_b = 0).
 	// J_a = [-I, 0], J_b = [I, 0]. Pure linear, no angular coupling.
-	SolverBallSocket sol = { .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	for (int d = 0; d < 3; d++) {
 		TEST_ASSERT(jac_linear_antisymmetric(jac, d));
@@ -60,10 +60,10 @@ static void test_jac_ball_socket_offset()
 	// Row 0 angular: [0, -r_a.z, r_a.y] = [0, 0, 0]
 	// Row 1 angular: [r_a.z, 0, -r_a.x] = [0, 0, -1]
 	// Row 2 angular: [-r_a.y, r_a.x, 0] = [0, 1, 0]
-	SolverBallSocket sol = { .r_a = V3(1,0,0), .r_b = V3(0,1,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(0,1,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// Row 0: J_a = [-1, 0, 0,   0, -0, 0] = [-1, 0, 0, 0, 0, 0]
 	TEST_ASSERT(fabs(jac[0].J_a[0] + 1.0) < JAC_EPS);
@@ -102,10 +102,10 @@ static void test_jac_ball_socket_velocity()
 	// Physical test: if body A has angular velocity w_a about Z,
 	// with anchor at r_a = (1, 0, 0), then w_a x r_a = (0, 0, w) x (1, 0, 0) = (0, w, 0).
 	// The constraint velocity row 1 (Y) should pick this up.
-	SolverBallSocket sol = { .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// Body A: stationary linear, rotating about Z at w=1.
 	// Body B: stationary.
@@ -125,10 +125,10 @@ static void test_jac_ball_socket_arbitrary()
 	TEST_BEGIN("jac_ball_socket_arbitrary");
 	// Arbitrary lever arms: verify via velocity test.
 	// Both bodies translating and rotating, check constraint velocity formula.
-	SolverBallSocket sol = { .r_a = V3(1, 2, 3), .r_b = V3(-1, 0.5f, 2) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 2, 3), .r_b = V3(-1, 0.5f, 2) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	v3 va = V3(1, -1, 2), wa = V3(0.5f, -0.3f, 0.7f);
 	v3 vb = V3(-0.5f, 1, 0), wb = V3(0.1f, 0.2f, -0.4f);
@@ -151,10 +151,10 @@ static void test_jac_ball_socket_coincident()
 	TEST_BEGIN("jac_ball_socket_coincident");
 	// Degenerate: bodies at the same position, anchors at the same world point.
 	// Jacobian should still be well-formed. With r_a = r_b, angular parts match.
-	SolverBallSocket sol = { .r_a = V3(1,1,1), .r_b = V3(1,1,1) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,1,1), .r_b = V3(1,1,1) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// With identical r, J_a angular = skew(r) and J_b angular = -skew(r).
 	// Pure equal/opposite angular coupling.
@@ -169,10 +169,10 @@ static void test_jac_ball_socket_large_lever()
 {
 	TEST_BEGIN("jac_ball_socket_large_lever");
 	// Large lever arms (r = 100). Angular columns should have entries ~100.
-	SolverBallSocket sol = { .r_a = V3(100, 0, 0), .r_b = V3(0, 100, 0) };
+	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(100, 0, 0), .r_b = V3(0, 100, 0) };
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
-	ldl_fill_jacobian(&con, &sol, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// Row 2, J_a angular: [-r_a.y, r_a.x, 0] = [0, 100, 0]
 	TEST_ASSERT(fabs(jac[2].J_a[4] - 100.0) < JAC_EPS);
@@ -196,10 +196,10 @@ static void test_jac_distance_x_axis()
 {
 	TEST_BEGIN("jac_distance_x_axis");
 	// Axis along X, anchors at body origins.
-	SolverDistance sol = { .r_a = V3(0,0,0), .r_b = V3(0,0,0), .axis = V3(1,0,0) };
+	SolverJoint sol = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(0,0,0), .r_b = V3(0,0,0), .dist.axis = V3(1,0,0) };
 	LDL_Constraint con = { .type = JOINT_DISTANCE, .dof = 1, .solver_idx = 0 };
 	LDL_JacobianRow jac[1];
-	ldl_fill_jacobian(&con, NULL, &sol, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// J_a = [-1, 0, 0, 0, 0, 0], J_b = [1, 0, 0, 0, 0, 0]
 	TEST_ASSERT(fabs(jac[0].J_a[0] + 1.0) < JAC_EPS);
@@ -218,10 +218,10 @@ static void test_jac_distance_diagonal_axis()
 	TEST_BEGIN("jac_distance_diagonal_axis");
 	// Axis along (1,1,1)/sqrt(3). Linear part should be [-axis, axis].
 	v3 ax = norm(V3(1, 1, 1));
-	SolverDistance sol = { .r_a = V3(0,0,0), .r_b = V3(0,0,0), .axis = ax };
+	SolverJoint sol = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(0,0,0), .r_b = V3(0,0,0), .dist.axis = ax };
 	LDL_Constraint con = { .type = JOINT_DISTANCE, .dof = 1, .solver_idx = 0 };
 	LDL_JacobianRow jac[1];
-	ldl_fill_jacobian(&con, NULL, &sol, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	TEST_ASSERT(fabs(jac[0].J_a[0] + ax.x) < JAC_EPS);
 	TEST_ASSERT(fabs(jac[0].J_a[1] + ax.y) < JAC_EPS);
@@ -235,10 +235,10 @@ static void test_jac_distance_with_lever()
 {
 	TEST_BEGIN("jac_distance_with_lever");
 	// Axis along X, r_a = (0, 1, 0). Angular part = -(r_a x axis) = -(0,1,0) x (1,0,0) = -(0,0,-1) = (0,0,1).
-	SolverDistance sol = { .r_a = V3(0,1,0), .r_b = V3(0,0,0), .axis = V3(1,0,0) };
+	SolverJoint sol = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(0,1,0), .r_b = V3(0,0,0), .dist.axis = V3(1,0,0) };
 	LDL_Constraint con = { .type = JOINT_DISTANCE, .dof = 1, .solver_idx = 0 };
 	LDL_JacobianRow jac[1];
-	ldl_fill_jacobian(&con, NULL, &sol, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// Angular A: -(r_a x axis) = -((0,1,0) x (1,0,0)) = -(0*0-0*0, 0*1-1*0, 1*0-0*1) = -(0, 0, -1) = (0, 0, 1)
 	TEST_ASSERT(fabs(jac[0].J_a[3]) < JAC_EPS);
@@ -250,10 +250,10 @@ static void test_jac_distance_velocity()
 {
 	TEST_BEGIN("jac_distance_velocity");
 	// Physical test: body B moving along the axis should produce positive constraint velocity.
-	SolverDistance sol = { .r_a = V3(0,0,0), .r_b = V3(0,0,0), .axis = V3(1,0,0) };
+	SolverJoint sol = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(0,0,0), .r_b = V3(0,0,0), .dist.axis = V3(1,0,0) };
 	LDL_Constraint con = { .type = JOINT_DISTANCE, .dof = 1, .solver_idx = 0 };
 	LDL_JacobianRow jac[1];
-	ldl_fill_jacobian(&con, NULL, &sol, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// B moving +X at speed 5: constraint velocity = axis . (vb - va) = 1*5 = 5
 	double cv = jac_velocity(&jac[0], V3(0,0,0), V3(0,0,0), V3(5,0,0), V3(0,0,0));
@@ -270,10 +270,10 @@ static void test_jac_distance_arbitrary()
 	// Arbitrary geometry, verify via velocity formula.
 	v3 ra = V3(1, 2, -1), rb = V3(-0.5f, 1, 3);
 	v3 ax = norm(V3(2, -1, 1));
-	SolverDistance sol = { .r_a = ra, .r_b = rb, .axis = ax };
+	SolverJoint sol = { .type = JOINT_DISTANCE, .dof = 1, .r_a = ra, .r_b = rb, .dist.axis = ax };
 	LDL_Constraint con = { .type = JOINT_DISTANCE, .dof = 1, .solver_idx = 0 };
 	LDL_JacobianRow jac[1];
-	ldl_fill_jacobian(&con, NULL, &sol, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	v3 va = V3(1, -1, 2), wa = V3(0.5f, -0.3f, 0.7f);
 	v3 vb = V3(-0.5f, 1, 0), wb = V3(0.1f, 0.2f, -0.4f);
@@ -293,10 +293,10 @@ static void test_jac_distance_zero_axis()
 	TEST_BEGIN("jac_distance_zero_axis");
 	// Degenerate: axis = (0,0,0). This happens when anchors coincide.
 	// Jacobian should be all zeros (no constraint direction).
-	SolverDistance sol = { .r_a = V3(0,0,0), .r_b = V3(0,0,0), .axis = V3(0,0,0) };
+	SolverJoint sol = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(0,0,0), .r_b = V3(0,0,0), .dist.axis = V3(0,0,0) };
 	LDL_Constraint con = { .type = JOINT_DISTANCE, .dof = 1, .solver_idx = 0 };
 	LDL_JacobianRow jac[1];
-	ldl_fill_jacobian(&con, NULL, &sol, NULL, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	for (int i = 0; i < 6; i++) {
 		TEST_ASSERT(fabs(jac[0].J_a[i]) < JAC_EPS);
@@ -316,13 +316,13 @@ static void test_jac_hinge_linear_matches_ball_socket()
 	TEST_BEGIN("jac_hinge_linear_matches_ball_socket");
 	// Linear rows of hinge must exactly match ball-socket Jacobian.
 	v3 ra = V3(1, 2, 3), rb = V3(-1, 0.5f, 2);
-	SolverBallSocket sol_bs = { .r_a = ra, .r_b = rb };
-	SolverHinge sol_h = { .r_a = ra, .r_b = rb, .u1 = V3(1,0,0), .u2 = V3(0,1,0) };
+	SolverJoint sol_bs = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = ra, .r_b = rb };
+	SolverJoint sol_h = { .type = JOINT_HINGE, .dof = 5, .r_a = ra, .r_b = rb, .hinge.u1 = V3(1,0,0), .hinge.u2 = V3(0,1,0) };
 	LDL_Constraint con_bs = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_Constraint con_h = { .type = JOINT_HINGE, .dof = 5, .solver_idx = 0 };
 	LDL_JacobianRow jac_bs[3], jac_h[5];
-	ldl_fill_jacobian(&con_bs, &sol_bs, NULL, NULL, jac_bs);
-	ldl_fill_jacobian(&con_h, NULL, NULL, &sol_h, jac_h);
+	ldl_fill_jacobian(&con_bs, &sol_bs, jac_bs);
+	ldl_fill_jacobian(&con_h, &sol_h, jac_h);
 
 	for (int d = 0; d < 3; d++) {
 		for (int i = 0; i < 6; i++) {
@@ -337,13 +337,13 @@ static void test_jac_hinge_angular_axis_aligned()
 	TEST_BEGIN("jac_hinge_angular_axis_aligned");
 	// Hinge axis along Z. u1, u2 are the angular constraint axes
 	// (perpendicular to the hinge axis, constraining rotation off-axis).
-	SolverHinge sol = {
+	SolverJoint sol = { .type = JOINT_HINGE, .dof = 5,
 		.r_a = V3(0,0,0), .r_b = V3(0,0,0),
-		.u1 = V3(1, 0, 0), .u2 = V3(0, 1, 0),
+		.hinge.u1 = V3(1, 0, 0), .hinge.u2 = V3(0, 1, 0),
 	};
 	LDL_Constraint con = { .type = JOINT_HINGE, .dof = 5, .solver_idx = 0 };
 	LDL_JacobianRow jac[5];
-	ldl_fill_jacobian(&con, NULL, NULL, &sol, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// Row 3: J_a = [0,0,0, u1] = [0,0,0, 1,0,0], J_b = [0,0,0, -u1] = [0,0,0, -1,0,0]
 	TEST_ASSERT(fabs(jac[3].J_a[0]) < JAC_EPS);
@@ -364,13 +364,13 @@ static void test_jac_hinge_angular_velocity()
 	TEST_BEGIN("jac_hinge_angular_velocity");
 	// Physical test: rotation about the hinge axis (Z) should produce zero
 	// constraint velocity on angular rows. Rotation about X or Y should not.
-	SolverHinge sol = {
+	SolverJoint sol = { .type = JOINT_HINGE, .dof = 5,
 		.r_a = V3(0,0,0), .r_b = V3(0,0,0),
-		.u1 = V3(1, 0, 0), .u2 = V3(0, 1, 0),
+		.hinge.u1 = V3(1, 0, 0), .hinge.u2 = V3(0, 1, 0),
 	};
 	LDL_Constraint con = { .type = JOINT_HINGE, .dof = 5, .solver_idx = 0 };
 	LDL_JacobianRow jac[5];
-	ldl_fill_jacobian(&con, NULL, NULL, &sol, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// Body A rotating about Z (hinge axis): angular rows should be zero.
 	double cv3 = jac_velocity(&jac[3], V3(0,0,0), V3(0,0,1), V3(0,0,0), V3(0,0,0));
@@ -392,13 +392,13 @@ static void test_jac_hinge_arbitrary()
 	TEST_BEGIN("jac_hinge_arbitrary");
 	// Arbitrary geometry, verify angular rows via velocity formula.
 	v3 u1 = norm(V3(1, 1, 0)), u2 = norm(V3(-1, 1, 0));
-	SolverHinge sol = {
+	SolverJoint sol = { .type = JOINT_HINGE, .dof = 5,
 		.r_a = V3(2, -1, 0.5f), .r_b = V3(-1, 1, 3),
-		.u1 = u1, .u2 = u2,
+		.hinge.u1 = u1, .hinge.u2 = u2,
 	};
 	LDL_Constraint con = { .type = JOINT_HINGE, .dof = 5, .solver_idx = 0 };
 	LDL_JacobianRow jac[5];
-	ldl_fill_jacobian(&con, NULL, NULL, &sol, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	v3 wa = V3(0.5f, -0.3f, 0.7f), wb = V3(0.1f, 0.2f, -0.4f);
 	// Angular constraint velocity for row d: u_d . (w_a - w_b)
@@ -416,13 +416,13 @@ static void test_jac_hinge_zero_lever()
 {
 	TEST_BEGIN("jac_hinge_zero_lever");
 	// Anchors at body origins: linear rows are pure [-I, I], angular rows are pure u.
-	SolverHinge sol = {
+	SolverJoint sol = { .type = JOINT_HINGE, .dof = 5,
 		.r_a = V3(0,0,0), .r_b = V3(0,0,0),
-		.u1 = V3(0, 0, 1), .u2 = V3(1, 0, 0),
+		.hinge.u1 = V3(0, 0, 1), .hinge.u2 = V3(1, 0, 0),
 	};
 	LDL_Constraint con = { .type = JOINT_HINGE, .dof = 5, .solver_idx = 0 };
 	LDL_JacobianRow jac[5];
-	ldl_fill_jacobian(&con, NULL, NULL, &sol, jac);
+	ldl_fill_jacobian(&con, &sol, jac);
 
 	// Linear rows: zero angular
 	for (int d = 0; d < 3; d++)
@@ -448,7 +448,7 @@ static void test_jac_weld()
 	// Synthetic weld: J_a = -I_6, J_b = +I_6. 6 DOF, all independent.
 	LDL_Constraint con = { .type = -1, .dof = 6, .is_synthetic = 1 };
 	LDL_JacobianRow jac[6];
-	ldl_fill_jacobian(&con, NULL, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, NULL, jac);
 
 	for (int d = 0; d < 6; d++) {
 		for (int i = 0; i < 6; i++) {
@@ -467,7 +467,7 @@ static void test_jac_weld_velocity()
 	// If both have same velocity, constraint velocity is zero.
 	LDL_Constraint con = { .type = -1, .dof = 6, .is_synthetic = 1 };
 	LDL_JacobianRow jac[6];
-	ldl_fill_jacobian(&con, NULL, NULL, NULL, jac);
+	ldl_fill_jacobian(&con, NULL, jac);
 
 	v3 v = V3(3, -2, 7), w = V3(1, -1, 0.5f);
 	for (int d = 0; d < 6; d++) {

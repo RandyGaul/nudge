@@ -366,48 +366,45 @@ struct WarmManifold
 // -----------------------------------------------------------------------------
 // Joint solver types.
 
-typedef struct SolverBallSocket
-{
-	int body_a, body_b;
-	v3 r_a, r_b;
-	float eff_mass[6]; // symmetric 3x3 inverse (xx,xy,xz,yy,yz,zz)
-	v3 bias;
-	float softness;
-	v3 lambda;
-	int joint_idx;
-} SolverBallSocket;
+// Max DOF per joint: hinge = 5 (3 linear + 2 angular).
+#define JOINT_MAX_DOF 5
 
-typedef struct SolverDistance
+// Unified solver joint: all joint types share one struct.
+// PGS and LDL both read/write the common fields. Type-specific PGS data
+// (eff_mass, axis, tangent basis) lives in a union.
+typedef struct SolverJoint
 {
 	int body_a, body_b;
-	v3 r_a, r_b;
-	v3 axis;
-	float eff_mass;
-	float bias;
-	float softness;
-	float lambda;
 	int joint_idx;
-} SolverDistance;
+	JointType type;
+	int dof;              // 1 (distance), 3 (ball socket), 5 (hinge)
+	float softness;
 
-typedef struct SolverHinge
-{
-	int body_a, body_b;
-	v3 r_a, r_b;
-	float lin_eff_mass[6];   // symmetric 3x3 inverse
-	v3 lin_bias;
-	v3 lin_lambda;
-	v3 t1, t2;              // tangent axes (perp to axis_a world)
-	v3 axis_b;              // body B hinge axis in world space
-	v3 u1, u2;              // angular constraint axes: cross(t_d, axis_b)
-	float ang_eff_mass1, ang_eff_mass2;
-	float ang_bias[2];
-	float ang_lambda[2];
-	float softness;
-	int joint_idx;
-} SolverHinge;
+	v3 r_a, r_b;         // world-space lever arms
+	float lambda[JOINT_MAX_DOF];
+	float bias[JOINT_MAX_DOF];
+
+	// Clamp bounds (for future joint limits / motors).
+	// Default: lo=-FLT_MAX, hi=+FLT_MAX (bilateral, unclamped).
+	float lo[JOINT_MAX_DOF];
+	float hi[JOINT_MAX_DOF];
+
+	// Type-specific PGS solve data.
+	union {
+		struct { float eff_mass[6]; } bs;                  // ball socket: sym 3x3
+		struct { v3 axis; float eff_mass; } dist;          // distance: 1 DOF along axis
+		struct {
+			float lin_eff_mass[6];                          // sym 3x3 for linear part
+			float ang_eff_mass[2];                          // 1 scalar per angular DOF
+			v3 axis_b;                                      // body B hinge axis in world
+			v3 t1, t2;                                      // tangent basis
+			v3 u1, u2;                                      // angular constraint axes
+		} hinge;
+	};
+} SolverJoint;
 
 // Constraint ref for graph coloring dispatch.
-enum { CTYPE_CONTACT, CTYPE_BALL_SOCKET, CTYPE_DISTANCE, CTYPE_HINGE };
+enum { CTYPE_CONTACT, CTYPE_JOINT };
 
 typedef struct ConstraintRef
 {
@@ -500,7 +497,7 @@ typedef struct AVBD_BodyState
 
 typedef struct LDL_DebugInfo
 {
-	int n;                                 // total DOFs
+	int n;                                // total DOFs
 	double A[LDL_MAX_DOF * LDL_MAX_DOF];  // constraint matrix snapshot
 	double D[LDL_MAX_DOF];                // diagonal pivots after factorization
 	double rhs[LDL_MAX_DOF];              // RHS (constraint violations) before solve

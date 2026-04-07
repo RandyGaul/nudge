@@ -157,19 +157,15 @@ void world_step(World world, float dt)
 	SolverContact*  sc = NULL;
 	solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, sub_dt);
 
-	SolverBallSocket* sol_bs = NULL;
-	SolverDistance*    sol_dist = NULL;
-	SolverHinge*       sol_hinge = NULL;
-	joints_pre_solve(w, sub_dt, &sol_bs, &sol_dist, &sol_hinge);
+	SolverJoint* sol_joints = NULL;
+	joints_pre_solve(w, sub_dt, &sol_joints);
 
 	// LDL is a direct solver -- rigid joints don't need warm-start. Stale
 	// warm-start impulses inject energy when lever arms rotate between frames.
 	if (w->ldl_enabled) {
-		for (int i = 0; i < asize(sol_bs); i++) if (sol_bs[i].softness == 0.0f) sol_bs[i].lambda = V3(0, 0, 0);
-		for (int i = 0; i < asize(sol_dist); i++) if (sol_dist[i].softness == 0.0f) sol_dist[i].lambda = 0;
-		for (int i = 0; i < asize(sol_hinge); i++) if (sol_hinge[i].softness == 0.0f) { sol_hinge[i].lin_lambda = V3(0, 0, 0); sol_hinge[i].ang_lambda[0] = 0; sol_hinge[i].ang_lambda[1] = 0; }
+		for (int i = 0; i < asize(sol_joints); i++) if (sol_joints[i].softness == 0.0f) for (int d = 0; d < sol_joints[i].dof; d++) sol_joints[i].lambda[d] = 0;
 	}
-	joints_warm_start(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge));
+	joints_warm_start(w, sol_joints, asize(sol_joints));
 
 	// --- Graph color (once per frame) ---
 	// When LDL enabled: rigid joints excluded from PGS (they get diagonal GS + LDL K^-1).
@@ -184,19 +180,9 @@ void world_step(World world, float dt)
 	}
 	if (!w->ldl_enabled) {
 		// No LDL: all joints go into PGS
-		for (int i = 0; i < asize(sol_bs); i++) {
-			ConstraintRef r = { .type = CTYPE_BALL_SOCKET, .index = i,
-				.body_a = sol_bs[i].body_a, .body_b = sol_bs[i].body_b };
-			apush(crefs, r);
-		}
-		for (int i = 0; i < asize(sol_dist); i++) {
-			ConstraintRef r = { .type = CTYPE_DISTANCE, .index = i,
-				.body_a = sol_dist[i].body_a, .body_b = sol_dist[i].body_b };
-			apush(crefs, r);
-		}
-		for (int i = 0; i < asize(sol_hinge); i++) {
-			ConstraintRef r = { .type = CTYPE_HINGE, .index = i,
-				.body_a = sol_hinge[i].body_a, .body_b = sol_hinge[i].body_b };
+		for (int i = 0; i < asize(sol_joints); i++) {
+			ConstraintRef r = { .type = CTYPE_JOINT, .index = i,
+				.body_a = sol_joints[i].body_a, .body_b = sol_joints[i].body_b };
 			apush(crefs, r);
 		}
 	} else {
@@ -222,7 +208,7 @@ void world_step(World world, float dt)
 		if (sub > 0)
 			integrate_velocities(w, sub_dt);
 
-		int has_ldl = w->ldl_enabled && (asize(sol_bs) > 0 || asize(sol_dist) > 0 || asize(sol_hinge) > 0);
+		int has_ldl = w->ldl_enabled && asize(sol_joints) > 0;
 
 		// Resolve LDL correction iteration: -2 = auto (velocity_iters/2), -1 = after loop
 		int ldl_iter = w->ldl_correction_iter;
@@ -230,26 +216,24 @@ void world_step(World world, float dt)
 
 		// LDL: factor K once at start of substep (topology + numeric)
 		if (has_ldl)
-			ldl_factor(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub);
+			ldl_factor(w, sol_joints, asize(sol_joints), sub);
 
 		if (has_ldl) {
 			// Sub > 0: clear soft joint lambda so ACCUMULATE starts fresh
 			// (no warm-start on sub > 0). Rigid joints use SET, no clearing needed.
 			if (sub > 0) {
-				for (int i = 0; i < asize(sol_bs); i++) if (sol_bs[i].softness > 0.0f) sol_bs[i].lambda = V3(0, 0, 0);
-				for (int i = 0; i < asize(sol_dist); i++) if (sol_dist[i].softness > 0.0f) sol_dist[i].lambda = 0;
-				for (int i = 0; i < asize(sol_hinge); i++) if (sol_hinge[i].softness > 0.0f) { sol_hinge[i].lin_lambda = V3(0, 0, 0); sol_hinge[i].ang_lambda[0] = 0; sol_hinge[i].ang_lambda[1] = 0; }
+				for (int i = 0; i < asize(sol_joints); i++) if (sol_joints[i].softness > 0.0f) for (int d = 0; d < sol_joints[i].dof; d++) sol_joints[i].lambda[d] = 0;
 			}
-			ldl_velocity_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub_dt);
+			ldl_velocity_correct(w, sol_joints, asize(sol_joints), sub_dt);
 			for (int iter = 0; iter < w->velocity_iters; iter++)
 				for (int c = 0; c < color_count; c++)
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist, sol_hinge);
+						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
 		} else {
 			for (int iter = 0; iter < w->velocity_iters; iter++)
 				for (int c = 0; c < color_count; c++)
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-						solve_constraint(w, &crefs[i], sm, sc, sol_bs, sol_dist, sol_hinge);
+						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
 		}
 
 		integrate_positions(w, sub_dt);
@@ -261,8 +245,8 @@ void world_step(World world, float dt)
 		// Position correction after integration.
 		// LDL: direct solve projects out bulk error, NGS cleans up residual.
 		if (has_ldl)
-			ldl_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), sub_dt);
-		joints_position_correct(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge), w->position_iters);
+			ldl_position_correct(w, sol_joints, asize(sol_joints), sub_dt);
+		joints_position_correct(w, sol_joints, asize(sol_joints), w->position_iters);
 	}
 
 	afree(crefs);
@@ -275,7 +259,7 @@ void world_step(World world, float dt)
 
 	// Post-solve (once per frame)
 	solver_post_solve(w, sm, asize(sm), sc, manifolds, manifold_count);
-	joints_post_solve(w, sol_bs, asize(sol_bs), sol_dist, asize(sol_dist), sol_hinge, asize(sol_hinge));
+	joints_post_solve(w, sol_joints, asize(sol_joints));
 
 	if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
 
