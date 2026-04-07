@@ -804,57 +804,82 @@ static void scene_mini_chain_setup()
 	apush(g_draw_list, ((DrawEntry){ g_mini_c, MESH_SPHERE, V3(0.5f, 0.5f, 0.5f), V3(0.9f, 0.2f, 0.2f) }));
 }
 
-// --- Joint Demo: lift cart suspended from overhead gantry ---
-// Platform held by 4 distance ropes from static ceiling mounts.
-// Hinged tailgate on one end. Cargo boxes stacked on top.
+// --- Joint Demo: suspension bridge with hinged planks and hanging cables ---
 static void scene_joint_demo_setup()
 {
 	add_floor();
 
-	float pw = 1.5f, ph = 0.15f, pd = 0.8f; // platform half-extents
-	float ceil_y = 8.0f;
-	float rope_len = 3.0f;
-	float plat_y = ceil_y - rope_len;
+	int plank_count = 12;
+	float plank_w = 0.6f;   // half-width (Z)
+	float plank_h = 0.06f;  // half-height (Y)
+	float plank_d = 0.25f;  // half-depth (X, along bridge)
+	float spacing = plank_d * 2.0f + 0.05f;
+	float bridge_len = plank_count * spacing;
+	float bridge_y = 5.0f;
+	float tower_h = 4.0f;
+	float cable_sag = 1.5f;
 
-	// Platform (the cart bed)
-	Body platform = create_body(g_world, (BodyParams){ .position = V3(0, plat_y, 0), .rotation = quat_identity(), .mass = 10.0f });
-	body_add_shape(g_world, platform, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(pw, ph, pd) });
-	apush(g_draw_list, ((DrawEntry){ platform, MESH_BOX, V3(pw, ph, pd), V3(0.6f, 0.55f, 0.45f) }));
+	// Two static towers
+	float tower_x_l = -bridge_len * 0.5f - 1.0f;
+	float tower_x_r =  bridge_len * 0.5f + 1.0f;
+	Body tower_l = create_body(g_world, (BodyParams){ .position = V3(tower_x_l, bridge_y + tower_h * 0.5f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(g_world, tower_l, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, tower_h * 0.5f, 0.3f) });
+	apush(g_draw_list, ((DrawEntry){ tower_l, MESH_BOX, V3(0.3f, tower_h * 0.5f, 0.3f), V3(0.5f, 0.45f, 0.4f) }));
 
-	// 4 ceiling mounts (static) + distance ropes to platform corners
-	v3 corners[] = { V3(-pw, 0, -pd), V3(pw, 0, -pd), V3(pw, 0, pd), V3(-pw, 0, pd) };
-	for (int i = 0; i < 4; i++) {
-		v3 ceil_pos = V3(corners[i].x, ceil_y, corners[i].z);
-		Body mount = create_body(g_world, (BodyParams){ .position = ceil_pos, .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(g_world, mount, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
-		// Ball socket at platform corner, distance rope from mount center
-		create_ball_socket(g_world, (BallSocketParams){
-			.body_a = mount, .body_b = platform,
-			.local_offset_a = V3(0, -rope_len, 0),
-			.local_offset_b = corners[i],
-		});
+	Body tower_r = create_body(g_world, (BodyParams){ .position = V3(tower_x_r, bridge_y + tower_h * 0.5f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(g_world, tower_r, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, tower_h * 0.5f, 0.3f) });
+	apush(g_draw_list, ((DrawEntry){ tower_r, MESH_BOX, V3(0.3f, tower_h * 0.5f, 0.3f), V3(0.5f, 0.45f, 0.4f) }));
+
+	// Bridge planks connected by hinges (rotate around Z axis = flex along bridge)
+	Body planks[12];
+	for (int i = 0; i < plank_count; i++) {
+		float x = -bridge_len * 0.5f + spacing * 0.5f + i * spacing;
+		planks[i] = create_body(g_world, (BodyParams){ .position = V3(x, bridge_y, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(g_world, planks[i], (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(plank_d, plank_h, plank_w) });
+		apush(g_draw_list, ((DrawEntry){ planks[i], MESH_BOX, V3(plank_d, plank_h, plank_w), V3(0.7f, 0.55f, 0.3f) }));
+
+		if (i == 0) {
+			// Hinge first plank to left tower
+			create_hinge(g_world, (HingeParams){ .body_a = tower_l, .body_b = planks[0],
+				.local_offset_a = V3(0.3f, -tower_h * 0.5f, 0), .local_offset_b = V3(-plank_d, 0, 0),
+				.local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		} else {
+			// Hinge consecutive planks together
+			create_hinge(g_world, (HingeParams){ .body_a = planks[i-1], .body_b = planks[i],
+				.local_offset_a = V3(plank_d, 0, 0), .local_offset_b = V3(-plank_d, 0, 0),
+				.local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		}
+	}
+	// Hinge last plank to right tower
+	create_hinge(g_world, (HingeParams){ .body_a = planks[plank_count-1], .body_b = tower_r,
+		.local_offset_a = V3(plank_d, 0, 0), .local_offset_b = V3(-0.3f, -tower_h * 0.5f, 0),
+		.local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+
+	// Suspension cables: distance joints from tower tops to each plank
+	float top_y = bridge_y + tower_h;
+	for (int i = 0; i < plank_count; i++) {
+		float x = -bridge_len * 0.5f + spacing * 0.5f + i * spacing;
+		// Parabolic cable length (longer in the middle)
+		float t = (float)i / (plank_count - 1) - 0.5f; // -0.5 to 0.5
+		float sag = cable_sag * (1.0f - 4.0f * t * t);  // peak in middle
+		float cable_len_l = sqrtf((x - tower_x_l) * (x - tower_x_l) + (top_y - bridge_y + sag) * (top_y - bridge_y + sag));
+		float cable_len_r = sqrtf((tower_x_r - x) * (tower_x_r - x) + (top_y - bridge_y + sag) * (top_y - bridge_y + sag));
+
+		// Left cable (both sides of plank for stability)
+		for (int side = -1; side <= 1; side += 2) {
+			float z = side * plank_w;
+			Body cable_top_l = create_body(g_world, (BodyParams){ .position = V3(tower_x_l, top_y, z), .rotation = quat_identity(), .mass = 0 });
+			create_distance(g_world, (DistanceParams){ .body_a = cable_top_l, .body_b = planks[i], .local_offset_b = V3(0, 0, z), .rest_length = cable_len_l });
+
+			Body cable_top_r = create_body(g_world, (BodyParams){ .position = V3(tower_x_r, top_y, z), .rotation = quat_identity(), .mass = 0 });
+			create_distance(g_world, (DistanceParams){ .body_a = cable_top_r, .body_b = planks[i], .local_offset_b = V3(0, 0, z), .rest_length = cable_len_r });
+		}
 	}
 
-	// Hinged tailgate on the back edge
-	Body tailgate = create_body(g_world, (BodyParams){ .position = V3(0, plat_y - ph - 0.4f, -pd - 0.08f), .rotation = quat_identity(), .mass = 2.0f });
-	body_add_shape(g_world, tailgate, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(pw, 0.4f, 0.06f) });
-	create_hinge(g_world, (HingeParams){
-		.body_a = platform, .body_b = tailgate,
-		.local_offset_a = V3(0, -ph, -pd),
-		.local_offset_b = V3(0, 0.4f, 0.06f),
-		.local_axis_a = V3(1, 0, 0),
-		.local_axis_b = V3(1, 0, 0),
-	});
-	apush(g_draw_list, ((DrawEntry){ tailgate, MESH_BOX, V3(pw, 0.4f, 0.06f), V3(0.4f, 0.35f, 0.3f) }));
-
-	// Cargo boxes stacked on platform
-	v3 cargo_colors[] = { V3(0.9f, 0.3f, 0.2f), V3(0.2f, 0.7f, 0.9f), V3(0.9f, 0.8f, 0.2f) };
-	float bh = 0.3f;
-	for (int i = 0; i < 3; i++) {
-		Body box = create_body(g_world, (BodyParams){ .position = V3(-0.5f + i * 0.5f, plat_y + ph + bh + 0.01f, 0), .rotation = quat_identity(), .mass = 1.0f });
-		body_add_shape(g_world, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, bh, 0.2f) });
-		apush(g_draw_list, ((DrawEntry){ box, MESH_BOX, V3(0.2f, bh, 0.2f), cargo_colors[i] }));
-	}
+	// A heavy ball sitting on the bridge to stress it
+	Body ball = create_body(g_world, (BodyParams){ .position = V3(0, bridge_y + 1.5f, 0), .rotation = quat_identity(), .mass = 20.0f });
+	body_add_shape(g_world, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.6f });
+	apush(g_draw_list, ((DrawEntry){ ball, MESH_SPHERE, V3(0.6f, 0.6f, 0.6f), V3(0.9f, 0.2f, 0.2f) }));
 }
 
 // --- Hub Star: central body with 8 radial joints (exercises body shattering) ---
