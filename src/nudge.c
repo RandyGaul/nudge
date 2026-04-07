@@ -7,7 +7,7 @@
 #include "bvh.c"
 #include "collision.c"
 #include "inertia.c"
-#include "solver.c"
+#include "pgs_solver.c"
 #include "joints.c"
 #include "solver_ldl.c"
 #include "islands.c"

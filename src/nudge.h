@@ -100,7 +100,6 @@ typedef struct ConvexHull
 //   clip_edge: which side plane produced this vertex (0xFF = original vertex)
 //
 // Edge contacts: edge_a | (edge_b << 16) | FEATURE_EDGE_BIT
-#define FEATURE_EDGE_BIT 0x80000000u
 
 typedef struct Contact
 {

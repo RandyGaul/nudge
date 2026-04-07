@@ -2,6 +2,10 @@
 #ifndef NUDGE_INTERNAL_H
 #define NUDGE_INTERNAL_H
 
+// Internal constant: feature ID bit flag for edge-edge contacts.
+// Edge contacts: edge_a | (edge_b << 16) | FEATURE_EDGE_BIT
+#define FEATURE_EDGE_BIT 0x80000000u
+
 // Portable float validity: rejects NaN, inf, and extreme magnitudes.
 // NaN fails the self-equality test; inf and huge values fail the bound test.
 static inline int float_valid(float f) { return f == f && f > -1e18f && f < 1e18f; }
@@ -366,8 +370,8 @@ struct WarmManifold
 // -----------------------------------------------------------------------------
 // Joint solver types.
 
-// Max DOF per joint: hinge = 5 (3 linear + 2 angular).
-#define JOINT_MAX_DOF 5
+// Max DOF per joint: 6 for future 6-DOF joints (currently hinge = 5).
+#define JOINT_MAX_DOF 6
 
 // Unified solver joint: all joint types share one struct.
 // PGS and LDL both read/write the common fields. Type-specific PGS data
