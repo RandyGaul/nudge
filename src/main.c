@@ -629,7 +629,7 @@ void update()
 		if (!g_ldl_enabled) {
 			g_ldl_inspect_island = -1;
 		}
-		if (ImGui_Checkbox("CR Contacts", &g_cr_enabled)) {
+		if (ImGui_Checkbox("CR Solver", &g_cr_enabled)) {
 			dbg_w->cr_enabled = g_cr_enabled;
 		}
 	} else {
