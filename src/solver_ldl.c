@@ -1322,9 +1322,9 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverBallSocket* s
 						float err = dist_val - w->joints[sd->joint_idx].distance.rest_length;
 						float ptv_f, soft_f;
 						spring_compute(w->joints[sd->joint_idx].distance.spring, sub_dt, &ptv_f, &soft_f);
-						bias = -ptv_f * err;
+						bias = ptv_f * err;
 					} else {
-						bias = sd->bias;
+						bias = -sd->bias;
 					}
 				} else {
 					SolverHinge* sh = &sol_hinge[con->solver_idx];

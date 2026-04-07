@@ -177,6 +177,7 @@ static void scene_mass_ratio_setup();
 static void scene_heavy_chain_setup();
 static void scene_heavy_chain_draw_extras();
 static void scene_mini_chain_setup();
+static void scene_joint_demo_setup();
 static void scene_hub_star_setup();
 static void scene_hub_star_draw_extras();
 static void scene_hull_pile_setup();
@@ -189,6 +190,7 @@ static Scene g_scenes[] = {
 	{ "Mass Ratio",      scene_mass_ratio_setup, NULL },
 	{ "Heavy Chain",     scene_heavy_chain_setup, scene_heavy_chain_draw_extras },
 	{ "Mini Chain",      scene_mini_chain_setup, NULL },
+	{ "Joint Demo",      scene_joint_demo_setup, NULL },
 	{ "Hub Star",        scene_hub_star_setup,  scene_hub_star_draw_extras },
 	{ "Hull Pile",       scene_hull_pile_setup,  NULL },
 };
@@ -737,8 +739,8 @@ static void scene_heavy_chain_setup()
 	Body prev = g_hchain_anchor;
 	for (int i = 0; i < HEAVY_CHAIN_LEN; i++) {
 		int last = (i == HEAVY_CHAIN_LEN - 1);
-		float mass = last ? 100.0f : 1.0f;
-		float radius = last ? 0.5f : 0.15f;
+		float mass = last ? 500.0f : 1.0f;
+		float radius = last ? 2.0f : 0.15f;
 		v3 color = last ? V3(0.9f, 0.2f, 0.2f) : V3(0.6f, 0.6f, 0.9f);
 
 		g_hchain[i] = create_body(g_world, (BodyParams){
@@ -800,6 +802,51 @@ static void scene_mini_chain_setup()
 	apush(g_draw_list, ((DrawEntry){ g_mini_a, MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.6f, 0.6f, 0.9f) }));
 	apush(g_draw_list, ((DrawEntry){ g_mini_b, MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.6f, 0.6f, 0.9f) }));
 	apush(g_draw_list, ((DrawEntry){ g_mini_c, MESH_SPHERE, V3(0.5f, 0.5f, 0.5f), V3(0.9f, 0.2f, 0.2f) }));
+}
+
+// --- Joint Demo: ball socket pivot + hinge door + distance chain in one scene ---
+static void scene_joint_demo_setup()
+{
+	add_floor();
+
+	// Ball socket: pendulum arm pivoting from a static mount
+	// The anchor IS on the body surface -- this is the correct use of ball socket.
+	Body pivot_mount = create_body(g_world, (BodyParams){ .position = V3(-4, 6, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(g_world, pivot_mount, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+
+	Body arm = create_body(g_world, (BodyParams){ .position = V3(-4, 4, 0), .rotation = quat_identity(), .mass = 2.0f });
+	body_add_shape(g_world, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.15f, 1.0f, 0.15f) });
+	create_ball_socket(g_world, (BallSocketParams){ .body_a = pivot_mount, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 1.0f, 0) });
+
+	Body weight = create_body(g_world, (BodyParams){ .position = V3(-4, 2.8f, 0), .rotation = quat_identity(), .mass = 5.0f });
+	body_add_shape(g_world, weight, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f });
+	create_ball_socket(g_world, (BallSocketParams){ .body_a = arm, .body_b = weight, .local_offset_a = V3(0, -1.0f, 0), .local_offset_b = V3(0, 0, 0) });
+
+	apush(g_draw_list, ((DrawEntry){ arm, MESH_BOX, V3(0.15f, 1.0f, 0.15f), V3(0.8f, 0.6f, 0.2f) }));
+	apush(g_draw_list, ((DrawEntry){ weight, MESH_SPHERE, V3(0.4f, 0.4f, 0.4f), V3(0.9f, 0.3f, 0.2f) }));
+
+	// Hinge: door swinging on a vertical axis
+	Body door_frame = create_body(g_world, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(g_world, door_frame, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+	Body door = create_body(g_world, (BodyParams){ .position = V3(0.75f, 3, 0), .rotation = quat_identity(), .mass = 3.0f });
+	body_add_shape(g_world, door, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.75f, 1.0f, 0.08f) });
+	create_hinge(g_world, (HingeParams){ .body_a = door_frame, .body_b = door, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-0.75f, 0, 0), .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0) });
+
+	apush(g_draw_list, ((DrawEntry){ door, MESH_BOX, V3(0.75f, 1.0f, 0.08f), V3(0.3f, 0.5f, 0.9f) }));
+
+	// Distance chain: 5 links, proper rod constraints
+	Body chain_anchor = create_body(g_world, (BodyParams){ .position = V3(4, 8, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(g_world, chain_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+
+	Body prev = chain_anchor;
+	for (int i = 0; i < 5; i++) {
+		Body link = create_body(g_world, (BodyParams){ .position = V3(4, 8 - (i + 1) * 0.8f, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(g_world, link, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+		create_distance(g_world, (DistanceParams){ .body_a = prev, .body_b = link, .rest_length = 0.8f });
+		apush(g_draw_list, ((DrawEntry){ link, MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.2f, 0.8f, 0.4f) }));
+		prev = link;
+	}
 }
 
 // --- Hub Star: central body with 8 radial joints (exercises body shattering) ---
