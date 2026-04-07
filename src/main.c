@@ -804,48 +804,56 @@ static void scene_mini_chain_setup()
 	apush(g_draw_list, ((DrawEntry){ g_mini_c, MESH_SPHERE, V3(0.5f, 0.5f, 0.5f), V3(0.9f, 0.2f, 0.2f) }));
 }
 
-// --- Joint Demo: ball socket pivot + hinge door + distance chain in one scene ---
+// --- Joint Demo: lift cart suspended from overhead gantry ---
+// Platform held by 4 distance ropes from static ceiling mounts.
+// Hinged tailgate on one end. Cargo boxes stacked on top.
 static void scene_joint_demo_setup()
 {
 	add_floor();
 
-	// Ball socket: pendulum arm pivoting from a static mount
-	// The anchor IS on the body surface -- this is the correct use of ball socket.
-	Body pivot_mount = create_body(g_world, (BodyParams){ .position = V3(-4, 6, 0), .rotation = quat_identity(), .mass = 0 });
-	body_add_shape(g_world, pivot_mount, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	float pw = 1.5f, ph = 0.15f, pd = 0.8f; // platform half-extents
+	float ceil_y = 8.0f;
+	float rope_len = 3.0f;
+	float plat_y = ceil_y - rope_len;
 
-	Body arm = create_body(g_world, (BodyParams){ .position = V3(-4, 4, 0), .rotation = quat_identity(), .mass = 2.0f });
-	body_add_shape(g_world, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.15f, 1.0f, 0.15f) });
-	create_ball_socket(g_world, (BallSocketParams){ .body_a = pivot_mount, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 1.0f, 0) });
+	// Platform (the cart bed)
+	Body platform = create_body(g_world, (BodyParams){ .position = V3(0, plat_y, 0), .rotation = quat_identity(), .mass = 10.0f });
+	body_add_shape(g_world, platform, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(pw, ph, pd) });
+	apush(g_draw_list, ((DrawEntry){ platform, MESH_BOX, V3(pw, ph, pd), V3(0.6f, 0.55f, 0.45f) }));
 
-	Body weight = create_body(g_world, (BodyParams){ .position = V3(-4, 2.8f, 0), .rotation = quat_identity(), .mass = 5.0f });
-	body_add_shape(g_world, weight, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f });
-	create_ball_socket(g_world, (BallSocketParams){ .body_a = arm, .body_b = weight, .local_offset_a = V3(0, -1.0f, 0), .local_offset_b = V3(0, 0, 0) });
+	// 4 ceiling mounts (static) + distance ropes to platform corners
+	v3 corners[] = { V3(-pw, 0, -pd), V3(pw, 0, -pd), V3(pw, 0, pd), V3(-pw, 0, pd) };
+	for (int i = 0; i < 4; i++) {
+		v3 ceil_pos = V3(corners[i].x, ceil_y, corners[i].z);
+		Body mount = create_body(g_world, (BodyParams){ .position = ceil_pos, .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(g_world, mount, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		// Ball socket at platform corner, distance rope from mount center
+		create_ball_socket(g_world, (BallSocketParams){
+			.body_a = mount, .body_b = platform,
+			.local_offset_a = V3(0, -rope_len, 0),
+			.local_offset_b = corners[i],
+		});
+	}
 
-	apush(g_draw_list, ((DrawEntry){ arm, MESH_BOX, V3(0.15f, 1.0f, 0.15f), V3(0.8f, 0.6f, 0.2f) }));
-	apush(g_draw_list, ((DrawEntry){ weight, MESH_SPHERE, V3(0.4f, 0.4f, 0.4f), V3(0.9f, 0.3f, 0.2f) }));
+	// Hinged tailgate on the back edge
+	Body tailgate = create_body(g_world, (BodyParams){ .position = V3(0, plat_y - ph - 0.4f, -pd - 0.08f), .rotation = quat_identity(), .mass = 2.0f });
+	body_add_shape(g_world, tailgate, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(pw, 0.4f, 0.06f) });
+	create_hinge(g_world, (HingeParams){
+		.body_a = platform, .body_b = tailgate,
+		.local_offset_a = V3(0, -ph, -pd),
+		.local_offset_b = V3(0, 0.4f, 0.06f),
+		.local_axis_a = V3(1, 0, 0),
+		.local_axis_b = V3(1, 0, 0),
+	});
+	apush(g_draw_list, ((DrawEntry){ tailgate, MESH_BOX, V3(pw, 0.4f, 0.06f), V3(0.4f, 0.35f, 0.3f) }));
 
-	// Hinge: door swinging on a vertical axis
-	Body door_frame = create_body(g_world, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 0 });
-	body_add_shape(g_world, door_frame, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
-
-	Body door = create_body(g_world, (BodyParams){ .position = V3(0.75f, 3, 0), .rotation = quat_identity(), .mass = 3.0f });
-	body_add_shape(g_world, door, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.75f, 1.0f, 0.08f) });
-	create_hinge(g_world, (HingeParams){ .body_a = door_frame, .body_b = door, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-0.75f, 0, 0), .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0) });
-
-	apush(g_draw_list, ((DrawEntry){ door, MESH_BOX, V3(0.75f, 1.0f, 0.08f), V3(0.3f, 0.5f, 0.9f) }));
-
-	// Distance chain: 5 links, proper rod constraints
-	Body chain_anchor = create_body(g_world, (BodyParams){ .position = V3(4, 8, 0), .rotation = quat_identity(), .mass = 0 });
-	body_add_shape(g_world, chain_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
-
-	Body prev = chain_anchor;
-	for (int i = 0; i < 5; i++) {
-		Body link = create_body(g_world, (BodyParams){ .position = V3(4, 8 - (i + 1) * 0.8f, 0), .rotation = quat_identity(), .mass = 1.0f });
-		body_add_shape(g_world, link, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
-		create_distance(g_world, (DistanceParams){ .body_a = prev, .body_b = link, .rest_length = 0.8f });
-		apush(g_draw_list, ((DrawEntry){ link, MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.2f, 0.8f, 0.4f) }));
-		prev = link;
+	// Cargo boxes stacked on platform
+	v3 cargo_colors[] = { V3(0.9f, 0.3f, 0.2f), V3(0.2f, 0.7f, 0.9f), V3(0.9f, 0.8f, 0.2f) };
+	float bh = 0.3f;
+	for (int i = 0; i < 3; i++) {
+		Body box = create_body(g_world, (BodyParams){ .position = V3(-0.5f + i * 0.5f, plat_y + ph + bh + 0.01f, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(g_world, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, bh, 0.2f) });
+		apush(g_draw_list, ((DrawEntry){ box, MESH_BOX, V3(0.2f, bh, 0.2f), cargo_colors[i] }));
 	}
 }
 
