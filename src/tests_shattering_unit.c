@@ -123,6 +123,7 @@ static void test_shatter_hub_star_pipeline()
 	v3 dirs[6] = { V3(1,0,0), V3(-1,0,0), V3(0,1,0), V3(0,-1,0), V3(0,0,1), V3(0,0,-1) };
 	for (int i = 0; i < 6; i++) {
 		sw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = dirs[i], .r_b = scale(dirs[i], -1), .body_a = 0, .body_b = i + 1, .joint_idx = i };
+		test_fill_bs_rows(&sw.sol_joints[i]);
 	}
 
 	sw.joint_count = 6;
@@ -184,6 +185,7 @@ static void test_shatter_hub_star_extreme_mass()
 	v3 dirs[6] = { V3(1,0,0), V3(-1,0,0), V3(0,1,0), V3(0,-1,0), V3(0,0,1), V3(0,0,-1) };
 	for (int i = 0; i < 6; i++) {
 		sw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = dirs[i], .r_b = scale(dirs[i], -1), .body_a = 0, .body_b = i + 1, .joint_idx = i };
+		test_fill_bs_rows(&sw.sol_joints[i]);
 	}
 	sw.joint_count = 6;
 	sw.sol_joint_count = 6;
@@ -250,6 +252,7 @@ static void test_shatter_hub_with_soft_springs()
 			.body_a = 0, .body_b = i + 1,
 			.softness = soft, .joint_idx = i,
 		};
+		test_fill_bs_rows(&sw.sol_joints[i]);
 		{ v3 _b = scale(err, ptv); sw.sol_joints[i].bias[0] = _b.x; sw.sol_joints[i].bias[1] = _b.y; sw.sol_joints[i].bias[2] = _b.z; }
 	}
 	sw.joint_count = 6;

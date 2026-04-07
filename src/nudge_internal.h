@@ -373,9 +373,19 @@ struct WarmManifold
 // Max DOF per joint: 6 for future 6-DOF joints (currently hinge = 5).
 #define JOINT_MAX_DOF 6
 
+// Per-DOF Jacobian row: J_a and J_b each have 6 components [lin_x, lin_y, lin_z, ang_x, ang_y, ang_z].
+// Scalar effective mass = 1 / (J * M^-1 * J^T + softness).
+typedef struct JacobianRow
+{
+	float J_a[6];
+	float J_b[6];
+	float eff_mass;
+} JacobianRow;
+
 // Unified solver joint: all joint types share one struct.
-// PGS and LDL both read/write the common fields. Type-specific PGS data
-// (eff_mass, axis, tangent basis) lives in a union.
+// PGS and LDL both read/write the common fields. Per-DOF Jacobian rows
+// encode the constraint geometry; type-specific knowledge lives only in
+// joint_fill_rows (called from joints_pre_solve and ldl_refresh_lever_arms).
 typedef struct SolverJoint
 {
 	int body_a, body_b;
@@ -393,18 +403,7 @@ typedef struct SolverJoint
 	float lo[JOINT_MAX_DOF];
 	float hi[JOINT_MAX_DOF];
 
-	// Type-specific PGS solve data.
-	union {
-		struct { float eff_mass[6]; } bs;                  // ball socket: sym 3x3
-		struct { v3 axis; float eff_mass; } dist;          // distance: 1 DOF along axis
-		struct {
-			float lin_eff_mass[6];                          // sym 3x3 for linear part
-			float ang_eff_mass[2];                          // 1 scalar per angular DOF
-			v3 axis_b;                                      // body B hinge axis in world
-			v3 t1, t2;                                      // tangent basis
-			v3 u1, u2;                                      // angular constraint axes
-		} hinge;
-	};
+	JacobianRow rows[JOINT_MAX_DOF];
 } SolverJoint;
 
 // Constraint ref for graph coloring dispatch.

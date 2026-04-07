@@ -39,6 +39,7 @@ static void test_impulse_ball_socket_unit()
 	// J_a = [-I, 0]. delta_v = inv_mass * J_a^T * lambda = 1 * [-1, 0, 0]^T * 1 = (-1, 0, 0).
 	BodyHot body = make_body(1, 1);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -63,6 +64,7 @@ static void test_impulse_ball_socket_side_b()
 	// Opposite sign from side A.
 	BodyHot body = make_body(1, 1);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -84,6 +86,7 @@ static void test_impulse_ball_socket_with_lever()
 	// delta_w = I_inv * [0, -1, 0] * 1.
 	BodyHot body = make_body(1, 1);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0, 0, 1), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -109,6 +112,7 @@ static void test_impulse_accumulates()
 	BodyHot body = make_body(1, 1);
 	body.velocity = V3(1, 2, 3);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -128,6 +132,7 @@ static void test_impulse_heavy_body()
 	// Heavy body: mass = 1000. Same impulse produces 1000x smaller velocity change.
 	BodyHot body = make_body(1000, 1000);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -147,6 +152,7 @@ static void test_impulse_static_body()
 	BodyHot body = {0};
 	body.rotation = quat_identity();
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,2,3), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -170,6 +176,7 @@ static void test_impulse_zero_lambda()
 	body.velocity = V3(5, -3, 7);
 	body.angular_velocity = V3(1, 2, 3);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -191,7 +198,8 @@ static void test_impulse_distance()
 	// Distance constraint: 1 DOF. Impulse along the axis.
 	BodyHot body = make_body(2, 4);
 	v3 ax = norm(V3(1, 1, 0));
-	SolverJoint sol = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(1, 0, 0), .r_b = V3(0,0,0), .dist.axis = ax };
+	SolverJoint sol = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(1, 0, 0), .r_b = V3(0,0,0) };
+	test_fill_dist_rows(&sol, ax);
 	LDL_Constraint con = { .type = JOINT_DISTANCE, .dof = 1, .solver_idx = 0 };
 	LDL_JacobianRow jac[1];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -215,10 +223,8 @@ static void test_impulse_hinge()
 	TEST_BEGIN("impulse_hinge");
 	// Hinge: 5 DOF (3 linear + 2 angular). Full lambda vector.
 	BodyHot body = make_body(3, 6);
-	SolverJoint sol = { .type = JOINT_HINGE, .dof = 5,
-		.r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0),
-		.hinge.u1 = norm(V3(1, 0, 0)), .hinge.u2 = norm(V3(0, 1, 0)),
-	};
+	SolverJoint sol = { .type = JOINT_HINGE, .dof = 5, .r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0) };
+	test_fill_hinge_rows(&sol, norm(V3(1, 0, 0)), norm(V3(0, 1, 0)));
 	LDL_Constraint con = { .type = JOINT_HINGE, .dof = 5, .solver_idx = 0 };
 	LDL_JacobianRow jac[5];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -245,6 +251,7 @@ static void test_impulse_rotated_asymmetric()
 	quat rot = quat_axis_angle(norm(V3(1, 2, -1)), 0.8f);
 	BodyHot body = make_body_full(2, V3(1, 5, 20), rot);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(3, -1, 2), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -272,6 +279,7 @@ static void test_impulse_both_bodies()
 	BodyHot a = make_body(2, 4);
 	BodyHot b = make_body(5, 10);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -312,6 +320,7 @@ static void test_cvel_stationary()
 	BodyHot a = make_body(1, 1);
 	BodyHot b = make_body(1, 1);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(0,1,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -331,6 +340,7 @@ static void test_cvel_linear_separation()
 	BodyHot b = make_body(1, 1);
 	b.velocity = V3(5, 0, 0);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -353,6 +363,7 @@ static void test_cvel_angular()
 	a.angular_velocity = V3(0, 0, 1);
 	BodyHot b = make_body(1, 1);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -370,6 +381,7 @@ static void test_impulse_large_lambda()
 	// Verify no precision loss in the velocity delta.
 	BodyHot body = make_body(1, 1);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -396,6 +408,7 @@ static void test_impulse_large_lambda_on_existing_velocity()
 	BodyHot body = make_body(1, 1);
 	body.velocity = V3(10000, -10000, 5000);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -417,6 +430,7 @@ static void test_impulse_extreme_mass_ratio()
 	BodyHot light = make_body(1, 1);
 	BodyHot heavy = make_body(10000, 10000);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0,0,0), .r_b = V3(0,0,0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -449,6 +463,7 @@ static void test_cvel_large_velocities()
 	b.angular_velocity = V3(-1000, 500, -200);
 
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(2, -1, 3), .r_b = V3(-1, 2, 0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -472,6 +487,7 @@ static void test_cvel_roundtrip_extreme_mass_ratio()
 	BodyHot a = make_body(1, 1);       // light
 	BodyHot b = make_body(10000, 10000); // heavy
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -510,6 +526,7 @@ static void test_cvel_roundtrip_with_lever()
 	BodyHot a = make_body(2, 3);
 	BodyHot b = make_body(5, 8);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(10, -5, 3), .r_b = V3(-3, 8, -2) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);
@@ -548,6 +565,7 @@ static void test_cvel_impulse_roundtrip()
 	BodyHot a = make_body(2, 4);
 	BodyHot b = make_body(5, 10);
 	SolverJoint sol = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(0, 1, 0) };
+	test_fill_bs_rows(&sol);
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_JacobianRow jac[3];
 	ldl_fill_jacobian(&con, &sol, jac);

@@ -47,29 +47,19 @@ static void spring_compute(SpringParams sp, float dt, float* pos_to_vel, float* 
 static void ball_socket_eff_mass(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, float softness, float* out)
 {
 	float inv_m = a->inv_mass + b->inv_mass;
-	// Skew-sandwich: skew(r)^T * I^-1 * skew(r) for diagonal inertia.
-	// For body A: I_a^-1 is diagonal in local space, r_a is world space.
-	// Transform r_a to local, compute product, transform back.
-	// Or equivalently use the explicit formula.
-	float K[6] = { inv_m, 0, 0, inv_m, 0, inv_m }; // start with linear term
+	float K[6] = { inv_m, 0, 0, inv_m, 0, inv_m };
 
-	// Add angular contribution for body A
 	v3 ia = a->inv_inertia_local;
 	if (ia.x > 0 || ia.y > 0 || ia.z > 0) {
-		// columns of world-space inverse inertia: R * diag(ia) * R^T
-		// skew(r)^T * I_world^-1 * skew(r) computed column by column
 		v3 e0 = inv_inertia_mul(a->rotation, ia, V3(0, -r_a.z, r_a.y));
 		v3 e1 = inv_inertia_mul(a->rotation, ia, V3(r_a.z, 0, -r_a.x));
 		v3 e2 = inv_inertia_mul(a->rotation, ia, V3(-r_a.y, r_a.x, 0));
-		// skew(r)^T * [e0 e1 e2] -- but skew(r)^T has rows [0 -rz ry; rz 0 -rx; -ry rx 0]
-		// Result[i][j] = dot(skew_row_i(r), e_j)
-		// Row 0 of skew^T: (0, -rz, ry)
-		K[0] += -r_a.z*e0.y + r_a.y*e0.z; // xx
-		K[1] += -r_a.z*e1.y + r_a.y*e1.z; // xy
-		K[2] += -r_a.z*e2.y + r_a.y*e2.z; // xz
-		K[3] +=  r_a.z*e1.x - r_a.x*e1.z; // yy
-		K[4] +=  r_a.z*e2.x - r_a.x*e2.z; // yz
-		K[5] += -r_a.y*e2.x + r_a.x*e2.y; // zz
+		K[0] += -r_a.z*e0.y + r_a.y*e0.z;
+		K[1] += -r_a.z*e1.y + r_a.y*e1.z;
+		K[2] += -r_a.z*e2.y + r_a.y*e2.z;
+		K[3] +=  r_a.z*e1.x - r_a.x*e1.z;
+		K[4] +=  r_a.z*e2.x - r_a.x*e2.z;
+		K[5] += -r_a.y*e2.x + r_a.x*e2.y;
 	}
 
 	v3 ib = b->inv_inertia_local;
@@ -85,7 +75,6 @@ static void ball_socket_eff_mass(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, float s
 		K[5] += -r_b.y*e2.x + r_b.x*e2.y;
 	}
 
-	// Add softness to diagonal: K_eff = K + gamma * I
 	K[0] += softness; K[3] += softness; K[5] += softness;
 	sym3x3_inverse(K, out);
 }
@@ -103,7 +92,140 @@ static void solver_joint_init_bounds(SolverJoint* s)
 	for (int d = 0; d < JOINT_MAX_DOF; d++) { s->lo[d] = -FLT_MAX; s->hi[d] = FLT_MAX; }
 }
 
-// Pre-solve joints: build unified SolverJoint array from persistent JointInternal data.
+// -----------------------------------------------------------------------------
+// Generic Jacobian helpers: velocity readback, impulse application, effective mass.
+
+// Compute constraint velocity for one DOF row.
+static float jac_velocity_f(JacobianRow* row, BodyHot* a, BodyHot* b)
+{
+	return row->J_a[0]*a->velocity.x + row->J_a[1]*a->velocity.y + row->J_a[2]*a->velocity.z + row->J_a[3]*a->angular_velocity.x + row->J_a[4]*a->angular_velocity.y + row->J_a[5]*a->angular_velocity.z + row->J_b[0]*b->velocity.x + row->J_b[1]*b->velocity.y + row->J_b[2]*b->velocity.z + row->J_b[3]*b->angular_velocity.x + row->J_b[4]*b->angular_velocity.y + row->J_b[5]*b->angular_velocity.z;
+}
+
+// Apply impulse for one DOF row: v += M^-1 * J^T * lambda.
+static void jac_apply(JacobianRow* row, float lambda, BodyHot* a, BodyHot* b)
+{
+	float ima = a->inv_mass, imb = b->inv_mass;
+	a->velocity.x += ima * row->J_a[0] * lambda;
+	a->velocity.y += ima * row->J_a[1] * lambda;
+	a->velocity.z += ima * row->J_a[2] * lambda;
+	v3 ang_a = inv_inertia_mul(a->rotation, a->inv_inertia_local, V3(row->J_a[3]*lambda, row->J_a[4]*lambda, row->J_a[5]*lambda));
+	a->angular_velocity = add(a->angular_velocity, ang_a);
+	b->velocity.x += imb * row->J_b[0] * lambda;
+	b->velocity.y += imb * row->J_b[1] * lambda;
+	b->velocity.z += imb * row->J_b[2] * lambda;
+	v3 ang_b = inv_inertia_mul(b->rotation, b->inv_inertia_local, V3(row->J_b[3]*lambda, row->J_b[4]*lambda, row->J_b[5]*lambda));
+	b->angular_velocity = add(b->angular_velocity, ang_b);
+}
+
+// Compute scalar effective mass for one DOF row: 1 / (J * M^-1 * J^T + softness).
+static float jac_eff_mass(JacobianRow* row, BodyHot* a, BodyHot* b, float softness)
+{
+	float ima = a->inv_mass, imb = b->inv_mass;
+	float k = ima * (row->J_a[0]*row->J_a[0] + row->J_a[1]*row->J_a[1] + row->J_a[2]*row->J_a[2]) + imb * (row->J_b[0]*row->J_b[0] + row->J_b[1]*row->J_b[1] + row->J_b[2]*row->J_b[2]);
+	v3 wa = inv_inertia_mul(a->rotation, a->inv_inertia_local, V3(row->J_a[3], row->J_a[4], row->J_a[5]));
+	k += row->J_a[3]*wa.x + row->J_a[4]*wa.y + row->J_a[5]*wa.z;
+	v3 wb = inv_inertia_mul(b->rotation, b->inv_inertia_local, V3(row->J_b[3], row->J_b[4], row->J_b[5]));
+	k += row->J_b[3]*wb.x + row->J_b[4]*wb.y + row->J_b[5]*wb.z;
+	k += softness;
+	return k > 1e-12f ? 1.0f / k : 0.0f;
+}
+
+// -----------------------------------------------------------------------------
+// Centralized Jacobian fill: the ONE function that knows about joint types.
+// Fills s->r_a, s->r_b, s->rows[], s->bias[], s->rows[].eff_mass from current body state.
+
+static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInternal* w, float dt)
+{
+	float ptv, soft;
+	JointInternal* j = &w->joints[s->joint_idx];
+
+	for (int d = 0; d < s->dof; d++) { memset(s->rows[d].J_a, 0, 6 * sizeof(float)); memset(s->rows[d].J_b, 0, 6 * sizeof(float)); }
+
+	if (s->type == JOINT_BALL_SOCKET) {
+		s->r_a = rotate(a->rotation, j->ball_socket.local_a);
+		s->r_b = rotate(b->rotation, j->ball_socket.local_b);
+		spring_compute(j->ball_socket.spring, dt, &ptv, &soft);
+		s->softness = soft;
+
+		v3 ra = s->r_a, rb = s->r_b;
+		// J_a = [-I, -skew(r_a)], J_b = [I, skew(r_b)]
+		s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
+		s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
+		s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
+		s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
+		s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
+		s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
+
+		for (int d = 0; d < 3; d++) s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, soft);
+
+		v3 anchor_a = add(a->position, s->r_a);
+		v3 anchor_b = add(b->position, s->r_b);
+		v3 bias_v = scale(sub(anchor_b, anchor_a), ptv);
+		s->bias[0] = bias_v.x; s->bias[1] = bias_v.y; s->bias[2] = bias_v.z;
+	} else if (s->type == JOINT_DISTANCE) {
+		s->r_a = rotate(a->rotation, j->distance.local_a);
+		s->r_b = rotate(b->rotation, j->distance.local_b);
+		spring_compute(j->distance.spring, dt, &ptv, &soft);
+		s->softness = soft;
+
+		v3 anchor_a = add(a->position, s->r_a);
+		v3 anchor_b = add(b->position, s->r_b);
+		v3 delta = sub(anchor_b, anchor_a);
+		float dist_val = len(delta);
+		v3 axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
+
+		v3 rxa = cross(s->r_a, axis), rxb = cross(s->r_b, axis);
+		s->rows[0].J_a[0] = -axis.x; s->rows[0].J_a[1] = -axis.y; s->rows[0].J_a[2] = -axis.z;
+		s->rows[0].J_a[3] = -rxa.x;  s->rows[0].J_a[4] = -rxa.y;  s->rows[0].J_a[5] = -rxa.z;
+		s->rows[0].J_b[0] =  axis.x; s->rows[0].J_b[1] =  axis.y; s->rows[0].J_b[2] =  axis.z;
+		s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
+
+		s->rows[0].eff_mass = jac_eff_mass(&s->rows[0], a, b, soft);
+
+		float error = dist_val - j->distance.rest_length;
+		s->bias[0] = ptv * error;
+	} else if (s->type == JOINT_HINGE) {
+		s->r_a = rotate(a->rotation, j->hinge.local_a);
+		s->r_b = rotate(b->rotation, j->hinge.local_b);
+		spring_compute(j->hinge.spring, dt, &ptv, &soft);
+		s->softness = soft;
+
+		v3 ra = s->r_a, rb = s->r_b;
+		// Linear rows 0-2: same as ball socket (J_a = [-I, -skew(r_a)], J_b = [I, skew(r_b)])
+		s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
+		s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
+		s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
+		s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
+		s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
+		s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
+
+		// Angular rows 3-4
+		v3 axis_a = norm(rotate(a->rotation, j->hinge.local_axis_a));
+		v3 axis_b = norm(rotate(b->rotation, j->hinge.local_axis_b));
+		v3 t1, t2;
+		hinge_tangent_basis(axis_a, &t1, &t2);
+		v3 u1 = cross(t1, axis_b);
+		v3 u2 = cross(t2, axis_b);
+
+		s->rows[3].J_a[3] =  u1.x; s->rows[3].J_a[4] =  u1.y; s->rows[3].J_a[5] =  u1.z;
+		s->rows[3].J_b[3] = -u1.x; s->rows[3].J_b[4] = -u1.y; s->rows[3].J_b[5] = -u1.z;
+		s->rows[4].J_a[3] =  u2.x; s->rows[4].J_a[4] =  u2.y; s->rows[4].J_a[5] =  u2.z;
+		s->rows[4].J_b[3] = -u2.x; s->rows[4].J_b[4] = -u2.y; s->rows[4].J_b[5] = -u2.z;
+
+		for (int d = 0; d < 5; d++) s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, soft);
+
+		v3 anchor_a = add(a->position, s->r_a);
+		v3 anchor_b = add(b->position, s->r_b);
+		v3 lin_bias = scale(sub(anchor_b, anchor_a), ptv);
+		s->bias[0] = lin_bias.x; s->bias[1] = lin_bias.y; s->bias[2] = lin_bias.z;
+		s->bias[3] = ptv * dot(t1, axis_b);
+		s->bias[4] = ptv * dot(t2, axis_b);
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Pre-solve: build unified SolverJoint array from persistent JointInternal data.
+
 static void joints_pre_solve(WorldInternal* w, float dt, SolverJoint** out_joints)
 {
 	CK_DYNA SolverJoint* joints = NULL;
@@ -115,204 +237,62 @@ static void joints_pre_solve(WorldInternal* w, float dt, SolverJoint** out_joint
 		BodyHot* a = &w->body_hot[j->body_a];
 		BodyHot* b = &w->body_hot[j->body_b];
 
+		SolverJoint s = {0};
+		s.body_a = j->body_a;
+		s.body_b = j->body_b;
+		s.joint_idx = i;
+		s.type = j->type;
+		s.dof = j->type == JOINT_BALL_SOCKET ? 3 : j->type == JOINT_DISTANCE ? 1 : 5;
+		solver_joint_init_bounds(&s);
+
+		joint_fill_rows(&s, a, b, w, dt);
+
+		// Warm start from persistent storage
 		if (j->type == JOINT_BALL_SOCKET) {
-			SolverJoint s = {0};
-			s.body_a = j->body_a;
-			s.body_b = j->body_b;
-			s.joint_idx = i;
-			s.type = JOINT_BALL_SOCKET;
-			s.dof = 3;
-			solver_joint_init_bounds(&s);
-			s.r_a = rotate(a->rotation, j->ball_socket.local_a);
-			s.r_b = rotate(b->rotation, j->ball_socket.local_b);
-
-			float ptv, soft;
-			spring_compute(j->ball_socket.spring, dt, &ptv, &soft);
-			s.softness = soft;
-			ball_socket_eff_mass(a, b, s.r_a, s.r_b, soft, s.bs.eff_mass);
-
-			// Position error: world anchor B - world anchor A
-			v3 anchor_a = add(a->position, s.r_a);
-			v3 anchor_b = add(b->position, s.r_b);
-			v3 bias_v = scale(sub(anchor_b, anchor_a), ptv);
-			s.bias[0] = bias_v.x; s.bias[1] = bias_v.y; s.bias[2] = bias_v.z;
-
-			// Warm start from persistent storage
 			s.lambda[0] = j->warm_lambda3.x; s.lambda[1] = j->warm_lambda3.y; s.lambda[2] = j->warm_lambda3.z;
-
-			apush(joints, s);
 		} else if (j->type == JOINT_DISTANCE) {
-			SolverJoint s = {0};
-			s.body_a = j->body_a;
-			s.body_b = j->body_b;
-			s.joint_idx = i;
-			s.type = JOINT_DISTANCE;
-			s.dof = 1;
-			solver_joint_init_bounds(&s);
-			s.r_a = rotate(a->rotation, j->distance.local_a);
-			s.r_b = rotate(b->rotation, j->distance.local_b);
-
-			v3 anchor_a = add(a->position, s.r_a);
-			v3 anchor_b = add(b->position, s.r_b);
-			v3 delta = sub(anchor_b, anchor_a);
-			float dist_val = len(delta);
-			s.dist.axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
-
-			float ptv, soft;
-			spring_compute(j->distance.spring, dt, &ptv, &soft);
-			s.softness = soft;
-
-			float inv_mass_sum = a->inv_mass + b->inv_mass;
-			float k = inv_mass_sum + dot(cross(inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(s.r_a, s.dist.axis)), s.r_a), s.dist.axis) + dot(cross(inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(s.r_b, s.dist.axis)), s.r_b), s.dist.axis);
-			k += soft;
-			s.dist.eff_mass = k > 1e-12f ? 1.0f / k : 0.0f;
-
-			float error = dist_val - j->distance.rest_length;
-			s.bias[0] = -ptv * error;
-
 			s.lambda[0] = j->warm_lambda1;
-
-			apush(joints, s);
 		} else if (j->type == JOINT_HINGE) {
-			SolverJoint s = {0};
-			s.body_a = j->body_a;
-			s.body_b = j->body_b;
-			s.joint_idx = i;
-			s.type = JOINT_HINGE;
-			s.dof = 5;
-			solver_joint_init_bounds(&s);
-			s.r_a = rotate(a->rotation, j->hinge.local_a);
-			s.r_b = rotate(b->rotation, j->hinge.local_b);
-
-			float ptv, soft;
-			spring_compute(j->hinge.spring, dt, &ptv, &soft);
-			s.softness = soft;
-			ball_socket_eff_mass(a, b, s.r_a, s.r_b, soft, s.hinge.lin_eff_mass);
-
-			v3 anchor_a = add(a->position, s.r_a);
-			v3 anchor_b = add(b->position, s.r_b);
-			v3 lin_bias = scale(sub(anchor_b, anchor_a), ptv);
-			s.bias[0] = lin_bias.x; s.bias[1] = lin_bias.y; s.bias[2] = lin_bias.z;
-
-			v3 axis_a = norm(rotate(a->rotation, j->hinge.local_axis_a));
-			s.hinge.axis_b = norm(rotate(b->rotation, j->hinge.local_axis_b));
-			hinge_tangent_basis(axis_a, &s.hinge.t1, &s.hinge.t2);
-			s.hinge.u1 = cross(s.hinge.t1, s.hinge.axis_b);
-			s.hinge.u2 = cross(s.hinge.t2, s.hinge.axis_b);
-
-			float k1 = dot(inv_inertia_mul(a->rotation, a->inv_inertia_local, s.hinge.u1), s.hinge.u1) + dot(inv_inertia_mul(b->rotation, b->inv_inertia_local, s.hinge.u1), s.hinge.u1) + soft;
-			s.hinge.ang_eff_mass[0] = k1 > 1e-12f ? 1.0f / k1 : 0.0f;
-			float k2 = dot(inv_inertia_mul(a->rotation, a->inv_inertia_local, s.hinge.u2), s.hinge.u2) + dot(inv_inertia_mul(b->rotation, b->inv_inertia_local, s.hinge.u2), s.hinge.u2) + soft;
-			s.hinge.ang_eff_mass[1] = k2 > 1e-12f ? 1.0f / k2 : 0.0f;
-
-			s.bias[3] = ptv * dot(s.hinge.t1, s.hinge.axis_b);
-			s.bias[4] = ptv * dot(s.hinge.t2, s.hinge.axis_b);
-
 			s.lambda[0] = j->warm_hinge.lin.x; s.lambda[1] = j->warm_hinge.lin.y; s.lambda[2] = j->warm_hinge.lin.z;
 			s.lambda[3] = j->warm_hinge.ang[0];
 			s.lambda[4] = j->warm_hinge.ang[1];
-
-			apush(joints, s);
 		}
+
+		apush(joints, s);
 	}
 
 	*out_joints = joints;
 }
 
-// Apply warm start impulses for joints.
+// Generic warm start: iterate DOFs, apply each row's warm lambda.
 static void joints_warm_start(WorldInternal* w, SolverJoint* joints, int count)
 {
 	for (int i = 0; i < count; i++) {
 		SolverJoint* s = &joints[i];
 		BodyHot* a = &w->body_hot[s->body_a];
 		BodyHot* b = &w->body_hot[s->body_b];
-		if (s->type == JOINT_BALL_SOCKET) {
-			v3 lam = V3(s->lambda[0], s->lambda[1], s->lambda[2]);
-			if (lam.x == 0 && lam.y == 0 && lam.z == 0) continue;
-			apply_impulse(a, b, s->r_a, s->r_b, lam);
-		} else if (s->type == JOINT_DISTANCE) {
-			if (s->lambda[0] == 0) continue;
-			apply_impulse(a, b, s->r_a, s->r_b, scale(s->dist.axis, s->lambda[0]));
-		} else if (s->type == JOINT_HINGE) {
-			v3 lin_lam = V3(s->lambda[0], s->lambda[1], s->lambda[2]);
-			if (lin_lam.x != 0 || lin_lam.y != 0 || lin_lam.z != 0)
-				apply_impulse(a, b, s->r_a, s->r_b, lin_lam);
-			for (int d = 0; d < 2; d++) {
-				if (s->lambda[3 + d] == 0) continue;
-				v3 u = d == 0 ? s->hinge.u1 : s->hinge.u2;
-				v3 ang = scale(u, s->lambda[3 + d]);
-				a->angular_velocity = add(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, ang));
-				b->angular_velocity = sub(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, ang));
-			}
+		for (int d = 0; d < s->dof; d++) {
+			if (s->lambda[d] == 0) continue;
+			jac_apply(&s->rows[d], s->lambda[d], a, b);
 		}
 	}
 }
 
-static void solve_ball_socket(WorldInternal* w, SolverJoint* s)
+// Generic PGS joint solve: no type switch.
+static void solve_joint(WorldInternal* w, SolverJoint* s)
 {
 	BodyHot* a = &w->body_hot[s->body_a];
 	BodyHot* b = &w->body_hot[s->body_b];
-	v3 dv = sub(
-		add(b->velocity, cross(b->angular_velocity, s->r_b)),
-		add(a->velocity, cross(a->angular_velocity, s->r_a)));
-	v3 bias_v = V3(s->bias[0], s->bias[1], s->bias[2]);
-	v3 lam = V3(s->lambda[0], s->lambda[1], s->lambda[2]);
-	v3 rhs = sub(neg(add(dv, bias_v)), scale(lam, s->softness));
-	v3 impulse = sym3x3_mul_v3(s->bs.eff_mass, rhs);
-	s->lambda[0] += impulse.x; s->lambda[1] += impulse.y; s->lambda[2] += impulse.z;
-	apply_impulse(a, b, s->r_a, s->r_b, impulse);
-}
-
-static void solve_distance(WorldInternal* w, SolverJoint* s)
-{
-	BodyHot* a = &w->body_hot[s->body_a];
-	BodyHot* b = &w->body_hot[s->body_b];
-	v3 dv = sub(
-		add(b->velocity, cross(b->angular_velocity, s->r_b)),
-		add(a->velocity, cross(a->angular_velocity, s->r_a)));
-	float cdot = dot(dv, s->dist.axis);
-	float lambda = s->dist.eff_mass * (-cdot + s->bias[0] - s->softness * s->lambda[0]);
-	s->lambda[0] += lambda;
-	apply_impulse(a, b, s->r_a, s->r_b, scale(s->dist.axis, lambda));
-}
-
-static void solve_hinge(WorldInternal* w, SolverJoint* s)
-{
-	BodyHot* a = &w->body_hot[s->body_a];
-	BodyHot* b = &w->body_hot[s->body_b];
-
-	// Linear part (same as ball socket)
-	v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-	v3 lin_bias = V3(s->bias[0], s->bias[1], s->bias[2]);
-	v3 lin_lam = V3(s->lambda[0], s->lambda[1], s->lambda[2]);
-	v3 rhs = sub(neg(add(dv, lin_bias)), scale(lin_lam, s->softness));
-	v3 impulse = sym3x3_mul_v3(s->hinge.lin_eff_mass, rhs);
-	s->lambda[0] += impulse.x; s->lambda[1] += impulse.y; s->lambda[2] += impulse.z;
-	apply_impulse(a, b, s->r_a, s->r_b, impulse);
-
-	// Angular DOF 1
-	v3 dw = sub(a->angular_velocity, b->angular_velocity);
-	float cdot1 = dot(dw, s->hinge.u1);
-	float lambda1 = s->hinge.ang_eff_mass[0] * (-(cdot1 + s->bias[3]) - s->softness * s->lambda[3]);
-	s->lambda[3] += lambda1;
-	v3 ang1 = scale(s->hinge.u1, lambda1);
-	a->angular_velocity = add(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, ang1));
-	b->angular_velocity = sub(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, ang1));
-
-	// Angular DOF 2 (re-read after DOF 1 impulse)
-	dw = sub(a->angular_velocity, b->angular_velocity);
-	float cdot2 = dot(dw, s->hinge.u2);
-	float lambda2 = s->hinge.ang_eff_mass[1] * (-(cdot2 + s->bias[4]) - s->softness * s->lambda[4]);
-	s->lambda[4] += lambda2;
-	v3 ang2 = scale(s->hinge.u2, lambda2);
-	a->angular_velocity = add(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, ang2));
-	b->angular_velocity = sub(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, ang2));
+	for (int d = 0; d < s->dof; d++) {
+		float vel_err = jac_velocity_f(&s->rows[d], a, b);
+		float rhs = -vel_err - s->bias[d] - s->softness * s->lambda[d];
+		float delta = s->rows[d].eff_mass * rhs;
+		s->lambda[d] += delta;
+		jac_apply(&s->rows[d], delta, a, b);
+	}
 }
 
 // Split-impulse position correction for joints.
-// Runs a pseudo-velocity PGS solve targeting position error, integrates positions
-// with the corrective velocities, then restores real velocities. Prevents energy
-// injection because pseudo-velocities never enter the real velocity state.
 static void joints_split_impulse(WorldInternal* w, SolverJoint* joints, int joint_count, float dt, int iters)
 {
 	if (iters <= 0 || dt <= 0) return;
@@ -334,48 +314,71 @@ static void joints_split_impulse(WorldInternal* w, SolverJoint* joints, int join
 		for (int d = 0; d < JOINT_MAX_DOF; d++) { saved_lambda[i * JOINT_MAX_DOF + d] = joints[i].lambda[d]; joints[i].lambda[d] = 0; }
 	}
 
-	// Set bias from current position error and refresh effective mass
+	// Set bias from current position error and refresh Jacobian rows
 	float ptv = 0.1f / dt; // SI gain: 0.1 is stable for shattering; 0.15+ destabilizes hub_12
 	for (int i = 0; i < joint_count; i++) {
 		SolverJoint* s = &joints[i];
 		if (s->softness != 0.0f) continue;
 		BodyHot* a = &w->body_hot[s->body_a];
 		BodyHot* b = &w->body_hot[s->body_b];
+		JointInternal* j = &w->joints[s->joint_idx];
+
+		// Refresh lever arms and Jacobians from current rotations
+		for (int d = 0; d < s->dof; d++) { memset(s->rows[d].J_a, 0, 6 * sizeof(float)); memset(s->rows[d].J_b, 0, 6 * sizeof(float)); }
+
 		if (s->type == JOINT_BALL_SOCKET) {
-			s->r_a = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
-			s->r_b = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
+			s->r_a = rotate(a->rotation, j->ball_socket.local_a);
+			s->r_b = rotate(b->rotation, j->ball_socket.local_b);
+			v3 ra = s->r_a, rb = s->r_b;
+			s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
+			s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
+			s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
+			s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
+			s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
+			s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
+			for (int d = 0; d < 3; d++) s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, 0.0f);
 			v3 bias_v = scale(sub(add(b->position, s->r_b), add(a->position, s->r_a)), ptv);
 			s->bias[0] = bias_v.x; s->bias[1] = bias_v.y; s->bias[2] = bias_v.z;
-			ball_socket_eff_mass(a, b, s->r_a, s->r_b, 0.0f, s->bs.eff_mass);
 		} else if (s->type == JOINT_DISTANCE) {
-			s->r_a = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
-			s->r_b = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
+			s->r_a = rotate(a->rotation, j->distance.local_a);
+			s->r_b = rotate(b->rotation, j->distance.local_b);
 			v3 anchor_a = add(a->position, s->r_a);
 			v3 anchor_b = add(b->position, s->r_b);
 			v3 delta = sub(anchor_b, anchor_a);
 			float dist_val = len(delta);
-			s->dist.axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
-			s->bias[0] = -ptv * (dist_val - w->joints[s->joint_idx].distance.rest_length);
-			float inv_mass_sum = a->inv_mass + b->inv_mass;
-			float k = inv_mass_sum + dot(cross(inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(s->r_a, s->dist.axis)), s->r_a), s->dist.axis) + dot(cross(inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(s->r_b, s->dist.axis)), s->r_b), s->dist.axis);
-			s->dist.eff_mass = k > 1e-12f ? 1.0f / k : 0.0f;
+			v3 axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
+			v3 rxa = cross(s->r_a, axis), rxb = cross(s->r_b, axis);
+			s->rows[0].J_a[0] = -axis.x; s->rows[0].J_a[1] = -axis.y; s->rows[0].J_a[2] = -axis.z;
+			s->rows[0].J_a[3] = -rxa.x;  s->rows[0].J_a[4] = -rxa.y;  s->rows[0].J_a[5] = -rxa.z;
+			s->rows[0].J_b[0] =  axis.x; s->rows[0].J_b[1] =  axis.y; s->rows[0].J_b[2] =  axis.z;
+			s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
+			s->rows[0].eff_mass = jac_eff_mass(&s->rows[0], a, b, 0.0f);
+			s->bias[0] = ptv * (dist_val - j->distance.rest_length);
 		} else if (s->type == JOINT_HINGE) {
-			s->r_a = rotate(a->rotation, w->joints[s->joint_idx].hinge.local_a);
-			s->r_b = rotate(b->rotation, w->joints[s->joint_idx].hinge.local_b);
+			s->r_a = rotate(a->rotation, j->hinge.local_a);
+			s->r_b = rotate(b->rotation, j->hinge.local_b);
+			v3 ra = s->r_a, rb = s->r_b;
+			s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
+			s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
+			s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
+			s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
+			s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
+			s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
+			v3 axis_a = norm(rotate(a->rotation, j->hinge.local_axis_a));
+			v3 axis_b = norm(rotate(b->rotation, j->hinge.local_axis_b));
+			v3 t1, t2;
+			hinge_tangent_basis(axis_a, &t1, &t2);
+			v3 u1 = cross(t1, axis_b);
+			v3 u2 = cross(t2, axis_b);
+			s->rows[3].J_a[3] =  u1.x; s->rows[3].J_a[4] =  u1.y; s->rows[3].J_a[5] =  u1.z;
+			s->rows[3].J_b[3] = -u1.x; s->rows[3].J_b[4] = -u1.y; s->rows[3].J_b[5] = -u1.z;
+			s->rows[4].J_a[3] =  u2.x; s->rows[4].J_a[4] =  u2.y; s->rows[4].J_a[5] =  u2.z;
+			s->rows[4].J_b[3] = -u2.x; s->rows[4].J_b[4] = -u2.y; s->rows[4].J_b[5] = -u2.z;
+			for (int d = 0; d < 5; d++) s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, 0.0f);
 			v3 lin_bias = scale(sub(add(b->position, s->r_b), add(a->position, s->r_a)), ptv);
 			s->bias[0] = lin_bias.x; s->bias[1] = lin_bias.y; s->bias[2] = lin_bias.z;
-			ball_socket_eff_mass(a, b, s->r_a, s->r_b, 0.0f, s->hinge.lin_eff_mass);
-			v3 axis_a = norm(rotate(a->rotation, w->joints[s->joint_idx].hinge.local_axis_a));
-			s->hinge.axis_b = norm(rotate(b->rotation, w->joints[s->joint_idx].hinge.local_axis_b));
-			hinge_tangent_basis(axis_a, &s->hinge.t1, &s->hinge.t2);
-			s->hinge.u1 = cross(s->hinge.t1, s->hinge.axis_b);
-			s->hinge.u2 = cross(s->hinge.t2, s->hinge.axis_b);
-			s->bias[3] = ptv * dot(s->hinge.t1, s->hinge.axis_b);
-			s->bias[4] = ptv * dot(s->hinge.t2, s->hinge.axis_b);
-			float k1 = dot(inv_inertia_mul(a->rotation, a->inv_inertia_local, s->hinge.u1), s->hinge.u1) + dot(inv_inertia_mul(b->rotation, b->inv_inertia_local, s->hinge.u1), s->hinge.u1);
-			s->hinge.ang_eff_mass[0] = k1 > 1e-12f ? 1.0f / k1 : 0.0f;
-			float k2 = dot(inv_inertia_mul(a->rotation, a->inv_inertia_local, s->hinge.u2), s->hinge.u2) + dot(inv_inertia_mul(b->rotation, b->inv_inertia_local, s->hinge.u2), s->hinge.u2);
-			s->hinge.ang_eff_mass[1] = k2 > 1e-12f ? 1.0f / k2 : 0.0f;
+			s->bias[3] = ptv * dot(t1, axis_b);
+			s->bias[4] = ptv * dot(t2, axis_b);
 		}
 	}
 
@@ -383,9 +386,7 @@ static void joints_split_impulse(WorldInternal* w, SolverJoint* joints, int join
 	for (int iter = 0; iter < iters; iter++) {
 		for (int i = 0; i < joint_count; i++) {
 			if (joints[i].softness != 0.0f) continue;
-			if (joints[i].type == JOINT_BALL_SOCKET) solve_ball_socket(w, &joints[i]);
-			else if (joints[i].type == JOINT_DISTANCE) solve_distance(w, &joints[i]);
-			else if (joints[i].type == JOINT_HINGE) solve_hinge(w, &joints[i]);
+			solve_joint(w, &joints[i]);
 		}
 	}
 
@@ -427,7 +428,7 @@ static void joints_split_impulse(WorldInternal* w, SolverJoint* joints, int join
 }
 
 // NGS position correction for joints. Operates on positions only, no velocity modification.
-// Mirrors solver_position_correct for contacts.
+// TODO: could be made generic with pos_error[] field, but position error is inherently geometric.
 static void joints_position_correct(WorldInternal* w, SolverJoint* joints, int joint_count, int iters)
 {
 	for (int iter = 0; iter < iters; iter++) {

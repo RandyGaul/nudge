@@ -7,7 +7,7 @@
 #include "bvh.c"
 #include "collision.c"
 #include "inertia.c"
-#include "pgs_solver.c"
+#include "solver_pgs.c"
 #include "joints.c"
 #include "solver_ldl.c"
 #include "islands.c"
@@ -216,7 +216,7 @@ void world_step(World world, float dt)
 
 		// LDL: factor K once at start of substep (topology + numeric)
 		if (has_ldl)
-			ldl_factor(w, sol_joints, asize(sol_joints), sub);
+			ldl_factor(w, sol_joints, asize(sol_joints), sub, sub_dt);
 
 		if (has_ldl) {
 			// Sub > 0: clear soft joint lambda so ACCUMULATE starts fresh

@@ -204,6 +204,8 @@ static void test_sparse_K_roundtrip()
 		{ .r_a = V3(0.5f, 0, 0), .r_b = V3(-0.5f, 0, 0), .body_a = 0, .body_b = 1 },
 		{ .r_a = V3(0.5f, 0, 0), .r_b = V3(-0.5f, 0, 0), .body_a = 1, .body_b = 2 },
 	};
+	test_fill_bs_rows(&sols[0]);
+	test_fill_bs_rows(&sols[1]);
 
 	// Fill Jacobians (using tested ldl_fill_jacobian)
 	LDL_Constraint cons[2] = {
@@ -296,6 +298,8 @@ static void test_sparse_K_roundtrip_extreme_mass()
 		{ .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .body_a = 0, .body_b = 1 },
 		{ .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .body_a = 1, .body_b = 2 },
 	};
+	test_fill_bs_rows(&sols[0]);
+	test_fill_bs_rows(&sols[1]);
 	LDL_Constraint cons[2] = {
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 },
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 1 },
@@ -368,6 +372,8 @@ static void test_sparse_K_roundtrip_large_levers()
 		{ .r_a = V3(50, 0, 0), .r_b = V3(-50, 0, 0), .body_a = 0, .body_b = 1 },
 		{ .r_a = V3(0, 50, 0), .r_b = V3(0, -50, 0), .body_a = 1, .body_b = 2 },
 	};
+	test_fill_bs_rows(&sols[0]);
+	test_fill_bs_rows(&sols[1]);
 	LDL_Constraint cons[2] = {
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 },
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 1 },
@@ -435,8 +441,10 @@ static void test_sparse_K_roundtrip_mixed_types()
 	bodies[2] = make_body(3, 6);
 
 	SolverJoint sol_bs = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .body_a = 0, .body_b = 1 };
+	test_fill_bs_rows(&sol_bs);
 	v3 ax = norm(V3(1, 0, 0));
-	SolverJoint sol_d = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .dist.axis = ax, .body_a = 1, .body_b = 2 };
+	SolverJoint sol_d = { .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .body_a = 1, .body_b = 2 };
+	test_fill_dist_rows(&sol_d, ax);
 
 	LDL_Constraint con_bs = { .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 };
 	LDL_Constraint con_d = { .type = JOINT_DISTANCE, .dof = 1, .solver_idx = 0 };
@@ -519,6 +527,8 @@ static void test_sparse_K_roundtrip_rotated_asymmetric()
 		{ .r_a = V3(5, -3, 2), .r_b = V3(-2, 8, 1), .body_a = 0, .body_b = 1 },
 		{ .r_a = V3(3, 1, -4), .r_b = V3(-1, 0, 6), .body_a = 1, .body_b = 2 },
 	};
+	test_fill_bs_rows(&sols[0]);
+	test_fill_bs_rows(&sols[1]);
 	LDL_Constraint cons[2] = {
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 0 },
 		{ .type = JOINT_BALL_SOCKET, .dof = 3, .solver_idx = 1 },

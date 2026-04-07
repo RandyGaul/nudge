@@ -206,6 +206,7 @@ static void apply_rotation_delta(quat* q, dv3 w)
 // K = J * M^{-1} * J^T is computed generically for all constraint types.
 
 // Fill Jacobian rows for a constraint. Writes dof rows starting at jac[0].
+// Copies from SolverJoint.rows[] for real joints; builds identity for synthetic welds.
 static void ldl_fill_jacobian(LDL_Constraint* con, SolverJoint* sol_joints, LDL_JacobianRow* jac)
 {
 	int dof = con->dof;
@@ -213,41 +214,12 @@ static void ldl_fill_jacobian(LDL_Constraint* con, SolverJoint* sol_joints, LDL_
 
 	if (con->is_synthetic) {
 		// Weld: J_a = -I_6, J_b = +I_6
-		for (int d = 0; d < 6; d++) { jac[d].J_a[d] = -1.0f; jac[d].J_b[d] = 1.0f; }
-	} else if (con->type == JOINT_BALL_SOCKET) {
-		SolverJoint* s = &sol_joints[con->solver_idx];
-		v3 ra = s->r_a, rb = s->r_b;
-		// J_a = [-I_3, skew(r_a)],  J_b = [I_3, -skew(r_b)]
-		jac[0].J_a[0] = -1; jac[0].J_a[4] = -ra.z; jac[0].J_a[5] =  ra.y;
-		jac[1].J_a[1] = -1; jac[1].J_a[3] =  ra.z; jac[1].J_a[5] = -ra.x;
-		jac[2].J_a[2] = -1; jac[2].J_a[3] = -ra.y; jac[2].J_a[4] =  ra.x;
-		jac[0].J_b[0] =  1; jac[0].J_b[4] =  rb.z; jac[0].J_b[5] = -rb.y;
-		jac[1].J_b[1] =  1; jac[1].J_b[3] = -rb.z; jac[1].J_b[5] =  rb.x;
-		jac[2].J_b[2] =  1; jac[2].J_b[3] =  rb.y; jac[2].J_b[4] = -rb.x;
-	} else if (con->type == JOINT_DISTANCE) {
-		SolverJoint* s = &sol_joints[con->solver_idx];
-		v3 ax = s->dist.axis;
-		v3 rxa = cross(s->r_a, ax), rxb = cross(s->r_b, ax);
-		// J_a = [-axis^T, -(r_a x axis)^T],  J_b = [axis^T, (r_b x axis)^T]
-		jac[0].J_a[0] = -ax.x; jac[0].J_a[1] = -ax.y; jac[0].J_a[2] = -ax.z;
-		jac[0].J_a[3] = -rxa.x; jac[0].J_a[4] = -rxa.y; jac[0].J_a[5] = -rxa.z;
-		jac[0].J_b[0] = ax.x; jac[0].J_b[1] = ax.y; jac[0].J_b[2] = ax.z;
-		jac[0].J_b[3] = rxb.x; jac[0].J_b[4] = rxb.y; jac[0].J_b[5] = rxb.z;
-	} else { // JOINT_HINGE
-		SolverJoint* s = &sol_joints[con->solver_idx];
-		v3 ra = s->r_a, rb = s->r_b;
-		// Linear rows 0-2: same as ball socket
-		jac[0].J_a[0] = -1; jac[0].J_a[4] = -ra.z; jac[0].J_a[5] =  ra.y;
-		jac[1].J_a[1] = -1; jac[1].J_a[3] =  ra.z; jac[1].J_a[5] = -ra.x;
-		jac[2].J_a[2] = -1; jac[2].J_a[3] = -ra.y; jac[2].J_a[4] =  ra.x;
-		jac[0].J_b[0] =  1; jac[0].J_b[4] =  rb.z; jac[0].J_b[5] = -rb.y;
-		jac[1].J_b[1] =  1; jac[1].J_b[3] = -rb.z; jac[1].J_b[5] =  rb.x;
-		jac[2].J_b[2] =  1; jac[2].J_b[3] =  rb.y; jac[2].J_b[4] = -rb.x;
-		// Angular rows 3-4: J_a = [0, u_d], J_b = [0, -u_d]
-		jac[3].J_a[3] = s->hinge.u1.x; jac[3].J_a[4] = s->hinge.u1.y; jac[3].J_a[5] = s->hinge.u1.z;
-		jac[3].J_b[3] = -s->hinge.u1.x; jac[3].J_b[4] = -s->hinge.u1.y; jac[3].J_b[5] = -s->hinge.u1.z;
-		jac[4].J_a[3] = s->hinge.u2.x; jac[4].J_a[4] = s->hinge.u2.y; jac[4].J_a[5] = s->hinge.u2.z;
-		jac[4].J_b[3] = -s->hinge.u2.x; jac[4].J_b[4] = -s->hinge.u2.y; jac[4].J_b[5] = -s->hinge.u2.z;
+		for (int d = 0; d < 6; d++) { jac[d].J_a[d] = -1.0; jac[d].J_b[d] = 1.0; }
+	} else {
+		SolverJoint* sj = &sol_joints[con->solver_idx];
+		for (int d = 0; d < con->dof; d++) {
+			for (int k = 0; k < 6; k++) { jac[d].J_a[k] = (double)sj->rows[d].J_a[k]; jac[d].J_b[k] = (double)sj->rows[d].J_b[k]; }
+		}
 	}
 }
 
@@ -1269,30 +1241,7 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 			if (!con->is_synthetic) {
 				SolverJoint* sj = &sol_joints[con->solver_idx];
 				lam = sj->lambda[d];
-				// For soft distance constraints, recompute bias from CURRENT positions each substep.
-				// The pre-computed bias is stale after position integration.
-				if (sj->softness > 0.0f && sj->type == JOINT_DISTANCE) {
-					v3 ra = rotate(a->rotation, w->joints[sj->joint_idx].distance.local_a);
-					v3 rb = rotate(b->rotation, w->joints[sj->joint_idx].distance.local_b);
-					v3 delta = sub(add(b->position, rb), add(a->position, ra));
-					float dist_val = len(delta);
-					float err = dist_val - w->joints[sj->joint_idx].distance.rest_length;
-					float ptv_f, soft_f;
-					spring_compute(w->joints[sj->joint_idx].distance.spring, sub_dt, &ptv_f, &soft_f);
-					bias = ptv_f * err;
-				} else if (sj->softness > 0.0f && sj->type == JOINT_BALL_SOCKET) {
-					v3 ra = rotate(a->rotation, w->joints[sj->joint_idx].ball_socket.local_a);
-					v3 rb = rotate(b->rotation, w->joints[sj->joint_idx].ball_socket.local_b);
-					v3 err = sub(add(b->position, rb), add(a->position, ra));
-					float ptv_f, soft_f;
-					spring_compute(w->joints[sj->joint_idx].ball_socket.spring, sub_dt, &ptv_f, &soft_f);
-					v3 bb = scale(err, ptv_f);
-					bias = d == 0 ? bb.x : d == 1 ? bb.y : bb.z;
-				} else {
-					bias = sj->bias[d];
-					// Distance bias sign convention: pre_solve stores -ptv*error, LDL expects +ptv*error
-					if (sj->type == JOINT_DISTANCE) bias = -bias;
-				}
+				bias = sj->bias[d];
 			}
 			vel_rhs[oi + d] = -vel_err - bias - compliance * lam;
 		}
@@ -1460,46 +1409,34 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 // -----------------------------------------------------------------------------
 // Top-level entry point.
 
-// Refresh solver-struct lever arms from current body rotations.
+// Refresh solver-struct lever arms, Jacobian rows, and bias from current body rotations.
 // Must be called before LDL factorization on substeps > 0, since integrate_positions
 // rotates bodies but joints_pre_solve only computes lever arms once per frame.
-static void ldl_refresh_lever_arms(WorldInternal* w, SolverJoint* sol_joints, int joint_count)
+// Uses joint_fill_rows to recompute everything from current state. The sub_dt parameter
+// is needed for spring bias computation; pass the current substep dt.
+static void ldl_refresh_lever_arms(WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt)
 {
 	for (int i = 0; i < joint_count; i++) {
 		SolverJoint* s = &sol_joints[i];
 		BodyHot* a = &w->body_hot[s->body_a];
 		BodyHot* b = &w->body_hot[s->body_b];
-		if (s->type == JOINT_BALL_SOCKET) {
-			s->r_a = rotate(a->rotation, w->joints[s->joint_idx].ball_socket.local_a);
-			s->r_b = rotate(b->rotation, w->joints[s->joint_idx].ball_socket.local_b);
-		} else if (s->type == JOINT_DISTANCE) {
-			s->r_a = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
-			s->r_b = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
-			v3 anchor_a = add(a->position, s->r_a);
-			v3 anchor_b = add(b->position, s->r_b);
-			v3 delta = sub(anchor_b, anchor_a);
-			float d = len(delta);
-			s->dist.axis = d > 1e-6f ? scale(delta, 1.0f / d) : V3(1, 0, 0);
-		} else if (s->type == JOINT_HINGE) {
-			s->r_a = rotate(a->rotation, w->joints[s->joint_idx].hinge.local_a);
-			s->r_b = rotate(b->rotation, w->joints[s->joint_idx].hinge.local_b);
-			v3 axis_a = norm(rotate(a->rotation, w->joints[s->joint_idx].hinge.local_axis_a));
-			s->hinge.axis_b = norm(rotate(b->rotation, w->joints[s->joint_idx].hinge.local_axis_b));
-			hinge_tangent_basis(axis_a, &s->hinge.t1, &s->hinge.t2);
-			s->hinge.u1 = cross(s->hinge.t1, s->hinge.axis_b);
-			s->hinge.u2 = cross(s->hinge.t2, s->hinge.axis_b);
-		}
+		float saved_softness = s->softness;
+		float saved_lambda[JOINT_MAX_DOF];
+		for (int d = 0; d < JOINT_MAX_DOF; d++) saved_lambda[d] = s->lambda[d];
+		joint_fill_rows(s, a, b, w, sub_dt);
+		// Restore lambda (joint_fill_rows may zero-init the struct fields we don't want to lose)
+		for (int d = 0; d < JOINT_MAX_DOF; d++) s->lambda[d] = saved_lambda[d];
 	}
 }
 
 // Factor K for all islands (topology rebuild + numeric factorization). No solve.
-static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_count, int sub)
+static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_count, int sub, float sub_dt)
 {
 	if (joint_count == 0) return;
 
 	// Refresh lever arms on substeps after the first (positions/rotations changed)
 	if (sub > 0)
-		ldl_refresh_lever_arms(w, sol_joints, joint_count);
+		ldl_refresh_lever_arms(w, sol_joints, joint_count, sub_dt);
 
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {
@@ -1578,7 +1515,7 @@ static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 
 	// Refresh lever arms from current rotations (positions changed since pre-solve).
 	// Without this, K uses stale lever arms while the RHS uses current positions.
-	ldl_refresh_lever_arms(w, sol_joints, joint_count);
+	ldl_refresh_lever_arms(w, sol_joints, joint_count, sub_dt);
 
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {

@@ -2,60 +2,32 @@
 // PGS is the known-good reference. If LDL produces different lambdas or velocities,
 // there's a sign, scale, or convention bug in the LDL pipeline.
 
-// Helper: run PGS solve_ball_socket N times on given state. Returns final lambda.
+// Helper: run generic PGS solve N times on given bodies. Returns final lambda as v3 (for ball-socket).
+// Uses per-DOF Jacobian rows, matching the production solver.
 static v3 pgs_solve_ball_socket_n(SolverJoint* s, BodyHot* bodies, int n_iters)
 {
 	BodyHot a = bodies[s->body_a];
 	BodyHot b = bodies[s->body_b];
 	s->lambda[0] = 0; s->lambda[1] = 0; s->lambda[2] = 0;
 	for (int iter = 0; iter < n_iters; iter++) {
-		v3 dv = sub(add(b.velocity, cross(b.angular_velocity, s->r_b)), add(a.velocity, cross(a.angular_velocity, s->r_a)));
-		v3 lam = V3(s->lambda[0], s->lambda[1], s->lambda[2]);
-		v3 bias_v = V3(s->bias[0], s->bias[1], s->bias[2]);
-		v3 rhs = sub(neg(add(dv, bias_v)), scale(lam, s->softness));
-		v3 impulse = sym3x3_mul_v3(s->bs.eff_mass, rhs);
-		s->lambda[0] += impulse.x; s->lambda[1] += impulse.y; s->lambda[2] += impulse.z;
-		apply_impulse(&a, &b, s->r_a, s->r_b, impulse);
+		for (int d = 0; d < s->dof; d++) {
+			float vel_err = jac_velocity_f(&s->rows[d], &a, &b);
+			float rhs = -vel_err - s->bias[d] - s->softness * s->lambda[d];
+			float delta = s->rows[d].eff_mass * rhs;
+			s->lambda[d] += delta;
+			jac_apply(&s->rows[d], delta, &a, &b);
+		}
 	}
 	bodies[s->body_a] = a;
 	bodies[s->body_b] = b;
 	return V3(s->lambda[0], s->lambda[1], s->lambda[2]);
 }
 
-// Helper: compute PGS effective mass (same as joints.c ball_socket_eff_mass)
-static void compute_ball_socket_eff_mass(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, float softness, float* eff_mass)
+// Helper: fill rows + eff_mass for a ball-socket SolverJoint from body state.
+static void compute_ball_socket_rows(SolverJoint* s, BodyHot* a, BodyHot* b)
 {
-	// K = inv_m_a * I + inv_m_b * I + skew(r_a)^T * I_a_inv * skew(r_a) + skew(r_b)^T * I_b_inv * skew(r_b)
-	// Then eff_mass = K^{-1} (symmetric 3x3)
-	float k[9] = {0};
-	float im = a->inv_mass + b->inv_mass + softness;
-	k[0] = im; k[4] = im; k[8] = im;
-
-	// Angular contribution from body A
-	v3 axes[3] = { V3(1,0,0), V3(0,1,0), V3(0,0,1) };
-	for (int i = 0; i < 3; i++) {
-		v3 rxa = cross(r_a, axes[i]);
-		v3 wrxa = inv_inertia_mul(a->rotation, a->inv_inertia_local, rxa);
-		v3 rxb = cross(r_b, axes[i]);
-		v3 wrxb = inv_inertia_mul(b->rotation, b->inv_inertia_local, rxb);
-		for (int j = 0; j < 3; j++) {
-			float va = j == 0 ? wrxa.x : j == 1 ? wrxa.y : wrxa.z;
-			float vb = j == 0 ? wrxb.x : j == 1 ? wrxb.y : wrxb.z;
-			float ra_j = j == 0 ? rxa.x : j == 1 ? rxa.y : rxa.z;
-			float rb_j = j == 0 ? rxb.x : j == 1 ? rxb.y : rxb.z;
-			// Wait, this isn't right. Let me use the actual cross product approach.
-			// K[j][i] += dot(cross(wrxa, r_a), axes[j]) doesn't work either.
-			// The correct formula: K += skew(r)^T * I_inv_world * skew(r)
-			// which is K[i][j] += dot(axes[i], cross(I_inv * cross(r, axes[j]), r))
-			// Hmm, let me just use the same approach as the actual code.
-		}
-	}
-
-	// Actually, let me just call the existing function.
-	// ball_socket_eff_mass is in joints.c. Let me check if it's accessible.
-	// Since this is a unity build, it should be.
-	(void)k; // unused, we'll use the real function
-	ball_socket_eff_mass(a, b, r_a, r_b, softness, eff_mass);
+	test_fill_bs_rows(s);
+	for (int d = 0; d < 3; d++) s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, s->softness);
 }
 
 // ============================================================================
@@ -87,7 +59,7 @@ static void test_pgs_vs_ldl_single_rigid()
 		.r_a = r_a, .r_b = r_b,
 		.softness = 0, // rigid, no position bias in velocity solve
 		};
-	compute_ball_socket_eff_mass(&bodies_pgs[0], &bodies_pgs[1], r_a, r_b, 0, pgs_sol.bs.eff_mass);
+	compute_ball_socket_rows(&pgs_sol, &bodies_pgs[0], &bodies_pgs[1]);
 
 	// Run PGS for 100 iterations (should converge for single constraint)
 	v3 pgs_lambda = pgs_solve_ball_socket_n(&pgs_sol, bodies_pgs, 100);
@@ -113,6 +85,7 @@ static void test_pgs_vs_ldl_single_rigid()
 		.softness = 0,
 		.joint_idx = 0,
 	};
+	test_fill_bs_rows(&sw.sol_joints[0]);
 
 	LDL_Cache c = {0};
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .real_body_a = 0, .real_body_b = 1, .weight_a = 1, .weight_b = 1, .solver_idx = 0 };
@@ -173,8 +146,8 @@ static void test_pgs_vs_ldl_chain_gravity()
 		{ .body_a = 0, .body_b = 1, .r_a = V3(0,0,0), .r_b = V3(0,1,0), .softness = 0 },
 		{ .body_a = 1, .body_b = 2, .r_a = V3(0,-1,0), .r_b = V3(0,0,0), .softness = 0 },
 	};
-	compute_ball_socket_eff_mass(&bodies_pgs[0], &bodies_pgs[1], pgs_sols[0].r_a, pgs_sols[0].r_b, 0, pgs_sols[0].bs.eff_mass);
-	compute_ball_socket_eff_mass(&bodies_pgs[1], &bodies_pgs[2], pgs_sols[1].r_a, pgs_sols[1].r_b, 0, pgs_sols[1].bs.eff_mass);
+	compute_ball_socket_rows(&pgs_sols[0], &bodies_pgs[0], &bodies_pgs[1]);
+	compute_ball_socket_rows(&pgs_sols[1], &bodies_pgs[1], &bodies_pgs[2]);
 
 	// Run PGS for 200 iterations
 	for (int iter = 0; iter < 200; iter++) {
@@ -182,13 +155,13 @@ static void test_pgs_vs_ldl_chain_gravity()
 			SolverJoint* s = &pgs_sols[ji];
 			BodyHot* a = &bodies_pgs[s->body_a];
 			BodyHot* b = &bodies_pgs[s->body_b];
-			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			v3 lam = V3(s->lambda[0], s->lambda[1], s->lambda[2]);
-			v3 bias_v = V3(s->bias[0], s->bias[1], s->bias[2]);
-			v3 rhs_v = sub(neg(add(dv, bias_v)), scale(lam, s->softness));
-			v3 impulse = sym3x3_mul_v3(s->bs.eff_mass, rhs_v);
-			s->lambda[0] += impulse.x; s->lambda[1] += impulse.y; s->lambda[2] += impulse.z;
-			apply_impulse(a, b, s->r_a, s->r_b, impulse);
+			for (int d = 0; d < s->dof; d++) {
+				float vel_err = jac_velocity_f(&s->rows[d], a, b);
+				float rhs = -vel_err - s->bias[d] - s->softness * s->lambda[d];
+				float delta = s->rows[d].eff_mass * rhs;
+				s->lambda[d] += delta;
+				jac_apply(&s->rows[d], delta, a, b);
+			}
 		}
 	}
 
@@ -209,7 +182,9 @@ static void test_pgs_vs_ldl_chain_gravity()
 	sw.joints[1] = (JointInternal){ .type = JOINT_BALL_SOCKET, .body_a = 1, .body_b = 2, .ball_socket = { .local_a = V3(0,-1,0), .local_b = V3(0,0,0), .spring = {0} } };
 	sw.joint_count = 2;
 	sw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .r_a = V3(0,0,0), .r_b = V3(0,1,0), .softness = 0, .joint_idx = 0 };
+	test_fill_bs_rows(&sw.sol_joints[0]);
 	sw.sol_joints[1] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 1, .body_b = 2, .r_a = V3(0,-1,0), .r_b = V3(0,0,0), .softness = 0, .joint_idx = 1 };
+	test_fill_bs_rows(&sw.sol_joints[1]);
 
 	LDL_Cache cc = {0};
 	LDL_Constraint cons[2] = {
@@ -285,7 +260,7 @@ static void test_pgs_vs_ldl_star_gravity()
 		{ .body_a = 1, .body_b = 4, .r_a = V3(0,0,1), .r_b = V3(0,0,0), .softness = 0 },
 	};
 	for (int i = 0; i < 4; i++)
-		compute_ball_socket_eff_mass(&bodies_pgs[pgs_sols[i].body_a], &bodies_pgs[pgs_sols[i].body_b], pgs_sols[i].r_a, pgs_sols[i].r_b, 0, pgs_sols[i].bs.eff_mass);
+		compute_ball_socket_rows(&pgs_sols[i], &bodies_pgs[pgs_sols[i].body_a], &bodies_pgs[pgs_sols[i].body_b]);
 
 	// Run PGS 500 iterations (enough to converge for 4 coupled constraints)
 	for (int iter = 0; iter < 500; iter++) {
@@ -293,13 +268,13 @@ static void test_pgs_vs_ldl_star_gravity()
 			SolverJoint* s = &pgs_sols[ji];
 			BodyHot* a = &bodies_pgs[s->body_a];
 			BodyHot* b = &bodies_pgs[s->body_b];
-			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			v3 lam = V3(s->lambda[0], s->lambda[1], s->lambda[2]);
-			v3 bias_v = V3(s->bias[0], s->bias[1], s->bias[2]);
-			v3 rhs_v = sub(neg(add(dv, bias_v)), scale(lam, s->softness));
-			v3 impulse = sym3x3_mul_v3(s->bs.eff_mass, rhs_v);
-			s->lambda[0] += impulse.x; s->lambda[1] += impulse.y; s->lambda[2] += impulse.z;
-			apply_impulse(a, b, s->r_a, s->r_b, impulse);
+			for (int d = 0; d < s->dof; d++) {
+				float vel_err = jac_velocity_f(&s->rows[d], a, b);
+				float rhs = -vel_err - s->bias[d] - s->softness * s->lambda[d];
+				float delta = s->rows[d].eff_mass * rhs;
+				s->lambda[d] += delta;
+				jac_apply(&s->rows[d], delta, a, b);
+			}
 		}
 	}
 
@@ -334,6 +309,7 @@ static void test_pgs_vs_ldl_star_gravity()
 			.r_a = pgs_sols[i].r_a, .r_b = pgs_sols[i].r_b,
 			.softness = 0, .joint_idx = i,
 		};
+		test_fill_bs_rows(&sw.sol_joints[i]);
 	}
 
 	LDL_Cache cc = {0};
@@ -395,24 +371,25 @@ static void test_pgs_vs_ldl_star_shattering()
 	v3 leaf_r_a[7] = { V3(0,0,0), V3(1,0,0), V3(-1,0,0), V3(0,0,1), V3(0,0,-1), V3(0,1,0), V3(0,-1,0) };
 	SolverJoint pgs_sols[8]; // 0-1 + 6 leaves
 	pgs_sols[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .r_a = V3(0,0,0), .r_b = V3(0,1,0), .softness = 0 };
+	test_fill_bs_rows(&pgs_sols[0]);
 	for (int i = 0; i < nj - 1; i++) {
 		pgs_sols[i + 1] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 1, .body_b = i + 2, .r_a = leaf_r_a[i + 1], .r_b = V3(0,0,0), .softness = 0 };
 	}
 	for (int i = 0; i < nj; i++)
-		compute_ball_socket_eff_mass(&bodies_pgs[pgs_sols[i].body_a], &bodies_pgs[pgs_sols[i].body_b], pgs_sols[i].r_a, pgs_sols[i].r_b, 0, pgs_sols[i].bs.eff_mass);
+		compute_ball_socket_rows(&pgs_sols[i], &bodies_pgs[pgs_sols[i].body_a], &bodies_pgs[pgs_sols[i].body_b]);
 
 	for (int iter = 0; iter < 1000; iter++) {
 		for (int ji = 0; ji < nj; ji++) {
 			SolverJoint* s = &pgs_sols[ji];
 			BodyHot* a = &bodies_pgs[s->body_a];
 			BodyHot* b = &bodies_pgs[s->body_b];
-			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			v3 lam = V3(s->lambda[0], s->lambda[1], s->lambda[2]);
-			v3 bias_v = V3(s->bias[0], s->bias[1], s->bias[2]);
-			v3 rhs_v = sub(neg(add(dv, bias_v)), scale(lam, s->softness));
-			v3 impulse = sym3x3_mul_v3(s->bs.eff_mass, rhs_v);
-			s->lambda[0] += impulse.x; s->lambda[1] += impulse.y; s->lambda[2] += impulse.z;
-			apply_impulse(a, b, s->r_a, s->r_b, impulse);
+			for (int d = 0; d < s->dof; d++) {
+				float vel_err = jac_velocity_f(&s->rows[d], a, b);
+				float rhs = -vel_err - s->bias[d] - s->softness * s->lambda[d];
+				float delta = s->rows[d].eff_mass * rhs;
+				s->lambda[d] += delta;
+				jac_apply(&s->rows[d], delta, a, b);
+			}
 		}
 	}
 
@@ -442,6 +419,7 @@ static void test_pgs_vs_ldl_star_shattering()
 			.r_a = pgs_sols[i].r_a, .r_b = pgs_sols[i].r_b,
 			.softness = 0, .joint_idx = i,
 		};
+		test_fill_bs_rows(&sw.sol_joints[i]);
 	}
 
 	LDL_Cache cc = {0};
