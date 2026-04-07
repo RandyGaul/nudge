@@ -838,12 +838,13 @@ static void scene_joint_demo_setup()
 		body_add_shape(g_world, planks[i], (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(plank_d, plank_h, plank_w) });
 		apush(g_draw_list, ((DrawEntry){ planks[i], MESH_BOX, V3(plank_d, plank_h, plank_w), V3(0.7f, 0.55f, 0.3f) }));
 	}
-	// Connect consecutive planks at both Z edges
+	// Connect consecutive planks at both Z edges (soft rope)
+	SpringParams rope = { .frequency = 15.0f, .damping_ratio = 0.5f };
 	for (int i = 0; i < plank_count - 1; i++) {
 		for (int side = -1; side <= 1; side += 2) {
 			create_distance(g_world, (DistanceParams){ .body_a = planks[i], .body_b = planks[i+1],
 				.local_offset_a = V3(plank_d, 0, side * plank_w), .local_offset_b = V3(-plank_d, 0, side * plank_w),
-				.rest_length = spacing - plank_d * 2 });
+				.rest_length = spacing - plank_d * 2, .spring = rope });
 		}
 	}
 	// Anchor end planks to towers at both Z edges
@@ -851,11 +852,11 @@ static void scene_joint_demo_setup()
 		create_distance(g_world, (DistanceParams){ .body_a = tower_l, .body_b = planks[0],
 			.local_offset_a = V3(0.3f, -tower_h * 0.5f, side * plank_w),
 			.local_offset_b = V3(-plank_d, 0, side * plank_w),
-			.rest_length = spacing - plank_d * 2 });
+			.rest_length = spacing - plank_d * 2, .spring = rope });
 		create_distance(g_world, (DistanceParams){ .body_a = planks[plank_count-1], .body_b = tower_r,
 			.local_offset_a = V3(plank_d, 0, side * plank_w),
 			.local_offset_b = V3(-0.3f, -tower_h * 0.5f, side * plank_w),
-			.rest_length = spacing - plank_d * 2 });
+			.rest_length = spacing - plank_d * 2, .spring = rope });
 	}
 
 	// Suspension cables: distance joints from tower tops to each plank
