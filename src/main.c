@@ -830,7 +830,7 @@ static void scene_joint_demo_setup()
 	body_add_shape(g_world, tower_r, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, tower_h * 0.5f, 0.3f) });
 	apush(g_draw_list, ((DrawEntry){ tower_r, MESH_BOX, V3(0.3f, tower_h * 0.5f, 0.3f), V3(0.5f, 0.45f, 0.4f) }));
 
-	// Bridge planks connected by hinges (rotate around Z axis = flex along bridge)
+	// Bridge planks connected by distance joints (free-swinging rope bridge)
 	Body planks[12];
 	for (int i = 0; i < plank_count; i++) {
 		float x = -bridge_len * 0.5f + spacing * 0.5f + i * spacing;
@@ -839,21 +839,15 @@ static void scene_joint_demo_setup()
 		apush(g_draw_list, ((DrawEntry){ planks[i], MESH_BOX, V3(plank_d, plank_h, plank_w), V3(0.7f, 0.55f, 0.3f) }));
 
 		if (i == 0) {
-			// Hinge first plank to left tower
-			create_hinge(g_world, (HingeParams){ .body_a = tower_l, .body_b = planks[0],
-				.local_offset_a = V3(0.3f, -tower_h * 0.5f, 0), .local_offset_b = V3(-plank_d, 0, 0),
-				.local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+			// Distance joint from left tower to first plank
+			create_distance(g_world, (DistanceParams){ .body_a = tower_l, .body_b = planks[0], .rest_length = spacing });
 		} else {
-			// Hinge consecutive planks together
-			create_hinge(g_world, (HingeParams){ .body_a = planks[i-1], .body_b = planks[i],
-				.local_offset_a = V3(plank_d, 0, 0), .local_offset_b = V3(-plank_d, 0, 0),
-				.local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+			// Distance joint between consecutive planks
+			create_distance(g_world, (DistanceParams){ .body_a = planks[i-1], .body_b = planks[i], .rest_length = spacing });
 		}
 	}
-	// Hinge last plank to right tower
-	create_hinge(g_world, (HingeParams){ .body_a = planks[plank_count-1], .body_b = tower_r,
-		.local_offset_a = V3(plank_d, 0, 0), .local_offset_b = V3(-0.3f, -tower_h * 0.5f, 0),
-		.local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+	// Distance joint from last plank to right tower
+	create_distance(g_world, (DistanceParams){ .body_a = planks[plank_count-1], .body_b = tower_r, .rest_length = spacing });
 
 	// Suspension cables: distance joints from tower tops to each plank
 	float top_y = bridge_y + tower_h;
