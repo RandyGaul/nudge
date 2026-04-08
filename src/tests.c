@@ -10190,6 +10190,95 @@ static void test_cr_coulomb_friction()
 	destroy_world(w);
 }
 
+// Friction quality comparison: CR vs PGS reference.
+// Sliding boxes with initial velocity — should decelerate and stop at similar positions.
+static void test_cr_friction_vs_pgs()
+{
+	float speeds[] = { 2.0f, 5.0f, 10.0f };
+	int n_speeds = 3;
+	int n_frames = 120;
+
+	// Run with both friction models
+	for (int fm = 0; fm < 2; fm++) {
+		FrictionModel fmodel = (fm == 0) ? FRICTION_COULOMB : FRICTION_PATCH;
+		const char* fname = (fm == 0) ? "Coulomb" : "Patch";
+
+		for (int si = 0; si < n_speeds; si++) {
+			float speed = speeds[si];
+			v3 pgs_pos, cr_pos, pgs_av, cr_av;
+
+			// PGS reference
+			{
+				World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+				WorldInternal* wi = (WorldInternal*)w.id;
+				wi->sleep_enabled = 0;
+				wi->cr_enabled = 0;
+				wi->ldl_enabled = 0;
+				wi->friction_model = fmodel;
+
+				Body floor = create_body(w, (BodyParams){
+					.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+				});
+				body_add_shape(w, floor, (ShapeParams){
+					.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
+				});
+				Body box = create_body(w, (BodyParams){
+					.position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+				});
+				body_add_shape(w, box, (ShapeParams){
+					.type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f),
+				});
+				body_set_velocity(w, box, V3(speed, 0, 0));
+
+				step_n(w, n_frames);
+				pgs_pos = body_get_position(w, box);
+				pgs_av = ((WorldInternal*)w.id)->body_hot[box.id & 0xFFFF].angular_velocity;
+				destroy_world(w);
+			}
+
+			// CR
+			{
+				World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+				WorldInternal* wi = (WorldInternal*)w.id;
+				wi->sleep_enabled = 0;
+				wi->cr_enabled = 1;
+				wi->ldl_enabled = 0;
+				wi->friction_model = fmodel;
+
+				Body floor = create_body(w, (BodyParams){
+					.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
+				});
+				body_add_shape(w, floor, (ShapeParams){
+					.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
+				});
+				Body box = create_body(w, (BodyParams){
+					.position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
+				});
+				body_add_shape(w, box, (ShapeParams){
+					.type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f),
+				});
+				body_set_velocity(w, box, V3(speed, 0, 0));
+
+				step_n(w, n_frames);
+				cr_pos = body_get_position(w, box);
+				cr_av = ((WorldInternal*)w.id)->body_hot[box.id & 0xFFFF].angular_velocity;
+				destroy_world(w);
+			}
+
+			float pgs_tumble = sqrtf(pgs_av.x*pgs_av.x + pgs_av.z*pgs_av.z);
+			float cr_tumble = sqrtf(cr_av.x*cr_av.x + cr_av.z*cr_av.z);
+			float dx = fabsf(cr_pos.x - pgs_pos.x);
+			printf("  %s v=%.0f: PGS(%.2f,%.2f) CR(%.2f,%.2f) dx=%.3f | tumble PGS=%.3f CR=%.3f\n",
+				fname, (double)speed,
+				(double)pgs_pos.x, (double)pgs_pos.y,
+				(double)cr_pos.x, (double)cr_pos.y, (double)dx,
+				(double)pgs_tumble, (double)cr_tumble);
+			TEST_BEGIN("CR friction match");
+			TEST_ASSERT(cr_tumble < 0.05f && dx < 0.5f);
+		}
+	}
+}
+
 // Box pyramid (5-layer, matches the "Box Pyramid" scene).
 // This is the key stress test: many contacts, many bodies in one island.
 static void test_cr_pyramid()
@@ -10479,6 +10568,7 @@ static void run_cr_tests()
 	test_cr_box_stack();
 	test_cr_chain_on_floor();
 	test_cr_coulomb_friction();
+	test_cr_friction_vs_pgs();
 	test_cr_pyramid();
 	test_cr_mass_ratio();
 }

@@ -379,8 +379,10 @@ static void scene_joint_demo_setup()
 		body_add_shape(g_world, planks[i], (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(plank_d, plank_h, plank_w) });
 		apush(g_draw_list, ((DrawEntry){ planks[i], MESH_BOX, V3(plank_d, plank_h, plank_w), V3(0.7f, 0.55f, 0.3f) }));
 	}
-	// Connect consecutive planks at both Z edges (soft rope)
-	SpringParams rope = { .frequency = 15.0f, .damping_ratio = 0.5f };
+	// Connect consecutive planks at both Z edges (soft rope).
+	// 8 Hz + damping 1.0 is loose enough for PGS/CR convergence while looking solid.
+	// Higher frequency (15+) causes oscillation with iterative solvers on long chains.
+	SpringParams rope = { .frequency = 8.0f, .damping_ratio = 1.0f };
 	for (int i = 0; i < plank_count - 1; i++) {
 		for (int side = -1; side <= 1; side += 2) {
 			create_distance(g_world, (DistanceParams){ .body_a = planks[i], .body_b = planks[i+1],

@@ -128,18 +128,13 @@ static int cr_count_island_dofs(WorldInternal* w, int island_idx, SolverManifold
 	}
 	}
 
-	// Contacts
-	int patch = (w->friction_model == FRICTION_PATCH);
+	// Contacts: normals only (friction handled by PGS — per-row clamping
+	// naturally balances tangent forces across contact points, avoiding tumble)
 	for (int i = 0; i < sm_count; i++) {
 		int isl_a = w->body_cold[sm[i].body_a].island_id;
 		int isl_b = w->body_cold[sm[i].body_b].island_id;
 		if (isl_a != island_idx && isl_b != island_idx) continue;
-		if (patch) {
-			n += sm[i].contact_count; // 1 normal per contact
-			n += 3; // 2 tangent + 1 twist per manifold
-		} else {
-			n += sm[i].contact_count * 3; // normal + t1 + t2 per contact
-		}
+		n += sm[i].contact_count;
 	}
 	return n;
 }
@@ -183,63 +178,25 @@ static void cr_build_island_system(CR_System* sys, WorldInternal* w, int island_
 	}
 	}
 
-	// --- Contacts ---
+	// --- Contacts: normals only ---
+	// Friction handled by PGS (warmup + post-CR sweeps). PGS per-row clamping
+	// naturally balances tangent forces across contact points. CR's global solve
+	// creates unbalanced friction that causes tumble torques — tested with scaling,
+	// without scaling, and with friction-only unscaling; none match PGS quality.
+	int mask = w->cr_active_set_mask;
 	for (int mi = 0; mi < sm_count; mi++) {
 		SolverManifold* m = &sm[mi];
 		int isl_a = w->body_cold[m->body_a].island_id;
 		int isl_b = w->body_cold[m->body_b].island_id;
 		if (isl_a != island_idx && isl_b != island_idx) continue;
 
-		// Track where normals start for this manifold (for PATCH friction parent)
-		int first_normal_idx = sys->n;
-		int active_normals = 0;
-		int mask = w->cr_active_set_mask;
-
 		for (int ci = 0; ci < m->contact_count; ci++) {
 			SolverContact* s = &sc[m->contact_start + ci];
-
-			// Active-set masking: PGS warmup already ran. If it left lambda_n = 0,
-			// this contact is inactive (separating). Skip it — CR doesn't need to
-			// solve for a DOF that's already at its bound.
 			if (mask && s->lambda_n == 0.0f) continue;
-			active_normals++;
 
-			// Normal DOF
 			JacobianRow jn = cr_build_contact_jacobian(s->normal, s->r_a, s->r_b);
 			float bias_n = s->bias + s->bounce;
 			cr_add_dof(sys, jn, m->body_a, m->body_b, s->softness, bias_n, s->lambda_n, &s->lambda_n, CR_CLAMP_LO_ZERO, -1, 0, 0, 0);
-
-			if (!patch) {
-				// COULOMB: per-contact tangent DOFs
-				// Use same softness as parent normal for conditioning.
-				int normal_idx = sys->n - 1;
-				float fric_soft = s->softness;
-
-				JacobianRow jt1 = cr_build_contact_jacobian(s->tangent1, s->r_a, s->r_b);
-				cr_add_dof(sys, jt1, m->body_a, m->body_b, fric_soft, 0, s->lambda_t1, &s->lambda_t1, CR_CLAMP_FRICTION, normal_idx, 1, m->friction, 0);
-
-				JacobianRow jt2 = cr_build_contact_jacobian(s->tangent2, s->r_a, s->r_b);
-				cr_add_dof(sys, jt2, m->body_a, m->body_b, fric_soft, 0, s->lambda_t2, &s->lambda_t2, CR_CLAMP_FRICTION2, normal_idx, 1, m->friction, 0);
-			}
-		}
-
-		if (patch) {
-			// Skip manifold friction entirely if no normals are active (masking on)
-			if (mask && active_normals == 0) continue;
-			// PATCH: manifold-level tangent friction at centroid.
-			// Use first active contact's softness for friction conditioning.
-			int normal_count = active_normals;
-			float patch_soft = (m->contact_count > 0) ? sc[m->contact_start].softness : 0;
-
-			JacobianRow jt1 = cr_build_contact_jacobian(m->tangent1, m->centroid_r_a, m->centroid_r_b);
-			cr_add_dof(sys, jt1, m->body_a, m->body_b, patch_soft, 0, m->lambda_t1, &m->lambda_t1, CR_CLAMP_FRICTION, first_normal_idx, normal_count, m->friction, 0);
-
-			JacobianRow jt2 = cr_build_contact_jacobian(m->tangent2, m->centroid_r_a, m->centroid_r_b);
-			cr_add_dof(sys, jt2, m->body_a, m->body_b, patch_soft, 0, m->lambda_t2, &m->lambda_t2, CR_CLAMP_FRICTION2, first_normal_idx, normal_count, m->friction, 0);
-
-			// Torsional friction (pure angular)
-			JacobianRow jtw = cr_build_twist_jacobian(m->normal);
-			cr_add_dof(sys, jtw, m->body_a, m->body_b, patch_soft, 0, m->lambda_twist, &m->lambda_twist, CR_CLAMP_TWIST, first_normal_idx, normal_count, m->friction, m->patch_radius);
 		}
 	}
 }

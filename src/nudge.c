@@ -33,7 +33,7 @@ World create_world(WorldParams params)
 	w->max_push_velocity = params.max_push_velocity > 0.0f ? params.max_push_velocity : 3.0f;
 	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 4;
 	w->ldl_correction_iter = -2; // -2 = auto: velocity_iters/2 (mid-loop, PGS can recover after LDL)
-	w->cr_max_iters = 30;
+	w->cr_max_iters = 5;
 	w->cr_tolerance = 1e-6f;
 	w->cr_active_set_mask = 1;
 	w->cr_reclamp_interval = 5;
@@ -243,10 +243,16 @@ void world_step(World world, float dt)
 				for (int c = 0; c < color_count; c++)
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
 						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
-			// CR: when LDL is on, solve contacts only (LDL already handled joints).
-			// When LDL is off, solve everything (contacts + joints).
+			// CR: normals only (+ joints when LDL is off). Friction stays with PGS.
 			int contacts_only = has_ldl;
 			cr_velocity_solve(w, sm, asize(sm), sc, sol_joints, asize(sol_joints), sub_dt, contacts_only);
+			// Post-CR PGS: update friction with CR's refined normal impulses.
+			// PGS per-row clamping keeps tangent forces balanced across contact points.
+			int pgs_friction = 3;
+			for (int iter = 0; iter < pgs_friction; iter++)
+				for (int c = 0; c < color_count; c++)
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
 		} else if (!has_ldl) {
 			// Plain PGS: no LDL, no CR.
 			for (int iter = 0; iter < w->velocity_iters; iter++)
