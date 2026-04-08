@@ -7587,7 +7587,6 @@ static void run_solver_tests()
 	bounce_test_for_solver(SOLVER_SOFT_STEP, "Soft Step");
 	bounce_test_for_solver(SOLVER_SI_SOFT, "SI Soft");
 	bounce_test_for_solver(SOLVER_SI, "SI");
-	bounce_test_for_solver(SOLVER_BLOCK, "Block");
 	bounce_test_for_solver(SOLVER_AVBD, "AVBD");
 	avbd_box_bounce_test();
 	// AVBD should still settle onto the floor after the bounce energy decays.
@@ -10398,24 +10397,19 @@ static World cr_bench_create_pyramid()
 	return w;
 }
 
-// Convergence trace: compares mass scaling on vs off.
+// Convergence trace for CR as linear accelerator.
 static void cr_bench_scene(const char* name,
 	World (*create_fn)(void), int warmup_frames)
 {
 	printf("\n=== CR Convergence: %s ===\n", name);
-	const char* labels[] = { "Mass scale ON", "Mass scale OFF" };
-	for (int mode = 0; mode < 2; mode++) {
-		World w = create_fn();
-		WorldInternal* wi = (WorldInternal*)w.id;
-		wi->cr_max_iters = 30;
-		wi->cr_mass_scale = (mode == 0) ? 1 : 0;
-		step_n(w, warmup_frames);
-		printf("\n--- %s ---\n", labels[mode]);
-		g_cr_trace = 1;
-		step_n(w, 1);
-		g_cr_trace = 0;
-		destroy_world(w);
-	}
+	World w = create_fn();
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->cr_max_iters = 30;
+	step_n(w, warmup_frames);
+	g_cr_trace = 1;
+	step_n(w, 1);
+	g_cr_trace = 0;
+	destroy_world(w);
 	printf("=== End %s ===\n", name);
 }
 

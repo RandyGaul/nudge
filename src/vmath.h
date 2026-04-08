@@ -469,8 +469,7 @@ static inline void block_solve_f(const float* L, const float* D,
 // Max bounded DOFs: 12 (4096 cases). Bilateral DOFs don't count.
 #define BLOCK_LCP_MAX_BOUNDED 12
 
-static inline int block_lcp_solve(const float* A_in, const float* b, float* x,
-                                   const float* lo, const float* hi, int n)
+static inline int block_lcp_solve(const float* A_in, const float* b, float* x, const float* lo, const float* hi, int n)
 {
 	// Identify bounded DOFs and their possible states.
 	// Each bounded DOF can be: at_lo (0), active (1), or at_hi (2).

@@ -620,7 +620,7 @@ void update()
 	}
 	if (ImGui_Combo("Friction", &g_friction_model, "Coulomb\0Patch\0"))
 		world_set_friction_model(g_world, (FrictionModel)g_friction_model);
-	if (ImGui_Combo("Solver", &g_solver_type, "Soft Step\0SI Soft\0SI\0Block\0AVBD\0"))
+	if (ImGui_Combo("Solver", &g_solver_type, "Soft Step\0SI Soft\0SI\0AVBD\0"))
 		world_set_solver_type(g_world, (SolverType)g_solver_type);
 	if (g_solver_type != SOLVER_AVBD) {
 		if (ImGui_Checkbox("LDL Joints", &g_ldl_enabled)) {

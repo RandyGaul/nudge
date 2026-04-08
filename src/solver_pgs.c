@@ -253,42 +253,6 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 			if (s->penetration < 0.0f) { s->lambda_n = 0.0f; s->lambda_t1 = 0.0f; s->lambda_t2 = 0.0f; }
 		}
 
-		// Block solver: compute NxN normal coupling matrix A[i][j]
-		if (w->solver_type == SOLVER_BLOCK && smf.contact_count >= 2) {
-			int n = smf.contact_count;
-			for (int ci = 0; ci < n; ci++) {
-				SolverContact* si = &sc[smf.contact_start + ci];
-				for (int cj = ci; cj < n; cj++) {
-					SolverContact* sj = &sc[smf.contact_start + cj];
-					// A[i][j] = inv_mass_sum
-					//   + dot(cross(I_a^-1 * cross(r_a_i, n), r_a_j), n)
-					//   + dot(cross(I_b^-1 * cross(r_b_i, n), r_b_j), n)
-					v3 nn = si->normal;
-					float kk = inv_mass_sum;
-					kk += dot(cross(inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(si->r_a, nn)), sj->r_a), nn);
-					kk += dot(cross(inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(si->r_b, nn)), sj->r_b), nn);
-					if (ci == cj) kk += si->softness; // regularization on diagonal
-					smf.K_nn[ci * 4 + cj] = kk;
-					smf.K_nn[cj * 4 + ci] = kk; // symmetric
-				}
-			}
-			// Invert: small matrix (2x2, 3x3, or 4x4)
-			if (n == 2) {
-				float a00 = smf.K_nn[0], a01 = smf.K_nn[1];
-				float a10 = smf.K_nn[4], a11 = smf.K_nn[5];
-				float det = a00 * a11 - a01 * a10;
-				if (det != 0.0f) {
-					float inv_det = 1.0f / det;
-					smf.K_nn_inv[0] = a11 * inv_det;  smf.K_nn_inv[1] = -a01 * inv_det;
-					smf.K_nn_inv[4] = -a10 * inv_det;  smf.K_nn_inv[5] = a00 * inv_det;
-				}
-			} else {
-				// For 3x3 and 4x4: compute inverse via cofactor expansion
-				// For now, fall back to per-contact PGS for count > 2
-				// (3+ contact manifolds are rare in practice)
-			}
-		}
-
 		apush(sm, smf);
 	}
 
@@ -338,9 +302,7 @@ static void solver_iterate(WorldInternal* w, SolverManifold* sm, int sm_count, S
 			SolverContact* s = &sc[m->contact_start + ci];
 
 			// Relative velocity at contact point
-			v3 dv = sub(
-				add(b->velocity, cross(b->angular_velocity, s->r_b)),
-				add(a->velocity, cross(a->angular_velocity, s->r_a)));
+			v3 dv = sub( add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
 
 			// --- Normal constraint ---
 			float vn = dot(dv, s->normal);
@@ -351,9 +313,7 @@ static void solver_iterate(WorldInternal* w, SolverManifold* sm, int sm_count, S
 			apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, delta_n));
 
 			// --- Friction tangent 1 ---
-			dv = sub(
-				add(b->velocity, cross(b->angular_velocity, s->r_b)),
-				add(a->velocity, cross(a->angular_velocity, s->r_a)));
+			dv = sub( add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
 			float vt1 = dot(dv, s->tangent1);
 			float lambda_t1 = s->eff_mass_t1 * (-vt1);
 			float max_f = m->friction * s->lambda_n;
@@ -362,9 +322,7 @@ static void solver_iterate(WorldInternal* w, SolverManifold* sm, int sm_count, S
 			apply_impulse(a, b, s->r_a, s->r_b, scale(s->tangent1, s->lambda_t1 - old_t1));
 
 			// --- Friction tangent 2 ---
-			dv = sub(
-				add(b->velocity, cross(b->angular_velocity, s->r_b)),
-				add(a->velocity, cross(a->angular_velocity, s->r_a)));
+			dv = sub( add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
 			float vt2 = dot(dv, s->tangent2);
 			float lambda_t2 = s->eff_mass_t2 * (-vt2);
 			float old_t2 = s->lambda_t2;
@@ -554,76 +512,6 @@ static void color_constraints(ConstraintRef* refs, int count, int body_count, in
 	*out_color_count = color_count;
 }
 
-// Block solver: Murty total enumeration for 2 contacts.
-// Solves the LCP: vn = A*x + b', vn >= 0, x >= 0, vn_i * x_i = 0
-// Enumerates all 4 cases and takes the first valid solution.
-static void solve_block_2(BodyHot* a, BodyHot* b, SolverManifold* m, SolverContact* sc)
-{
-	SolverContact* c0 = &sc[m->contact_start];
-	SolverContact* c1 = &sc[m->contact_start + 1];
-
-	float a0 = c0->lambda_n, a1 = c1->lambda_n; // accumulated impulse (old)
-
-	// Compute relative normal velocities
-	v3 dv0 = sub(add(b->velocity, cross(b->angular_velocity, c0->r_b)), add(a->velocity, cross(a->angular_velocity, c0->r_a)));
-	v3 dv1 = sub(add(b->velocity, cross(b->angular_velocity, c1->r_b)), add(a->velocity, cross(a->angular_velocity, c1->r_a)));
-	float vn0 = dot(dv0, c0->normal);
-	float vn1 = dot(dv1, c1->normal);
-
-	// b' = b - A * a, where b = vn + bias + bounce
-	float b0 = vn0 + c0->bias + c0->bounce;
-	float b1 = vn1 + c1->bias + c1->bounce;
-	b0 -= m->K_nn[0] * a0 + m->K_nn[1] * a1;
-	b1 -= m->K_nn[4] * a0 + m->K_nn[5] * a1;
-
-	// Also include softness feedback in b'
-	b0 -= c0->softness * a0;
-	b1 -= c1->softness * a1;
-
-	float x0, x1;
-
-	// Case 1: both active (vn0 = 0, vn1 = 0) → x = -A_inv * b'
-	x0 = -(m->K_nn_inv[0] * b0 + m->K_nn_inv[1] * b1);
-	x1 = -(m->K_nn_inv[4] * b0 + m->K_nn_inv[5] * b1);
-	if (x0 >= 0.0f && x1 >= 0.0f) goto apply;
-
-	// Case 2: c0 active, c1 inactive (vn0 = 0, x1 = 0)
-	x0 = -b0 / m->K_nn[0];
-	x1 = 0.0f;
-	if (x0 >= 0.0f) {
-		float vn1_check = m->K_nn[4] * x0 + b1;
-		if (vn1_check >= 0.0f) goto apply;
-	}
-
-	// Case 3: c0 inactive, c1 active (x0 = 0, vn1 = 0)
-	x0 = 0.0f;
-	x1 = -b1 / m->K_nn[5];
-	if (x1 >= 0.0f) {
-		float vn0_check = m->K_nn[1] * x1 + b0;
-		if (vn0_check >= 0.0f) goto apply;
-	}
-
-	// Case 4: both inactive (x0 = 0, x1 = 0)
-	x0 = 0.0f;
-	x1 = 0.0f;
-
-apply:;
-	float d0 = x0 - a0, d1 = x1 - a1;
-	c0->lambda_n = x0;
-	c1->lambda_n = x1;
-	v3 P0 = scale(c0->normal, d0);
-	v3 P1 = scale(c1->normal, d1);
-	v3 P = add(P0, P1);
-	a->velocity = sub(a->velocity, scale(P, a->inv_mass));
-	b->velocity = add(b->velocity, scale(P, b->inv_mass));
-	a->angular_velocity = sub(a->angular_velocity,
-		add(inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(c0->r_a, P0)),
-		    inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(c1->r_a, P1))));
-	b->angular_velocity = add(b->angular_velocity,
-		add(inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(c0->r_b, P0)),
-		    inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(c1->r_b, P1))));
-}
-
 // Forward declaration for generic joint solver (defined in joints.c, included after solver.c).
 static void solve_joint(WorldInternal* w, SolverJoint* s);
 
@@ -637,23 +525,16 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 		BodyHot* b = &w->body_hot[m->body_b];
 
 		if (w->friction_model == FRICTION_PATCH) {
-			// Solve normal constraints (block LCP or sequential)
 			float total_lambda_n = 0.0f;
-			if (w->solver_type == SOLVER_BLOCK && m->contact_count == 2) {
-				solve_block_2(a, b, m, sc);
-				for (int ci = 0; ci < m->contact_count; ci++)
-					total_lambda_n += sc[m->contact_start + ci].lambda_n;
-			} else {
-				for (int ci = 0; ci < m->contact_count; ci++) {
-					SolverContact* s = &sc[m->contact_start + ci];
-					v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-					float vn = dot(dv, s->normal);
-					float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
-					float old_n = s->lambda_n;
-					s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
-					apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
-					total_lambda_n += s->lambda_n;
-				}
+			for (int ci = 0; ci < m->contact_count; ci++) {
+				SolverContact* s = &sc[m->contact_start + ci];
+				v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
+				float vn = dot(dv, s->normal);
+				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
+				float old_n = s->lambda_n;
+				s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
+				apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
+				total_lambda_n += s->lambda_n;
 			}
 
 			// Manifold-level 2D friction at centroid, clamped by aggregate normal force
@@ -682,19 +563,14 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 			b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, twist_impulse));
 		} else {
 			// Per-point Coulomb friction
-			// Block solver handles normals first, then friction per-contact
-			if (w->solver_type == SOLVER_BLOCK && m->contact_count == 2) {
-				solve_block_2(a, b, m, sc);
-			} else {
-				for (int ci = 0; ci < m->contact_count; ci++) {
-					SolverContact* s = &sc[m->contact_start + ci];
-					v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-					float vn = dot(dv, s->normal);
-					float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
-					float old_n = s->lambda_n;
-					s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
-					apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
-				}
+			for (int ci = 0; ci < m->contact_count; ci++) {
+				SolverContact* s = &sc[m->contact_start + ci];
+				v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
+				float vn = dot(dv, s->normal);
+				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
+				float old_n = s->lambda_n;
+				s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
+				apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
 			}
 			// Per-contact friction (uses normal impulse from above)
 			for (int ci = 0; ci < m->contact_count; ci++) {

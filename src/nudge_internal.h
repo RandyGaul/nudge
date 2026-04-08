@@ -280,12 +280,10 @@ typedef struct WorldInternal
 	float max_push_velocity;
 	int sub_steps;
 	// CR (Conjugate Residual) solver parameters
-	int cr_enabled;          // 1 = use CR for velocity solve (replaces PGS iterations)
-	int cr_max_iters;        // max CR iterations per island (default 30)
+	int cr_enabled;          // 1 = use CR as linear accelerator between PGS passes
+	int cr_max_iters;        // max CR iterations per island (default 5)
 	float cr_tolerance;      // convergence tolerance on residual norm (default 1e-6)
 	int cr_active_set_mask;  // 1 = skip inactive contacts (lambda_n=0 after PGS warmup)
-	int cr_reclamp_interval; // reclamp every N CR iterations (default 5, 0 = disable)
-	int cr_mass_scale;       // 1 = symmetric diagonal scaling to normalize mass ratios
 	int cr_last_iters;       // max CR iterations across islands in most recent solve
 	int cr_peak_iters;       // highest cr_last_iters seen (reset on scene swap)
 	// AVBD parameters
@@ -346,9 +344,6 @@ typedef struct SolverManifold
 	float lambda_twist;
 	float patch_area;
 	float patch_radius;
-	// Block solver: normal coupling matrix A[i][j] (symmetric, max 4x4 = 10 unique)
-	float K_nn[16];      // full NxN stored row-major (max 4x4)
-	float K_nn_inv[16];  // inverse of K_nn
 } SolverManifold;
 
 // Warm starting: cached impulses from previous frame, keyed by body pair.
