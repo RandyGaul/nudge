@@ -222,7 +222,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
 	case GJK_BOX: (out_point) = gjk_box_support(sp, sd, (out_feat)); break;                                                \
 	case GJK_HULL: {                                                                                                      \
 		v3 ld = gjk_mat_rotate(sp->hull.inv_row0, sp->hull.inv_row1, sp->hull.inv_row2, sd);                               \
-		int hbi = (sp->hull.vert_edge && sp->hull.count > 32)                                                              \
+		int hbi = (sp->hull.vert_edge && sp->hull.count > 8)                                                              \
 			? gjk_hull_support_climb(sp->hull.verts, sp->hull.edges, sp->hull.vert_edge, ld, sp->hull.hint)                 \
 			: gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, ld);                                     \
 		sp->hull.hint = hbi;                                                                                               \
