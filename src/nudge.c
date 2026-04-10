@@ -271,6 +271,17 @@ void world_step(World world, float dt)
 					int i = start;
 					for (; i + 3 < end; i += 4) {
 						int idx[4] = { crefs[i].index, crefs[i+1].index, crefs[i+2].index, crefs[i+3].index };
+						// Prefetch next batch's manifolds + body states
+						if (i + 7 < end) {
+							_mm_prefetch((char*)&sm[crefs[i+4].index], _MM_HINT_T0);
+							_mm_prefetch((char*)&sm[crefs[i+5].index], _MM_HINT_T0);
+							_mm_prefetch((char*)&sm[crefs[i+6].index], _MM_HINT_T0);
+							_mm_prefetch((char*)&sm[crefs[i+7].index], _MM_HINT_T0);
+							_mm_prefetch((char*)&w->body_vel[sm[crefs[i+4].index].body_a], _MM_HINT_T0);
+							_mm_prefetch((char*)&w->body_vel[sm[crefs[i+4].index].body_b], _MM_HINT_T0);
+							_mm_prefetch((char*)&w->body_vel[sm[crefs[i+5].index].body_a], _MM_HINT_T0);
+							_mm_prefetch((char*)&w->body_vel[sm[crefs[i+5].index].body_b], _MM_HINT_T0);
+						}
 						PGS_Batch4 bt;
 						pgs_batch4_prepare(&bt, sm, idx, 4);
 						solve_contact_batch4_sv(w->body_vel, &bt, sc);
