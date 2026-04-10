@@ -1022,6 +1022,37 @@ static ConvexHull make_convex_hull(BodyHot* h, ShapeInternal* s)
 }
 
 // Narrowphase dispatch for a single body pair.
+// Narrowphase timing accumulators (indexed by shape pair type).
+// Pair encoding: type_a * 5 + type_b (upper triangle, type_a <= type_b).
+#define NP_PAIR_COUNT 15
+static double np_time_acc[NP_PAIR_COUNT];
+static int np_call_acc[NP_PAIR_COUNT];
+static int np_frame_count;
+
+static int np_pair_idx(int ta, int tb) { return ta * 5 + tb; }
+
+void narrowphase_reset_timers() { memset(np_time_acc, 0, sizeof(np_time_acc)); memset(np_call_acc, 0, sizeof(np_call_acc)); np_frame_count = 0; }
+void narrowphase_end_frame() { np_frame_count++; }
+void narrowphase_print_timers()
+{
+	if (np_frame_count == 0) return;
+	double n = (double)np_frame_count;
+	const char* names[] = {"sphere", "capsule", "box", "hull", "?"};
+	printf("  --- narrowphase breakdown ---\n");
+	double total = 0;
+	int total_calls = 0;
+	for (int a = 0; a < 4; a++) for (int b = a; b < 4; b++) {
+		int idx = np_pair_idx(a, b);
+		if (np_call_acc[idx] == 0) continue;
+		double avg_us = np_time_acc[idx] / n * 1e6;
+		int avg_calls = (int)((double)np_call_acc[idx] / n + 0.5);
+		printf("  np.%-8s-%-8s %7.1f us  (%d calls, %.2f us/call)\n", names[a], names[b], avg_us, avg_calls, avg_us / avg_calls);
+		total += np_time_acc[idx] / n * 1000.0;
+		total_calls += avg_calls;
+	}
+	printf("  np.total:          %7.3f ms  (%d calls)\n", total, total_calls);
+}
+
 static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** manifolds)
 {
 	// Canonical ordering: lower type first for upper-triangle dispatch,
@@ -1037,6 +1068,7 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	InternalManifold im = { .body_a = i, .body_b = j };
 
 	int hit = 0;
+	double t0 = perf_now();
 
 	if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE)
 		hit = collide_sphere_sphere(make_sphere(h0, s0), make_sphere(h1, s1), &im.m);
@@ -1058,6 +1090,11 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL)
 		hit = collide_hull_hull(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m);
+
+	double dt = perf_now() - t0;
+	int idx = np_pair_idx(s0->type, s1->type);
+	np_time_acc[idx] += dt;
+	np_call_acc[idx]++;
 
 	if (hit) apush(*manifolds, im);
 }

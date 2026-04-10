@@ -10962,12 +10962,18 @@ static void bench_box_pile(int grid_w, int height, int frames_count, WorldParams
 
 	printf("bench_box_pile: %d boxes (%dx%dx%d), %d frames, sub=%d vel=%d\n", total_boxes, grid_w, grid_w, height, frames_count, wi->sub_steps, wi->velocity_iters);
 
+	extern void narrowphase_reset_timers();
+	extern void narrowphase_end_frame();
+	extern void narrowphase_print_timers();
+	narrowphase_reset_timers();
+
 	// Accumulate timers
 	PerfTimers acc = {0};
 	PGSTimers pacc = {0};
 	float dt = 1.0f / 60.0f;
 	for (int frame = 0; frame < frames_count; frame++) {
 		world_step(w, dt);
+		narrowphase_end_frame();
 		PerfTimers p = world_get_perf(w);
 		acc.broadphase += p.broadphase;
 		acc.pre_solve += p.pre_solve;
@@ -11007,6 +11013,7 @@ static void bench_box_pile(int grid_w, int height, int frames_count, WorldParams
 	printf("  pgs.pos_cont:   %8.3f ms\n", pacc.pos_contacts / n * 1000.0);
 	printf("  pgs.pos_joints: %8.3f ms\n", pacc.pos_joints / n * 1000.0);
 	printf("  pgs.post_solve: %8.3f ms\n", pacc.post_solve / n * 1000.0);
+	narrowphase_print_timers();
 
 	destroy_world(w);
 }
