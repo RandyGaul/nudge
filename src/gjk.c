@@ -50,17 +50,22 @@ typedef struct GJK_Shape
 	union {
 		struct { v3 center; } point;
 		struct { v3 p, q; } segment;
-		struct { v3 center; quat rot; v3 half_extents; } box;
-		struct { v3 center; quat rot; const v3* verts; int count; } hull;
-		struct { v3 p, q; float radius; } cylinder;
+		struct { v3 center; quat rot; quat inv_rot; v3 half_extents; } box;
+		struct { v3 center; quat rot; quat inv_rot; const v3* verts; int count; } hull;
+		struct { v3 p, q; float radius; v3 axis; float inv_axis_len; } cylinder;
 	};
 } GJK_Shape;
 
 static GJK_Shape gjk_sphere(v3 center, float radius) { return (GJK_Shape){ .type = GJK_POINT, .radius = radius, .point.center = center }; }
 static GJK_Shape gjk_capsule(v3 p, v3 q, float radius) { return (GJK_Shape){ .type = GJK_SEGMENT, .radius = radius, .segment.p = p, .segment.q = q }; }
-static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) { return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.rot = rot, .box.half_extents = half_extents }; }
-static GJK_Shape gjk_hull(v3 center, quat rot, const v3* verts, int count) { return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.rot = rot, .hull.verts = verts, .hull.count = count }; }
-static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) { return (GJK_Shape){ .type = GJK_CYLINDER, .cylinder.p = p, .cylinder.q = q, .cylinder.radius = radius }; }
+static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) { return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.rot = rot, .box.inv_rot = inv(rot), .box.half_extents = half_extents }; }
+static GJK_Shape gjk_hull(v3 center, quat rot, const v3* verts, int count) { return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.rot = rot, .hull.inv_rot = inv(rot), .hull.verts = verts, .hull.count = count }; }
+static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
+	v3 axis = sub(q, p);
+	float al = len(axis);
+	float inv_al = al > FLT_EPSILON ? 1.0f / al : 0.0f;
+	return (GJK_Shape){ .type = GJK_CYLINDER, .cylinder.p = p, .cylinder.q = q, .cylinder.radius = radius, .cylinder.axis = scale(axis, inv_al), .cylinder.inv_axis_len = inv_al };
+}
 
 // Hull convenience: pre-scale vertices and build shape.
 // Caller must keep scaled_verts alive for the duration of the GJK call.
@@ -92,14 +97,14 @@ static v3 gjk_support(const GJK_Shape* s, v3 d, int* feat)
 		return f ? s->segment.q : s->segment.p;
 	}
 	case GJK_BOX: {
-		v3 ld = rotate(inv(s->box.rot), d);
+		v3 ld = rotate(s->box.inv_rot, d);
 		v3 he = s->box.half_extents;
 		v3 local = V3(ld.x >= 0 ? he.x : -he.x, ld.y >= 0 ? he.y : -he.y, ld.z >= 0 ? he.z : -he.z);
 		*feat = (ld.x >= 0.0f) | ((ld.y >= 0.0f) << 1) | ((ld.z >= 0.0f) << 2);
 		return add(s->box.center, rotate(s->box.rot, local));
 	}
 	case GJK_HULL: {
-		v3 ld = rotate(inv(s->hull.rot), d);
+		v3 ld = rotate(s->hull.inv_rot, d);
 		float best = -1e18f;
 		int bi = 0;
 		for (int i = 0; i < s->hull.count; i++) {
@@ -110,10 +115,8 @@ static v3 gjk_support(const GJK_Shape* s, v3 d, int* feat)
 		return add(s->hull.center, rotate(s->hull.rot, s->hull.verts[bi]));
 	}
 	case GJK_CYLINDER: {
-		v3 axis = sub(s->cylinder.q, s->cylinder.p);
-		float al = len(axis);
-		if (al < FLT_EPSILON) { *feat = 0; return s->cylinder.p; }
-		v3 u = scale(axis, 1.0f / al);
+		v3 u = s->cylinder.axis;
+		if (s->cylinder.inv_axis_len == 0.0f) { *feat = 0; return s->cylinder.p; }
 		float da = dot(d, u);
 		int f = da >= 0.0f;
 		*feat = f;
