@@ -374,16 +374,20 @@ static int qh_build_simplex(QH_State* s, int nv)
 static int qh_next_conflict(QH_State* s, int* out_face)
 {
 	int bv = QH_INVALID, bf = QH_INVALID; float bd = -1e18f;
-	for (int fi = 0; fi < asize(s->faces); fi++) {
-		if (s->faces[fi].mark != QH_VISIBLE) continue;
-		int head = s->faces[fi].conflict_head;
+	int nf = asize(s->faces);
+	QH_Face* faces = s->faces;
+	QH_Vertex* verts = s->verts;
+	for (int fi = 0; fi < nf; fi++) {
+		if (faces[fi].mark != QH_VISIBLE) continue;
+		int head = faces[fi].conflict_head;
 		if (head == QH_INVALID) continue;
-		if (s->faces[fi].maxoutside <= bd) continue;
+		if (faces[fi].maxoutside <= bd) continue;
+		HullPlane p = faces[fi].plane;
 		int ci = head;
 		do {
-			float d = qh_face_dist(s, fi, s->verts[ci].pos);
+			float d = dot(p.normal, verts[ci].pos) - p.offset;
 			if (d > bd) { bd = d; bv = ci; bf = fi; }
-			ci = s->verts[ci].conflict_next;
+			ci = verts[ci].conflict_next;
 		} while (ci != head);
 	}
 	*out_face = bf;
@@ -613,25 +617,29 @@ static int qh_do_adjacent_merge(QH_State* s, int fi, int type, int* unclaimed)
 	if (s->faces[fi].mark != QH_VISIBLE) return 0;
 	int hedge = s->faces[fi].edge;
 	int convex = 1;
+	float tol = s->epsilon;
+	HullPlane p_fi = s->faces[fi].plane;
 	do {
 		int ofi = qh_opp_face(s, hedge);
 		if (ofi == fi || s->faces[ofi].mark == QH_DELETED) {
 			hedge = s->edges[hedge].next; continue;
 		}
 
-		float tol = s->epsilon;
+		// Inline opp_face_dist: distance of ofi's centroid to fi's plane, and vice versa.
+		float d_fwd = dot(p_fi.normal, s->faces[ofi].centroid) - p_fi.offset;
 
 		int merge = 0;
 		if (type == QH_MERGE_ANY) {
-			if (qh_opp_face_dist(s, hedge) > -tol ||
-			    qh_opp_face_dist(s, s->edges[hedge].twin) > -tol) merge = 1;
+			if (d_fwd > -tol) merge = 1;
+			else { float d_rev = dot(s->faces[ofi].plane.normal, s->faces[fi].centroid) - s->faces[ofi].plane.offset; if (d_rev > -tol) merge = 1; }
 		} else {
 			if (s->faces[fi].area > s->faces[ofi].area) {
-				if (qh_opp_face_dist(s, hedge) > -tol) merge = 1;
-				else if (qh_opp_face_dist(s, s->edges[hedge].twin) > -tol) convex = 0;
+				if (d_fwd > -tol) merge = 1;
+				else { float d_rev = dot(s->faces[ofi].plane.normal, s->faces[fi].centroid) - s->faces[ofi].plane.offset; if (d_rev > -tol) convex = 0; }
 			} else {
-				if (qh_opp_face_dist(s, s->edges[hedge].twin) > -tol) merge = 1;
-				else if (qh_opp_face_dist(s, hedge) > -tol) convex = 0;
+				float d_rev = dot(s->faces[ofi].plane.normal, s->faces[fi].centroid) - s->faces[ofi].plane.offset;
+				if (d_rev > -tol) merge = 1;
+				else if (d_fwd > -tol) convex = 0;
 			}
 		}
 		if (merge) {
@@ -884,20 +892,22 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 		if (s->faces[i].mark == QH_VISIBLE) apush(live, i);
 
 	// Validate face loops before output -- detect broken topology from merges.
-	int total_edges = asize(s->edges);
-	for (int i = 0; i < asize(live); i++) {
-		int fi = live[i];
-		int e = s->faces[fi].edge, start = e, steps = 0;
-		do {
-			steps++;
-			if (steps > total_edges) {
-				fprintf(stderr, "qh_build_output: face %d (live[%d]) edge loop did not close after %d steps (start edge %d, cur edge %d)\n",
-					fi, i, steps, start, e);
-				assert(0 && "qh_build_output: broken face edge loop");
-			}
-			e = s->edges[e].next;
-		} while (e != start);
-	}
+	QH_DEBUG({
+		int total_edges = asize(s->edges);
+		for (int i = 0; i < asize(live); i++) {
+			int fi = live[i];
+			int e = s->faces[fi].edge, start = e, steps = 0;
+			do {
+				steps++;
+				if (steps > total_edges) {
+					fprintf(stderr, "qh_build_output: face %d (live[%d]) edge loop did not close after %d steps (start edge %d, cur edge %d)\n",
+						fi, i, steps, start, e);
+					assert(0 && "qh_build_output: broken face edge loop");
+				}
+				e = s->edges[e].next;
+			} while (e != start);
+		}
+	});
 
 	// Vertex remap.
 	CK_DYNA int* vremap = NULL;
@@ -955,10 +965,7 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	// Fix inward-facing normals: degenerate merges can produce Newell normals
 	// that point toward the hull interior. Flip them before widening.
 	for (int i = 0; i < h->face_count; i++) {
-		v3 fc = V3(0,0,0); int cnt = 0;
-		int start = fcp[i].edge, e = start;
-		do { fc = add(fc, vcp[ecp[e].origin]); cnt++; e = ecp[e].next; } while (e != start);
-		fc = scale(fc, 1.0f / cnt);
+		v3 fc = s->faces[live[i]].centroid;
 		if (dot(pcp[i].normal, sub(fc, centroid)) < 0) {
 			pcp[i].normal = scale(pcp[i].normal, -1.0f);
 			pcp[i].offset = -pcp[i].offset;
