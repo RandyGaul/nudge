@@ -690,10 +690,9 @@ static void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, Sol
 		float old_n = s->lambda_n;
 		s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
 		float delta = s->lambda_n - old_n;
-		// Apply: use precomputed angular impulse direction.
-		v3 P = scale(normal, delta);
-		a->velocity = sub(a->velocity, scale(P, ima));
-		b->velocity = add(b->velocity, scale(P, imb));
+		// Apply: fused linear impulse + precomputed angular direction.
+		a->velocity = sub(a->velocity, scale(normal, delta * ima));
+		b->velocity = add(b->velocity, scale(normal, delta * imb));
 		a->angular_velocity = sub(a->angular_velocity, scale(s->w_n_a, delta));
 		b->angular_velocity = add(b->angular_velocity, scale(s->w_n_b, delta));
 		linear_vn += delta * inv_mass_sum;
@@ -708,9 +707,8 @@ static void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, Sol
 	float old_t1 = m->lambda_t1;
 	m->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + m->eff_mass_t1 * (-vt1), max_f));
 	float dt1 = m->lambda_t1 - old_t1;
-	v3 P1 = scale(m->tangent1, dt1);
-	a->velocity = sub(a->velocity, scale(P1, ima));
-	b->velocity = add(b->velocity, scale(P1, imb));
+	a->velocity = sub(a->velocity, scale(m->tangent1, dt1 * ima));
+	b->velocity = add(b->velocity, scale(m->tangent1, dt1 * imb));
 	a->angular_velocity = sub(a->angular_velocity, scale(m->w_t1_a, dt1));
 	b->angular_velocity = add(b->angular_velocity, scale(m->w_t1_b, dt1));
 
@@ -719,9 +717,8 @@ static void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, Sol
 	float old_t2 = m->lambda_t2;
 	m->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + m->eff_mass_t2 * (-vt2), max_f));
 	float dt2 = m->lambda_t2 - old_t2;
-	v3 P2 = scale(m->tangent2, dt2);
-	a->velocity = sub(a->velocity, scale(P2, ima));
-	b->velocity = add(b->velocity, scale(P2, imb));
+	a->velocity = sub(a->velocity, scale(m->tangent2, dt2 * ima));
+	b->velocity = add(b->velocity, scale(m->tangent2, dt2 * imb));
 	a->angular_velocity = sub(a->angular_velocity, scale(m->w_t2_a, dt2));
 	b->angular_velocity = add(b->angular_velocity, scale(m->w_t2_b, dt2));
 
