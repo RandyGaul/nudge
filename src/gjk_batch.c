@@ -1,55 +1,55 @@
 // gjk_batch.c -- Batched GJK distance for multiple pairs simultaneously.
 // Processes 4 pairs in parallel using SSE SoA layout.
-// Each __m128 holds the same component from 4 different pairs.
+// Each simd4f holds the same component from 4 different pairs.
 
-typedef struct v3w { __m128 x, y, z; } v3w; // 4-wide v3 (SoA)
+typedef struct v3w { simd4f x, y, z; } v3w; // 4-wide v3 (SoA)
 
-static inline v3w v3w_set1(v3 v) { return (v3w){ _mm_set1_ps(v.x), _mm_set1_ps(v.y), _mm_set1_ps(v.z) }; }
-static inline v3w v3w_load4(v3 a, v3 b, v3 c, v3 d) { return (v3w){ _mm_set_ps(d.x,c.x,b.x,a.x), _mm_set_ps(d.y,c.y,b.y,a.y), _mm_set_ps(d.z,c.z,b.z,a.z) }; }
-static inline v3w v3w_sub(v3w a, v3w b) { return (v3w){ _mm_sub_ps(a.x, b.x), _mm_sub_ps(a.y, b.y), _mm_sub_ps(a.z, b.z) }; }
-static inline v3w v3w_add(v3w a, v3w b) { return (v3w){ _mm_add_ps(a.x, b.x), _mm_add_ps(a.y, b.y), _mm_add_ps(a.z, b.z) }; }
-static inline v3w v3w_neg(v3w a) { __m128 z = _mm_setzero_ps(); return (v3w){ _mm_sub_ps(z, a.x), _mm_sub_ps(z, a.y), _mm_sub_ps(z, a.z) }; }
-static inline __m128 v3w_dot(v3w a, v3w b) { return _mm_add_ps(_mm_add_ps(_mm_mul_ps(a.x, b.x), _mm_mul_ps(a.y, b.y)), _mm_mul_ps(a.z, b.z)); }
-static inline __m128 v3w_len2(v3w a) { return v3w_dot(a, a); }
-static inline v3w v3w_scale(v3w a, __m128 s) { return (v3w){ _mm_mul_ps(a.x, s), _mm_mul_ps(a.y, s), _mm_mul_ps(a.z, s) }; }
+static inline v3w v3w_set1(v3 v) { return (v3w){ simd_set1(v.x), simd_set1(v.y), simd_set1(v.z) }; }
+static inline v3w v3w_load4(v3 a, v3 b, v3 c, v3 d) { return (v3w){ simd_set(d.x,c.x,b.x,a.x), simd_set(d.y,c.y,b.y,a.y), simd_set(d.z,c.z,b.z,a.z) }; }
+static inline v3w v3w_sub(v3w a, v3w b) { return (v3w){ simd_sub(a.x, b.x), simd_sub(a.y, b.y), simd_sub(a.z, b.z) }; }
+static inline v3w v3w_add(v3w a, v3w b) { return (v3w){ simd_add(a.x, b.x), simd_add(a.y, b.y), simd_add(a.z, b.z) }; }
+static inline v3w v3w_neg(v3w a) { simd4f z = simd_zero(); return (v3w){ simd_sub(z, a.x), simd_sub(z, a.y), simd_sub(z, a.z) }; }
+static inline simd4f v3w_dot(v3w a, v3w b) { return simd_add(simd_add(simd_mul(a.x, b.x), simd_mul(a.y, b.y)), simd_mul(a.z, b.z)); }
+static inline simd4f v3w_len2(v3w a) { return v3w_dot(a, a); }
+static inline v3w v3w_scale(v3w a, simd4f s) { return (v3w){ simd_mul(a.x, s), simd_mul(a.y, s), simd_mul(a.z, s) }; }
 static inline v3w v3w_cross(v3w a, v3w b) {
 	return (v3w){
-		_mm_sub_ps(_mm_mul_ps(a.y, b.z), _mm_mul_ps(a.z, b.y)),
-		_mm_sub_ps(_mm_mul_ps(a.z, b.x), _mm_mul_ps(a.x, b.z)),
-		_mm_sub_ps(_mm_mul_ps(a.x, b.y), _mm_mul_ps(a.y, b.x))
+		simd_sub(simd_mul(a.y, b.z), simd_mul(a.z, b.y)),
+		simd_sub(simd_mul(a.z, b.x), simd_mul(a.x, b.z)),
+		simd_sub(simd_mul(a.x, b.y), simd_mul(a.y, b.x))
 	};
 }
 // Select: mask=all-1s picks a, mask=all-0s picks b.
-static inline v3w v3w_sel(v3w a, v3w b, __m128 mask) {
-	return (v3w){ _mm_blendv_ps(b.x, a.x, mask), _mm_blendv_ps(b.y, a.y, mask), _mm_blendv_ps(b.z, a.z, mask) };
+static inline v3w v3w_sel(v3w a, v3w b, simd4f mask) {
+	return (v3w){ simd_blendv(b.x, a.x, mask), simd_blendv(b.y, a.y, mask), simd_blendv(b.z, a.z, mask) };
 }
 
 // 4-wide mat3 rotate: R^T * v (column broadcast multiply). Each column is 4-wide.
 static inline v3w v3w_mat_rotate_t(v3w c0, v3w c1, v3w c2, v3w v) {
 	return (v3w){
-		_mm_add_ps(_mm_add_ps(_mm_mul_ps(c0.x, v.x), _mm_mul_ps(c1.x, v.y)), _mm_mul_ps(c2.x, v.z)),
-		_mm_add_ps(_mm_add_ps(_mm_mul_ps(c0.y, v.x), _mm_mul_ps(c1.y, v.y)), _mm_mul_ps(c2.y, v.z)),
-		_mm_add_ps(_mm_add_ps(_mm_mul_ps(c0.z, v.x), _mm_mul_ps(c1.z, v.y)), _mm_mul_ps(c2.z, v.z))
+		simd_add(simd_add(simd_mul(c0.x, v.x), simd_mul(c1.x, v.y)), simd_mul(c2.x, v.z)),
+		simd_add(simd_add(simd_mul(c0.y, v.x), simd_mul(c1.y, v.y)), simd_mul(c2.y, v.z)),
+		simd_add(simd_add(simd_mul(c0.z, v.x), simd_mul(c1.z, v.y)), simd_mul(c2.z, v.z))
 	};
 }
 // 4-wide mat3 inverse rotate: R * v (transpose then column broadcast).
 static inline v3w v3w_mat_rotate(v3w c0, v3w c1, v3w c2, v3w v) {
 	// dot(col_i, v) for each row
 	return (v3w){
-		_mm_add_ps(_mm_add_ps(_mm_mul_ps(c0.x, v.x), _mm_mul_ps(c0.y, v.y)), _mm_mul_ps(c0.z, v.z)),
-		_mm_add_ps(_mm_add_ps(_mm_mul_ps(c1.x, v.x), _mm_mul_ps(c1.y, v.y)), _mm_mul_ps(c1.z, v.z)),
-		_mm_add_ps(_mm_add_ps(_mm_mul_ps(c2.x, v.x), _mm_mul_ps(c2.y, v.y)), _mm_mul_ps(c2.z, v.z))
+		simd_add(simd_add(simd_mul(c0.x, v.x), simd_mul(c0.y, v.y)), simd_mul(c0.z, v.z)),
+		simd_add(simd_add(simd_mul(c1.x, v.x), simd_mul(c1.y, v.y)), simd_mul(c1.z, v.z)),
+		simd_add(simd_add(simd_mul(c2.x, v.x), simd_mul(c2.y, v.y)), simd_mul(c2.z, v.z))
 	};
 }
 
 // 4-wide box support: copysign(he, R^T*d) then R*corner + center.
 static inline v3w v3w_box_support(v3w center, v3w c0, v3w c1, v3w c2, v3w he, v3w dir) {
 	v3w ld = v3w_mat_rotate(c0, c1, c2, dir);
-	__m128 sign_mask = _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000));
+	simd4f sign_mask = simd_cast_itof(simd_set1_i((int)0x80000000));
 	v3w lc = {
-		_mm_xor_ps(he.x, _mm_and_ps(ld.x, sign_mask)),
-		_mm_xor_ps(he.y, _mm_and_ps(ld.y, sign_mask)),
-		_mm_xor_ps(he.z, _mm_and_ps(ld.z, sign_mask))
+		simd_xor(he.x, simd_and(ld.x, sign_mask)),
+		simd_xor(he.y, simd_and(ld.y, sign_mask)),
+		simd_xor(he.z, simd_and(ld.z, sign_mask))
 	};
 	return v3w_add(center, v3w_mat_rotate_t(c0, c1, c2, lc));
 }
@@ -86,27 +86,27 @@ static void gjk_distance_batch_box(const GJK_Shape* a[4], const GJK_Shape* b[4],
 	v3w simplex_p = v3w_sub(supB, supA); // Minkowski diff
 	v3w simplex_p1 = supA, simplex_p2 = supB;
 
-	__m128 dsq_prev = _mm_set1_ps(FLT_MAX);
-	__m128 done_mask = _mm_setzero_ps(); // lanes that have terminated
-	__m128 eps2 = _mm_set1_ps(GJK_CONTAINMENT_EPS2);
+	simd4f dsq_prev = simd_set1(FLT_MAX);
+	simd4f done_mask = simd_zero(); // lanes that have terminated
+	simd4f eps2 = simd_set1(GJK_CONTAINMENT_EPS2);
 	v3w best_p1 = simplex_p1, best_p2 = simplex_p2; // witness points
 
 	for (int iter = 0; iter < 20; iter++) {
 		// Closest point on simplex (for count==1, it's just the single point)
 		v3w closest = simplex_p;
-		__m128 dsq = v3w_len2(closest);
+		simd4f dsq = v3w_len2(closest);
 
 		// Containment check
-		__m128 contained = _mm_cmple_ps(dsq, eps2);
-		done_mask = _mm_or_ps(done_mask, contained);
+		simd4f contained = simd_cmple(dsq, eps2);
+		done_mask = simd_or(done_mask, contained);
 
 		// Monotonic check
-		__m128 no_progress = _mm_cmpge_ps(dsq, dsq_prev);
-		done_mask = _mm_or_ps(done_mask, no_progress);
+		simd4f no_progress = simd_cmpge(dsq, dsq_prev);
+		done_mask = simd_or(done_mask, no_progress);
 
-		if (_mm_movemask_ps(done_mask) == 0xF) break; // all 4 lanes done
+		if (simd_movemask(done_mask) == 0xF) break; // all 4 lanes done
 
-		dsq_prev = _mm_blendv_ps(dsq, dsq_prev, done_mask); // only update active lanes
+		dsq_prev = simd_blendv(dsq, dsq_prev, done_mask); // only update active lanes
 
 		// New support
 		v3w newA = v3w_box_support(cenA, c0A, c1A, c2A, heA, closest);
@@ -114,16 +114,16 @@ static void gjk_distance_batch_box(const GJK_Shape* a[4], const GJK_Shape* b[4],
 		v3w w = v3w_sub(newB, newA);
 
 		// Progress check: dsq - dot(w, closest) <= dsq * eps
-		__m128 progress = _mm_sub_ps(dsq, v3w_dot(w, closest));
-		__m128 threshold = _mm_mul_ps(v3w_len2(simplex_p), _mm_set1_ps(GJK_PROGRESS_EPS));
-		__m128 stalled = _mm_cmple_ps(progress, threshold);
-		done_mask = _mm_or_ps(done_mask, stalled);
+		simd4f progress = simd_sub(dsq, v3w_dot(w, closest));
+		simd4f threshold = simd_mul(v3w_len2(simplex_p), simd_set1(GJK_PROGRESS_EPS));
+		simd4f stalled = simd_cmple(progress, threshold);
+		done_mask = simd_or(done_mask, stalled);
 
 		// Update simplex for active lanes (simplified: always use single-vertex simplex)
 		// This is a simplification — full batch would need per-lane simplex state.
-		simplex_p = v3w_sel(simplex_p, w, _mm_andnot_ps(done_mask, _mm_set1_ps(-0.0f))); // hacky: use -0 as all-bits-set
+		simplex_p = v3w_sel(simplex_p, w, simd_andnot(done_mask, simd_set1(-0.0f))); // hacky: use -0 as all-bits-set
 		// Actually, let's just use the new point for active lanes:
-		__m128 active = _mm_andnot_ps(done_mask, _mm_castsi128_ps(_mm_set1_epi32(-1)));
+		simd4f active = simd_andnot(done_mask, simd_cast_itof(simd_set1_i(-1)));
 		simplex_p = v3w_sel(w, simplex_p, done_mask);
 		simplex_p1 = v3w_sel(newA, simplex_p1, done_mask);
 		simplex_p2 = v3w_sel(newB, simplex_p2, done_mask);
@@ -133,9 +133,9 @@ static void gjk_distance_batch_box(const GJK_Shape* a[4], const GJK_Shape* b[4],
 
 	// Extract distances
 	v3w sep = v3w_sub(best_p2, best_p1);
-	__m128 dist2 = v3w_len2(sep);
-	__m128 dist = _mm_sqrt_ps(dist2);
-	_mm_storeu_ps(out_dist, dist);
+	simd4f dist2 = v3w_len2(sep);
+	simd4f dist = simd_sqrt(dist2);
+	simd_store(out_dist, dist);
 
 	// Save cache
 	for (int i = 0; i < 4; i++) {
@@ -148,10 +148,10 @@ static void gjk_distance_batch_box(const GJK_Shape* a[4], const GJK_Shape* b[4],
 
 // 4-wide triangle support: max dot of 3 vertices per lane.
 static inline v3w v3w_tri_support(v3w ta, v3w tb, v3w tc, v3w dir) {
-	__m128 da = v3w_dot(ta, dir), db = v3w_dot(tb, dir), dc = v3w_dot(tc, dir);
-	__m128 ab = _mm_cmpge_ps(da, db), ac = _mm_cmpge_ps(da, dc), bc = _mm_cmpge_ps(db, dc);
-	__m128 pick_a = _mm_and_ps(ab, ac);             // da >= db && da >= dc
-	__m128 pick_b = _mm_andnot_ps(pick_a, bc);       // not-a && db >= dc
+	simd4f da = v3w_dot(ta, dir), db = v3w_dot(tb, dir), dc = v3w_dot(tc, dir);
+	simd4f ab = simd_cmpge(da, db), ac = simd_cmpge(da, dc), bc = simd_cmpge(db, dc);
+	simd4f pick_a = simd_and(ab, ac);             // da >= db && da >= dc
+	simd4f pick_b = simd_andnot(pick_a, bc);       // not-a && db >= dc
 	v3w result = tc;                                  // default: pick C
 	result = v3w_sel(tb, result, pick_b);             // if pick_b: use B
 	result = v3w_sel(ta, result, pick_a);             // if pick_a: use A
@@ -169,7 +169,7 @@ static void gjk_distance_batch_sphere_tri(v3 sphere_center, float sphere_radius,
 	v3w tc = v3w_load4(tri_verts[2], tri_verts[5], tri_verts[8], tri_verts[11]);
 
 	// Initial direction: sphere center to triangle centroid
-	v3w tri_cen = v3w_scale(v3w_add(v3w_add(ta, tb), tc), _mm_set1_ps(1.0f/3.0f));
+	v3w tri_cen = v3w_scale(v3w_add(v3w_add(ta, tb), tc), simd_set1(1.0f/3.0f));
 	v3w init_d = v3w_sub(tri_cen, sph);
 
 	// Initial support: sphere = center, triangle = max dot vertex
@@ -178,27 +178,27 @@ static void gjk_distance_batch_sphere_tri(v3 sphere_center, float sphere_radius,
 	v3w simplex_p = v3w_sub(supB, supA);
 	v3w best_p1 = supA, best_p2 = supB;
 
-	__m128 dsq_prev = _mm_set1_ps(FLT_MAX);
-	__m128 done_mask = _mm_setzero_ps();
-	__m128 eps2 = _mm_set1_ps(GJK_CONTAINMENT_EPS2);
-	__m128 prog_eps = _mm_set1_ps(GJK_PROGRESS_EPS);
+	simd4f dsq_prev = simd_set1(FLT_MAX);
+	simd4f done_mask = simd_zero();
+	simd4f eps2 = simd_set1(GJK_CONTAINMENT_EPS2);
+	simd4f prog_eps = simd_set1(GJK_PROGRESS_EPS);
 
 	for (int iter = 0; iter < 20; iter++) {
 		v3w closest = simplex_p;
-		__m128 dsq = v3w_len2(closest);
-		done_mask = _mm_or_ps(done_mask, _mm_cmple_ps(dsq, eps2));
-		done_mask = _mm_or_ps(done_mask, _mm_cmpge_ps(dsq, dsq_prev));
-		if (_mm_movemask_ps(done_mask) == 0xF) break;
-		dsq_prev = _mm_blendv_ps(dsq, dsq_prev, done_mask);
+		simd4f dsq = v3w_len2(closest);
+		done_mask = simd_or(done_mask, simd_cmple(dsq, eps2));
+		done_mask = simd_or(done_mask, simd_cmpge(dsq, dsq_prev));
+		if (simd_movemask(done_mask) == 0xF) break;
+		dsq_prev = simd_blendv(dsq, dsq_prev, done_mask);
 
 		// Sphere support in direction closest = just sphere center (always)
 		v3w newA = sph;
 		v3w newB = v3w_tri_support(ta, tb, tc, v3w_neg(closest));
 		v3w w = v3w_sub(newB, newA);
 
-		__m128 progress = _mm_sub_ps(dsq, v3w_dot(w, closest));
-		__m128 threshold = _mm_mul_ps(v3w_len2(simplex_p), prog_eps);
-		done_mask = _mm_or_ps(done_mask, _mm_cmple_ps(progress, threshold));
+		simd4f progress = simd_sub(dsq, v3w_dot(w, closest));
+		simd4f threshold = simd_mul(v3w_len2(simplex_p), prog_eps);
+		done_mask = simd_or(done_mask, simd_cmple(progress, threshold));
 
 		simplex_p = v3w_sel(w, simplex_p, done_mask);
 		best_p1 = v3w_sel(newA, best_p1, done_mask);
@@ -207,7 +207,7 @@ static void gjk_distance_batch_sphere_tri(v3 sphere_center, float sphere_radius,
 
 	// Distance = |p2 - p1| - radius
 	v3w sep = v3w_sub(best_p2, best_p1);
-	__m128 dist = _mm_sqrt_ps(v3w_len2(sep));
-	dist = _mm_max_ps(_mm_setzero_ps(), _mm_sub_ps(dist, _mm_set1_ps(sphere_radius)));
-	_mm_storeu_ps(out_dist, dist);
+	simd4f dist = simd_sqrt(v3w_len2(sep));
+	dist = simd_max(simd_zero(), simd_sub(dist, simd_set1(sphere_radius)));
+	simd_store(out_dist, dist);
 }

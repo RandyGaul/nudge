@@ -280,6 +280,19 @@ static inline simd4f simd_andnot(simd4f a, simd4f b)
 #endif
 }
 
+static inline simd4f simd_or(simd4f a, simd4f b)
+{
+#if SIMD_SSE
+	return _mm_or_ps(a, b);
+#elif SIMD_NEON
+	return vreinterpretq_f32_u32(vorrq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b)));
+#else
+	simd4f r;
+	for (int i = 0; i < 4; i++) { int ai, bi, ri; memcpy(&ai, &a.v[i], 4); memcpy(&bi, &b.v[i], 4); ri = ai | bi; memcpy(&r.v[i], &ri, 4); }
+	return r;
+#endif
+}
+
 static inline simd4f simd_xor(simd4f a, simd4f b)
 {
 #if SIMD_SSE
