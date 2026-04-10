@@ -11,24 +11,25 @@
 // -----------------------------------------------------------------------------
 // Simplex types.
 
-// SoA simplex: solver only touches point[]+u[]+divisor+count (hot data).
-// point1[]/point2[]/feat[] are cold — only read at witness extraction.
+typedef struct GJK_Vertex
+{
+	v3 point1;  // support point on shape A (world space)
+	v3 point2;  // support point on shape B (world space)
+	v3 point;   // Minkowski difference: point2 - point1
+	float u;    // barycentric coordinate
+	int feat1;  // feature ID on shape A
+	int feat2;  // feature ID on shape B
+} GJK_Vertex;
+
 typedef struct GJK_Simplex
 {
-	// Hot: touched by simplex solvers every iteration
-	v3 point[4];       // Minkowski difference
-	float u[4];        // barycentric coordinates
+	GJK_Vertex v[4];
 	float divisor;
 	int count;
-	// Cold: written per vertex, read once at end
-	v3 point1[4];      // support point on shape A
-	v3 point2[4];      // support point on shape B
-	int feat1[4];
-	int feat2[4];
 } GJK_Simplex;
 
-// Byte size of hot portion for backup/restore.
-#define gjk_simplex_size(n) (sizeof(v3) * (n) + sizeof(float) * (n) + sizeof(float) + sizeof(int))
+// Byte size of a simplex with n active vertices (vertices + divisor + count).
+#define gjk_simplex_size(n) (sizeof(GJK_Vertex) * (n) + sizeof(float) + sizeof(int))
 
 typedef struct GJK_Result
 {
@@ -190,10 +191,10 @@ static v3 gjk_center(const GJK_Shape* s)
 	const GJK_Simplex* cs = (simplex);                                                                              \
 	float cinv = 1.0f / cs->divisor;                                                                                \
 	switch (cs->count) {                                                                                            \
-	case 1: (out) = cs->point[0]; break;                                                                          \
-	case 2: (out) = add(scale(cs->point[0], cs->u[0] * cinv), scale(cs->point[1], cs->u[1] * cinv)); break; \
-	case 3: (out) = add(add(scale(cs->point[0], cs->u[0] * cinv), scale(cs->point[1], cs->u[1] * cinv)),    \
-	                     scale(cs->point[2], cs->u[2] * cinv)); break;                                          \
+	case 1: (out) = cs->v[0].point; break;                                                                          \
+	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break; \
+	case 3: (out) = add(add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)),    \
+	                     scale(cs->v[2].point, cs->v[2].u * cinv)); break;                                          \
 	default: (out) = V3(0,0,0); break;                                                                              \
 	}                                                                                                               \
 } while(0)
@@ -205,10 +206,10 @@ static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, in
 	float best_u = -1.0f;
 	*f1 = 0; *f2 = 0;
 	for (int i = 0; i < s->count; i++) {
-		float w = s->u[i] * inv;
-		*p1 = add(*p1, scale(s->point1[i], w));
-		*p2 = add(*p2, scale(s->point2[i], w));
-		if (s->u[i] > best_u) { best_u = s->u[i]; *f1 = s->feat1[i]; *f2 = s->feat2[i]; }
+		float w = s->v[i].u * inv;
+		*p1 = add(*p1, scale(s->v[i].point1, w));
+		*p2 = add(*p2, scale(s->v[i].point2, w));
+		if (s->v[i].u > best_u) { best_u = s->v[i].u; *f1 = s->v[i].feat1; *f2 = s->v[i].feat2; }
 	}
 }
 
@@ -217,7 +218,7 @@ static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, in
 
 static int gjk_solve2(GJK_Simplex* s)
 {
-	v3 a = s->point[0], b = s->point[1];
+	v3 a = s->v[0].point, b = s->v[1].point;
 	v3 ba = sub(b, a);
 	float u = dot(b, ba);
 	float v = -dot(a, ba);
@@ -227,17 +228,17 @@ static int gjk_solve2(GJK_Simplex* s)
 	int va = v <= 0.0f, vb = u <= 0.0f;
 	if (va | vb) {
 		// One of the vertex regions. If vb, swap v[0]=v[1] first.
-		if (vb) s->point[0] = s->point[1]; s->point1[0] = s->point1[1]; s->point2[0] = s->point2[1]; s->u[0] = s->u[1]; s->feat1[0] = s->feat1[1]; s->feat2[0] = s->feat2[1];
-		s->u[0] = 1.0f; s->divisor = 1.0f; s->count = 1;
+		if (vb) s->v[0] = s->v[1];
+		s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1;
 		return 1;
 	}
-	s->u[0] = u; s->u[1] = v; s->divisor = div; s->count = 2;
+	s->v[0].u = u; s->v[1].u = v; s->divisor = div; s->count = 2;
 	return 1;
 }
 
 static int gjk_solve3(GJK_Simplex* s)
 {
-	v3 a = s->point[0], b = s->point[1], c = s->point[2];
+	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point;
 	v3 ba = sub(b, a), cb = sub(c, b), ac = sub(a, c);
 	float uAB = dot(b, ba), vAB = -dot(a, ba);
 	float uBC = dot(c, cb), vBC = -dot(b, cb);
@@ -250,21 +251,21 @@ static int gjk_solve3(GJK_Simplex* s)
 	            ((uCA > 0) << 4) | ((vCA > 0) << 5) | ((uABC > 0) << 6) | ((vABC > 0) << 7) | ((wABC > 0) << 8);
 
 	// Vertex A: vAB<=0 && uCA<=0 → bits 1,4 both 0
-	if ((signs & 0x12) == 0) { s->u[0] = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	if ((signs & 0x12) == 0) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
 	// Vertex B: uAB<=0 && vBC<=0 → bits 0,3 both 0
-	if ((signs & 0x09) == 0) { s->point[0] = s->point[1]; s->point1[0] = s->point1[1]; s->point2[0] = s->point2[1]; s->u[0] = s->u[1]; s->feat1[0] = s->feat1[1]; s->feat2[0] = s->feat2[1]; s->u[0] = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	if ((signs & 0x09) == 0) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
 	// Vertex C: uBC<=0 && vCA<=0 → bits 2,5 both 0
-	if ((signs & 0x24) == 0) { s->point[0] = s->point[2]; s->point1[0] = s->point1[2]; s->point2[0] = s->point2[2]; s->u[0] = s->u[2]; s->feat1[0] = s->feat1[2]; s->feat2[0] = s->feat2[2]; s->u[0] = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	if ((signs & 0x24) == 0) { s->v[0] = s->v[2]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
 	// Edge AB: uAB>0 && vAB>0 && wABC<=0 → bits 0,1 set, bit 8 clear
-	if ((signs & 0x103) == 0x03) { s->u[0] = uAB; s->u[1] = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
+	if ((signs & 0x103) == 0x03) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
 	// Edge BC: uBC>0 && vBC>0 && uABC<=0 → bits 2,3 set, bit 6 clear
-	if ((signs & 0x4C) == 0x0C) { s->point[0] = s->point[1]; s->point1[0] = s->point1[1]; s->point2[0] = s->point2[1]; s->u[0] = s->u[1]; s->feat1[0] = s->feat1[1]; s->feat2[0] = s->feat2[1]; s->point[1] = s->point[2]; s->point1[1] = s->point1[2]; s->point2[1] = s->point2[2]; s->u[1] = s->u[2]; s->feat1[1] = s->feat1[2]; s->feat2[1] = s->feat2[2]; s->u[0] = uBC; s->u[1] = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
+	if ((signs & 0x4C) == 0x0C) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
 	// Edge CA: uCA>0 && vCA>0 && vABC<=0 → bits 4,5 set, bit 7 clear
-	if ((signs & 0xB0) == 0x30) { s->point[1] = s->point[0]; s->point1[1] = s->point1[0]; s->point2[1] = s->point2[0]; s->u[1] = s->u[0]; s->feat1[1] = s->feat1[0]; s->feat2[1] = s->feat2[0]; s->point[0] = s->point[2]; s->point1[0] = s->point1[2]; s->point2[0] = s->point2[2]; s->u[0] = s->u[2]; s->feat1[0] = s->feat1[2]; s->feat2[0] = s->feat2[2]; s->u[0] = uCA; s->u[1] = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
+	if ((signs & 0xB0) == 0x30) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
 	// Face ABC
 	s->divisor = uABC + vABC + wABC;
 	if (s->divisor == 0.0f) return 0;
-	s->u[0] = uABC; s->u[1] = vABC; s->u[2] = wABC; s->count = 3;
+	s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->count = 3;
 	return 1;
 }
 
@@ -272,7 +273,7 @@ static int gjk_solve3(GJK_Simplex* s)
 
 static int gjk_solve4(GJK_Simplex* s)
 {
-	v3 a = s->point[0], b = s->point[1], c = s->point[2], d = s->point[3];
+	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point, d = s->v[3].point;
 
 	float uAB = dot(b, sub(b, a)), vAB = dot(a, sub(a, b));
 	float uBC = dot(c, sub(c, b)), vBC = dot(b, sub(b, c));
@@ -297,24 +298,24 @@ static int gjk_solve4(GJK_Simplex* s)
 	float uABCD = stp(c, d, b) * vol, vABCD = stp(c, a, d) * vol;
 	float wABCD = stp(d, a, b) * vol, xABCD = stp(b, a, c) * vol;
 
-	if (vAB <= 0 && uCA <= 0 && vAD <= 0) { s->u[0] = 1; s->divisor = 1; s->count = 1; return 1; }
-	if (uAB <= 0 && vBC <= 0 && vBD <= 0) { s->point[0] = s->point[1]; s->point1[0] = s->point1[1]; s->point2[0] = s->point2[1]; s->u[0] = s->u[1]; s->feat1[0] = s->feat1[1]; s->feat2[0] = s->feat2[1]; s->u[0] = 1; s->divisor = 1; s->count = 1; return 1; }
-	if (uBC <= 0 && vCA <= 0 && uDC <= 0) { s->point[0] = s->point[2]; s->point1[0] = s->point1[2]; s->point2[0] = s->point2[2]; s->u[0] = s->u[2]; s->feat1[0] = s->feat1[2]; s->feat2[0] = s->feat2[2]; s->u[0] = 1; s->divisor = 1; s->count = 1; return 1; }
-	if (uBD <= 0 && vDC <= 0 && uAD <= 0) { s->point[0] = s->point[3]; s->point1[0] = s->point1[3]; s->point2[0] = s->point2[3]; s->u[0] = s->u[3]; s->feat1[0] = s->feat1[3]; s->feat2[0] = s->feat2[3]; s->u[0] = 1; s->divisor = 1; s->count = 1; return 1; }
+	if (vAB <= 0 && uCA <= 0 && vAD <= 0) { s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if (uAB <= 0 && vBC <= 0 && vBD <= 0) { s->v[0] = s->v[1]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if (uBC <= 0 && vCA <= 0 && uDC <= 0) { s->v[0] = s->v[2]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if (uBD <= 0 && vDC <= 0 && uAD <= 0) { s->v[0] = s->v[3]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
 
-	if (wABC <= 0 && vADB <= 0 && uAB > 0 && vAB > 0) { s->u[0] = uAB; s->u[1] = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
-	if (uABC <= 0 && wCBD <= 0 && uBC > 0 && vBC > 0) { s->point[0] = s->point[1]; s->point1[0] = s->point1[1]; s->point2[0] = s->point2[1]; s->u[0] = s->u[1]; s->feat1[0] = s->feat1[1]; s->feat2[0] = s->feat2[1]; s->point[1] = s->point[2]; s->point1[1] = s->point1[2]; s->point2[1] = s->point2[2]; s->u[1] = s->u[2]; s->feat1[1] = s->feat1[2]; s->feat2[1] = s->feat2[2]; s->u[0] = uBC; s->u[1] = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
-	if (vABC <= 0 && wACD <= 0 && uCA > 0 && vCA > 0) { s->point[1] = s->point[0]; s->point1[1] = s->point1[0]; s->point2[1] = s->point2[0]; s->u[1] = s->u[0]; s->feat1[1] = s->feat1[0]; s->feat2[1] = s->feat2[0]; s->point[0] = s->point[2]; s->point1[0] = s->point1[2]; s->point2[0] = s->point2[2]; s->u[0] = s->u[2]; s->feat1[0] = s->feat1[2]; s->feat2[0] = s->feat2[2]; s->u[0] = uCA; s->u[1] = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
-	if (vCBD <= 0 && uACD <= 0 && uDC > 0 && vDC > 0) { s->point[0] = s->point[3]; s->point1[0] = s->point1[3]; s->point2[0] = s->point2[3]; s->u[0] = s->u[3]; s->feat1[0] = s->feat1[3]; s->feat2[0] = s->feat2[3]; s->point[1] = s->point[2]; s->point1[1] = s->point1[2]; s->point2[1] = s->point2[2]; s->u[1] = s->u[2]; s->feat1[1] = s->feat1[2]; s->feat2[1] = s->feat2[2]; s->u[0] = uDC; s->u[1] = vDC; s->divisor = uDC + vDC; s->count = 2; return 1; }
-	if (vACD <= 0 && wADB <= 0 && uAD > 0 && vAD > 0) { s->point[1] = s->point[3]; s->point1[1] = s->point1[3]; s->point2[1] = s->point2[3]; s->u[1] = s->u[3]; s->feat1[1] = s->feat1[3]; s->feat2[1] = s->feat2[3]; s->u[0] = uAD; s->u[1] = vAD; s->divisor = uAD + vAD; s->count = 2; return 1; }
-	if (uCBD <= 0 && uADB <= 0 && uBD > 0 && vBD > 0) { s->point[0] = s->point[1]; s->point1[0] = s->point1[1]; s->point2[0] = s->point2[1]; s->u[0] = s->u[1]; s->feat1[0] = s->feat1[1]; s->feat2[0] = s->feat2[1]; s->point[1] = s->point[3]; s->point1[1] = s->point1[3]; s->point2[1] = s->point2[3]; s->u[1] = s->u[3]; s->feat1[1] = s->feat1[3]; s->feat2[1] = s->feat2[3]; s->u[0] = uBD; s->u[1] = vBD; s->divisor = uBD + vBD; s->count = 2; return 1; }
+	if (wABC <= 0 && vADB <= 0 && uAB > 0 && vAB > 0) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
+	if (uABC <= 0 && wCBD <= 0 && uBC > 0 && vBC > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
+	if (vABC <= 0 && wACD <= 0 && uCA > 0 && vCA > 0) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
+	if (vCBD <= 0 && uACD <= 0 && uDC > 0 && vDC > 0) { s->v[0] = s->v[3]; s->v[1] = s->v[2]; s->v[0].u = uDC; s->v[1].u = vDC; s->divisor = uDC + vDC; s->count = 2; return 1; }
+	if (vACD <= 0 && wADB <= 0 && uAD > 0 && vAD > 0) { s->v[1] = s->v[3]; s->v[0].u = uAD; s->v[1].u = vAD; s->divisor = uAD + vAD; s->count = 2; return 1; }
+	if (uCBD <= 0 && uADB <= 0 && uBD > 0 && vBD > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uBD; s->v[1].u = vBD; s->divisor = uBD + vBD; s->count = 2; return 1; }
 
-	if (xABCD <= 0 && uABC > 0 && vABC > 0 && wABC > 0) { s->u[0] = uABC; s->u[1] = vABC; s->u[2] = wABC; s->divisor = uABC + vABC + wABC; s->count = 3; return 1; }
-	if (uABCD <= 0 && uCBD > 0 && vCBD > 0 && wCBD > 0) { s->point[0] = s->point[2]; s->point1[0] = s->point1[2]; s->point2[0] = s->point2[2]; s->u[0] = s->u[2]; s->feat1[0] = s->feat1[2]; s->feat2[0] = s->feat2[2]; s->point[2] = s->point[3]; s->point1[2] = s->point1[3]; s->point2[2] = s->point2[3]; s->u[2] = s->u[3]; s->feat1[2] = s->feat1[3]; s->feat2[2] = s->feat2[3]; s->u[0] = uCBD; s->u[1] = vCBD; s->u[2] = wCBD; s->divisor = uCBD + vCBD + wCBD; s->count = 3; return 1; }
-	if (vABCD <= 0 && uACD > 0 && vACD > 0 && wACD > 0) { s->point[1] = s->point[2]; s->point1[1] = s->point1[2]; s->point2[1] = s->point2[2]; s->u[1] = s->u[2]; s->feat1[1] = s->feat1[2]; s->feat2[1] = s->feat2[2]; s->point[2] = s->point[3]; s->point1[2] = s->point1[3]; s->point2[2] = s->point2[3]; s->u[2] = s->u[3]; s->feat1[2] = s->feat1[3]; s->feat2[2] = s->feat2[3]; s->u[0] = uACD; s->u[1] = vACD; s->u[2] = wACD; s->divisor = uACD + vACD + wACD; s->count = 3; return 1; }
-	if (wABCD <= 0 && uADB > 0 && vADB > 0 && wADB > 0) { s->point[2] = s->point[1]; s->point1[2] = s->point1[1]; s->point2[2] = s->point2[1]; s->u[2] = s->u[1]; s->feat1[2] = s->feat1[1]; s->feat2[2] = s->feat2[1]; s->point[1] = s->point[3]; s->point1[1] = s->point1[3]; s->point2[1] = s->point2[3]; s->u[1] = s->u[3]; s->feat1[1] = s->feat1[3]; s->feat2[1] = s->feat2[3]; s->u[0] = uADB; s->u[1] = vADB; s->u[2] = wADB; s->divisor = uADB + vADB + wADB; s->count = 3; return 1; }
+	if (xABCD <= 0 && uABC > 0 && vABC > 0 && wABC > 0) { s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = uABC + vABC + wABC; s->count = 3; return 1; }
+	if (uABCD <= 0 && uCBD > 0 && vCBD > 0 && wCBD > 0) { s->v[0] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uCBD; s->v[1].u = vCBD; s->v[2].u = wCBD; s->divisor = uCBD + vCBD + wCBD; s->count = 3; return 1; }
+	if (vABCD <= 0 && uACD > 0 && vACD > 0 && wACD > 0) { s->v[1] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uACD; s->v[1].u = vACD; s->v[2].u = wACD; s->divisor = uACD + vACD + wACD; s->count = 3; return 1; }
+	if (wABCD <= 0 && uADB > 0 && vADB > 0 && wADB > 0) { s->v[2] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uADB; s->v[1].u = vADB; s->v[2].u = wADB; s->divisor = uADB + vADB + wADB; s->count = 3; return 1; }
 
-	s->u[0] = uABCD; s->u[1] = vABCD; s->u[2] = wABCD; s->u[3] = xABCD;
+	s->v[0].u = uABCD; s->v[1].u = vABCD; s->v[2].u = wABCD; s->v[3].u = xABCD;
 	s->divisor = 1.0f; s->count = 4;
 	return 1;
 }
@@ -338,12 +339,12 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 	int fA, fB;
 	v3 sA; gjk_support(&shapeA, init_d, &fA, sA);
 	v3 sB; gjk_support(&shapeB, neg(init_d), &fB, sB);
-	simplex.point1[0] = sA;
-	simplex.point2[0] = sB;
-	simplex.point[0] = sub(sB, sA);
-	simplex.feat1[0] = fA;
-	simplex.feat2[0] = fB;
-	simplex.u[0] = 1.0f;
+	simplex.v[0].point1 = sA;
+	simplex.v[0].point2 = sB;
+	simplex.v[0].point = sub(sB, sA);
+	simplex.v[0].feat1 = fA;
+	simplex.v[0].feat2 = fB;
+	simplex.v[0].u = 1.0f;
 	simplex.divisor = 1.0f;
 	simplex.count = 1;
 
@@ -377,19 +378,19 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 
 		float max_vert2 = 0.0f;
 		for (int i = 0; i < simplex.count; i++) {
-			float v2 = len2(simplex.point[i]);
+			float v2 = len2(simplex.v[i].point);
 			if (v2 > max_vert2) max_vert2 = v2;
 		}
 		float progress = dsq - dot(w, closest);
 		if (progress <= max_vert2 * GJK_PROGRESS_EPS) break;
 
 		iter++;
-		int si = simplex.count;
-		simplex.point1[si] = sA;
-		simplex.point2[si] = sB;
-		simplex.point[si] = w;
-		simplex.feat1[si] = fA;
-		simplex.feat2[si] = fB;
+		GJK_Vertex* vert = &simplex.v[simplex.count];
+		vert->point1 = sA;
+		vert->point2 = sB;
+		vert->point = w;
+		vert->feat1 = fA;
+		vert->feat2 = fB;
 		simplex.count++;
 	}
 
