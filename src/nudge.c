@@ -10,6 +10,7 @@
 #include "collision.c"
 #include "inertia.c"
 #include "solver_pgs.c"
+#include "solver_pgs_simd.c"
 #include "joints.c"
 #include "solver_ldl.c"
 #include "islands.c"
@@ -216,6 +217,23 @@ void world_step(World world, float dt)
 
 	w->perf.pre_solve = perf_now() - t2;
 
+	// --- Build SIMD groups for patch friction contacts (once per frame) ---
+	int use_simd = (w->friction_model == FRICTION_PATCH);
+	CK_DYNA SolverGroupSIMD* simd_groups = NULL;
+	CK_DYNA int* simd_batch_starts = NULL; // group index where each color starts
+	int simd_group_count = 0;
+	if (use_simd && color_count > 0) {
+		for (int c = 0; c < color_count; c++) {
+			apush(simd_batch_starts, simd_group_count);
+			int gc = 0;
+			SolverGroupSIMD* cg = simd_prepare_groups(w, sm, sc, crefs, batch_starts[c], batch_starts[c + 1], &gc);
+			for (int g = 0; g < gc; g++) apush(simd_groups, cg[g]);
+			simd_group_count += gc;
+			afree(cg);
+		}
+		apush(simd_batch_starts, simd_group_count); // sentinel
+	}
+
 	// --- Sub-step loop ---
 	// Unified path: PGS iterates all constraints (contacts + joints).
 	// When LDL enabled, K is factored once at substep start, and a mid-loop
@@ -231,6 +249,8 @@ void world_step(World world, float dt)
 			// Refresh joint Jacobians/limits from current body state (positions
 			// changed by integrate_positions last substep, velocities just updated).
 			joints_refresh_substep(w, sol_joints, asize(sol_joints), sub_dt);
+			// Refresh SIMD bias from scalar contacts (relax updated them)
+			if (use_simd) simd_refresh_bias(simd_groups, simd_group_count, sm, sc);
 		}
 
 		int has_ldl = w->ldl_enabled && asize(sol_joints) > 0;
@@ -256,17 +276,31 @@ void world_step(World world, float dt)
 
 		// PGS: iterate all constraints (contacts, and joints when LDL is off).
 		double tp = perf_now();
-		for (int iter = 0; iter < w->velocity_iters; iter++) {
-			for (int c = 0; c < color_count; c++)
-				for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-					solve_constraint(w, &crefs[i], sm, sc, sol_joints);
-			// Joint limits: solved each PGS iteration (limit DOFs only).
-			// LDL handles the bilateral DOFs; this handles the unilateral limit.
-			double tjl = perf_now();
-			joints_solve_limits(w, sol_joints, asize(sol_joints));
-			t_jlim += perf_now() - tjl;
+		if (use_simd) {
+			// SIMD path: solve contact groups in batches by color
+			for (int iter = 0; iter < w->velocity_iters; iter++) {
+				for (int c = 0; c < color_count; c++)
+					for (int g = simd_batch_starts[c]; g < simd_batch_starts[c + 1]; g++)
+						simd_solve_group(w->body_hot, &simd_groups[g]);
+				double tjl = perf_now();
+				joints_solve_limits(w, sol_joints, asize(sol_joints));
+				t_jlim += perf_now() - tjl;
+			}
+		} else {
+			// Scalar path: original dispatch
+			for (int iter = 0; iter < w->velocity_iters; iter++) {
+				for (int c = 0; c < color_count; c++)
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
+				double tjl = perf_now();
+				joints_solve_limits(w, sol_joints, asize(sol_joints));
+				t_jlim += perf_now() - tjl;
+			}
 		}
 		t_pgs += perf_now() - tp;
+
+		// Copy SIMD lambdas back to scalar before integration/relax
+		if (use_simd) simd_writeback_lambdas(simd_groups, simd_group_count, sm, sc);
 
 		double ti2 = perf_now();
 		integrate_positions(w, sub_dt);
@@ -302,6 +336,8 @@ void world_step(World world, float dt)
 	w->perf.pgs.pos_joints = t_posJ;
 
 	afree(crefs);
+	afree(simd_groups);
+	afree(simd_batch_starts);
 
 	// Position correction: NGS for hard SI; also for soft modes when contact_hertz is off
 	double t3 = perf_now();
