@@ -276,11 +276,9 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 		if (simplex.count > 1) {
 			GJK_Simplex backup;
 			memcpy(&backup, &simplex, gjk_simplex_size(simplex.count));
-			switch (simplex.count) {
-			case 2: solved = gjk_solve2(&simplex); break;
-			case 3: solved = gjk_solve3(&simplex); break;
-			case 4: solved = gjk_solve4(&simplex); break;
-			}
+			if (simplex.count == 2) solved = gjk_solve2(&simplex);
+			else if (simplex.count == 3) solved = gjk_solve3(&simplex);
+			else solved = gjk_solve4(&simplex);
 			if (!solved) { memcpy(&simplex, &backup, gjk_simplex_size(backup.count)); break; }
 		}
 		if (simplex.count == 4) break;
