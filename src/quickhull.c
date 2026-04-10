@@ -407,28 +407,42 @@ static void qh_delete_face_points(QH_State* s, int fi, int absorb, int* unclaime
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Recursive DFS from a visible face, marking visible faces DELETED.
+// Iterative DFS from a visible face, marking visible faces DELETED.
+// After a child pops, the parent's edge still points across the child face
+// which is now DELETED, so the re-check naturally skips it before advancing.
 
-static void qh_calculate_horizon(QH_State* s, v3 eye, int edge0, int fi, CK_DYNA int** horizon, int* unclaimed)
+typedef struct { int edge0; int edge; } QH_HFrame;
+
+static void qh_calculate_horizon(QH_State* s, v3 eye, int edge0_init, int fi_init, CK_DYNA int** horizon, int* unclaimed)
 {
-	qh_delete_face_points(s, fi, QH_INVALID, unclaimed);
-	s->faces[fi].mark = QH_DELETED;
+	static CK_DYNA QH_HFrame* hstk = NULL;
+	if (hstk) asetlen(hstk, 0);
 
-	int edge;
-	if (edge0 == QH_INVALID) { edge0 = s->faces[fi].edge; edge = edge0; }
-	else { edge = s->edges[edge0].next; }
+	qh_delete_face_points(s, fi_init, QH_INVALID, unclaimed);
+	s->faces[fi_init].mark = QH_DELETED;
+	int e0 = (edge0_init == QH_INVALID) ? s->faces[fi_init].edge : edge0_init;
+	int estart = (edge0_init == QH_INVALID) ? e0 : s->edges[e0].next;
+	apush(hstk, ((QH_HFrame){ e0, estart }));
 
-	do {
-		int ofi = qh_opp_face(s, edge);
+	float eps = s->epsilon;
+	while (asize(hstk) > 0) {
+		QH_HFrame* f = &hstk[asize(hstk) - 1];
+		int ofi = qh_opp_face(s, f->edge);
 		if (s->faces[ofi].mark == QH_VISIBLE) {
-			if (qh_face_dist(s, ofi, eye) > s->epsilon)
-				qh_calculate_horizon(s, eye, s->edges[edge].twin, ofi, horizon, unclaimed);
-			else
-				apush(*horizon, edge);
+			if (dot(s->faces[ofi].plane.normal, eye) - s->faces[ofi].plane.offset > eps) {
+				int child_e0 = s->edges[f->edge].twin;
+				qh_delete_face_points(s, ofi, QH_INVALID, unclaimed);
+				s->faces[ofi].mark = QH_DELETED;
+				apush(hstk, ((QH_HFrame){ child_e0, s->edges[child_e0].next }));
+				continue;
+			} else {
+				apush(*horizon, f->edge);
+			}
 		}
-		edge = s->edges[edge].next;
-	} while (edge != edge0);
+		f = &hstk[asize(hstk) - 1]; // re-fetch after potential apush
+		f->edge = s->edges[f->edge].next;
+		if (f->edge == f->edge0) asetlen(hstk, asize(hstk) - 1);
+	}
 }
 
 // -----------------------------------------------------------------------------
