@@ -1470,6 +1470,7 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAPEntry), sap_cmp);
 
 	// Sweep: test overlapping pairs along x-axis, then full 3D AABB overlap (SIMD branchless).
+	// Box-box pairs are dispatched directly (bypassing narrowphase_pair overhead).
 	for (int i = 0; i < sap_count; i++) {
 		float max_x = sap[i].max_x;
 		int a = sap[i].body_idx;
@@ -1481,6 +1482,14 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 			int isl_b = w->body_cold[b].island_id;
 			if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
 			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
+			// Inline box-box fast path: skip narrowphase_pair dispatch + per-call timing.
+			if (w->body_cold[a].shapes[0].type == SHAPE_BOX && w->body_cold[b].shapes[0].type == SHAPE_BOX) {
+				int ba = a < b ? a : b, bb = a < b ? b : a;
+				InternalManifold im = { .body_a = ba, .body_b = bb };
+				if (collide_box_box_ex(make_box(&w->body_hot[ba], &w->body_cold[ba].shapes[0]), make_box(&w->body_hot[bb], &w->body_cold[bb].shapes[0]), &im.m, NULL))
+					apush(*manifolds, im);
+				continue;
+			}
 			narrowphase_pair(w, a, b, manifolds);
 		}
 	}
