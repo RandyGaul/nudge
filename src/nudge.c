@@ -60,13 +60,15 @@ void destroy_world(World world)
 	CK_FREE(w);
 }
 
-// Integrate velocities for a sub-step (gravity + damping).
-static void integrate_velocities(WorldInternal* w, float dt)
+// Integrate velocities + precompute world inertia in one fused pass.
+// Halves body_hot cache traversals vs separate loops (both touch same data).
+static void integrate_velocities_and_inertia(WorldInternal* w, float dt)
 {
 	int count = asize(w->body_hot);
 	for (int i = 0; i < count; i++) {
 		if (!split_alive(w->body_gen, i)) continue;
 		BodyHot* h = &w->body_hot[i];
+		body_compute_inv_inertia_world(h);
 		if (h->inv_mass == 0.0f) continue;
 		int isl = w->body_cold[i].island_id;
 		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake) continue;
@@ -116,15 +118,6 @@ static void integrate_positions(WorldInternal* w, float dt)
 	}
 }
 
-static void precompute_world_inertia(WorldInternal* w)
-{
-	int count = asize(w->body_hot);
-	for (int i = 0; i < count; i++) {
-		if (!split_alive(w->body_gen, i)) continue;
-		body_compute_inv_inertia_world(&w->body_hot[i]);
-	}
-}
-
 static int perf_initialized;
 
 void world_step(World world, float dt)
@@ -139,8 +132,7 @@ void world_step(World world, float dt)
 
 	double t0 = perf_now();
 	warm_cache_age_and_evict(w);
-	integrate_velocities(w, sub_dt);
-	precompute_world_inertia(w);
+	integrate_velocities_and_inertia(w, sub_dt);
 	w->perf.integrate = perf_now() - t0;
 
 	double t1 = perf_now();
@@ -227,8 +219,7 @@ void world_step(World world, float dt)
 	for (int sub = 0; sub < n_sub; sub++) {
 		if (sub > 0) {
 			double ti = perf_now();
-			integrate_velocities(w, sub_dt);
-			precompute_world_inertia(w);
+			integrate_velocities_and_inertia(w, sub_dt);
 			t_int_sub += perf_now() - ti;
 			// Refresh joint Jacobians/limits from current body state (positions
 			// changed by integrate_positions last substep, velocities just updated).
