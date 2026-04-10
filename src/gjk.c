@@ -543,8 +543,7 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		if (simplex.count == 4) break;
 		v3 closest; gjk_closest_point(&simplex, closest);
 		float dsq = len2(closest);
-		if (dsq <= GJK_CONTAINMENT_EPS2) break;
-		if (dsq >= dsq_prev) break;
+		if (dsq <= GJK_CONTAINMENT_EPS2 || dsq >= dsq_prev) break;
 		dsq_prev = dsq;
 		gjk_support(shapeA, closest, &fA, sA);
 		gjk_support(shapeB, neg(closest), &fB, sB);
