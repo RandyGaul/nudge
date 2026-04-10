@@ -44,14 +44,14 @@ typedef struct GJK_Shape
 	float radius; // applied post-hoc (sphere/capsule); 0 for surface shapes
 	union {
 		struct { v3 center; } point;
-		struct { v3 p, q, dir; } segment;
+		struct { v3 p, q; } segment;
 		struct { v3 center; v3 col0, col1, col2; v3 half_extents; } box;
 		struct { v3 center; v3 col0, col1, col2; const v3* verts; const float* soa; const HalfEdge* edges; const int* vert_edge; int count; int hint; } hull;
 		struct { v3 mid; v3 half_axis; float radius; v3 axis; float inv_axis_len; } cylinder;
 	};
 } GJK_Shape;
 static GJK_Shape gjk_sphere(v3 center, float radius) { return (GJK_Shape){ .type = GJK_POINT, .radius = radius, .point.center = center }; }
-static GJK_Shape gjk_capsule(v3 p, v3 q, float radius) { return (GJK_Shape){ .type = GJK_SEGMENT, .radius = radius, .segment.p = p, .segment.q = q, .segment.dir = sub(q, p) }; }
+static GJK_Shape gjk_capsule(v3 p, v3 q, float radius) { return (GJK_Shape){ .type = GJK_SEGMENT, .radius = radius, .segment.p = p, .segment.q = q }; }
 // Mat3x3 transpose rotate: R^T * v (column-wise multiply-add). Used for inverse rotation.
 // 3 broadcasts + 3 muls + 2 adds = 8 SSE ops (vs 18 for row-dot version).
 static inline v3 gjk_mat_rotate_t(v3 r0, v3 r1, v3 r2, v3 v) {
@@ -226,7 +226,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
 	switch (sp->type) {                                                                                                   \
 	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                               \
 	case GJK_SEGMENT: {                                                                                                   \
-		int sf = dot(sd, sp->segment.dir) >= 0.0f;                                                      \
+		int sf = dot(sd, sub(sp->segment.q, sp->segment.p)) >= 0.0f;                                                      \
 		*(out_feat) = sf; (out_point) = sf ? sp->segment.q : sp->segment.p; break;                                         \
 	}                                                                                                                     \
 	case GJK_BOX: (out_point) = gjk_box_support(sp, sd, (out_feat)); break;                                                \
