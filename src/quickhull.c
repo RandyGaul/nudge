@@ -209,13 +209,6 @@ static float qh_face_dist(QH_State* s, int fi, v3 pt)
 	return qh_plane_dist(s->faces[fi].plane, pt);
 }
 
-static v3 qh_face_centroid(QH_State* s, int fi)
-{
-	int e = s->faces[fi].edge, start = e;
-	v3 c = V3(0,0,0); int n = 0;
-	do { c = add(c, s->verts[s->edges[e].origin].pos); n++; e = s->edges[e].next; } while (e != start);
-	return scale(c, 1.0f / n);
-}
 
 // Distance of the adjacent face's centroid to this edge's face plane.
 static float qh_opp_face_dist(QH_State* s, int ei)
