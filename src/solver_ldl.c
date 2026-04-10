@@ -257,6 +257,14 @@ static void ldl_fill_jacobian(LDL_Constraint* con, SolverJoint* sol_joints, LDL_
 static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_start, BodyHot* body, double weight, double* K_packed)
 {
 	double wm = (double)body->inv_mass * (double)weight;
+	// Fast path for 1-DOF constraints (distance joints): scalar K += J * M^{-1} * J^T.
+	if (dof == 1) {
+		double* J = side ? jac[0].J_b : jac[0].J_a;
+		double w0 = wm * J[0], w1 = wm * J[1], w2 = wm * J[2];
+		dv3 w_ang = dv3_scale(dinv_inertia_world_mul(body, DV3(J[3], J[4], J[5])), (double)weight);
+		K_packed[LDL_TRI(dof_start, dof_start)] += J[0]*w0 + J[1]*w1 + J[2]*w2 + J[3]*w_ang.x + J[4]*w_ang.y + J[5]*w_ang.z;
+		return;
+	}
 	double W[6 * LDL_MAX_BLOCK_DIM];
 	for (int d = 0; d < dof; d++) {
 		double* J = side ? jac[d].J_b : jac[d].J_a;
