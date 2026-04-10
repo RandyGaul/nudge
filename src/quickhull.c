@@ -493,10 +493,11 @@ static void qh_delete_face_points(QH_State* s, int fi, int absorb, int* unclaime
 	}
 	float eps = s->epsilon;
 	HullPlane ap = s->faces[absorb].plane;
+	QH_Verts* V = &s->verts;
 	int v = vlist;
 	while (v != QH_INVALID) {
-		int nxt = s->verts.cnext[v];
-		if (dot(ap.normal, qh_vert_pos(&s->verts, v)) - ap.offset > eps) {
+		int nxt = V->cnext[v];
+		if (ap.normal.x * V->x[v] + ap.normal.y * V->y[v] + ap.normal.z * V->z[v] - ap.offset > eps) {
 			qh_conflict_add(s, absorb, v);
 		} else {
 			s->verts.cnext[v] = *unclaimed;
@@ -506,13 +507,15 @@ static void qh_delete_face_points(QH_State* s, int fi, int absorb, int* unclaime
 	}
 }
 
-// Iterative DFS from a visible face, marking visible faces DELETED.
-// After a child pops, the parent's edge still points across the child face
-// which is now DELETED, so the re-check naturally skips it before advancing.
+static void qh_face_list_add(QH_State* s, QH_FaceList* list, int fi);
+
+// Fused horizon DFS + cone creation: find horizon edges and immediately
+// build cone triangles during DFS traversal. Eliminates the intermediate
+// horizon array and fuses two passes into one.
 
 typedef struct { int edge0; int edge; } QH_HFrame;
 
-static void qh_calculate_horizon(QH_State* s, v3 eye, int edge0_init, int fi_init, CK_DYNA int** horizon, int* unclaimed)
+static void qh_horizon_and_cone(QH_State* s, int eye, int eye_face, QH_FaceList* nf, int* unclaimed)
 {
 	QH_HFrame hstk_buf[64];
 	int hstk_n = 0;
@@ -521,31 +524,60 @@ static void qh_calculate_horizon(QH_State* s, v3 eye, int edge0_init, int fi_ini
 	#define HSTK_TOP() (&hstk_buf[hstk_n - 1])
 	#define HSTK_EMPTY() (hstk_n == 0)
 
-	qh_delete_face_points(s, fi_init, QH_INVALID, unclaimed);
-	s->faces[fi_init].mark = QH_DELETED;
-	int e0 = (edge0_init == QH_INVALID) ? s->faces[fi_init].edge : edge0_init;
-	int estart = (edge0_init == QH_INVALID) ? e0 : s->edges[e0].next;
-	HSTK_PUSH(((QH_HFrame){ e0, estart }));
+	nf->first = nf->last = QH_INVALID;
+	int prev = QH_INVALID, begin = QH_INVALID;
+	v3 eye_pos = qh_vert_pos(&s->verts, eye);
+
+	qh_delete_face_points(s, eye_face, QH_INVALID, unclaimed);
+	s->faces[eye_face].mark = QH_DELETED;
+	int e0 = s->faces[eye_face].edge;
+	HSTK_PUSH(((QH_HFrame){ e0, e0 }));
 
 	float eps = s->epsilon;
 	while (!HSTK_EMPTY()) {
 		QH_HFrame* f = HSTK_TOP();
 		int ofi = qh_opp_face(s, f->edge);
 		if (s->faces[ofi].mark == QH_VISIBLE) {
-			if (dot(s->faces[ofi].plane.normal, eye) - s->faces[ofi].plane.offset > eps) {
+			if (dot(s->faces[ofi].plane.normal, eye_pos) - s->faces[ofi].plane.offset > eps) {
 				int child_e0 = s->edges[f->edge].twin;
 				qh_delete_face_points(s, ofi, QH_INVALID, unclaimed);
 				s->faces[ofi].mark = QH_DELETED;
 				HSTK_PUSH(((QH_HFrame){ child_e0, s->edges[child_e0].next }));
 				continue;
 			} else {
-				apush(*horizon, f->edge);
+				// Horizon edge found: create cone triangle inline.
+				int horizon_edge = f->edge;
+				int tail = s->edges[horizon_edge].origin;
+				int head = s->edges[s->edges[horizon_edge].next].origin;
+				int fi = qh_alloc_face(s);
+				int ce0 = qh_alloc_edge(s), ce1 = qh_alloc_edge(s), ce2 = qh_alloc_edge(s);
+				s->edges[ce0] = (QH_Edge){ .next=ce1, .prev=ce2, .twin=QH_INVALID, .origin=eye, .face=fi };
+				s->edges[ce1] = (QH_Edge){ .next=ce2, .prev=ce0, .twin=QH_INVALID, .origin=tail, .face=fi };
+				s->edges[ce2] = (QH_Edge){ .next=ce0, .prev=ce1, .twin=QH_INVALID, .origin=head, .face=fi };
+				s->faces[fi].edge = ce0;
+				s->faces[fi].next = fi;
+				s->faces[fi].prev = fi;
+				v3 p1 = qh_vert_pos(&s->verts, tail), p2 = qh_vert_pos(&s->verts, head);
+				v3 n = cross(sub(p1, eye_pos), sub(p2, eye_pos));
+				float a = len(n);
+				if (a > 0) n = scale(n, 1.0f / a);
+				v3 c = scale(add(add(eye_pos, p1), p2), 1.0f / 3.0f);
+				s->faces[fi].plane = (HullPlane){ n, dot(n, c) };
+				s->faces[fi].centroid = c;
+				s->faces[fi].num_verts = 3;
+				s->faces[fi].area = a;
+				qh_set_opposite(s, ce1, s->edges[horizon_edge].twin);
+				if (prev != QH_INVALID) qh_set_opposite(s, ce0, prev);
+				else begin = ce0;
+				qh_face_list_add(s, nf, fi);
+				prev = ce2;
 			}
 		}
 		f = HSTK_TOP();
 		f->edge = s->edges[f->edge].next;
 		if (f->edge == f->edge0) HSTK_POP();
 	}
+	if (begin != QH_INVALID) qh_set_opposite(s, begin, prev);
 	#undef HSTK_PUSH
 	#undef HSTK_POP
 	#undef HSTK_TOP
@@ -797,85 +829,33 @@ static void qh_face_list_add(QH_State* s, QH_FaceList* list, int fi)
 	list->last = fi;
 }
 
-// Batch-allocate n contiguous edges at the end of the array.
-static int qh_alloc_edges_contiguous(QH_State* s, int n)
-{
-	int base = asize(s->edges);
-	afit(s->edges, base + n);
-	asetlen(s->edges, base + n);
-	memset(s->edges + base, 0, n * sizeof(QH_Edge));
-	return base;
-}
-
-static void qh_add_new_faces(QH_State* s, QH_FaceList* nf, int eye, CK_DYNA int* horizon, int nh)
-{
-	nf->first = nf->last = QH_INVALID;
-	int prev = QH_INVALID, begin = QH_INVALID;
-	v3 eye_pos = qh_vert_pos(&s->verts, eye);
-	// Batch-allocate all cone edges contiguously for cache-friendly writes.
-	int edge_base = qh_alloc_edges_contiguous(s, nh * 3);
-	for (int i = 0; i < nh; i++) {
-		int horizon_edge = horizon[i];
-		int tail = s->edges[horizon_edge].origin;
-		int head = s->edges[s->edges[horizon_edge].next].origin;
-		int fi = qh_alloc_face(s);
-		int e0 = edge_base + i*3, e1 = e0+1, e2 = e0+2;
-		s->edges[e0] = (QH_Edge){ .next=e1, .prev=e2, .twin=QH_INVALID, .origin=eye, .face=fi };
-		s->edges[e1] = (QH_Edge){ .next=e2, .prev=e0, .twin=QH_INVALID, .origin=tail, .face=fi };
-		s->edges[e2] = (QH_Edge){ .next=e0, .prev=e1, .twin=QH_INVALID, .origin=head, .face=fi };
-		s->faces[fi].edge = e0;
-		s->faces[fi].next = fi;
-		s->faces[fi].prev = fi;
-		v3 p0 = eye_pos, p1 = qh_vert_pos(&s->verts, tail), p2 = qh_vert_pos(&s->verts, head);
-		v3 n = cross(sub(p1, p0), sub(p2, p0));
-		float a = len(n);
-		if (a > 0) n = scale(n, 1.0f / a);
-		v3 c = scale(add(add(p0, p1), p2), 1.0f / 3.0f);
-		s->faces[fi].plane = (HullPlane){ n, dot(n, c) };
-		s->faces[fi].centroid = c;
-		s->faces[fi].num_verts = 3;
-		s->faces[fi].area = a;
-		// Twin e1 with old twin of horizon edge.
-		qh_set_opposite(s, e1, s->edges[horizon_edge].twin);
-		// Link side edges between consecutive cone triangles.
-		// e2.next == e0 (eye->tail), which is the inward side edge.
-		if (prev != QH_INVALID) qh_set_opposite(s, e0, prev);
-		else begin = e0;
-		qh_face_list_add(s, nf, fi);
-		prev = e2;
-	}
-	qh_set_opposite(s, begin, prev);
-}
-
 // Reassign orphaned conflict vertices from the unclaimed list to new faces.
 static void qh_resolve_unclaimed(QH_State* s, QH_FaceList* nf, int* unclaimed)
 {
+	QH_Verts* V = &s->verts;
+	float eps = s->epsilon, eps1000 = 1000 * eps;
 	int v = *unclaimed;
 	while (v != QH_INVALID) {
-		int nxt = s->verts.cnext[v];
-		float bd = s->epsilon; int bf = QH_INVALID;
-		// First try new faces (most likely home for orphaned points).
+		int nxt = V->cnext[v];
+		float vx = V->x[v], vy = V->y[v], vz = V->z[v];
+		float bd = eps; int bf = QH_INVALID;
 		for (int fi = nf->first; fi != QH_INVALID; fi = s->faces[fi].next) {
 			if (s->faces[fi].mark == QH_VISIBLE) {
-				float d = qh_face_dist(s, fi, qh_vert_pos(&s->verts, v));
+				HullPlane p = s->faces[fi].plane;
+				float d = p.normal.x * vx + p.normal.y * vy + p.normal.z * vz - p.offset;
 				if (d > bd) { bd = d; bf = fi; }
-				if (bd > 1000*s->epsilon) break;
+				if (bd > eps1000) break;
 			}
 		}
-		// Fallback: if no new face claims the point, scan ALL live faces
-		// with a relaxed threshold. A point may be numerically inside the
-		// current hull but actually belong on it. Use the least-negative
-		// distance (closest to being outside) as a last resort.
 		if (bf == QH_INVALID) {
 			float closest = -1e18f;
 			for (int fi = 0; fi < asize(s->faces); fi++) {
 				if (s->faces[fi].mark == QH_DELETED) continue;
-				float d = qh_face_dist(s, fi, qh_vert_pos(&s->verts, v));
+				HullPlane p = s->faces[fi].plane;
+				float d = p.normal.x * vx + p.normal.y * vy + p.normal.z * vz - p.offset;
 				if (d > closest) { closest = d; bf = fi; }
 			}
-			// Only assign if the point is reasonably close to some face plane.
-			// If it's deeply inside (> 100x epsilon below all planes), it's truly interior.
-			if (closest < -100.0f * s->epsilon) bf = QH_INVALID;
+			if (closest < -100.0f * eps) bf = QH_INVALID;
 		}
 		if (bf != QH_INVALID) qh_conflict_add(s, bf, v);
 		v = nxt;
@@ -951,14 +931,12 @@ static void qh_validate_mesh(QH_State* s, const char* ctx)
 
 static void qh_add_point(QH_State* s, int eye, int eye_face)
 {
-	CK_DYNA int* horizon = NULL;
 	int unclaimed = QH_INVALID;
 
 	qh_conflict_remove(s, eye_face, eye);
-	qh_calculate_horizon(s, qh_vert_pos(&s->verts, eye), QH_INVALID, eye_face, &horizon, &unclaimed);
 
 	QH_FaceList nf;
-	qh_add_new_faces(s, &nf, eye, horizon, asize(horizon));
+	qh_horizon_and_cone(s, eye, eye_face, &nf, &unclaimed);
 
 	// Two-pass merge: first larger-face-biased, then mutual non-convexity.
 	// Each successful merge reduces the live face count by 1, so the total
@@ -1029,7 +1007,6 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 	}
 
 	qh_resolve_unclaimed(s, &nf, &unclaimed);
-	afree(horizon);
 }
 
 // -----------------------------------------------------------------------------
