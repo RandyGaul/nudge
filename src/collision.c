@@ -14,9 +14,37 @@ static v3 hull_support(const Hull* hull, v3 dir)
 {
 	// Box fast path: sign selection (3 comparisons vs 8 dot products).
 	if (hull->vert_count == 8 && hull->face_count == 6) return V3(dir.x >= 0.0f ? 1.0f : -1.0f, dir.y >= 0.0f ? 1.0f : -1.0f, dir.z >= 0.0f ? 1.0f : -1.0f);
+	int n = hull->vert_count;
+	if (hull->soa_verts) {
+		// SIMD 4-wide support scan using SoA vertex data.
+		const float* sx = hull->soa_verts, *sy = sx + ((n + 3) & ~3), *sz = sy + ((n + 3) & ~3);
+		simd4f vdx = simd_set1(dir.x), vdy = simd_set1(dir.y), vdz = simd_set1(dir.z);
+		simd4f best4 = simd_set1(-1e18f);
+		simd4i besti4 = simd_set1_i(0);
+		simd4i idx4 = _mm_set_epi32(3, 2, 1, 0);
+		simd4i inc4 = simd_set1_i(4);
+		int n4 = n & ~3;
+		for (int i = 0; i < n4; i += 4) {
+			simd4f d = simd_add(simd_add(simd_mul(simd_load(sx + i), vdx), simd_mul(simd_load(sy + i), vdy)), simd_mul(simd_load(sz + i), vdz));
+			simd4f mask = simd_cmpgt(d, best4);
+			best4 = simd_max(best4, d);
+			besti4 = simd_cast_ftoi(simd_blendv(simd_cast_itof(besti4), simd_cast_itof(idx4), mask));
+			idx4 = simd_add_i(idx4, inc4);
+		}
+		// Horizontal reduction.
+		float ds[4]; simd_store(ds, best4);
+		int idxs[4]; simd_store_i(idxs, besti4);
+		int best_i = idxs[0]; float best = ds[0];
+		for (int k = 1; k < 4; k++) if (ds[k] > best) { best = ds[k]; best_i = idxs[k]; }
+		for (int i = n4; i < n; i++) {
+			float d = sx[i]*dir.x + sy[i]*dir.y + sz[i]*dir.z;
+			if (d > best) { best = d; best_i = i; }
+		}
+		return hull->verts[best_i];
+	}
 	float best = -1e18f;
 	int best_i = 0;
-	for (int i = 0; i < hull->vert_count; i++) {
+	for (int i = 0; i < n; i++) {
 		float d = dot(hull->verts[i], dir);
 		if (d > best) { best = d; best_i = i; }
 	}
@@ -873,24 +901,54 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 		ne2_arr[k] = neg(e2_arr[k]);
 	}
 
+	// Transpose hull2 edge normals into SoA for SIMD Gauss map pruning.
+	float nu2x[128], nu2y[128], nu2z[128], nv2x[128], nv2y[128], nv2z[128];
+	float ne2x[128], ne2y[128], ne2z[128];
+	for (int k = 0; k < n2; k++) {
+		nu2x[k] = nu2_arr[k].x; nu2y[k] = nu2_arr[k].y; nu2z[k] = nu2_arr[k].z;
+		nv2x[k] = nv2_arr[k].x; nv2y[k] = nv2_arr[k].y; nv2z[k] = nv2_arr[k].z;
+		ne2x[k] = ne2_arr[k].x; ne2y[k] = ne2_arr[k].y; ne2z[k] = ne2_arr[k].z;
+	}
+	// Pad to multiple of 4.
+	for (int k = n2; k < ((n2 + 3) & ~3); k++) {
+		nu2x[k]=nu2y[k]=nu2z[k]=nv2x[k]=nv2y[k]=nv2z[k]=ne2x[k]=ne2y[k]=ne2z[k]=0;
+	}
+
 	for (int k1 = 0; k1 < n1; k1++) {
 		v3 e1 = e1_arr[k1], u1 = u1_arr[k1], v1 = v1_arr[k1], b_x_a = ne1_arr[k1];
+		// Broadcast k1 data for SIMD.
+		simd4f bxa_x = simd_set1(b_x_a.x), bxa_y = simd_set1(b_x_a.y), bxa_z = simd_set1(b_x_a.z);
+		simd4f u1x = simd_set1(u1.x), u1y = simd_set1(u1.y), u1z = simd_set1(u1.z);
+		simd4f v1x = simd_set1(v1.x), v1y = simd_set1(v1.y), v1z = simd_set1(v1.z);
+		simd4f zero = simd_zero();
 
-		for (int k2 = 0; k2 < n2; k2++) {
-			v3 e2 = e2_arr[k2], ne2 = ne2_arr[k2];
-
-			// Gauss map pruning (inlined is_minkowski_face).
+		int n2_4 = n2 & ~3;
+		for (int k2 = 0; k2 < n2_4; k2 += 4) {
+			// 4-wide Gauss map pruning.
+			simd4f cba = simd_add(simd_add(simd_mul(simd_load(nu2x+k2), bxa_x), simd_mul(simd_load(nu2y+k2), bxa_y)), simd_mul(simd_load(nu2z+k2), bxa_z));
+			simd4f dba = simd_add(simd_add(simd_mul(simd_load(nv2x+k2), bxa_x), simd_mul(simd_load(nv2y+k2), bxa_y)), simd_mul(simd_load(nv2z+k2), bxa_z));
+			simd4f adc = simd_add(simd_add(simd_mul(u1x, simd_load(ne2x+k2)), simd_mul(u1y, simd_load(ne2y+k2))), simd_mul(u1z, simd_load(ne2z+k2)));
+			simd4f bdc = simd_add(simd_add(simd_mul(v1x, simd_load(ne2x+k2)), simd_mul(v1y, simd_load(ne2y+k2))), simd_mul(v1z, simd_load(ne2z+k2)));
+			// Check: (cba*dba < 0) && (adc*bdc < 0) && (cba*bdc > 0)
+			simd4f cd_neg = simd_cmpgt(zero, simd_mul(cba, dba));
+			simd4f ab_neg = simd_cmpgt(zero, simd_mul(adc, bdc));
+			simd4f cb_pos = simd_cmpgt(simd_mul(cba, bdc), zero);
+			int mask = simd_movemask(simd_and(simd_and(cd_neg, ab_neg), cb_pos));
+			if (!mask) continue;
+			for (int lane = 0; lane < 4; lane++) {
+				if (!(mask & (1 << lane))) continue;
+				int k2i = k2 + lane;
+				float sep = sat_edge_project_full(e1, e2_arr[k2i], c1_local, hull1, rel_rot, scale1, hull2, scale2);
+				if (sep > best.separation) { best.index1 = k1*2; best.index2 = k2i*2; best.separation = sep; }
+			}
+		}
+		for (int k2 = n2_4; k2 < n2; k2++) {
+			v3 ne2 = ne2_arr[k2];
 			float cba = dot(nu2_arr[k2], b_x_a), dba = dot(nv2_arr[k2], b_x_a);
 			float adc = dot(u1, ne2), bdc = dot(v1, ne2);
-			if (!((cba * dba < 0.0f) && (adc * bdc < 0.0f) && (cba * bdc > 0.0f)))
-				continue;
-
-			float sep = sat_edge_project_full(e1, e2, c1_local, hull1, rel_rot, scale1, hull2, scale2);
-			if (sep > best.separation) {
-				best.index1 = k1 * 2;
-				best.index2 = k2 * 2;
-				best.separation = sep;
-			}
+			if (!((cba * dba < 0.0f) && (adc * bdc < 0.0f) && (cba * bdc > 0.0f))) continue;
+			float sep = sat_edge_project_full(e1, e2_arr[k2], c1_local, hull1, rel_rot, scale1, hull2, scale2);
+			if (sep > best.separation) { best.index1 = k1*2; best.index2 = k2*2; best.separation = sep; }
 		}
 	}
 	return best;
@@ -1462,6 +1520,7 @@ void hull_free(Hull* hull)
 {
 	if (!hull) return;
 	CK_FREE((void*)hull->verts);
+	if (hull->soa_verts) CK_FREE_ALIGNED((void*)hull->soa_verts);
 	CK_FREE((void*)hull->edges);
 	CK_FREE((void*)hull->faces);
 	CK_FREE((void*)hull->planes);

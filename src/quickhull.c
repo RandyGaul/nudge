@@ -1111,6 +1111,16 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 		} while (e != start);
 	}
 
+	// Build SoA vertex arrays for SIMD support queries.
+	{
+		int padded = (vc + 3) & ~3; // pad to multiple of 4 for SIMD
+		float* soa = (float*)CK_ALLOC_ALIGNED(padded * 3 * sizeof(float), 16);
+		float* sx = soa, *sy = soa + padded, *sz = soa + padded * 2;
+		for (int i = 0; i < vc; i++) { sx[i] = vcp[i].x; sy[i] = vcp[i].y; sz[i] = vcp[i].z; }
+		for (int i = vc; i < padded; i++) { sx[i] = sx[0]; sy[i] = sy[0]; sz[i] = sz[0]; } // pad with v0
+		h->soa_verts = soa;
+	}
+
 	// Fill edges and faces directly.
 	for (int i = 0; i < nlive; i++) {
 		int e = s->faces[live[i]].edge, start = e;

@@ -97,6 +97,7 @@ typedef struct Hull
 {
 	v3 centroid;
 	const v3*        verts;
+	const float*     soa_verts; // SoA: x[0..n-1], y[0..n-1], z[0..n-1], 16-byte aligned
 	const HalfEdge*  edges;
 	const HullFace*  faces;
 	const HullPlane* planes;

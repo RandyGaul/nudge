@@ -146,7 +146,7 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 	int n = hull->vert_count;
 	const v3* raw_verts = hull->verts;
 	(void)scaled_verts;
-	const float* soa = NULL;
+	const float* soa = hull->soa_verts;
 
 	// Cache per-vertex first-edge lookup: topology-only, rebuild when hull pointer changes.
 	#define VE_CACHE_SLOTS 4
@@ -289,45 +289,45 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 }
 
 // Support dispatch macro. Box/cylinder/hull use separate functions to control inlining.
-#define gjk_support(shape, dir, out_feat, out_point) do {                                                                 \
-	GJK_Shape* sp = (shape); v3 sd = (dir);                                                                               \
-	SIMD_ASSUME(sp->type >= GJK_POINT && sp->type <= GJK_TRIANGLE);                                                       \
-	switch (sp->type) {                                                                                                   \
-	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                               \
-	case GJK_SEGMENT: {                                                                                                   \
-		int sf = dot(sd, sub(sp->segment.q, sp->segment.p)) >= 0.0f;                                                      \
-		*(out_feat) = sf; (out_point) = sf ? sp->segment.q : sp->segment.p; break;                                         \
-	}                                                                                                                     \
-	case GJK_BOX: (out_point) = gjk_box_support(sp, sd, (out_feat)); break;                                                \
-	case GJK_HULL: {                                                                                                      \
-		v3 ld = gjk_mat_rotate(sp->hull.col0, sp->hull.col1, sp->hull.col2, sd);                                          \
-		v3 sld = hmul(ld, sp->hull.scale);                                                                                \
-		int hbi = (sp->hull.vert_edge && sp->hull.count > 0)                                                              \
-			? gjk_hull_support_climb(sp->hull.verts, sp->hull.edges, sp->hull.vert_edge, sld, sp->hull.hint)               \
-			: gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, sld);                                   \
-		sp->hull.hint = hbi;                                                                                               \
-		*(out_feat) = hbi;                                                                                                \
-		(out_point) = add(sp->hull.center, gjk_mat_rotate_t(sp->hull.col0, sp->hull.col1, sp->hull.col2,                  \
-		                  hmul(sp->hull.verts[hbi], sp->hull.scale)));                                                     \
-		break;                                                                                                            \
-	}                                                                                                                     \
-	case GJK_CYLINDER: (out_point) = gjk_cylinder_support(sp, sd, (out_feat)); break;                                      \
-	case GJK_TRIANGLE: {                                                                                                  \
-		/* 3 dots in parallel via AoS->SoA transpose */                                                                    \
-		simd4f v0 = sp->tri.a.m, v1 = sp->tri.b.m, v2 = sp->tri.c.m;                                                     \
-		simd4f t01lo = simd_unpacklo(v0, v1), t01hi = simd_unpackhi(v0, v1);                                              \
-		simd4f t2lo = simd_unpacklo(v2, simd_zero()), t2hi = simd_unpackhi(v2, simd_zero());                              \
-		simd4f xs = simd_movelh(t01lo, t2lo), ys = simd_movehl(t2lo, t01lo), zs = simd_movelh(t01hi, t2hi);              \
-		simd4f dx = simd_splat(sd.m, 0), dy = simd_splat(sd.m, 1), dz = simd_splat(sd.m, 2);                             \
-		simd4f dots = simd_add(simd_add(simd_mul(xs, dx), simd_mul(ys, dy)), simd_mul(zs, dz));                           \
-		float td[4]; simd_store(td, dots);                                                                                 \
-		if (td[0] >= td[1] && td[0] >= td[2]) { *(out_feat) = 0; (out_point) = sp->tri.a; }                               \
-		else if (td[1] >= td[2]) { *(out_feat) = 1; (out_point) = sp->tri.b; }                                            \
-		else { *(out_feat) = 2; (out_point) = sp->tri.c; }                                                                \
-		break;                                                                                                            \
-	}                                                                                                                     \
-	default: *(out_feat) = 0; (out_point) = V3(0,0,0); break;                                                             \
-	}                                                                                                                     \
+#define gjk_support(shape, dir, out_feat, out_point) do {                                                    \
+	GJK_Shape* sp = (shape); v3 sd = (dir);                                                                  \
+	SIMD_ASSUME(sp->type >= GJK_POINT && sp->type <= GJK_TRIANGLE);                                          \
+	switch (sp->type) {                                                                                      \
+	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                  \
+	case GJK_SEGMENT: {                                                                                      \
+		int sf = dot(sd, sub(sp->segment.q, sp->segment.p)) >= 0.0f;                                         \
+		*(out_feat) = sf; (out_point) = sf ? sp->segment.q : sp->segment.p; break;                           \
+	}                                                                                                        \
+	case GJK_BOX: (out_point) = gjk_box_support(sp, sd, (out_feat)); break;                                  \
+	case GJK_HULL: {                                                                                         \
+		v3 ld = gjk_mat_rotate(sp->hull.col0, sp->hull.col1, sp->hull.col2, sd);                             \
+		v3 sld = hmul(ld, sp->hull.scale);                                                                   \
+		int hbi = (sp->hull.vert_edge && sp->hull.count > 0)                                                 \
+			? gjk_hull_support_climb(sp->hull.verts, sp->hull.edges, sp->hull.vert_edge, sld, sp->hull.hint) \
+			: gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, sld);                      \
+		sp->hull.hint = hbi;                                                                                 \
+		*(out_feat) = hbi;                                                                                   \
+		(out_point) = add(sp->hull.center, gjk_mat_rotate_t(sp->hull.col0, sp->hull.col1, sp->hull.col2,     \
+		                  hmul(sp->hull.verts[hbi], sp->hull.scale)));                                       \
+		break;                                                                                               \
+	}                                                                                                        \
+	case GJK_CYLINDER: (out_point) = gjk_cylinder_support(sp, sd, (out_feat)); break;                        \
+	case GJK_TRIANGLE: {                                                                                     \
+		/* 3 dots in parallel via AoS->SoA transpose */                                                      \
+		simd4f v0 = sp->tri.a.m, v1 = sp->tri.b.m, v2 = sp->tri.c.m;                                         \
+		simd4f t01lo = simd_unpacklo(v0, v1), t01hi = simd_unpackhi(v0, v1);                                 \
+		simd4f t2lo = simd_unpacklo(v2, simd_zero()), t2hi = simd_unpackhi(v2, simd_zero());                 \
+		simd4f xs = simd_movelh(t01lo, t2lo), ys = simd_movehl(t2lo, t01lo), zs = simd_movelh(t01hi, t2hi);  \
+		simd4f dx = simd_splat(sd.m, 0), dy = simd_splat(sd.m, 1), dz = simd_splat(sd.m, 2);                 \
+		simd4f dots = simd_add(simd_add(simd_mul(xs, dx), simd_mul(ys, dy)), simd_mul(zs, dz));              \
+		float td[4]; simd_store(td, dots);                                                                   \
+		if (td[0] >= td[1] && td[0] >= td[2]) { *(out_feat) = 0; (out_point) = sp->tri.a; }                  \
+		else if (td[1] >= td[2]) { *(out_feat) = 1; (out_point) = sp->tri.b; }                               \
+		else { *(out_feat) = 2; (out_point) = sp->tri.c; }                                                   \
+		break;                                                                                               \
+	}                                                                                                        \
+	default: *(out_feat) = 0; (out_point) = V3(0,0,0); break;                                                \
+	}                                                                                                        \
 } while(0)
 
 // Reconstruct a support point from a cached feature index (no direction search needed).
@@ -390,30 +390,30 @@ static v3 gjk_center(const GJK_Shape* s)
 	}                                                                                                               \
 } while(0)
 
-#define gjk_witness_points(simplex, out_p1, out_p2, out_f1, out_f2) do {                                              \
-	const GJK_Simplex* ws = (simplex);                                                                                \
-	float winv = 1.0f / ws->divisor;                                                                                  \
-	SIMD_ASSUME(ws->count >= 1 && ws->count <= 3);                                                                    \
-	switch (ws->count) {                                                                                              \
-	case 1:                                                                                                           \
-		(out_p1) = ws->v[0].point1; (out_p2) = ws->v[0].point2;                                                       \
-		*(out_f1) = ws->v[0].feat1; *(out_f2) = ws->v[0].feat2; break;                                                \
-	case 2: {                                                                                                         \
-		float w0 = ws->v[0].u * winv, w1 = ws->v[1].u * winv;                                                         \
-		(out_p1) = add(scale(ws->v[0].point1, w0), scale(ws->v[1].point1, w1));                                        \
-		(out_p2) = add(scale(ws->v[0].point2, w0), scale(ws->v[1].point2, w1));                                        \
-		int wi = ws->v[1].u > ws->v[0].u;                                                                             \
-		*(out_f1) = ws->v[wi].feat1; *(out_f2) = ws->v[wi].feat2; break;                                              \
-	}                                                                                                                 \
-	case 3: {                                                                                                         \
-		float w0 = ws->v[0].u * winv, w1 = ws->v[1].u * winv, w2 = ws->v[2].u * winv;                                \
-		(out_p1) = add(add(scale(ws->v[0].point1, w0), scale(ws->v[1].point1, w1)), scale(ws->v[2].point1, w2));       \
-		(out_p2) = add(add(scale(ws->v[0].point2, w0), scale(ws->v[1].point2, w1)), scale(ws->v[2].point2, w2));       \
-		int wi = 0; if (ws->v[1].u > ws->v[wi].u) wi = 1; if (ws->v[2].u > ws->v[wi].u) wi = 2;                      \
-		*(out_f1) = ws->v[wi].feat1; *(out_f2) = ws->v[wi].feat2; break;                                              \
-	}                                                                                                                 \
-	default: (out_p1) = V3(0,0,0); (out_p2) = V3(0,0,0); *(out_f1) = 0; *(out_f2) = 0; break;                        \
-	}                                                                                                                 \
+#define gjk_witness_points(simplex, out_p1, out_p2, out_f1, out_f2) do {                                         \
+	const GJK_Simplex* ws = (simplex);                                                                           \
+	float winv = 1.0f / ws->divisor;                                                                             \
+	SIMD_ASSUME(ws->count >= 1 && ws->count <= 3);                                                               \
+	switch (ws->count) {                                                                                         \
+	case 1:                                                                                                      \
+		(out_p1) = ws->v[0].point1; (out_p2) = ws->v[0].point2;                                                  \
+		*(out_f1) = ws->v[0].feat1; *(out_f2) = ws->v[0].feat2; break;                                           \
+	case 2: {                                                                                                    \
+		float w0 = ws->v[0].u * winv, w1 = ws->v[1].u * winv;                                                    \
+		(out_p1) = add(scale(ws->v[0].point1, w0), scale(ws->v[1].point1, w1));                                  \
+		(out_p2) = add(scale(ws->v[0].point2, w0), scale(ws->v[1].point2, w1));                                  \
+		int wi = ws->v[1].u > ws->v[0].u;                                                                        \
+		*(out_f1) = ws->v[wi].feat1; *(out_f2) = ws->v[wi].feat2; break;                                         \
+	}                                                                                                            \
+	case 3: {                                                                                                    \
+		float w0 = ws->v[0].u * winv, w1 = ws->v[1].u * winv, w2 = ws->v[2].u * winv;                            \
+		(out_p1) = add(add(scale(ws->v[0].point1, w0), scale(ws->v[1].point1, w1)), scale(ws->v[2].point1, w2)); \
+		(out_p2) = add(add(scale(ws->v[0].point2, w0), scale(ws->v[1].point2, w1)), scale(ws->v[2].point2, w2)); \
+		int wi = 0; if (ws->v[1].u > ws->v[wi].u) wi = 1; if (ws->v[2].u > ws->v[wi].u) wi = 2;                  \
+		*(out_f1) = ws->v[wi].feat1; *(out_f2) = ws->v[wi].feat2; break;                                         \
+	}                                                                                                            \
+	default: (out_p1) = V3(0,0,0); (out_p2) = V3(0,0,0); *(out_f1) = 0; *(out_f2) = 0; break;                    \
+	}                                                                                                            \
 } while(0)
 
 // -----------------------------------------------------------------------------
