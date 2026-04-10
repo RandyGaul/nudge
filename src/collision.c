@@ -534,20 +534,29 @@ typedef struct FaceQuery
 	float separation;
 } FaceQuery;
 
-static FaceQuery sat_query_faces(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
+// Evaluate a single face of hull1 against hull2. Returns separation.
+static float sat_eval_face(const Hull* hull1, int face_idx, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
+{
+	HullPlane pw = plane_transform(hull1->planes[face_idx], pos1, rot1, scale1);
+	quat inv2 = inv(rot2);
+	v3 sup_dir_local = rotate(inv2, neg(pw.normal));
+	v3 sup_local = hull_support(hull2, sup_dir_local);
+	v3 sup_scaled = V3(sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z);
+	v3 sup_world = add(pos2, rotate(rot2, sup_scaled));
+	return dot(pw.normal, sup_world) - pw.offset;
+}
+
+// face_hint: if >= 0, hill-climb from this face (for temporal coherence). -1 = full scan.
+static FaceQuery sat_query_faces_hint(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2, int face_hint)
 {
 	FaceQuery best = { .index = -1, .separation = -1e18f };
 
 	// Fast path: box vs any hull. Box has 6 faces with axis-aligned normals.
-	// Precompute 3 rotation columns once, derive all 6 world-space face planes.
-	// Avoids per-face plane_transform (which does quaternion rotation + normalize + dot).
 	if (hull1 == &s_unit_box_hull) {
 		v3 cols[3] = { rotate(rot1, V3(1, 0, 0)), rotate(rot1, V3(0, 1, 0)), rotate(rot1, V3(0, 0, 1)) };
 		quat inv2 = inv(rot2);
 		for (int i = 0; i < 6; i++) {
-			// Box planes: -Z=0,+Z=1,-X=2,+X=3,-Y=4,+Y=5. Normals: axis-aligned, offset=1.
 			HullPlane lp = hull1->planes[i];
-			// lp.normal is axis-aligned: one component is +/-1, rest 0. World normal = rotation column or its negation.
 			int axis = lp.normal.x != 0.0f ? 0 : (lp.normal.y != 0.0f ? 1 : 2);
 			float sign = (&lp.normal.x)[axis];
 			v3 face_n = sign > 0 ? cols[axis] : neg(cols[axis]);
@@ -558,6 +567,32 @@ static FaceQuery sat_query_faces(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 			v3 sup_world = add(pos2, rotate(rot2, sup_scaled));
 			float sep = dot(face_n, sup_world) - face_off;
 			if (sep > best.separation) { best.separation = sep; best.index = i; }
+		}
+		return best;
+	}
+
+	// Hill-climb from cached face: walk to topological neighbors with better separation.
+	// For large hulls (20+ faces), this is O(sqrt(F)) vs O(F) for full scan.
+	if (face_hint >= 0 && face_hint < hull1->face_count && hull1->face_count > 8) {
+		int cur = face_hint;
+		float cur_sep = sat_eval_face(hull1, cur, pos1, rot1, scale1, hull2, pos2, rot2, scale2);
+		best.index = cur; best.separation = cur_sep;
+		for (int iter = 0; iter < hull1->face_count; iter++) {
+			int improved = 0;
+			// Walk adjacent faces via shared edges.
+			int start_e = hull1->faces[cur].edge;
+			int ei = start_e;
+			do {
+				int twin = hull1->edges[ei].twin;
+				int adj_face = hull1->edges[twin].face;
+				if (adj_face != cur) {
+					float adj_sep = sat_eval_face(hull1, adj_face, pos1, rot1, scale1, hull2, pos2, rot2, scale2);
+					if (adj_sep > best.separation) { best.separation = adj_sep; best.index = adj_face; improved = 1; }
+				}
+				ei = hull1->edges[ei].next;
+			} while (ei != start_e);
+			if (!improved) return best;
+			cur = best.index;
 		}
 		return best;
 	}
@@ -578,6 +613,8 @@ static FaceQuery sat_query_faces(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 	}
 	return best;
 }
+
+static FaceQuery sat_query_faces(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2) { return sat_query_faces_hint(hull1, pos1, rot1, scale1, hull2, pos2, rot2, scale2, -1); }
 
 // -----------------------------------------------------------------------------
 // SAT: Gauss map Minkowski face test.
@@ -1081,7 +1118,9 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 // Dedicated box-box SAT: Gottschalk OBB test with direct rotation column arithmetic.
 // Tests all 15 separating axes without generic hull machinery (plane_transform, hull_support loops, Gauss map).
 // Falls through to collide_hull_hull for contact generation when penetrating.
-int collide_box_box(Box a, Box b, Manifold* manifold)
+// sat_hint: if non-NULL, *sat_hint is the cached axis from last frame (-1 = no cache).
+// On return, *sat_hint is updated to the winning axis for next frame.
+static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint)
 {
 	// Rotation columns for each box.
 	v3 ax = rotate(a.rotation, V3(1, 0, 0)), ay = rotate(a.rotation, V3(0, 1, 0)), az = rotate(a.rotation, V3(0, 0, 1));
@@ -1221,15 +1260,19 @@ int collide_box_box(Box a, Box b, Manifold* manifold)
 		cp = reduce_contacts(tmp_contacts, cp);
 		manifold->count = cp;
 		for (int i = 0; i < cp; i++) manifold->contacts[i] = tmp_contacts[i];
+		if (sat_hint) *sat_hint = best_axis;
 		return 1;
 	}
 
 	// Edge-edge contact: fall through to hull-hull (edge contacts are rare in box piles).
+	if (sat_hint) *sat_hint = best_axis;
 	return collide_hull_hull(
 		(ConvexHull){ &s_unit_box_hull, a.center, a.rotation, a.half_extents },
 		(ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents },
 		manifold);
 }
+
+int collide_box_box(Box a, Box b, Manifold* manifold) { return collide_box_box_ex(a, b, manifold, NULL); }
 
 const Hull* hull_unit_box() { return &s_unit_box_hull; }
 
@@ -1304,6 +1347,8 @@ void narrowphase_print_timers()
 	printf("  np.total:          %7.3f ms  (%d calls)\n", total, total_calls);
 }
 
+static uint64_t body_pair_key(int a, int b);
+
 static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** manifolds)
 {
 	// Canonical ordering: lower type first for upper-triangle dispatch,
@@ -1331,8 +1376,13 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		hit = collide_capsule_capsule(make_capsule(h0, s0), make_capsule(h1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX)
 		hit = collide_capsule_box(make_capsule(h0, s0), make_box(h1, s1), &im.m);
-	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX)
-		hit = collide_box_box(make_box(h0, s0), make_box(h1, s1), &im.m);
+	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) {
+		uint64_t pkey = body_pair_key(i, j);
+		WarmManifold* wm = map_get_ptr(w->warm_cache, pkey);
+		int hint = wm ? wm->sat_axis : -1;
+		hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, &hint);
+		if (wm) wm->sat_axis = hint;
+	}
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL)
 		hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL)
