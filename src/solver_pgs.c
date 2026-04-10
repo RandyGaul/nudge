@@ -492,6 +492,15 @@ static void warm_cache_age_and_evict(WorldInternal* w)
 // Graph coloring: assign colors to constraints so no two in same color share a body.
 // Uses uint64_t bitmask per body (max 64 colors).
 
+static int cref_cmp_body(const void* a, const void* b)
+{
+	const ConstraintRef* ca = (const ConstraintRef*)a;
+	const ConstraintRef* cb = (const ConstraintRef*)b;
+	int ka = ca->body_a < ca->body_b ? ca->body_a : ca->body_b;
+	int kb = cb->body_a < cb->body_b ? cb->body_a : cb->body_b;
+	return (ka > kb) - (ka < kb);
+}
+
 static void color_constraints(ConstraintRef* refs, int count, int body_count, int* out_batch_starts, int* out_color_count)
 {
 	uint64_t* body_colors = (uint64_t*)CK_ALLOC(body_count * sizeof(uint64_t));
@@ -539,16 +548,9 @@ static void color_constraints(ConstraintRef* refs, int count, int body_count, in
 	memcpy(refs, sorted, count * sizeof(ConstraintRef));
 
 	// Sort within each color batch by min(body_a, body_b) for cache locality.
-	// Bodies accessed in ascending index order → sequential body_vel[] cache lines.
 	for (int c = 0; c < color_count; c++) {
-		int lo = out_batch_starts[c], hi = out_batch_starts[c+1];
-		for (int i = lo + 1; i < hi; i++) {
-			ConstraintRef key = refs[i];
-			int kv = key.body_a < key.body_b ? key.body_a : key.body_b;
-			int j = i - 1;
-			while (j >= lo && (refs[j].body_a < refs[j].body_b ? refs[j].body_a : refs[j].body_b) > kv) { refs[j + 1] = refs[j]; j--; }
-			refs[j + 1] = key;
-		}
+		int lo = out_batch_starts[c], n = out_batch_starts[c+1] - lo;
+		if (n > 1) qsort(&refs[lo], n, sizeof(ConstraintRef), cref_cmp_body);
 	}
 
 	CK_FREE(sorted);
