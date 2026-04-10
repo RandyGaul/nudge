@@ -158,12 +158,8 @@
 // ahash: Hash all bytes in the array using FNV1a.
 #define ahash(a)      ((a) ? ck_hash_fnv1a(a, sizeof(*(a)) * asize(a)) : 0)
 
-// aalign: Set alignment for array data. Must be called before first allocation (afit/apush).
-// Elements will be aligned to N bytes. Use for SIMD types (16) or cache lines (64).
-#define aalign(a, n)  do { afit((a), 1); CK_AHDR(a)->alignment = (n); } while (0)
-
 // afree: Free array memory and set pointer to NULL.
-#define afree(a)      do { CK_ACANARY(a); if (a && !CK_AHDR(a)->is_static) { if (CK_AHDR(a)->alignment > 0) CK_FREE_ALIGNED(CK_AHDR(a)); else CK_FREE(CK_AHDR(a)); } (a) = NULL; } while (0)
+#define afree(a)      do { CK_ACANARY(a); if (a && !CK_AHDR(a)->is_static) CK_FREE(CK_AHDR(a)); (a) = NULL; } while (0)
 
 // Check if array is a valid dynamic array.
 #define avalid(a)  ((a) && CK_AHDR(a)->cookie.val == CK_ACOOKIE)
@@ -569,13 +565,15 @@ typedef struct CK_UniqueString
 } CK_UniqueString;
 
 // Hidden array header behind the user pointer.
-// Total 32 bytes: data always starts at a 16-byte-aligned offset from the allocation base.
+// Total 32 bytes: data always starts at a 16-byte-aligned offset from the
+// allocation base (malloc guarantees 16-byte alignment on 64-bit platforms).
+// This means v3/simd4f elements in CK_DYNA arrays are correctly aligned for SSE.
 typedef struct CK_ArrayHeader
 {
 	int size;
 	int capacity;
 	int is_static;
-	int alignment;   // requested data alignment (0 = default malloc alignment)
+	int _pad;        // pad header to 32 bytes for 16-byte data alignment
 	char* data;
 	CK_Cookie cookie;
 } CK_ArrayHeader;
@@ -751,13 +749,12 @@ void* ck_agrow(const void* a, int new_size, size_t element_size)
 	assert(new_size <= new_capacity);
 	assert((size_t)new_capacity <= (SIZE_MAX - sizeof(CK_ArrayHeader)) / element_size);
 	size_t total_size = sizeof(CK_ArrayHeader) + (size_t)new_capacity * element_size;
-	int align = a ? CK_AHDR(a)->alignment : 0;
 	CK_ArrayHeader* hdr;
 	if (a) {
 		if (!CK_AHDR(a)->is_static) {
-			hdr = align > 0 ? (CK_ArrayHeader*)CK_REALLOC_ALIGNED(CK_AHDR(a), total_size, align) : (CK_ArrayHeader*)CK_REALLOC(CK_AHDR(a), total_size);
+			hdr = (CK_ArrayHeader*)CK_REALLOC(CK_AHDR(a), total_size);
 		} else {
-			hdr = align > 0 ? (CK_ArrayHeader*)CK_ALLOC_ALIGNED(total_size, align) : (CK_ArrayHeader*)CK_ALLOC(total_size);
+			hdr = (CK_ArrayHeader*)CK_ALLOC(total_size);
 			memcpy(hdr + 1, a, (size_t)asize(a) * element_size);
 			hdr->size = asize(a);
 			hdr->cookie.val = CK_ACOOKIE;
@@ -766,7 +763,6 @@ void* ck_agrow(const void* a, int new_size, size_t element_size)
 		hdr = (CK_ArrayHeader*)CK_ALLOC(total_size);
 		hdr->size = 0;
 		hdr->cookie.val = CK_ACOOKIE;
-		hdr->alignment = 0;
 	}
 	hdr->capacity = new_capacity;
 	hdr->is_static = 0;
