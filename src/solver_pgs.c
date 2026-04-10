@@ -132,10 +132,12 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 				}
 			}
 
+			// Always precompute cross(r, normal) — used by both Coulomb and patch modes.
+			s.rn_a = cross(s.r_a, s.normal);
+			s.rn_b = cross(s.r_b, s.normal);
+
 			if (!patch_mode) {
-				// Coulomb mode: precompute angular data (not used by patch fast path)
-				s.rn_a = cross(s.r_a, s.normal);
-				s.rn_b = cross(s.r_b, s.normal);
+				// Coulomb mode: precompute additional angular data (rn_a/rn_b already set above)
 				s.w_n_a = inv_inertia_world_mul(a, s.rn_a);
 				s.w_n_b = inv_inertia_world_mul(b, s.rn_b);
 				contact_tangent_basis(ct->normal, &s.tangent1, &s.tangent2);
@@ -680,9 +682,9 @@ static void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, Sol
 	float total_lambda_n = 0.0f;
 	for (int ci = 0; ci < m->contact_count; ci++) {
 		SolverContact* s = &sc[m->contact_start + ci];
-		// Recompute cross(r, normal) and I_w * cross(r, normal) each iteration.
-		v3 rn_a = cross(s->r_a, normal);
-		v3 rn_b = cross(s->r_b, normal);
+		// Use precomputed cross(r, normal) from pre_solve.
+		v3 rn_a = s->rn_a;
+		v3 rn_b = s->rn_b;
 		float vn = linear_vn + dot(b->angular_velocity, rn_b) - dot(a->angular_velocity, rn_a);
 		float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
 		float old_n = s->lambda_n;
