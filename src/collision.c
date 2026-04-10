@@ -12,6 +12,8 @@ int g_hull_trace;
 // Support function: furthest vertex along a direction.
 static v3 hull_support(const Hull* hull, v3 dir)
 {
+	// Box fast path: sign selection (3 comparisons vs 8 dot products).
+	if (hull->vert_count == 8 && hull->face_count == 6) return V3(dir.x >= 0.0f ? 1.0f : -1.0f, dir.y >= 0.0f ? 1.0f : -1.0f, dir.z >= 0.0f ? 1.0f : -1.0f);
 	float best = -1e18f;
 	int best_i = 0;
 	for (int i = 0; i < hull->vert_count; i++) {
@@ -672,6 +674,7 @@ static int is_minkowski_face(v3 a, v3 b, v3 b_x_a, v3 c, v3 d, v3 d_x_c)
 }
 
 // Project edge pair: signed distance along cross(e1,e2) from p1 to p2.
+// Uses support functions instead of full vertex scan — O(1) for boxes.
 static float sat_edge_project_full(v3 e1, v3 e2, v3 c1,
 	const Hull* hull1, quat rel_rot, v3 scale1,
 	const Hull* hull2, v3 scale2)
@@ -685,8 +688,18 @@ static float sat_edge_project_full(v3 e1, v3 e2, v3 c1,
 		return -1e18f;
 
 	v3 n = scale(e1_x_e2, 1.0f / l);
-	// Orient n from hull1 toward hull2 by projecting ALL vertices of both hulls.
-	// This is O(V) per edge pair but robust for any scale/aspect ratio.
+
+	// For box hulls, use O(1) support function. For general hulls, keep O(V) vertex scan
+	// (avoids extra inv_rot overhead per edge pair).
+	if (hull1->vert_count == 8 && hull1->face_count == 6 && hull2->vert_count == 8 && hull2->face_count == 6) {
+		quat inv_rel = inv(rel_rot);
+		v3 sup1 = hull_support(hull1, rotate(inv_rel, n));
+		float max1 = dot(n, add(c1, rotate(rel_rot, V3(sup1.x*scale1.x, sup1.y*scale1.y, sup1.z*scale1.z))));
+		v3 sup2 = hull_support(hull2, neg(n));
+		float min2 = dot(n, V3(sup2.x*scale2.x, sup2.y*scale2.y, sup2.z*scale2.z));
+		return min2 - max1;
+	}
+
 	float max1 = -1e18f, min2 = 1e18f;
 	for (int i = 0; i < hull1->vert_count; i++) {
 		v3 v = add(c1, rotate(rel_rot, hull_vert_scaled(hull1, i, scale1)));
