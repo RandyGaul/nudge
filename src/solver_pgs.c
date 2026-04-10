@@ -130,9 +130,11 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 				}
 			}
 
-			// Precompute angular impulse vectors: I_w * cross(r, direction)
-			s.w_n_a = inv_inertia_world_mul(a, cross(s.r_a, s.normal));
-			s.w_n_b = inv_inertia_world_mul(b, cross(s.r_b, s.normal));
+			// Precompute cross(r, normal) for dv dot product + angular impulse
+			s.rn_a = cross(s.r_a, s.normal);
+			s.rn_b = cross(s.r_b, s.normal);
+			s.w_n_a = inv_inertia_world_mul(a, s.rn_a);
+			s.w_n_b = inv_inertia_world_mul(b, s.rn_b);
 
 			if (!patch_mode) {
 				contact_tangent_basis(ct->normal, &s.tangent1, &s.tangent2);
@@ -182,11 +184,15 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 			float k_twist = dot(inv_inertia_world_mul(a, n), n) + dot(inv_inertia_world_mul(b, n), n);
 			smf.eff_mass_twist = k_twist > 1e-12f ? 1.0f / k_twist : 0.0f;
 
-			// Precompute angular impulse vectors for manifold-level friction
-			smf.w_t1_a = inv_inertia_world_mul(a, cross(smf.centroid_r_a, smf.tangent1));
-			smf.w_t1_b = inv_inertia_world_mul(b, cross(smf.centroid_r_b, smf.tangent1));
-			smf.w_t2_a = inv_inertia_world_mul(a, cross(smf.centroid_r_a, smf.tangent2));
-			smf.w_t2_b = inv_inertia_world_mul(b, cross(smf.centroid_r_b, smf.tangent2));
+			// Precompute cross(centroid_r, tangent) for dv dot product + angular impulse
+			smf.rct1_a = cross(smf.centroid_r_a, smf.tangent1);
+			smf.rct1_b = cross(smf.centroid_r_b, smf.tangent1);
+			smf.rct2_a = cross(smf.centroid_r_a, smf.tangent2);
+			smf.rct2_b = cross(smf.centroid_r_b, smf.tangent2);
+			smf.w_t1_a = inv_inertia_world_mul(a, smf.rct1_a);
+			smf.w_t1_b = inv_inertia_world_mul(b, smf.rct1_b);
+			smf.w_t2_a = inv_inertia_world_mul(a, smf.rct2_a);
+			smf.w_t2_b = inv_inertia_world_mul(b, smf.rct2_b);
 			smf.w_tw_a = inv_inertia_world_mul(a, n);
 			smf.w_tw_b = inv_inertia_world_mul(b, n);
 		}
@@ -551,8 +557,7 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 			float total_lambda_n = 0.0f;
 			for (int ci = 0; ci < m->contact_count; ci++) {
 				SolverContact* s = &sc[m->contact_start + ci];
-				v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-				float vn = dot(dv, s->normal);
+				float vn = dot(sub(b->velocity, a->velocity), s->normal) + dot(b->angular_velocity, s->rn_b) - dot(a->angular_velocity, s->rn_a);
 				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
 				float old_n = s->lambda_n;
 				s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
@@ -562,14 +567,12 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 
 			// Manifold-level 2D friction at centroid, clamped by aggregate normal force
 			float max_f = m->friction * total_lambda_n;
-			v3 dv = sub(add(b->velocity, cross(b->angular_velocity, m->centroid_r_b)), add(a->velocity, cross(a->angular_velocity, m->centroid_r_a)));
-			float vt1 = dot(dv, m->tangent1);
+			float vt1 = dot(sub(b->velocity, a->velocity), m->tangent1) + dot(b->angular_velocity, m->rct1_b) - dot(a->angular_velocity, m->rct1_a);
 			float old_t1 = m->lambda_t1;
 			m->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + m->eff_mass_t1 * (-vt1), max_f));
 			apply_impulse_row(a, b, m->tangent1, m->w_t1_a, m->w_t1_b, m->lambda_t1 - old_t1);
 
-			dv = sub(add(b->velocity, cross(b->angular_velocity, m->centroid_r_b)), add(a->velocity, cross(a->angular_velocity, m->centroid_r_a)));
-			float vt2 = dot(dv, m->tangent2);
+			float vt2 = dot(sub(b->velocity, a->velocity), m->tangent2) + dot(b->angular_velocity, m->rct2_b) - dot(a->angular_velocity, m->rct2_a);
 			float old_t2 = m->lambda_t2;
 			m->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + m->eff_mass_t2 * (-vt2), max_f));
 			apply_impulse_row(a, b, m->tangent2, m->w_t2_a, m->w_t2_b, m->lambda_t2 - old_t2);

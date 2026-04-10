@@ -312,6 +312,8 @@ typedef struct SolverContact
 	float lambda_t2;     // accumulated tangent2 impulse
 	float softness;      // soft constraint regularization (0 = rigid/NGS)
 	float penetration;   // cached for position correction pass
+	// Precomputed cross(r, direction) for fast dv dot product via triple product identity.
+	v3 rn_a, rn_b;      // cross(r, normal) — normal row
 	// Precomputed angular impulse: I_w * cross(r, direction) per row per body.
 	// Applying angular impulse = scale(w_*, delta) instead of cross+matmul.
 	v3 w_n_a, w_n_b;    // normal row
@@ -337,6 +339,9 @@ typedef struct SolverManifold
 	float lambda_twist;
 	float patch_area;
 	float patch_radius;
+	// Precomputed cross(centroid_r, direction) for fast dv dot product (patch mode)
+	v3 rct1_a, rct1_b;    // cross(centroid_r, tangent1)
+	v3 rct2_a, rct2_b;    // cross(centroid_r, tangent2)
 	// Precomputed angular impulse for manifold-level friction (patch mode)
 	v3 w_t1_a, w_t1_b;   // tangent1 at centroid
 	v3 w_t2_a, w_t2_b;   // tangent2 at centroid
