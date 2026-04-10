@@ -1224,20 +1224,46 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint)
 		v3 side_n[4] = { ref_cols[u], neg(ref_cols[u]), ref_cols[v_ax], neg(ref_cols[v_ax]) };
 		float side_d[4] = { dot(ref_cols[u], ref_pos) + (&ref_he.x)[u], dot(neg(ref_cols[u]), ref_pos) + (&ref_he.x)[u], dot(ref_cols[v_ax], ref_pos) + (&ref_he.x)[v_ax], dot(neg(ref_cols[v_ax]), ref_pos) + (&ref_he.x)[v_ax] };
 
+		// SIMD fast-path: classify all 4 incident verts against all 4 clip planes simultaneously.
+		// If all vertices are inside all planes, skip the entire clip loop.
 		v3* in_buf = buf1; v3* out_buf = buf2;
 		uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
-		for (int i = 0; i < 4; i++) {
-			clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n[i], side_d[i], (uint8_t)i, out_buf, out_fid);
-			v3* sw = in_buf; in_buf = out_buf; out_buf = sw;
-			uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
+		{
+			simd4f vx = simd_set(buf1[0].x, buf1[1].x, buf1[2].x, buf1[3].x);
+			simd4f vy = simd_set(buf1[0].y, buf1[1].y, buf1[2].y, buf1[3].y);
+			simd4f vz = simd_set(buf1[0].z, buf1[1].z, buf1[2].z, buf1[3].z);
+			simd4f zero4 = simd_zero();
+			int any_outside = 0;
+			for (int p = 0; p < 4; p++) {
+				simd4f dist = simd_sub(simd_add(simd_add(simd_mul(simd_set1(side_n[p].x), vx), simd_mul(simd_set1(side_n[p].y), vy)), simd_mul(simd_set1(side_n[p].z), vz)), simd_set1(side_d[p]));
+				any_outside |= simd_movemask(simd_cmpgt(dist, zero4));
+			}
+			if (any_outside) {
+				for (int i = 0; i < 4; i++) {
+					clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n[i], side_d[i], (uint8_t)i, out_buf, out_fid);
+					v3* sw = in_buf; in_buf = out_buf; out_buf = sw;
+					uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
+				}
+			}
 		}
 
-		// Corner snap: 4 reference face corners from rotation columns.
+		// SIMD corner snap: test each clip vertex against all 4 corners simultaneously.
 		v3 ref_center = add(ref_pos, scale(ref_cols[la], nsign * (&ref_he.x)[la]));
 		v3 ref_eu = scale(ref_cols[u], (&ref_he.x)[u]), ref_ev = scale(ref_cols[v_ax], (&ref_he.x)[v_ax]);
 		v3 corners[4] = { add(ref_center, add(ref_eu, ref_ev)), add(ref_center, sub(ref_eu, ref_ev)), add(ref_center, sub(neg(ref_eu), neg(ref_ev))), add(ref_center, sub(neg(ref_eu), ref_ev)) };
+		simd4f cx = simd_set(corners[0].x, corners[1].x, corners[2].x, corners[3].x);
+		simd4f cy = simd_set(corners[0].y, corners[1].y, corners[2].y, corners[3].y);
+		simd4f cz = simd_set(corners[0].z, corners[1].z, corners[2].z, corners[3].z);
+		simd4f snap_tol = simd_set1(1e-6f);
+		for (int i = 0; i < clip_count; i++) {
+			simd4f dx = simd_sub(simd_set1(in_buf[i].x), cx), dy = simd_sub(simd_set1(in_buf[i].y), cy), dz = simd_sub(simd_set1(in_buf[i].z), cz);
+			simd4f dist2 = simd_add(simd_add(simd_mul(dx, dx), simd_mul(dy, dy)), simd_mul(dz, dz));
+			int close = simd_movemask(simd_cmpgt(snap_tol, dist2)); // bits set where dist2 < tol
+			if (close) { int c = 0; if (close & 2) c = 1; if (close & 4) c = 2; if (close & 8) c = 3; in_fid[i] = 0xC0 | (uint8_t)c; }
+		}
+		// Legacy path (for when clip_count > 4, corners array needed).
 		float snap_tol2 = 1e-6f;
-		for (int i = 0; i < clip_count; i++)
+		for (int i = 4; i < clip_count; i++)
 			for (int c = 0; c < 4; c++)
 				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
 
