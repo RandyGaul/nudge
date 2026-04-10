@@ -47,6 +47,15 @@ static dv3 dinv_inertia_mul(quat rot, v3 inv_i, dv3 v)
 	return DV3(sx + qw*tx2 + (qy*tz2 - qz*ty2), sy + qw*ty2 + (qz*tx2 - qx*tz2), sz + qw*tz2 + (qx*ty2 - qy*tx2));
 }
 
+// Use precomputed symmetric 3x3 world-space inverse inertia (from BodyHot.iw_diag/iw_off).
+// 9 muls + 6 adds vs ~48 muls + 24 adds for dinv_inertia_mul quaternion path.
+static dv3 dinv_inertia_world_mul(BodyHot* body, dv3 v)
+{
+	double xx = body->iw_diag.x, yy = body->iw_diag.y, zz = body->iw_diag.z;
+	double xy = body->iw_off.x, xz = body->iw_off.y, yz = body->iw_off.z;
+	return DV3(xx*v.x + xy*v.y + xz*v.z, xy*v.x + yy*v.y + yz*v.z, xz*v.x + yz*v.y + zz*v.z);
+}
+
 static LDL_DebugInfo g_ldl_debug_info;
 int g_ldl_debug_enabled;
 int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = none)
@@ -255,7 +264,7 @@ static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_
 		W[1*dof+d] = wm * J[1];
 		W[2*dof+d] = wm * J[2];
 		dv3 j_ang = DV3(J[3], J[4], J[5]);
-		dv3 w_ang = dv3_scale(dinv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang), (double)weight);
+		dv3 w_ang = dv3_scale(dinv_inertia_world_mul(body, j_ang), (double)weight);
 		W[3*dof+d] = w_ang.x;
 		W[4*dof+d] = w_ang.y;
 		W[5*dof+d] = w_ang.z;
@@ -279,7 +288,7 @@ static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_Jacob
 		W[1*dj+d] = wm * J[1];
 		W[2*dj+d] = wm * J[2];
 		dv3 j_ang = DV3(J[3], J[4], J[5]);
-		dv3 w_ang = dv3_scale(dinv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang), (double)weight);
+		dv3 w_ang = dv3_scale(dinv_inertia_world_mul(body, j_ang), (double)weight);
 		W[3*dj+d] = w_ang.x;
 		W[4*dj+d] = w_ang.y;
 		W[5*dj+d] = w_ang.z;
@@ -308,7 +317,7 @@ static void ldl_apply_jacobian_impulse(LDL_JacobianRow* jac, int dof, double* la
 		body->velocity.y += (float)dv.y;
 		body->velocity.z += (float)dv.z;
 		dv3 j_ang_d = DV3(J[3] * lam, J[4] * lam, J[5] * lam);
-		dv3 dw = dinv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang_d);
+		dv3 dw = dinv_inertia_world_mul(body, j_ang_d);
 		body->angular_velocity.x += (float)dw.x;
 		body->angular_velocity.y += (float)dw.y;
 		body->angular_velocity.z += (float)dw.z;
@@ -1393,11 +1402,11 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 				double lam = pos_lambda[oi + d] * (double)sub_dt;
 				pos_delta[real_a] = dv3_add(pos_delta[real_a], DV3(inv_ma * jac[d].J_a[0] * lam, inv_ma * jac[d].J_a[1] * lam, inv_ma * jac[d].J_a[2] * lam));
 				dv3 j_ang_a = DV3(jac[d].J_a[3] * lam, jac[d].J_a[4] * lam, jac[d].J_a[5] * lam);
-				dv3 dwa = dinv_inertia_mul(w->body_hot[real_a].rotation, w->body_hot[real_a].inv_inertia_local, j_ang_a);
+				dv3 dwa = dinv_inertia_world_mul(&w->body_hot[real_a], j_ang_a);
 				ang_delta[real_a] = dv3_add(ang_delta[real_a], dwa);
 				pos_delta[real_b] = dv3_add(pos_delta[real_b], DV3(inv_mb * jac[d].J_b[0] * lam, inv_mb * jac[d].J_b[1] * lam, inv_mb * jac[d].J_b[2] * lam));
 				dv3 j_ang_b = DV3(jac[d].J_b[3] * lam, jac[d].J_b[4] * lam, jac[d].J_b[5] * lam);
-				dv3 dwb = dinv_inertia_mul(w->body_hot[real_b].rotation, w->body_hot[real_b].inv_inertia_local, j_ang_b);
+				dv3 dwb = dinv_inertia_world_mul(&w->body_hot[real_b], j_ang_b);
 				ang_delta[real_b] = dv3_add(ang_delta[real_b], dwb);
 			}
 		}
@@ -1528,6 +1537,11 @@ static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 			w->body_hot[i].inv_inertia_local = scale(w->body_hot[i].inv_inertia_local, w->body_hot[i].inv_mass / save_inv_mass[i]);
 		}
 	}
+
+	// Recompute world-space inverse inertia from compressed masses so
+	// dinv_inertia_world_mul uses the correct tensor during K fill and apply.
+	for (int i = 0; i < body_count; i++)
+		if (w->body_hot[i].inv_mass > 0.0f) body_compute_inv_inertia_world(&w->body_hot[i]);
 
 	// Refresh lever arms from current rotations (positions changed since pre-solve).
 	// Without this, K uses stale lever arms while the RHS uses current positions.
