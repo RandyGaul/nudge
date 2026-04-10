@@ -378,7 +378,6 @@ static int gjk_solve4(GJK_Simplex* s)
 static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 {
 	GJK_Result result;
-	result.distance = 0; result.iterations = 0; result.feat1 = 0; result.feat2 = 0;
 	GJK_Simplex simplex;
 	v3 init_d = sub(gjk_center(&shapeB), gjk_center(&shapeA));
 	if (len2(init_d) < FLT_EPSILON) init_d = V3(1, 0, 0);
