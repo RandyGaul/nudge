@@ -811,16 +811,13 @@ static PerfRow perf_box_box()
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		float sep = 0.1f + (float)(c % 4) * 3.0f;
 		float sc = 0.5f + (float)(c / 4 % 4) * 2.5f;
-		m[c].posA = V3(0,0,0);
-		m[c].posB = V3(sep + sc*2, 0, 0);
+		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc*2, 0, 0);
 		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
 		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].rotA = gjk_perf_random_quat();
-		m[c].rotB = gjk_perf_random_quat();
+		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
 		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
 		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].heA = V3(sc, sc*0.7f, sc*0.5f);
-		m[c].heB = V3(sc*0.8f, sc, sc*0.6f);
+		m[c].heA = V3(sc, sc*0.7f, sc*0.5f); m[c].heB = V3(sc*0.8f, sc, sc*0.6f);
 	}
 	int total = PERF_N * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
@@ -828,8 +825,10 @@ static PerfRow perf_box_box()
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		PerfMotion* mc = &m[c];
 		for (int i = 0; i < PERF_N; i++) {
+			// Construct proxies + GJK = the per-pair cost an engine pays
 			GJK_Result r = gjk_distance(gjk_box(mc->posA, mc->rotA, mc->heA), gjk_box(mc->posB, mc->rotB, mc->heB));
 			sum += r.distance; iters += r.iterations;
+			// Integration: not timed, but interleaved to vary transforms
 			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
 			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
 			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
@@ -1023,10 +1022,9 @@ static PerfRow perf_hull_hull(int n_target)
 	double t0 = qpc_now();
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		PerfMotion* mc = &m[c];
-		v3 sva[1024], svb[1024]; float soaa[3072], soab[3072];
 		for (int i = 0; i < n_iters; i++) {
-			GJK_Shape ga = gjk_hull_scaled(ha, mc->posA, mc->rotA, mc->heA, sva, soaa);
-			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB, svb, soab);
+			GJK_Shape ga = gjk_hull_scaled(ha, mc->posA, mc->rotA, mc->heA, NULL, NULL);
+			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB, NULL, NULL);
 			GJK_Result r = gjk_distance(ga, gb);
 			sum += r.distance; iters += r.iterations;
 			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
