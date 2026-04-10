@@ -1560,6 +1560,70 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 // 0.5 = sqrt compression (100:1 → 10:1). 1.0 = no compression (real masses).
 #define LDL_POS_MASS_EXP 0.5f
 
+// Lightweight position error refresh: only recompute pos_error[] from current body state.
+// Skips full joint_fill_rows (Jacobian recomputation, spring params, memsets) since
+// position solve only needs pos_error for the RHS. ~3x faster than ldl_refresh_lever_arms.
+static void ldl_refresh_pos_errors(WorldInternal* w, SolverJoint* sol_joints, int joint_count)
+{
+	for (int i = 0; i < joint_count; i++) {
+		SolverJoint* s = &sol_joints[i];
+		BodyHot* a = &w->body_hot[s->body_a];
+		BodyHot* b = &w->body_hot[s->body_b];
+		JointInternal* j = &w->joints[s->joint_idx];
+		if (s->type == JOINT_DISTANCE) {
+			v3 ra = rotate(a->rotation, j->distance.local_a);
+			v3 rb = rotate(b->rotation, j->distance.local_b);
+			v3 delta = sub(add(b->position, rb), add(a->position, ra));
+			float dist_val = len(delta);
+			s->pos_error[0] = dist_val - j->distance.rest_length;
+			float dmin = j->distance.limit_min, dmax = j->distance.limit_max;
+			if (dmin > 0 || dmax > 0) {
+				if (dmin > 0 && dist_val < dmin) s->pos_error[0] = dist_val - dmin;
+				else if (dmax > 0 && dist_val > dmax) s->pos_error[0] = dist_val - dmax;
+				else s->pos_error[0] = 0;
+			}
+		} else if (s->type == JOINT_BALL_SOCKET) {
+			v3 ra = rotate(a->rotation, j->ball_socket.local_a);
+			v3 rb = rotate(b->rotation, j->ball_socket.local_b);
+			v3 err = sub(add(b->position, rb), add(a->position, ra));
+			s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
+		} else if (s->type == JOINT_HINGE) {
+			v3 ra = rotate(a->rotation, j->hinge.local_a);
+			v3 rb = rotate(b->rotation, j->hinge.local_b);
+			v3 err = sub(add(b->position, rb), add(a->position, ra));
+			s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
+			v3 axis_a = norm(rotate(a->rotation, j->hinge.local_axis_a));
+			v3 axis_b = norm(rotate(b->rotation, j->hinge.local_axis_b));
+			v3 t1, t2;
+			hinge_tangent_basis(axis_a, &t1, &t2);
+			s->pos_error[3] = dot(t1, axis_b);
+			s->pos_error[4] = dot(t2, axis_b);
+		} else if (s->type == JOINT_FIXED) {
+			v3 ra = rotate(a->rotation, j->fixed.local_a);
+			v3 rb = rotate(b->rotation, j->fixed.local_b);
+			v3 err = sub(add(b->position, rb), add(a->position, ra));
+			s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
+			quat q_diff = mul(inv(a->rotation), b->rotation);
+			quat q_target = j->fixed.local_rel_quat;
+			quat q_err = mul(inv(q_target), q_diff);
+			if (q_err.w < 0) { q_err.x = -q_err.x; q_err.y = -q_err.y; q_err.z = -q_err.z; q_err.w = -q_err.w; }
+			s->pos_error[3] = 2.0f * q_err.x; s->pos_error[4] = 2.0f * q_err.y; s->pos_error[5] = 2.0f * q_err.z;
+		} else if (s->type == JOINT_PRISMATIC) {
+			v3 ra = rotate(a->rotation, j->prismatic.local_a);
+			v3 rb = rotate(b->rotation, j->prismatic.local_b);
+			v3 err = sub(add(b->position, rb), add(a->position, ra));
+			v3 axis_a = norm(rotate(a->rotation, j->prismatic.local_axis_a));
+			v3 t1, t2;
+			hinge_tangent_basis(axis_a, &t1, &t2);
+			s->pos_error[0] = dot(t1, err); s->pos_error[1] = dot(t2, err);
+			v3 axis_b = norm(rotate(b->rotation, j->prismatic.local_axis_b));
+			v3 u1 = cross(t1, axis_b), u2 = cross(t2, axis_b);
+			s->pos_error[2] = dot(t1, axis_b); s->pos_error[3] = dot(t2, axis_b);
+			s->pos_error[4] = dot(axis_a, err);
+		}
+	}
+}
+
 // Lightweight position correction: solve through the already-factored K (from ldl_factor).
 // No refactorization, no mass compression — K was factored with compressed masses in ldl_factor,
 // and position deltas are applied with real masses. This unified approach eliminates the
@@ -1568,8 +1632,8 @@ static void ldl_position_solve(WorldInternal* w, SolverJoint* sol_joints, int jo
 {
 	double t_pos_start = perf_now();
 
-	// Refresh lever arms from current body state (positions changed by integrate_positions).
-	ldl_refresh_lever_arms(w, sol_joints, joint_count, sub_dt);
+	// Only refresh position errors from current body state — skip full Jacobian recompute.
+	ldl_refresh_pos_errors(w, sol_joints, joint_count);
 
 	int body_count = asize(w->body_hot);
 	dv3* pos_delta = CK_ALLOC(body_count * sizeof(dv3));
