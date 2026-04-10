@@ -1309,5 +1309,93 @@ static void run_gjk_perf_tests()
 	printf("  --------------- --------  -----\n");
 	for (int i = 0; i < pi; i++)
 		printf("  %-15s %8.1f  %5.1f\n", names[i], p[i].ns, p[i].iters);
+
+	// Batch box-box: 4 pairs at a time
+	{
+		gjk_perf_rng = 77777;
+		int batch_n = PERF_N;
+		int batch_configs = PERF_CONFIGS;
+		GJK_Shape shapes_a[32], shapes_b[32];
+		GJK_Cache caches[32] = {0};
+		v3 posA[32], posB[32], velA[32], velB[32];
+		quat rotA[32], rotB[32];
+		v3 omA[32], omB[32], heA[32], heB[32];
+		for (int c = 0; c < batch_configs; c++) {
+			float sep = 0.1f + (float)(c % 4) * 3.0f;
+			float sc = 0.5f + (float)(c / 4 % 4) * 2.5f;
+			posA[c] = V3(0,0,0); posB[c] = V3(sep + sc*2, 0, 0);
+			velA[c] = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+			velB[c] = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+			rotA[c] = gjk_perf_random_quat(); rotB[c] = gjk_perf_random_quat();
+			omA[c] = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+			omB[c] = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+			heA[c] = V3(sc, sc*0.7f, sc*0.5f); heB[c] = V3(sc*0.8f, sc, sc*0.6f);
+		}
+		float sum = 0;
+		double t0 = qpc_now();
+		for (int i = 0; i < batch_n; i++) {
+			// Build shapes for all configs
+			for (int c = 0; c < batch_configs; c++) {
+				shapes_a[c] = gjk_box(posA[c], rotA[c], heA[c]);
+				shapes_b[c] = gjk_box(posB[c], rotB[c], heB[c]);
+			}
+			// Process in batches of 4
+			for (int c = 0; c < batch_configs; c += 4) {
+				const GJK_Shape* pa[4] = { &shapes_a[c], &shapes_a[c+1], &shapes_a[c+2], &shapes_a[c+3] };
+				const GJK_Shape* pb[4] = { &shapes_b[c], &shapes_b[c+1], &shapes_b[c+2], &shapes_b[c+3] };
+				GJK_Cache* pc[4] = { &caches[c], &caches[c+1], &caches[c+2], &caches[c+3] };
+				float dist[4];
+				gjk_distance_batch_box(pa, pb, pc, dist);
+				sum += dist[0] + dist[1] + dist[2] + dist[3];
+			}
+			// Integrate
+			for (int c = 0; c < batch_configs; c++) {
+				posA[c] = add(posA[c], scale(velA[c], PERF_DT));
+				posB[c] = add(posB[c], scale(velB[c], PERF_DT));
+				rotA[c] = perf_integrate_rot(rotA[c], omA[c], PERF_DT);
+				rotB[c] = perf_integrate_rot(rotB[c], omB[c], PERF_DT);
+			}
+		}
+		double t1 = qpc_now();
+		volatile float sink = sum; (void)sink;
+		int total = batch_n * batch_configs;
+		double batch_ns = (t1 - t0) * 1e9 / total;
+
+		// Compare with scalar
+		for (int c = 0; c < batch_configs; c++) caches[c] = (GJK_Cache){0};
+		gjk_perf_rng = 77777;
+		for (int c = 0; c < batch_configs; c++) {
+			float sep = 0.1f + (float)(c % 4) * 3.0f;
+			float sc = 0.5f + (float)(c / 4 % 4) * 2.5f;
+			posA[c] = V3(0,0,0); posB[c] = V3(sep + sc*2, 0, 0);
+			velA[c] = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+			velB[c] = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+			rotA[c] = gjk_perf_random_quat(); rotB[c] = gjk_perf_random_quat();
+			omA[c] = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+			omB[c] = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+			heA[c] = V3(sc, sc*0.7f, sc*0.5f); heB[c] = V3(sc*0.8f, sc, sc*0.6f);
+		}
+		sum = 0;
+		t0 = qpc_now();
+		for (int i = 0; i < batch_n; i++) {
+			for (int c = 0; c < batch_configs; c++) {
+				GJK_Shape a = gjk_box(posA[c], rotA[c], heA[c]), b = gjk_box(posB[c], rotB[c], heB[c]);
+				GJK_Result r = gjk_distance(&a, &b, &caches[c]);
+				sum += r.distance;
+			}
+			for (int c = 0; c < batch_configs; c++) {
+				posA[c] = add(posA[c], scale(velA[c], PERF_DT));
+				posB[c] = add(posB[c], scale(velB[c], PERF_DT));
+				rotA[c] = perf_integrate_rot(rotA[c], omA[c], PERF_DT);
+				rotB[c] = perf_integrate_rot(rotB[c], omB[c], PERF_DT);
+			}
+		}
+		t1 = qpc_now();
+		volatile float sink2 = sum; (void)sink2;
+		double scalar_ns = (t1 - t0) * 1e9 / total;
+		printf("\n  --- batch box-box (4-wide SIMD) ---\n");
+		printf("  scalar:  %6.1f ns/pair\n", scalar_ns);
+		printf("  batch:   %6.1f ns/pair (%.1fx)\n", batch_ns, scalar_ns / batch_ns);
+	}
 	printf("\n");
 }

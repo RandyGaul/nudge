@@ -3,6 +3,7 @@
 
 #include "nudge_internal.h"
 #include "gjk.c"
+#include "gjk_batch.c"
 #include "quickhull.c"
 #include "bvh.c"
 #include "collision.c"
