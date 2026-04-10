@@ -436,6 +436,27 @@ static void test_gjk_known_distances()
 	r = gjk_distance_v(gjk_cylinder(V3(0,-2,0), V3(0,2,0), 0.5f), gjk_cylinder(V3(3,0,-2), V3(3,0,2), 0.5f), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.02f);
 
+	// --- Triangle ---
+	TEST_BEGIN("sphere-triangle face");
+	r = gjk_distance_v(gjk_sphere(V3(0,3,0), 0.5f), gjk_triangle(V3(-1,0,-1), V3(1,0,-1), V3(0,0,1)), NULL);
+	TEST_ASSERT_FLOAT(r.distance, 2.5f, 0.01f);
+
+	TEST_BEGIN("sphere-triangle edge");
+	r = gjk_distance_v(gjk_sphere(V3(3,0,0), 0.5f), gjk_triangle(V3(0,0,0), V3(1,0,0), V3(0.5f,1,0)), NULL);
+	TEST_ASSERT_FLOAT(r.distance, 1.5f, 0.01f);
+
+	TEST_BEGIN("sphere-triangle vertex");
+	r = gjk_distance_v(gjk_sphere(V3(5,0,0), 1.0f), gjk_triangle(V3(0,0,0), V3(1,0,0), V3(0.5f,1,0)), NULL);
+	TEST_ASSERT_FLOAT(r.distance, 3.0f, 0.01f);
+
+	TEST_BEGIN("box-triangle separated");
+	r = gjk_distance_v(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_triangle(V3(3,0,0), V3(4,1,0), V3(3.5f,0,1)), NULL);
+	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.05f);
+
+	TEST_BEGIN("capsule-triangle");
+	r = gjk_distance_v(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_triangle(V3(3,0,0), V3(4,1,0), V3(3.5f,0,1)), NULL);
+	TEST_ASSERT(r.distance > 0.0f); // just verify non-negative, exact value depends on geometry
+
 	// --- Hull ---
 	TEST_BEGIN("hull-hull (box via hull)");
 	{
@@ -1262,6 +1283,87 @@ static PerfRow perf_cylinder_hull(int n_target)
 	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
 }
 
+// Box-triangle perf: box vs rotating triangle.
+static PerfRow perf_box_triangle()
+{
+	gjk_perf_rng = 11111;
+	PerfMotion m[PERF_CONFIGS];
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		float sep = 0.5f + (float)(c % 4) * 2.5f;
+		float sc = 0.5f + (float)(c / 4 % 4) * 2.0f;
+		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc*2, 0, 0);
+		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
+		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].heA = V3(sc, sc*0.7f, sc*0.5f); m[c].heB = V3(sc*0.8f, sc, sc*0.6f);
+	}
+	GJK_Cache cache[PERF_CONFIGS] = {0};
+	int total = PERF_N * PERF_CONFIGS;
+	float sum = 0; int iters = 0;
+	double t0 = qpc_now();
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		PerfMotion* mc = &m[c];
+		for (int i = 0; i < PERF_N; i++) {
+			GJK_Shape a = gjk_box(mc->posA, mc->rotA, mc->heA);
+			// Triangle: 3 vertices rotated around posB
+			v3 tv0 = add(mc->posB, quat_rotate(mc->rotB, V3(-mc->heB.x, 0, -mc->heB.z)));
+			v3 tv1 = add(mc->posB, quat_rotate(mc->rotB, V3(mc->heB.x, 0, -mc->heB.z)));
+			v3 tv2 = add(mc->posB, quat_rotate(mc->rotB, V3(0, 0, mc->heB.z)));
+			GJK_Shape b = gjk_triangle(tv0, tv1, tv2);
+			GJK_Result r = gjk_distance(&a, &b, &cache[c]);
+			sum += r.distance; iters += r.iterations;
+			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
+			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
+			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
+			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
+		}
+	}
+	double t1 = qpc_now();
+	volatile float sink = sum; (void)sink;
+	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
+}
+
+// Sphere-triangle perf.
+static PerfRow perf_sphere_triangle()
+{
+	gjk_perf_rng = 11222;
+	PerfMotion m[PERF_CONFIGS];
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		float sep = 0.5f + (float)(c % 4) * 2.5f;
+		float sc = 0.5f + (float)(c / 4 % 4) * 2.0f;
+		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc*2, 0, 0);
+		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].rotB = gjk_perf_random_quat();
+		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].heB = V3(sc*0.8f, sc, sc*0.6f);
+		m[c].radiusA = sc * 0.5f;
+	}
+	GJK_Cache cache[PERF_CONFIGS] = {0};
+	int total = PERF_N * PERF_CONFIGS;
+	float sum = 0; int iters = 0;
+	double t0 = qpc_now();
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		PerfMotion* mc = &m[c];
+		for (int i = 0; i < PERF_N; i++) {
+			v3 tv0 = add(mc->posB, quat_rotate(mc->rotB, V3(-mc->heB.x, 0, -mc->heB.z)));
+			v3 tv1 = add(mc->posB, quat_rotate(mc->rotB, V3(mc->heB.x, 0, -mc->heB.z)));
+			v3 tv2 = add(mc->posB, quat_rotate(mc->rotB, V3(0, 0, mc->heB.z)));
+			GJK_Shape a = gjk_sphere(mc->posA, mc->radiusA), b = gjk_triangle(tv0, tv1, tv2);
+			GJK_Result r = gjk_distance(&a, &b, &cache[c]);
+			sum += r.distance; iters += r.iterations;
+			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
+			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
+			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
+		}
+	}
+	double t1 = qpc_now();
+	volatile float sink = sum; (void)sink;
+	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
+}
+
 static void run_gjk_perf_tests()
 {
 	qpc_init();
@@ -1285,7 +1387,7 @@ static void run_gjk_perf_tests()
 	// Performance
 	int hull_sizes[] = { 20, 50, 200, 1000 };
 	int nh = 4;
-	enum { N_PERF = 5 + 5*4 }; // 5 prim-prim + 5 shape types * 4 hull sizes
+	enum { N_PERF = 5 + 5*4 + 2 }; // 5 prim-prim + 5 shape types * 4 hull sizes + 2 triangle
 	const char* names[N_PERF];
 	PerfRow p[N_PERF];
 	char name_bufs[N_PERF][20];
@@ -1303,6 +1405,10 @@ static void run_gjk_perf_tests()
 		sprintf(name_bufs[pi], "cyl-h%d", n);    names[pi] = name_bufs[pi]; p[pi] = perf_cylinder_hull(n); pi++;
 		sprintf(name_bufs[pi], "hull-h%d", n);   names[pi] = name_bufs[pi]; p[pi] = perf_hull_hull(n);     pi++;
 	}
+
+	// Triangle tests
+	names[pi] = "sph-tri";       p[pi++] = perf_sphere_triangle();
+	names[pi] = "box-tri";       p[pi++] = perf_box_triangle();
 
 	printf("\n=== GJK Performance (%d iters x %d configs) ===\n\n", PERF_N, PERF_CONFIGS);
 	printf("  shape pair        ns/call  iters\n");

@@ -48,7 +48,7 @@ typedef struct GJK_Cache
 } GJK_Cache;
 // -----------------------------------------------------------------------------
 // Shape types and constructors.
-enum { GJK_POINT, GJK_SEGMENT, GJK_BOX, GJK_HULL, GJK_CYLINDER };
+enum { GJK_POINT, GJK_SEGMENT, GJK_BOX, GJK_HULL, GJK_CYLINDER, GJK_TRIANGLE };
 typedef struct GJK_Shape
 {
 	int type;
@@ -59,10 +59,12 @@ typedef struct GJK_Shape
 		struct { v3 center; v3 col0, col1, col2; v3 half_extents; } box;
 		struct { v3 center; v3 col0, col1, col2; v3 scale; const v3* verts; const float* soa; const HalfEdge* edges; const int* vert_edge; int count; int hint; } hull;
 		struct { v3 mid; v3 half_axis; float radius; v3 axis; float inv_axis_len; } cylinder;
+		struct { v3 a, b, c; } tri;
 	};
 } GJK_Shape;
 static GJK_Shape gjk_sphere(v3 center, float radius) { return (GJK_Shape){ .type = GJK_POINT, .radius = radius, .point.center = center }; }
 static GJK_Shape gjk_capsule(v3 p, v3 q, float radius) { return (GJK_Shape){ .type = GJK_SEGMENT, .radius = radius, .segment.p = p, .segment.q = q }; }
+static GJK_Shape gjk_triangle(v3 a, v3 b, v3 c) { return (GJK_Shape){ .type = GJK_TRIANGLE, .tri.a = a, .tri.b = b, .tri.c = c }; }
 // Mat3x3 transpose rotate: R^T * v (column-wise multiply-add). Used for inverse rotation.
 // 3 broadcasts + 3 muls + 2 adds = 8 SSE ops (vs 18 for row-dot version).
 static inline v3 gjk_mat_rotate_t(v3 r0, v3 r1, v3 r2, v3 v) {
@@ -273,6 +275,13 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 		break;                                                                                                            \
 	}                                                                                                                     \
 	case GJK_CYLINDER: (out_point) = gjk_cylinder_support(sp, sd, (out_feat)); break;                                      \
+	case GJK_TRIANGLE: {                                                                                                  \
+		float da = dot(sp->tri.a, sd), db = dot(sp->tri.b, sd), dc = dot(sp->tri.c, sd);                                  \
+		if (da >= db && da >= dc) { *(out_feat) = 0; (out_point) = sp->tri.a; }                                            \
+		else if (db >= dc) { *(out_feat) = 1; (out_point) = sp->tri.b; }                                                  \
+		else { *(out_feat) = 2; (out_point) = sp->tri.c; }                                                                \
+		break;                                                                                                            \
+	}                                                                                                                     \
 	default: *(out_feat) = 0; (out_point) = V3(0,0,0); break;                                                             \
 	}                                                                                                                     \
 } while(0)
@@ -303,6 +312,8 @@ static inline v3 gjk_support_feature(const GJK_Shape* sp, int feat)
 		// Direction is approximately unit-length after quantization; skip renormalization.
 		return add(cbase, scale(V3((float)ix, (float)iy, (float)iz), sp->cylinder.radius / 511.0f));
 	}
+	case GJK_TRIANGLE:
+		return feat == 0 ? sp->tri.a : (feat == 1 ? sp->tri.b : sp->tri.c);
 	}
 	return V3(0,0,0);
 }
@@ -315,6 +326,7 @@ static v3 gjk_center(const GJK_Shape* s)
 	case GJK_BOX:      return s->box.center;
 	case GJK_HULL:     return s->hull.center;
 	case GJK_CYLINDER: return s->cylinder.mid;
+	case GJK_TRIANGLE: return scale(add(add(s->tri.a, s->tri.b), s->tri.c), 1.0f/3.0f);
 	}
 	return V3(0,0,0);
 }
