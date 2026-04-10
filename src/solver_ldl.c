@@ -1525,8 +1525,7 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt)
 {
 	double t_pos_start = perf_now();
-	// Compress inv_mass and inv_inertia for position stage.
-	// LDL_POS_MASS_EXP is 0.5 so powf -> sqrtf.
+	// Compress inv_mass and inv_inertia for position stage
 	int body_count = asize(w->body_hot);
 	float* save_inv_mass = CK_ALLOC(body_count * sizeof(float));
 	v3* save_inv_inertia = CK_ALLOC(body_count * sizeof(v3));
@@ -1534,7 +1533,7 @@ static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 		save_inv_mass[i] = w->body_hot[i].inv_mass;
 		save_inv_inertia[i] = w->body_hot[i].inv_inertia_local;
 		if (w->body_hot[i].inv_mass > 0.0f) {
-			w->body_hot[i].inv_mass = sqrtf(w->body_hot[i].inv_mass);
+			w->body_hot[i].inv_mass = powf(w->body_hot[i].inv_mass, LDL_POS_MASS_EXP);
 			w->body_hot[i].inv_inertia_local = scale(w->body_hot[i].inv_inertia_local, w->body_hot[i].inv_mass / save_inv_mass[i]);
 		}
 	}
