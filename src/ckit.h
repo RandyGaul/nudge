@@ -158,8 +158,13 @@
 // ahash: Hash all bytes in the array using FNV1a.
 #define ahash(a)      ((a) ? ck_hash_fnv1a(a, sizeof(*(a)) * asize(a)) : 0)
 
+// aalign: Set data alignment for array. Must be power of 2 (4, 8, 16, 32, 64...).
+// Call before first push. Data pointer will be aligned to N bytes on next grow.
+// Default is 16-byte alignment (from 32-byte header + 16-byte-aligned malloc).
+#define aalign(a, n)  do { afit((a), 0); CK_AHDR(a)->alignment = (n); } while (0)
+
 // afree: Free array memory and set pointer to NULL.
-#define afree(a)      do { CK_ACANARY(a); if (a && !CK_AHDR(a)->is_static) CK_FREE(CK_AHDR(a)); (a) = NULL; } while (0)
+#define afree(a)      do { CK_ACANARY(a); if (a && !CK_AHDR(a)->is_static) CK_FREE(CK_AHDR(a)->alloc_base); (a) = NULL; } while (0)
 
 // Check if array is a valid dynamic array.
 #define avalid(a)  ((a) && CK_AHDR(a)->cookie.val == CK_ACOOKIE)
@@ -565,16 +570,15 @@ typedef struct CK_UniqueString
 } CK_UniqueString;
 
 // Hidden array header behind the user pointer.
-// Total 32 bytes: data always starts at a 16-byte-aligned offset from the
-// allocation base (malloc guarantees 16-byte alignment on 64-bit platforms).
-// This means v3/simd4f elements in CK_DYNA arrays are correctly aligned for SSE.
+// Total 32 bytes on 64-bit: data starts at a 16-byte-aligned offset from the
+// allocation base by default. Use aalign(a, N) for larger alignments (32, 64, etc.).
 typedef struct CK_ArrayHeader
 {
 	int size;
 	int capacity;
 	int is_static;
-	int _pad;        // pad header to 32 bytes for 16-byte data alignment
-	char* data;
+	int alignment;     // data alignment (0 = default 16-byte, N = power-of-2)
+	void* alloc_base;  // original allocation pointer (may differ from header when alignment > 32)
 	CK_Cookie cookie;
 } CK_ArrayHeader;
 
@@ -748,25 +752,40 @@ void* ck_agrow(const void* a, int new_size, size_t element_size)
 	if (new_capacity < min_cap) new_capacity = min_cap;
 	assert(new_size <= new_capacity);
 	assert((size_t)new_capacity <= (SIZE_MAX - sizeof(CK_ArrayHeader)) / element_size);
-	size_t total_size = sizeof(CK_ArrayHeader) + (size_t)new_capacity * element_size;
+	size_t data_size = (size_t)new_capacity * element_size;
+	size_t total_size = sizeof(CK_ArrayHeader) + data_size;
+	int align = a ? CK_AHDR(a)->alignment : 0;
+	int old_size = asize(a);
+	int was_static = a ? CK_AHDR(a)->is_static : 0;
+
 	CK_ArrayHeader* hdr;
-	if (a) {
-		if (!CK_AHDR(a)->is_static) {
-			hdr = (CK_ArrayHeader*)CK_REALLOC(CK_AHDR(a), total_size);
-		} else {
-			hdr = (CK_ArrayHeader*)CK_ALLOC(total_size);
-			memcpy(hdr + 1, a, (size_t)asize(a) * element_size);
-			hdr->size = asize(a);
-			hdr->cookie.val = CK_ACOOKIE;
-		}
-	} else {
-		hdr = (CK_ArrayHeader*)CK_ALLOC(total_size);
-		hdr->size = 0;
+	if (align > (int)sizeof(CK_ArrayHeader)) {
+		// Over-allocate so we can place header such that (header+1) is aligned.
+		size_t alloc_size = total_size + (size_t)align;
+		char* base = (char*)CK_ALLOC(alloc_size);
+		// Find first aligned address >= base + sizeof(CK_ArrayHeader).
+		uintptr_t data_addr = ((uintptr_t)base + sizeof(CK_ArrayHeader) + (uintptr_t)align - 1) & ~((uintptr_t)align - 1);
+		hdr = (CK_ArrayHeader*)data_addr - 1;
+		if (a && old_size > 0) memcpy((void*)data_addr, a, (size_t)old_size * element_size);
+		if (a && !was_static) CK_FREE(CK_AHDR(a)->alloc_base);
+		hdr->size = a ? old_size : 0;
 		hdr->cookie.val = CK_ACOOKIE;
+		hdr->alloc_base = base;
+	} else if (a && !was_static) {
+		// Default path: header is at alloc_base. realloc in place.
+		hdr = (CK_ArrayHeader*)CK_REALLOC(CK_AHDR(a)->alloc_base, total_size);
+		hdr->alloc_base = hdr;
+	} else {
+		// Fresh allocation (NULL or static source).
+		hdr = (CK_ArrayHeader*)CK_ALLOC(total_size);
+		if (a && was_static) { memcpy(hdr + 1, a, (size_t)old_size * element_size); hdr->size = old_size; }
+		else hdr->size = 0;
+		hdr->cookie.val = CK_ACOOKIE;
+		hdr->alloc_base = hdr;
 	}
 	hdr->capacity = new_capacity;
 	hdr->is_static = 0;
-	hdr->data = (char*)(hdr + 1);
+	hdr->alignment = align;
 	return (void*)(hdr + 1);
 }
 
@@ -781,7 +800,8 @@ void* ck_astatic(const void* a, int buffer_size, size_t element_size)
 		int elements_taken = (int)sizeof(CK_ArrayHeader) / (int)element_size + ((int)sizeof(CK_ArrayHeader) % (int)element_size > 0);
 		hdr->capacity = buffer_size / (int)element_size - elements_taken;
 	}
-	hdr->data = (char*)(hdr + 1);
+	hdr->alloc_base = hdr;
+	hdr->alignment = 0;
 	hdr->is_static = 1;
 	return (void*)(hdr + 1);
 }

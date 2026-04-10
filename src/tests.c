@@ -10681,6 +10681,80 @@ static void test_replay_recording(const char* path)
 
 
 
+// ---------------------------------------------------------------------------
+// aalign unit tests
+// ---------------------------------------------------------------------------
+
+static void test_aalign()
+{
+	printf("--- aalign tests ---\n");
+
+	// Default alignment: data should be 16-byte aligned (header is 32 bytes).
+	TEST_BEGIN("default array 16-byte aligned");
+	CK_DYNA int* a = NULL;
+	for (int i = 0; i < 100; i++) apush(a, i);
+	TEST_ASSERT(((uintptr_t)a & 15) == 0);
+	TEST_ASSERT(asize(a) == 100);
+	TEST_ASSERT(a[0] == 0 && a[99] == 99);
+	afree(a);
+
+	// v3 array: should be 16-byte aligned automatically.
+	TEST_BEGIN("v3 array 16-byte aligned");
+	CK_DYNA v3* va = NULL;
+	for (int i = 0; i < 50; i++) apush(va, V3((float)i, 0, 0));
+	TEST_ASSERT(((uintptr_t)va & 15) == 0);
+	TEST_ASSERT(asize(va) == 50);
+	TEST_ASSERT(va[0].x == 0.0f && va[49].x == 49.0f);
+	// Verify each element is 16-byte aligned (v3 contains __m128).
+	for (int i = 0; i < 50; i++) TEST_ASSERT(((uintptr_t)&va[i] & 15) == 0);
+	afree(va);
+
+	// aalign(a, 32): data starts at 32-byte boundary.
+	TEST_BEGIN("aalign 32");
+	CK_DYNA float* b = NULL;
+	aalign(b, 32);
+	for (int i = 0; i < 200; i++) apush(b, (float)i);
+	TEST_ASSERT(((uintptr_t)b & 31) == 0);
+	TEST_ASSERT(asize(b) == 200);
+	TEST_ASSERT(b[0] == 0.0f && b[199] == 199.0f);
+	afree(b);
+
+	// aalign(a, 64): cache-line alignment.
+	TEST_BEGIN("aalign 64");
+	CK_DYNA double* c = NULL;
+	aalign(c, 64);
+	for (int i = 0; i < 100; i++) apush(c, (double)i);
+	TEST_ASSERT(((uintptr_t)c & 63) == 0);
+	TEST_ASSERT(asize(c) == 100);
+	TEST_ASSERT(c[0] == 0.0 && c[99] == 99.0);
+	// Verify survives multiple reallocations.
+	for (int i = 100; i < 10000; i++) apush(c, (double)i);
+	TEST_ASSERT(((uintptr_t)c & 63) == 0);
+	TEST_ASSERT(asize(c) == 10000);
+	TEST_ASSERT(c[9999] == 9999.0);
+	afree(c);
+
+	// aalign(a, 4): smaller than default, should still work.
+	TEST_BEGIN("aalign 4");
+	CK_DYNA char* d = NULL;
+	aalign(d, 4);
+	for (int i = 0; i < 50; i++) apush(d, (char)i);
+	TEST_ASSERT(((uintptr_t)d & 3) == 0);
+	TEST_ASSERT(asize(d) == 50);
+	TEST_ASSERT(d[0] == 0 && d[49] == 49);
+	afree(d);
+
+	// Verify v3 array with aalign(64) — elements should all be aligned.
+	TEST_BEGIN("aalign 64 with v3 array");
+	CK_DYNA v3* ve = NULL;
+	aalign(ve, 64);
+	for (int i = 0; i < 100; i++) apush(ve, V3((float)i, (float)i * 2, (float)i * 3));
+	TEST_ASSERT(((uintptr_t)ve & 63) == 0);
+	TEST_ASSERT(asize(ve) == 100);
+	TEST_ASSERT(ve[50].x == 50.0f);
+	afree(ve);
+}
+
 static void run_tests()
 {
 	test_pass = 0;
@@ -10722,6 +10796,7 @@ static void run_tests()
 	TIMED(run_query_tests());
 	TIMED(test_feature_ids());
 	// run_sleep_tests (4.8s) moved to --slow
+	test_aalign();
 
 	printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	if (test_fail > 0) printf("*** FAILURES ***\n");
