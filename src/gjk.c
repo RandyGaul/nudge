@@ -142,7 +142,7 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 // O(sqrt(n)) expected for convex hulls vs O(n) for linear scan.
 // Hill-climbing support: walk vertex adjacency graph from vertex 0.
 // Ring walk: next outgoing edge from v = edges[current ^ 1].next
-static int gjk_hull_support_climb(const v3* verts, const HalfEdge* edges, const int* vert_edge, v3 ld, int start)
+static int gjk_hull_support_climb(const v3* __restrict verts, const HalfEdge* __restrict edges, const int* __restrict vert_edge, v3 ld, int start)
 {
 	int best = start;
 	float best_d = dot(verts[start], ld);
@@ -162,7 +162,7 @@ static int gjk_hull_support_climb(const v3* verts, const HalfEdge* edges, const 
 	return best;
 }
 
-static int gjk_hull_support_scan(const v3* verts, int count, const float* soa, v3 ld)
+static int gjk_hull_support_scan(const v3* __restrict verts, int count, const float* __restrict soa, v3 ld)
 {
 	__m128 ldx = _mm_shuffle_ps(ld.m, ld.m, 0x00);
 	__m128 ldy = _mm_shuffle_ps(ld.m, ld.m, 0x55);
@@ -216,7 +216,7 @@ static int gjk_hull_support_scan(const v3* verts, int count, const float* soa, v
 	return hbi;
 }
 // Box/cylinder support: separate functions to keep gjk_support macro small for inlining budget.
-static v3 gjk_box_support(const GJK_Shape* sp, v3 sd, int* feat)
+static v3 gjk_box_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict feat)
 {
 	v3 ld = gjk_mat_rotate(sp->box.col0, sp->box.col1, sp->box.col2, sd);
 	// SSE sign select: copysign(he, ld) — flip he components where ld < 0
@@ -225,7 +225,7 @@ static v3 gjk_box_support(const GJK_Shape* sp, v3 sd, int* feat)
 	*feat = _mm_movemask_ps(_mm_cmpge_ps(ld.m, _mm_setzero_ps())) & 7;
 	return add(sp->box.center, gjk_mat_rotate_t(sp->box.col0, sp->box.col1, sp->box.col2, lc));
 }
-static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
+static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict feat)
 {
 	v3 cu = sp->cylinder.axis;
 	if (sp->cylinder.inv_axis_len == 0.0f) { *feat = 0; return sp->cylinder.mid; }
