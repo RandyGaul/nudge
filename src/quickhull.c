@@ -504,34 +504,42 @@ typedef struct { int edge0; int edge; } QH_HFrame;
 
 static void qh_calculate_horizon(QH_State* s, v3 eye, int edge0_init, int fi_init, CK_DYNA int** horizon, int* unclaimed)
 {
-	static CK_DYNA QH_HFrame* hstk = NULL;
-	if (hstk) asetlen(hstk, 0);
+	QH_HFrame hstk_buf[64];
+	int hstk_n = 0;
+	#define HSTK_PUSH(val) do { assert(hstk_n < 64); hstk_buf[hstk_n++] = (val); } while(0)
+	#define HSTK_POP() (hstk_n--)
+	#define HSTK_TOP() (&hstk_buf[hstk_n - 1])
+	#define HSTK_EMPTY() (hstk_n == 0)
 
 	qh_delete_face_points(s, fi_init, QH_INVALID, unclaimed);
 	s->faces[fi_init].mark = QH_DELETED;
 	int e0 = (edge0_init == QH_INVALID) ? s->faces[fi_init].edge : edge0_init;
 	int estart = (edge0_init == QH_INVALID) ? e0 : s->edges[e0].next;
-	apush(hstk, ((QH_HFrame){ e0, estart }));
+	HSTK_PUSH(((QH_HFrame){ e0, estart }));
 
 	float eps = s->epsilon;
-	while (asize(hstk) > 0) {
-		QH_HFrame* f = &hstk[asize(hstk) - 1];
+	while (!HSTK_EMPTY()) {
+		QH_HFrame* f = HSTK_TOP();
 		int ofi = qh_opp_face(s, f->edge);
 		if (s->faces[ofi].mark == QH_VISIBLE) {
 			if (dot(s->faces[ofi].plane.normal, eye) - s->faces[ofi].plane.offset > eps) {
 				int child_e0 = s->edges[f->edge].twin;
 				qh_delete_face_points(s, ofi, QH_INVALID, unclaimed);
 				s->faces[ofi].mark = QH_DELETED;
-				apush(hstk, ((QH_HFrame){ child_e0, s->edges[child_e0].next }));
+				HSTK_PUSH(((QH_HFrame){ child_e0, s->edges[child_e0].next }));
 				continue;
 			} else {
 				apush(*horizon, f->edge);
 			}
 		}
-		f = &hstk[asize(hstk) - 1]; // re-fetch after potential apush
+		f = HSTK_TOP();
 		f->edge = s->edges[f->edge].next;
-		if (f->edge == f->edge0) asetlen(hstk, asize(hstk) - 1);
+		if (f->edge == f->edge0) HSTK_POP();
 	}
+	#undef HSTK_PUSH
+	#undef HSTK_POP
+	#undef HSTK_TOP
+	#undef HSTK_EMPTY
 }
 
 // -----------------------------------------------------------------------------
@@ -1149,10 +1157,20 @@ Hull* quickhull(const v3* points, int count)
 	// precision floor for this input extent).
 	float weld_dist2 = state.epsilon * state.epsilon;
 	qh_verts_reserve(&state.verts, count);
+	simd4f vwd2 = simd_set1(weld_dist2);
 	for (int i = 0; i < count; i++) {
 		v3 p = points[i];
-		int dup = 0;
-		for (int j = 0; j < state.verts.count; j++) {
+		simd4f vpx = simd_set1(p.x), vpy = simd_set1(p.y), vpz = simd_set1(p.z);
+		int dup = 0, n = state.verts.count, n4 = n & ~3;
+		int j = 0;
+		for (; j < n4; j += 4) {
+			simd4f dx = simd_sub(vpx, simd_load(state.verts.x + j));
+			simd4f dy = simd_sub(vpy, simd_load(state.verts.y + j));
+			simd4f dz = simd_sub(vpz, simd_load(state.verts.z + j));
+			simd4f d2 = simd_add(simd_add(simd_mul(dx, dx), simd_mul(dy, dy)), simd_mul(dz, dz));
+			if (simd_movemask(simd_cmple(d2, vwd2))) { dup = 1; break; }
+		}
+		for (; !dup && j < n; j++) {
 			if (len2(sub(p, qh_vert_pos(&state.verts, j))) <= weld_dist2) { dup = 1; break; }
 		}
 		if (!dup) qh_verts_push(&state.verts, p);
