@@ -1142,39 +1142,48 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint)
 	// Translation in A's frame.
 	float ta = dot(d, ax), tb = dot(d, ay), tc = dot(d, az);
 
-	// Test 15 separating axes. Track minimum penetration.
-	float ra, rb, sep, pen, best_pen = 1e18f;
-	int best_axis = -1;
+	// Compute all 15 penetrations for axis lookup.
+	float pen_all[15];
+	{
+		float ra, rb;
+		ra = ea; rb = fa*A00 + fb*A01 + fc*A02; pen_all[0] = ra + rb - fabsf(ta);
+		ra = eb; rb = fa*A10 + fb*A11 + fc*A12; pen_all[1] = ra + rb - fabsf(tb);
+		ra = ec; rb = fa*A20 + fb*A21 + fc*A22; pen_all[2] = ra + rb - fabsf(tc);
+		pen_all[3] = (ea*A00 + eb*A10 + ec*A20) + fa - fabsf(ta*R00 + tb*R10 + tc*R20);
+		pen_all[4] = (ea*A01 + eb*A11 + ec*A21) + fb - fabsf(ta*R01 + tb*R11 + tc*R21);
+		pen_all[5] = (ea*A02 + eb*A12 + ec*A22) + fc - fabsf(ta*R02 + tb*R12 + tc*R22);
+		pen_all[6]  = (eb*A20+ec*A10) + (fb*A02+fc*A01) - fabsf(tc*R10-tb*R20);
+		pen_all[7]  = (eb*A21+ec*A11) + (fa*A02+fc*A00) - fabsf(tc*R11-tb*R21);
+		pen_all[8]  = (eb*A22+ec*A12) + (fa*A01+fb*A00) - fabsf(tc*R12-tb*R22);
+		pen_all[9]  = (ea*A20+ec*A00) + (fb*A12+fc*A11) - fabsf(ta*R20-tc*R00);
+		pen_all[10] = (ea*A21+ec*A01) + (fa*A12+fc*A10) - fabsf(ta*R21-tc*R01);
+		pen_all[11] = (ea*A22+ec*A02) + (fa*A11+fb*A10) - fabsf(ta*R22-tc*R02);
+		pen_all[12] = (ea*A10+eb*A00) + (fb*A22+fc*A21) - fabsf(tb*R00-ta*R10);
+		pen_all[13] = (ea*A11+eb*A01) + (fa*A22+fc*A20) - fabsf(tb*R01-ta*R11);
+		pen_all[14] = (ea*A12+eb*A02) + (fa*A21+fb*A20) - fabsf(tb*R02-ta*R12);
+	}
 
-	// A's face normals (axes 0-2).
-	ra = ea; rb = fa*A00 + fb*A01 + fc*A02; sep = fabsf(ta); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 0; }
-	ra = eb; rb = fa*A10 + fb*A11 + fc*A12; sep = fabsf(tb); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 1; }
-	ra = ec; rb = fa*A20 + fb*A21 + fc*A22; sep = fabsf(tc); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 2; }
+	// Quick separation check: any pen < 0 means separated.
+	for (int i = 0; i < 15; i++) if (pen_all[i] < 0.0f) return 0;
 
-	// B's face normals (axes 3-5).
-	ra = ea*A00 + eb*A10 + ec*A20; rb = fa; sep = fabsf(ta*R00 + tb*R10 + tc*R20); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 3; }
-	ra = ea*A01 + eb*A11 + ec*A21; rb = fb; sep = fabsf(ta*R01 + tb*R11 + tc*R21); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 4; }
-	ra = ea*A02 + eb*A12 + ec*A22; rb = fc; sep = fabsf(ta*R02 + tb*R12 + tc*R22); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 5; }
+	// Find minimum penetration axis. Use cached hint if valid.
+	float best_pen; int best_axis;
+	int hint = sat_hint ? *sat_hint : -1;
+	if (hint >= 0 && hint < 15 && hint < 6) {
+		// Trust face-axis hint: check if it's still the best among the 6 face axes.
+		// Face axes dominate in box piles. Skip the 9 edge axis min-search.
+		best_axis = hint; best_pen = pen_all[hint];
+		for (int i = 0; i < 6; i++) if (pen_all[i] < best_pen) { best_pen = pen_all[i]; best_axis = i; }
+		// Bias face over edge (only use edge if significantly better).
+		float edge_best = 1e18f;
+		for (int i = 6; i < 15; i++) if (pen_all[i] < edge_best) edge_best = pen_all[i];
+		if (edge_best < best_pen - 0.05f) { best_pen = edge_best; for (int i = 6; i < 15; i++) if (pen_all[i] <= best_pen) { best_axis = i; break; } }
+	} else {
+		best_pen = pen_all[0]; best_axis = 0;
+		for (int i = 1; i < 15; i++) if (pen_all[i] < best_pen) { best_pen = pen_all[i]; best_axis = i; }
+	}
 
-	// Edge cross products (axes 6-14). Skip near-parallel edges (cross product near zero).
-	// ax x bx
-	ra = eb*A20 + ec*A10; rb = fb*A02 + fc*A01; sep = fabsf(tc*R10 - tb*R20); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 6; }
-	// ax x by
-	ra = eb*A21 + ec*A11; rb = fa*A02 + fc*A00; sep = fabsf(tc*R11 - tb*R21); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 7; }
-	// ax x bz
-	ra = eb*A22 + ec*A12; rb = fa*A01 + fb*A00; sep = fabsf(tc*R12 - tb*R22); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 8; }
-	// ay x bx
-	ra = ea*A20 + ec*A00; rb = fb*A12 + fc*A11; sep = fabsf(ta*R20 - tc*R00); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 9; }
-	// ay x by
-	ra = ea*A21 + ec*A01; rb = fa*A12 + fc*A10; sep = fabsf(ta*R21 - tc*R01); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 10; }
-	// ay x bz
-	ra = ea*A22 + ec*A02; rb = fa*A11 + fb*A10; sep = fabsf(ta*R22 - tc*R02); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 11; }
-	// az x bx
-	ra = ea*A10 + eb*A00; rb = fb*A22 + fc*A21; sep = fabsf(tb*R00 - ta*R10); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 12; }
-	// az x by
-	ra = ea*A11 + eb*A01; rb = fa*A22 + fc*A20; sep = fabsf(tb*R01 - ta*R11); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 13; }
-	// az x bz
-	ra = ea*A12 + eb*A02; rb = fa*A21 + fb*A20; sep = fabsf(tb*R02 - ta*R12); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 14; }
+
 
 	if (!manifold) return 1;
 
