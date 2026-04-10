@@ -168,16 +168,8 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 		if (sp->cylinder.inv_axis_len == 0.0f) { *(out_feat) = 0; (out_point) = sp->cylinder.p; break; }         \
 		float cda = dot(sd, cu); int cf = cda >= 0.0f; *(out_feat) = cf;                                         \
 		v3 cbase = cf ? sp->cylinder.q : sp->cylinder.p;                                                         \
-		v3 cdp = sub(sd, scale(cu, cda));                                                                        \
-		float cdp2 = len2(cdp);                                                                                  \
-		if (cdp2 > FLT_EPSILON * FLT_EPSILON) {                                                                  \
-			/* Fast normalize: rsqrt + Newton-Raphson refinement */                                               \
-			__m128 x2 = _mm_set_ss(cdp2);                                                                        \
-			__m128 r = _mm_rsqrt_ss(x2);                                                                         \
-			r = _mm_mul_ss(r, _mm_sub_ss(_mm_set_ss(1.5f), _mm_mul_ss(_mm_mul_ss(_mm_set_ss(0.5f), x2), _mm_mul_ss(r, r)))); \
-			(out_point) = add(cbase, scale(cdp, sp->cylinder.radius * _mm_cvtss_f32(r)));                        \
-		} else (out_point) = cbase;                                                                              \
-		break;                                                                                                   \
+		v3 cdp = sub(sd, scale(cu, cda)); float cpl = len(cdp);                                                  \
+		(out_point) = (cpl > FLT_EPSILON) ? add(cbase, scale(cdp, sp->cylinder.radius / cpl)) : cbase; break;    \
 	}                                                                                                            \
 	default: *(out_feat) = 0; (out_point) = V3(0,0,0); break;                                                    \
 	}                                                                                                            \
