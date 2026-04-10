@@ -68,9 +68,14 @@ static inline quat quat_mul(quat a, quat b)
 
 static __forceinline v3 quat_rotate(quat q, v3 v)
 {
-	v3 u = V3(q.x, q.y, q.z);
+	// Load quat as __m128 [x,y,z,w], mask w to get u=[x,y,z,0]
+	__m128 qm = _mm_loadu_ps(&q.x);
+	v3 u = { .m = _mm_and_ps(qm, _mm_castsi128_ps(_mm_set_epi32(0, ~0, ~0, ~0))) };
 	float s = q.w;
-	return v3_add(v3_add(v3_scale(u, 2.0f * v3_dot(u, v)), v3_scale(v, s*s - v3_dot(u, u))), v3_scale(v3_cross(u, v), 2.0f * s));
+	float uv2 = 2.0f * v3_dot(u, v);
+	float ss_uu = s*s - v3_dot(u, u);
+	v3 uxv = v3_cross(u, v);
+	return (v3){ .m = _mm_add_ps(_mm_add_ps(_mm_mul_ps(u.m, _mm_set1_ps(uv2)), _mm_mul_ps(v.m, _mm_set1_ps(ss_uu))), _mm_mul_ps(uxv.m, _mm_set1_ps(2.0f * s))) };
 }
 
 // -----------------------------------------------------------------------------
