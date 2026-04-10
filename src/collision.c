@@ -687,6 +687,20 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 // Collect face vertices in world space by walking the half-edge loop.
 static int hull_face_verts_world(const Hull* hull, int face_idx, v3 pos, quat rot, v3 sc, v3* out)
 {
+	// Fast path: box face vertices from rotation columns (avoids 4 quaternion rotations).
+	if (hull->verts == s_box_verts) {
+		v3 cx = scale(rotate(rot, V3(1, 0, 0)), sc.x), cy = scale(rotate(rot, V3(0, 1, 0)), sc.y), cz = scale(rotate(rot, V3(0, 0, 1)), sc.z);
+		// Walk the face winding to get vertices in correct order.
+		int start = hull->faces[face_idx].edge;
+		int e = start;
+		int count = 0;
+		do {
+			v3 lv = hull->verts[hull->edges[e].origin];
+			out[count++] = add(pos, add(add(scale(cx, lv.x), scale(cy, lv.y)), scale(cz, lv.z)));
+			e = hull->edges[e].next;
+		} while (e != start);
+		return count;
+	}
 	int start = hull->faces[face_idx].edge;
 	int e = start;
 	int count = 0;
