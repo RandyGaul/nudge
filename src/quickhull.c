@@ -57,6 +57,7 @@ typedef struct QH_Face {
 	int edge;
 	int next, prev;
 	int conflict_head;
+	int conflict_slot; // index into conflict_faces[] (-1 if not in list)
 	int mark;
 	int num_verts;
 	float area;
@@ -69,6 +70,7 @@ typedef struct QH_State {
 	CK_DYNA QH_Vertex* verts;
 	CK_DYNA QH_Edge*   edges;
 	CK_DYNA QH_Face*   faces;
+	CK_DYNA int*       conflict_faces; // compact list of faces with non-empty conflict lists
 	int edge_free, face_free;
 	v3 interior;
 	float epsilon;
@@ -102,16 +104,40 @@ static int qh_alloc_face(QH_State* s)
 		s->face_free = s->faces[idx].next;
 		s->faces[idx] = (QH_Face){0};
 		s->faces[idx].conflict_head = QH_INVALID;
+		s->faces[idx].conflict_slot = -1;
 		s->faces[idx].mark = QH_VISIBLE;
 		s->faces[idx].maxoutside = s->epsilon;
 		return idx;
 	}
 	QH_Face f = {0};
 	f.conflict_head = QH_INVALID;
+	f.conflict_slot = -1;
 	f.mark = QH_VISIBLE;
 	f.maxoutside = s->epsilon;
 	apush(s->faces, f);
 	return asize(s->faces) - 1;
+}
+
+// Conflict face list: compact array of face indices with non-empty conflict lists.
+static void qh_cfl_add(QH_State* s, int fi)
+{
+	if (s->faces[fi].conflict_slot >= 0) return;
+	s->faces[fi].conflict_slot = asize(s->conflict_faces);
+	apush(s->conflict_faces, fi);
+}
+
+static void qh_cfl_remove(QH_State* s, int fi)
+{
+	int slot = s->faces[fi].conflict_slot;
+	if (slot < 0) return;
+	int last = asize(s->conflict_faces) - 1;
+	if (slot != last) {
+		int moved = s->conflict_faces[last];
+		s->conflict_faces[slot] = moved;
+		s->faces[moved].conflict_slot = slot;
+	}
+	asetlen(s->conflict_faces, last);
+	s->faces[fi].conflict_slot = -1;
 }
 
 // Forward declaration (used by qh_conflict_add before full definition).
@@ -134,6 +160,7 @@ static void qh_conflict_add(QH_State* s, int fi, int vi)
 	} else {
 		v->conflict_next = vi;
 		v->conflict_prev = vi;
+		qh_cfl_add(s, fi);
 	}
 	f->conflict_head = vi;
 	// Track max distance any point was seen outside this face.
@@ -147,6 +174,7 @@ static void qh_conflict_remove(QH_State* s, int fi, int vi)
 	QH_Vertex* v = &s->verts[vi];
 	if (v->conflict_next == vi) {
 		f->conflict_head = QH_INVALID;
+		qh_cfl_remove(s, fi);
 	} else {
 		s->verts[v->conflict_next].conflict_prev = v->conflict_prev;
 		s->verts[v->conflict_prev].conflict_next = v->conflict_next;
@@ -166,6 +194,7 @@ static int qh_conflict_remove_all(QH_State* s, int fi)
 	int last = s->verts[head].conflict_prev;
 	s->verts[last].conflict_next = QH_INVALID;
 	f->conflict_head = QH_INVALID;
+	qh_cfl_remove(s, fi);
 	return head;
 }
 
@@ -367,15 +396,14 @@ static int qh_build_simplex(QH_State* s, int nv)
 static int qh_next_conflict(QH_State* s, int* out_face)
 {
 	int bv = QH_INVALID, bf = QH_INVALID; float bd = -1e18f;
-	int nf = asize(s->faces);
 	QH_Face* faces = s->faces;
 	QH_Vertex* verts = s->verts;
-	for (int fi = 0; fi < nf; fi++) {
-		if (faces[fi].mark != QH_VISIBLE) continue;
-		int head = faces[fi].conflict_head;
-		if (head == QH_INVALID) continue;
+	int ncf = asize(s->conflict_faces);
+	for (int ci_idx = 0; ci_idx < ncf; ci_idx++) {
+		int fi = s->conflict_faces[ci_idx];
 		if (faces[fi].maxoutside <= bd) continue;
 		HullPlane p = faces[fi].plane;
+		int head = faces[fi].conflict_head;
 		int ci = head;
 		do {
 			float d = dot(p.normal, verts[ci].pos) - p.offset;
@@ -918,9 +946,9 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 
 	// Vertex remap.
 	CK_DYNA int* vremap = NULL;
-	afit(vremap, asize(s->verts));
-	for (int i = 0; i < asize(s->verts); i++) apush(vremap, -1);
-	CK_DYNA v3* ov = NULL; int vc = 0;
+	afit_set(vremap, asize(s->verts));
+	memset(vremap, -1, asize(s->verts) * sizeof(int));
+	CK_DYNA v3* ov = NULL; afit(ov, asize(s->verts)); int vc = 0;
 	for (int i = 0; i < asize(live); i++) {
 		int e = s->faces[live[i]].edge, start = e;
 		do { int vi = s->edges[e].origin;
@@ -931,9 +959,9 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 
 	// Edge remap.
 	CK_DYNA int* eremap = NULL;
-	afit(eremap, asize(s->edges));
-	for (int i = 0; i < asize(s->edges); i++) apush(eremap, -1);
-	CK_DYNA HalfEdge* oe = NULL; int ec = 0;
+	afit_set(eremap, asize(s->edges));
+	memset(eremap, -1, asize(s->edges) * sizeof(int));
+	CK_DYNA HalfEdge* oe = NULL; afit(oe, asize(s->edges)); int ec = 0;
 	for (int i = 0; i < asize(live); i++) {
 		int e = s->faces[live[i]].edge, start = e;
 		do { eremap[e]=ec++; HalfEdge he={0}; apush(oe, he); e=s->edges[e].next; } while (e!=start);
@@ -1045,12 +1073,12 @@ Hull* quickhull(const v3* points, int count)
 	int welded_count = asize(state.verts);
 
 	if (welded_count < 4) {
-		afree(state.verts); afree(state.edges); afree(state.faces);
+		afree(state.verts); afree(state.edges); afree(state.faces); afree(state.conflict_faces);
 		return NULL;
 	}
 
 	if (!qh_build_simplex(&state, welded_count)) {
-		afree(state.verts); afree(state.edges); afree(state.faces);
+		afree(state.verts); afree(state.edges); afree(state.faces); afree(state.conflict_faces);
 		return NULL;
 	}
 
@@ -1066,6 +1094,6 @@ Hull* quickhull(const v3* points, int count)
 	}
 
 	Hull* result = qh_build_output(&state, points, count);
-	afree(state.verts); afree(state.edges); afree(state.faces);
+	afree(state.verts); afree(state.edges); afree(state.faces); afree(state.conflict_faces);
 	return result;
 }
