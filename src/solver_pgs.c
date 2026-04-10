@@ -650,12 +650,13 @@ static void solver_sync_vel_out(WorldInternal* w)
 }
 
 // Apply impulse row to velocity-only body state. inv_mass comes from the manifold (cached).
-// Skips zero-mass (static) body — avoids wasted SIMD ops on immovable bodies.
 static void apply_impulse_row_sv(SolverBodyVel* a, SolverBodyVel* b, float ima, float imb, v3 direction, v3 w_a, v3 w_b, float delta)
 {
 	v3 P = scale(direction, delta);
-	if (ima > 0.0f) { a->velocity = sub(a->velocity, scale(P, ima)); a->angular_velocity = sub(a->angular_velocity, scale(w_a, delta)); }
-	if (imb > 0.0f) { b->velocity = add(b->velocity, scale(P, imb)); b->angular_velocity = add(b->angular_velocity, scale(w_b, delta)); }
+	a->velocity = sub(a->velocity, scale(P, ima));
+	b->velocity = add(b->velocity, scale(P, imb));
+	a->angular_velocity = sub(a->angular_velocity, scale(w_a, delta));
+	b->angular_velocity = add(b->angular_velocity, scale(w_b, delta));
 }
 
 // Solve one patch-friction manifold using compact SolverBodyVel arrays.
