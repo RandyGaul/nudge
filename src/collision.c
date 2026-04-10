@@ -741,14 +741,23 @@ static float sat_edge_project_full(v3 e1, v3 e2, v3 c1,
 	const Hull* hull2, v3 scale2)
 {
 	v3 e1_x_e2 = cross(e1, e2);
-	float l = len(e1_x_e2);
+	float l2 = len2(e1_x_e2);
 
-	// Skip near-parallel edges
-	float tolerance = 0.005f;
-	if (l < tolerance * sqrtf(len2(e1) * len2(e2)))
+	// Skip near-parallel edges (squared comparison avoids 2 sqrt calls).
+	float tol2 = 0.005f * 0.005f;
+	if (l2 < tol2 * len2(e1) * len2(e2))
 		return -1e18f;
 
-	v3 n = scale(e1_x_e2, 1.0f / l);
+	// Fast approximate normalize: rsqrt (1 Newton-Raphson iteration, ~5 cycles vs ~20 for sqrt+div).
+	float inv_l;
+#if SIMD_SSE
+	{ __m128 v = _mm_set_ss(l2); v = _mm_rsqrt_ss(v); _mm_store_ss(&inv_l, v); }
+	// One Newton-Raphson refinement: inv_l = inv_l * (1.5 - 0.5 * l2 * inv_l * inv_l)
+	inv_l = inv_l * (1.5f - 0.5f * l2 * inv_l * inv_l);
+#else
+	inv_l = 1.0f / sqrtf(l2);
+#endif
+	v3 n = scale(e1_x_e2, inv_l);
 
 	// For box hulls, use O(1) support function. For general hulls, keep O(V) vertex scan
 	// (avoids extra inv_rot overhead per edge pair).
