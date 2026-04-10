@@ -8,16 +8,8 @@
 // -----------------------------------------------------------------------------
 // Types.
 
-// v3: 16-byte aligned vector (w=0) for native SSE operation.
-#include <xmmintrin.h>
-#include <smmintrin.h>
-
-typedef union v3
-{
-	struct { float x, y, z, _w; };
-	__m128 m;
-} v3;
-
+typedef struct v3
+{ float x, y, z; } v3;
 typedef struct quat
 { float x, y, z, w; } quat;
 typedef struct mat4
@@ -26,25 +18,20 @@ typedef struct Transform
 { v3 position; quat rotation; } Transform;
 
 // Constructors.
-#define V3(vx, vy, vz) ((v3){ .m = _mm_set_ps(0, vz, vy, vx) })
+#define V3(x, y, z) ((v3){ x, y, z })
 
 // -----------------------------------------------------------------------------
-// v3 implementation (SSE-backed).
+// v3 implementation.
 
-static inline v3 v3_add(v3 a, v3 b) { return (v3){ .m = _mm_add_ps(a.m, b.m) }; }
-static inline v3 v3_sub(v3 a, v3 b) { return (v3){ .m = _mm_sub_ps(a.m, b.m) }; }
-static inline v3 v3_scale(v3 a, float s) { return (v3){ .m = _mm_mul_ps(a.m, _mm_set1_ps(s)) }; }
-static inline float v3_dot(v3 a, v3 b) { return _mm_cvtss_f32(_mm_dp_ps(a.m, b.m, 0x71)); }
-static inline v3 v3_cross(v3 a, v3 b) {
-	__m128 a1 = _mm_shuffle_ps(a.m, a.m, _MM_SHUFFLE(3,0,2,1));
-	__m128 b1 = _mm_shuffle_ps(b.m, b.m, _MM_SHUFFLE(3,0,2,1));
-	__m128 r = _mm_sub_ps(_mm_mul_ps(a.m, b1), _mm_mul_ps(a1, b.m));
-	return (v3){ .m = _mm_shuffle_ps(r, r, _MM_SHUFFLE(3,0,2,1)) };
-}
+static inline v3 v3_add(v3 a, v3 b) { return (v3){ a.x+b.x, a.y+b.y, a.z+b.z }; }
+static inline v3 v3_sub(v3 a, v3 b) { return (v3){ a.x-b.x, a.y-b.y, a.z-b.z }; }
+static inline v3 v3_scale(v3 a, float s) { return (v3){ a.x*s, a.y*s, a.z*s }; }
+static inline float v3_dot(v3 a, v3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+static inline v3 v3_cross(v3 a, v3 b) { return (v3){ a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x }; }
 static inline float v3_len2(v3 a) { return v3_dot(a, a); }
 static inline float v3_len(v3 a) { return sqrtf(v3_len2(a)); }
 static inline v3 v3_norm(v3 a) { float l = v3_len(a); return v3_scale(a, 1.0f/l); }
-static inline v3 v3_neg(v3 a) { return (v3){ .m = _mm_sub_ps(_mm_setzero_ps(), a.m) }; }
+static inline v3 v3_neg(v3 a) { return (v3){ -a.x, -a.y, -a.z }; }
 
 // -----------------------------------------------------------------------------
 // quat implementation.
@@ -64,7 +51,7 @@ static inline quat quat_mul(quat a, quat b)
 
 static __forceinline v3 quat_rotate(quat q, v3 v)
 {
-	v3 u = V3(q.x, q.y, q.z);
+	v3 u = { q.x, q.y, q.z };
 	float s = q.w;
 	return v3_add(v3_add(v3_scale(u, 2.0f * v3_dot(u, v)), v3_scale(v, s*s - v3_dot(u, u))), v3_scale(v3_cross(u, v), 2.0f * s));
 }
@@ -195,15 +182,14 @@ static inline mat4 mat4_trs(v3 pos, quat rot, v3 s)
 // -----------------------------------------------------------------------------
 // v3 component-wise operations.
 
-static inline v3 v3_mul(v3 a, v3 b) { return (v3){ .m = _mm_mul_ps(a.m, b.m) }; }
-static inline v3 v3_min(v3 a, v3 b) { return (v3){ .m = _mm_min_ps(a.m, b.m) }; }
-static inline v3 v3_max(v3 a, v3 b) { return (v3){ .m = _mm_max_ps(a.m, b.m) }; }
+static inline v3 v3_mul(v3 a, v3 b) { return (v3){ a.x*b.x, a.y*b.y, a.z*b.z }; }
+static inline v3 v3_min(v3 a, v3 b) { return (v3){ fminf(a.x, b.x), fminf(a.y, b.y), fminf(a.z, b.z) }; }
+static inline v3 v3_max(v3 a, v3 b) { return (v3){ fmaxf(a.x, b.x), fmaxf(a.y, b.y), fmaxf(a.z, b.z) }; }
 static inline v3 v3_rcp(v3 a) {
-	// Safe reciprocal: zero where input is zero
-	__m128 zero = _mm_setzero_ps();
-	__m128 mask = _mm_cmpneq_ps(a.m, zero);
-	__m128 r = _mm_div_ps(_mm_set1_ps(1.0f), _mm_blendv_ps(_mm_set1_ps(1.0f), a.m, mask));
-	return (v3){ .m = _mm_and_ps(r, mask) };
+	return (v3){
+		a.x != 0.0f ? 1.0f / a.x : 0.0f,
+		a.y != 0.0f ? 1.0f / a.y : 0.0f,
+		a.z != 0.0f ? 1.0f / a.z : 0.0f };
 }
 
 // -----------------------------------------------------------------------------
