@@ -87,7 +87,7 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 //   Hull:     vertex index
 //   Cylinder: 0 = endpoint p, 1 = endpoint q
 
-static v3 gjk_support(const GJK_Shape* s, v3 d, int* feat)
+static __forceinline v3 gjk_support(const GJK_Shape* s, v3 d, int* feat)
 {
 	switch (s->type) {
 	case GJK_POINT: *feat = 0; return s->point.center;
@@ -234,7 +234,7 @@ static int gjk_solve4(GJK_Simplex* s)
 // -----------------------------------------------------------------------------
 // Closest point and witness points.
 
-static v3 gjk_closest_point(const GJK_Simplex* s)
+static __forceinline v3 gjk_closest_point(const GJK_Simplex* s)
 {
 	float inv = 1.0f / s->divisor;
 	switch (s->count) {
