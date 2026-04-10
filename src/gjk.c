@@ -61,19 +61,19 @@ static inline v3 gjk_mat_rotate_t(v3 r0, v3 r1, v3 r2, v3 v) {
 		_mm_mul_ps(r2.m, _mm_shuffle_ps(v.m, v.m, 0xAA))) };
 }
 
-// Mat3x3 forward rotate: R * v using row dot products.
+// Mat3x3 forward rotate: R * v. Transpose rows to columns, then broadcast-mul.
 static inline v3 gjk_mat_rotate(v3 r0, v3 r1, v3 r2, v3 v) {
-	__m128 m0 = _mm_mul_ps(r0.m, v.m);
-	__m128 m1 = _mm_mul_ps(r1.m, v.m);
-	__m128 m2 = _mm_mul_ps(r2.m, v.m);
-	__m128 t01lo = _mm_unpacklo_ps(m0, m1);
-	__m128 t01hi = _mm_unpackhi_ps(m0, m1);
-	__m128 t2lo  = _mm_unpacklo_ps(m2, _mm_setzero_ps());
-	__m128 t2hi  = _mm_unpackhi_ps(m2, _mm_setzero_ps());
-	__m128 xy = _mm_movelh_ps(t01lo, t2lo);
-	__m128 yz = _mm_movehl_ps(t2lo, t01lo);
-	__m128 zw = _mm_movelh_ps(t01hi, t2hi);
-	return (v3){ .m = _mm_add_ps(_mm_add_ps(xy, yz), zw) };
+	__m128 t01lo = _mm_unpacklo_ps(r0.m, r1.m);
+	__m128 t01hi = _mm_unpackhi_ps(r0.m, r1.m);
+	__m128 t2lo  = _mm_unpacklo_ps(r2.m, _mm_setzero_ps());
+	__m128 t2hi  = _mm_unpackhi_ps(r2.m, _mm_setzero_ps());
+	__m128 col0 = _mm_movelh_ps(t01lo, t2lo);
+	__m128 col1 = _mm_movehl_ps(t2lo, t01lo);
+	__m128 col2 = _mm_movelh_ps(t01hi, t2hi);
+	return (v3){ .m = _mm_add_ps(_mm_add_ps(
+		_mm_mul_ps(col0, _mm_shuffle_ps(v.m, v.m, 0x00)),
+		_mm_mul_ps(col1, _mm_shuffle_ps(v.m, v.m, 0x55))),
+		_mm_mul_ps(col2, _mm_shuffle_ps(v.m, v.m, 0xAA))) };
 }
 static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) {
 	v3 r0 = quat_rotate(rot, V3(1,0,0)), r1 = quat_rotate(rot, V3(0,1,0)), r2 = quat_rotate(rot, V3(0,0,1));
