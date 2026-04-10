@@ -269,15 +269,16 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 	int iter = 0;
 
 	while (iter < GJK_MAX_ITERS) {
-		GJK_Simplex backup = simplex;
 		int solved = 1;
-		switch (simplex.count) {
-		case 1: break;
-		case 2: solved = gjk_solve2(&simplex); break;
-		case 3: solved = gjk_solve3(&simplex); break;
-		case 4: solved = gjk_solve4(&simplex); break;
+		if (simplex.count > 1) {
+			GJK_Simplex backup = simplex;
+			switch (simplex.count) {
+			case 2: solved = gjk_solve2(&simplex); break;
+			case 3: solved = gjk_solve3(&simplex); break;
+			case 4: solved = gjk_solve4(&simplex); break;
+			}
+			if (!solved) { simplex = backup; break; }
 		}
-		if (!solved) { simplex = backup; break; }
 		if (simplex.count == 4) break;
 
 		v3 closest; gjk_closest_point(&simplex, closest);
