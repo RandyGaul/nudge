@@ -29,6 +29,10 @@ int main(int argc, char* argv[])
 	int fuzz_iters = 0;
 	int soak = 0;
 	int bench_stack = 0;
+	int bench_pile = 0;
+	int bench_pile_grid = 10;
+	int bench_pile_height = 5;
+	int bench_pile_frames = 300;
 	int sub_steps = 0;
 	int vel_iters = 0;
 	float hertz = 0;
@@ -40,6 +44,14 @@ int main(int argc, char* argv[])
 			soak = 1;
 		else if (strcmp(argv[i], "--bench-stack") == 0)
 			bench_stack = (i + 1 < argc && argv[i+1][0] != '-') ? atoi(argv[++i]) : 10;
+		else if (strcmp(argv[i], "--bench-pile") == 0)
+			bench_pile = 1;
+		else if (strcmp(argv[i], "--pile-grid") == 0 && i + 1 < argc)
+			bench_pile_grid = atoi(argv[++i]);
+		else if (strcmp(argv[i], "--pile-height") == 0 && i + 1 < argc)
+			bench_pile_height = atoi(argv[++i]);
+		else if (strcmp(argv[i], "--pile-frames") == 0 && i + 1 < argc)
+			bench_pile_frames = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--sub-steps") == 0 && i + 1 < argc)
 			sub_steps = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--vel-iters") == 0 && i + 1 < argc)
@@ -48,6 +60,12 @@ int main(int argc, char* argv[])
 			hertz = (float)atof(argv[++i]);
 		else if (strcmp(argv[i], "--damping") == 0 && i + 1 < argc)
 			damping = (float)atof(argv[++i]);
+	}
+
+	if (bench_pile) {
+		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
+		bench_box_pile(bench_pile_grid, bench_pile_height, bench_pile_frames, wp);
+		return 0;
 	}
 
 	if (bench_stack > 0) {

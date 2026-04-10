@@ -10801,6 +10801,86 @@ static void bench_box_stack(int height)
 	bench_box_stack_ex(height, (WorldParams){ .gravity = V3(0, -9.81f, 0) });
 }
 
+// Bench: large box pile for PGS solver perf profiling.
+// Creates a grid_w x grid_w x height pile of unit boxes, no sleeping.
+// Runs frames_count frames and prints per-phase PGSTimers averages.
+static void bench_box_pile(int grid_w, int height, int frames_count, WorldParams wp)
+{
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	// Floor
+	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50) });
+
+	// Grid of stacked boxes
+	float half = 0.5f;
+	int total_boxes = 0;
+	for (int row = 0; row < grid_w; row++) {
+		for (int col = 0; col < grid_w; col++) {
+			float x = (float)(col - grid_w / 2) * (2.0f * half + 0.01f);
+			float z = (float)(row - grid_w / 2) * (2.0f * half + 0.01f);
+			for (int h = 0; h < height; h++) {
+				float y = half + (float)h;
+				Body b = create_body(w, (BodyParams){ .position = V3(x, y, z), .rotation = quat_identity(), .mass = 1.0f });
+				body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(half, half, half) });
+				total_boxes++;
+			}
+		}
+	}
+
+	printf("bench_box_pile: %d boxes (%dx%dx%d), %d frames, sub=%d vel=%d\n", total_boxes, grid_w, grid_w, height, frames_count, wi->sub_steps, wi->velocity_iters);
+
+	// Accumulate timers
+	PerfTimers acc = {0};
+	PGSTimers pacc = {0};
+	float dt = 1.0f / 60.0f;
+	for (int frame = 0; frame < frames_count; frame++) {
+		world_step(w, dt);
+		PerfTimers p = world_get_perf(w);
+		acc.broadphase += p.broadphase;
+		acc.pre_solve += p.pre_solve;
+		acc.pgs_solve += p.pgs_solve;
+		acc.position_correct += p.position_correct;
+		acc.integrate += p.integrate;
+		acc.islands += p.islands;
+		acc.total += p.total;
+		pacc.pre_solve += p.pgs.pre_solve;
+		pacc.warm_start += p.pgs.warm_start;
+		pacc.graph_color += p.pgs.graph_color;
+		pacc.iterations += p.pgs.iterations;
+		pacc.joint_limits += p.pgs.joint_limits;
+		pacc.ldl += p.pgs.ldl;
+		pacc.relax += p.pgs.relax;
+		pacc.pos_contacts += p.pgs.pos_contacts;
+		pacc.pos_joints += p.pgs.pos_joints;
+		pacc.post_solve += p.pgs.post_solve;
+	}
+
+	double n = (double)frames_count;
+	printf("  avg total:      %8.3f ms\n", acc.total / n * 1000.0);
+	printf("  broadphase:     %8.3f ms\n", acc.broadphase / n * 1000.0);
+	printf("  pre_solve:      %8.3f ms\n", acc.pre_solve / n * 1000.0);
+	printf("  pgs_solve:      %8.3f ms\n", acc.pgs_solve / n * 1000.0);
+	printf("  pos_correct:    %8.3f ms\n", acc.position_correct / n * 1000.0);
+	printf("  integrate:      %8.3f ms\n", acc.integrate / n * 1000.0);
+	printf("  islands:        %8.3f ms\n", acc.islands / n * 1000.0);
+	printf("  --- PGS breakdown ---\n");
+	printf("  pgs.pre_solve:  %8.3f ms\n", pacc.pre_solve / n * 1000.0);
+	printf("  pgs.warm_start: %8.3f ms\n", pacc.warm_start / n * 1000.0);
+	printf("  pgs.graph_color:%8.3f ms\n", pacc.graph_color / n * 1000.0);
+	printf("  pgs.iterations: %8.3f ms\n", pacc.iterations / n * 1000.0);
+	printf("  pgs.jnt_limits: %8.3f ms\n", pacc.joint_limits / n * 1000.0);
+	printf("  pgs.ldl:        %8.3f ms\n", pacc.ldl / n * 1000.0);
+	printf("  pgs.relax:      %8.3f ms\n", pacc.relax / n * 1000.0);
+	printf("  pgs.pos_cont:   %8.3f ms\n", pacc.pos_contacts / n * 1000.0);
+	printf("  pgs.pos_joints: %8.3f ms\n", pacc.pos_joints / n * 1000.0);
+	printf("  pgs.post_solve: %8.3f ms\n", pacc.post_solve / n * 1000.0);
+
+	destroy_world(w);
+}
+
 // Soak test: infinite-loop fuzz with crash logging to file.
 static void test_quickhull_soak()
 {
