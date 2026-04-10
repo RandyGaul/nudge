@@ -167,11 +167,16 @@ void world_step(World world, float dt)
 			for (int d = 0; d < ldl_dof; d++) sol_joints[i].lambda[d] = 0;
 		}
 	}
+	w->perf.pgs.pre_solve = perf_now() - t2;
+
+	double t_ws = perf_now();
 	joints_warm_start(w, sol_joints, asize(sol_joints));
+	w->perf.pgs.warm_start = perf_now() - t_ws;
 
 	// --- Graph color (once per frame) ---
 	// When LDL enabled: rigid joints excluded from PGS (they get diagonal GS + LDL K^-1).
 	// Soft spring joints stay in PGS (LDL handles them via softness term).
+	double t_gc = perf_now();
 	int count = asize(w->body_hot);
 	CK_DYNA ConstraintRef* crefs = NULL;
 	int sm_count = asize(sm);
@@ -197,6 +202,7 @@ void world_step(World world, float dt)
 	int color_count = 0;
 	if (cref_count > 0)
 		color_constraints(crefs, cref_count, count, batch_starts, &color_count);
+	w->perf.pgs.graph_color = perf_now() - t_gc;
 
 	w->perf.pre_solve = perf_now() - t2;
 
@@ -205,6 +211,7 @@ void world_step(World world, float dt)
 	// When LDL enabled, K is factored once at substep start, and a mid-loop
 	// K^-1 residual correction is applied at the configured iteration.
 	double t_pgs = 0, t_pos = 0, t_int_sub = 0;
+	double t_jlim = 0, t_ldl = 0, t_relax = 0, t_posJ = 0;
 	for (int sub = 0; sub < n_sub; sub++) {
 		if (sub > 0) {
 			double ti = perf_now();
@@ -222,6 +229,7 @@ void world_step(World world, float dt)
 		if (ldl_iter == -2) ldl_iter = w->velocity_iters / 2;
 
 		// LDL: factor K once at start of substep (topology + numeric)
+		double tl0 = perf_now();
 		if (has_ldl)
 			ldl_factor(w, sol_joints, asize(sol_joints), sub, sub_dt);
 
@@ -233,6 +241,7 @@ void world_step(World world, float dt)
 			}
 			ldl_velocity_correct(w, sol_joints, asize(sol_joints), sub_dt);
 		}
+		t_ldl += perf_now() - tl0;
 
 		// PGS: iterate all constraints (contacts, and joints when LDL is off).
 		double tp = perf_now();
@@ -242,7 +251,9 @@ void world_step(World world, float dt)
 					solve_constraint(w, &crefs[i], sm, sc, sol_joints);
 			// Joint limits: solved each PGS iteration (limit DOFs only).
 			// LDL handles the bilateral DOFs; this handles the unilateral limit.
+			double tjl = perf_now();
 			joints_solve_limits(w, sol_joints, asize(sol_joints));
+			t_jlim += perf_now() - tjl;
 		}
 		t_pgs += perf_now() - tp;
 
@@ -251,21 +262,33 @@ void world_step(World world, float dt)
 		t_int_sub += perf_now() - ti2;
 
 		// Relax contacts: refresh separation/bias from updated positions
-		double tpc = perf_now();
+		double tr = perf_now();
 		if (w->solver_type == SOLVER_SOFT_STEP)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
+		t_relax += perf_now() - tr;
 
 		// Position correction after integration.
 		// LDL: direct solve projects out bulk joint error, NGS cleans up residual.
+		double tl1 = perf_now();
 		if (has_ldl)
 			ldl_position_correct(w, sol_joints, asize(sol_joints), sub_dt);
+		t_ldl += perf_now() - tl1;
+
+		double tpj = perf_now();
 		joints_position_correct(w, sol_joints, asize(sol_joints), w->position_iters);
-		t_pos += perf_now() - tpc;
+		t_posJ += perf_now() - tpj;
+
+		t_pos += (perf_now() - tr);
 	}
 
 	w->perf.pgs_solve = t_pgs;
 	w->perf.integrate += t_int_sub;
 	w->perf.position_correct = t_pos;
+	w->perf.pgs.iterations = t_pgs - t_jlim;
+	w->perf.pgs.joint_limits = t_jlim;
+	w->perf.pgs.ldl = t_ldl;
+	w->perf.pgs.relax = t_relax;
+	w->perf.pgs.pos_joints = t_posJ;
 
 	afree(crefs);
 
@@ -275,11 +298,14 @@ void world_step(World world, float dt)
 		solver_position_correct(w, sm, asize(sm), sc);
 	else if (w->contact_hertz <= 0.0f)
 		solver_position_correct(w, sm, asize(sm), sc);
+	w->perf.pgs.pos_contacts = perf_now() - t3;
 	w->perf.position_correct += perf_now() - t3;
 
 	// Post-solve (once per frame)
+	double t_ps = perf_now();
 	solver_post_solve(w, sm, asize(sm), sc, manifolds, manifold_count);
 	joints_post_solve(w, sol_joints, asize(sol_joints));
+	w->perf.pgs.post_solve = perf_now() - t_ps;
 
 	double t4 = perf_now();
 	if (w->sleep_enabled) islands_evaluate_sleep(w, dt);

@@ -16,6 +16,20 @@
 // -----------------------------------------------------------------------------
 // Performance timers (seconds per phase from last world_step).
 
+typedef struct PGSTimers
+{
+	double pre_solve;      // build solver manifolds/contacts/joints
+	double warm_start;     // apply warm start impulses
+	double graph_color;    // constraint graph coloring
+	double iterations;     // PGS velocity iterations (contacts + joints)
+	double joint_limits;   // joint limit solving within PGS loop
+	double ldl;            // LDL factor + velocity/position correction
+	double relax;          // contact relaxation (soft step)
+	double pos_contacts;   // NGS position correction for contacts
+	double pos_joints;     // NGS position correction for joints
+	double post_solve;     // warm cache update
+} PGSTimers;
+
 typedef struct PerfTimers
 {
 	double broadphase;
@@ -25,6 +39,7 @@ typedef struct PerfTimers
 	double integrate;
 	double islands;
 	double total;
+	PGSTimers pgs;
 } PerfTimers;
 
 // -----------------------------------------------------------------------------
