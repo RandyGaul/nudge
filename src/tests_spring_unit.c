@@ -191,7 +191,7 @@ static void test_soft_spring_pulls_together()
 
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
 	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// After solve: body A should have gained +X velocity, body B should have gained -X velocity.
@@ -250,7 +250,7 @@ static void test_soft_spring_no_overshoot()
 	WorldInternal* w = soft_test_make_world(&sw);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
 	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// Velocity should be moderate -- not shooting off. At sub_dt = 1/240,
@@ -309,7 +309,7 @@ static void test_soft_spring_heavy_light()
 	WorldInternal* w = soft_test_make_world(&sw);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
 	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// Both should move toward each other
@@ -365,7 +365,7 @@ static void test_rigid_constraint_zeroes_velocity()
 	WorldInternal* w = soft_test_make_world(&sw);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
 	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// After solve: constraint velocity should be near zero.
@@ -418,7 +418,7 @@ static void test_rigid_constraint_with_lever()
 	WorldInternal* w = soft_test_make_world(&sw);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
 
 	// Compute constraint velocity before solve
 	LDL_JacobianRow jac[3];

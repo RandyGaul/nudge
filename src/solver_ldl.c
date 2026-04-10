@@ -47,6 +47,17 @@ static dv3 dinv_inertia_mul(quat rot, v3 inv_i, dv3 v)
 	return DV3(sx + qw*tx2 + (qy*tz2 - qz*ty2), sy + qw*ty2 + (qz*tx2 - qx*tz2), sz + qw*tz2 + (qx*ty2 - qy*tx2));
 }
 
+// Compact compressed body mass data for K fill (28 bytes, cache-friendly).
+typedef struct LDL_CompBody { float inv_mass; v3 iw_diag, iw_off; } LDL_CompBody;
+
+// Symmetric 3x3 inverse inertia multiply from compact body data.
+static dv3 ldl_comp_iw_mul(LDL_CompBody* b, dv3 v)
+{
+	double xx = b->iw_diag.x, yy = b->iw_diag.y, zz = b->iw_diag.z;
+	double xy = b->iw_off.x, xz = b->iw_off.y, yz = b->iw_off.z;
+	return DV3(xx*v.x + xy*v.y + xz*v.z, xy*v.x + yy*v.y + yz*v.z, xz*v.x + yz*v.y + zz*v.z);
+}
+
 // Use precomputed symmetric 3x3 world-space inverse inertia (from BodyHot.iw_diag/iw_off).
 // 9 muls + 6 adds vs ~48 muls + 24 adds for dinv_inertia_mul quaternion path.
 static dv3 dinv_inertia_world_mul(BodyHot* body, dv3 v)
@@ -254,14 +265,14 @@ static void ldl_fill_jacobian(LDL_Constraint* con, SolverJoint* sol_joints, LDL_
 
 // Accumulate K contribution from one body: K += J * (w * M^{-1}) * J^T into packed lower-tri.
 // jac has dof rows, side: 0 = J_a, 1 = J_b. weight scales inv_mass/inv_inertia (shattering).
-static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_start, BodyHot* body, double weight, double* K_packed)
+static void ldl_K_body_contrib_comp(LDL_JacobianRow* jac, int dof, int side, int dof_start, LDL_CompBody* body, double weight, double* K_packed)
 {
 	double wm = (double)body->inv_mass * (double)weight;
 	// Fast path for 1-DOF constraints (distance joints): scalar K += J * M^{-1} * J^T.
 	if (dof == 1) {
 		double* J = side ? jac[0].J_b : jac[0].J_a;
 		double w0 = wm * J[0], w1 = wm * J[1], w2 = wm * J[2];
-		dv3 w_ang = dv3_scale(dinv_inertia_world_mul(body, DV3(J[3], J[4], J[5])), (double)weight);
+		dv3 w_ang = dv3_scale(ldl_comp_iw_mul(body, DV3(J[3], J[4], J[5])), (double)weight);
 		K_packed[LDL_TRI(dof_start, dof_start)] += J[0]*w0 + J[1]*w1 + J[2]*w2 + J[3]*w_ang.x + J[4]*w_ang.y + J[5]*w_ang.z;
 		return;
 	}
@@ -272,7 +283,7 @@ static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_
 		W[1*dof+d] = wm * J[1];
 		W[2*dof+d] = wm * J[2];
 		dv3 j_ang = DV3(J[3], J[4], J[5]);
-		dv3 w_ang = dv3_scale(dinv_inertia_world_mul(body, j_ang), (double)weight);
+		dv3 w_ang = dv3_scale(ldl_comp_iw_mul(body, j_ang), (double)weight);
 		W[3*dof+d] = w_ang.x;
 		W[4*dof+d] = w_ang.y;
 		W[5*dof+d] = w_ang.z;
@@ -286,7 +297,7 @@ static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_
 		}
 }
 
-static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_JacobianRow* jac_j, int dj, int side_j, BodyHot* body, double weight, double* out)
+static void ldl_K_body_off_comp(LDL_JacobianRow* jac_i, int di, int side_i, LDL_JacobianRow* jac_j, int dj, int side_j, LDL_CompBody* body, double weight, double* out)
 {
 	double wm = (double)body->inv_mass * (double)weight;
 	double W[6 * LDL_MAX_BLOCK_DIM];
@@ -296,7 +307,7 @@ static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_Jacob
 		W[1*dj+d] = wm * J[1];
 		W[2*dj+d] = wm * J[2];
 		dv3 j_ang = DV3(J[3], J[4], J[5]);
-		dv3 w_ang = dv3_scale(dinv_inertia_world_mul(body, j_ang), (double)weight);
+		dv3 w_ang = dv3_scale(ldl_comp_iw_mul(body, j_ang), (double)weight);
 		W[3*dj+d] = w_ang.x;
 		W[4*dj+d] = w_ang.y;
 		W[5*dj+d] = w_ang.z;
@@ -310,6 +321,10 @@ static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_Jacob
 		}
 	}
 }
+
+// Test-facing wrappers: convert BodyHot* to LDL_CompBody for K fill functions.
+static void ldl_K_body_contrib(LDL_JacobianRow* jac, int dof, int side, int dof_start, BodyHot* body, double weight, double* K_packed) { LDL_CompBody cb = { body->inv_mass, body->iw_diag, body->iw_off }; ldl_K_body_contrib_comp(jac, dof, side, dof_start, &cb, weight, K_packed); }
+static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_JacobianRow* jac_j, int dj, int side_j, BodyHot* body, double weight, double* out) { LDL_CompBody cb = { body->inv_mass, body->iw_diag, body->iw_off }; ldl_K_body_off_comp(jac_i, di, side_i, jac_j, dj, side_j, &cb, weight, out); }
 
 // Apply impulse generically: v += M^{-1} * J^T * lambda for one body.
 // jac has dof rows, lambda has dof scalars. side: 0 = J_a, 1 = J_b.
@@ -828,11 +843,18 @@ static double ldl_condition_check(LDL_Cache* c, LDL_Topology* t)
 // Numeric factorization using cached topology.
 
 // Fill K matrix and factorize using precomputed topology.
-static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_joints)
+static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_joints, LDL_CompBody* comp_bodies)
 {
+	LDL_CompBody* local_comp = NULL;
+	if (!comp_bodies) {
+		int bc = asize(w->body_hot);
+		local_comp = CK_ALLOC(bc * sizeof(LDL_CompBody));
+		for (int i2 = 0; i2 < bc; i2++) { local_comp[i2].inv_mass = w->body_hot[i2].inv_mass; local_comp[i2].iw_diag = w->body_hot[i2].iw_diag; local_comp[i2].iw_off = w->body_hot[i2].iw_off; }
+		comp_bodies = local_comp;
+	}
 	LDL_Topology* t = c->topo;
 	int nc = t->node_count;
-	if (nc == 0) return;
+	if (nc == 0) { if (local_comp) CK_FREE(local_comp); return; }
 
 	double t_fill_start = perf_now();
 
@@ -863,13 +885,13 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 			LDL_Constraint* con = &c->constraints[bun->start + ci];
 			int off = con->bundle_offset;
 			int dk = con->dof;
-			BodyHot* a = &w->body_hot[con->real_body_a];
-			BodyHot* b = &w->body_hot[con->real_body_b];
+			LDL_CompBody* ca = &comp_bodies[con->real_body_a];
+			LDL_CompBody* cb2 = &comp_bodies[con->real_body_b];
 			LDL_JacobianRow* jac = &c->jacobians[con->jacobian_start];
 
 			// K += J_a * (w_a * M_a^{-1}) * J_a^T + J_b * (w_b * M_b^{-1}) * J_b^T
-			ldl_K_body_contrib(jac, dk, 0, off, a, con->weight_a, c->diag_data[bi]);
-			ldl_K_body_contrib(jac, dk, 1, off, b, con->weight_b, c->diag_data[bi]);
+			ldl_K_body_contrib_comp(jac, dk, 0, off, ca, con->weight_a, c->diag_data[bi]);
+			ldl_K_body_contrib_comp(jac, dk, 1, off, cb2, con->weight_b, c->diag_data[bi]);
 
 			// Regularization: soft constraints add softness directly to K diagonal
 			// (matching PGS convention). Rigid/synthetic use trace-scaled minimum compliance.
@@ -905,11 +927,11 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 					int body = bs == 0 ? bun->body_a : bun->body_b;
 					int real_b = bs == 0 ? con_i->real_body_a : con_i->real_body_b;
 					double wt = (body == con_i->body_a) ? con_i->weight_a : con_i->weight_b;
-					BodyHot* B = &w->body_hot[real_b];
+					LDL_CompBody* B = &comp_bodies[real_b];
 					int side_i = (body == con_i->body_b) ? 1 : 0;
 					int side_j = (body == con_j->body_b) ? 1 : 0;
 					double buf[LDL_MAX_BLOCK_DIM * LDL_MAX_BLOCK_DIM] = {0};
-					ldl_K_body_off(jac_i, di, side_i, jac_j, dj, side_j, B, wt, buf);
+					ldl_K_body_off_comp(jac_i, di, side_i, jac_j, dj, side_j, B, wt, buf);
 					for (int r = 0; r < di; r++)
 						for (int col = 0; col < dj; col++)
 							c->diag_data[bi][LDL_TRI(oi+r, oj+col)] += buf[r*dj + col];
@@ -935,7 +957,7 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 			int side_i = (f->body == con_i->body_b) ? 1 : 0;
 			int real_b = side_i ? con_i->real_body_b : con_i->real_body_a;
 			double wt = side_i ? con_i->weight_b : con_i->weight_a;
-			BodyHot* B = &w->body_hot[real_b];
+			LDL_CompBody* B = &comp_bodies[real_b];
 			LDL_JacobianRow* jac_i = &c->jacobians[con_i->jacobian_start];
 			for (int cj = 0; cj < bj_b->count; cj++) {
 				LDL_Constraint* con_j = &c->constraints[bj_b->start + cj];
@@ -945,7 +967,7 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 				int di = con_i->dof, dj = con_j->dof;
 				LDL_JacobianRow* jac_j = &c->jacobians[con_j->jacobian_start];
 				double buf[LDL_MAX_BLOCK_DIM * LDL_MAX_BLOCK_DIM] = {0};
-				ldl_K_body_off(jac_i, di, side_i, jac_j, dj, side_j, B, wt, buf);
+				ldl_K_body_off_comp(jac_i, di, side_i, jac_j, dj, side_j, B, wt, buf);
 				// Write to both directions
 				for (int r = 0; r < di; r++)
 					for (int col = 0; col < dj; col++)
@@ -1081,6 +1103,7 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 			}
 		}
 	}
+	if (local_comp) CK_FREE(local_comp);
 }
 
 // Forward/diagonal/back substitution using precomputed topology.
@@ -1522,25 +1545,22 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 	if (sub > 0)
 		ldl_refresh_lever_arms_light(w, sol_joints, joint_count, sub_dt);
 
-	// Compress masses for K conditioning: sqrt compression (100:1 -> 10:1).
-	// Save inv_mass, inv_inertia_local, and precomputed world inertia (iw_diag/iw_off)
-	// so we can restore all of them without an expensive world inertia recompute.
-	// Single contiguous alloc for all 4 save arrays (40 bytes/body).
+	// Build compressed mass data for K fill into compact separate array (28 bytes/body).
+	// BodyHot is never modified — no save/restore needed. Better cache: K fill reads
+	// from tight comp_bodies array instead of 112-byte BodyHot stride.
 	int body_count = asize(w->body_hot);
-	char* save_buf = CK_ALLOC(body_count * (sizeof(float) + sizeof(v3) * 3));
-	float* save_inv_mass = (float*)save_buf;
-	v3* save_inv_inertia = (v3*)(save_buf + body_count * sizeof(float));
-	v3* save_iw_diag = save_inv_inertia + body_count;
-	v3* save_iw_off = save_iw_diag + body_count;
+	LDL_CompBody* comp_bodies = CK_ALLOC(body_count * sizeof(LDL_CompBody));
 	for (int i = 0; i < body_count; i++) {
-		save_inv_mass[i] = w->body_hot[i].inv_mass;
-		save_inv_inertia[i] = w->body_hot[i].inv_inertia_local;
-		save_iw_diag[i] = w->body_hot[i].iw_diag;
-		save_iw_off[i] = w->body_hot[i].iw_off;
-		if (w->body_hot[i].inv_mass > 0.0f) {
-			w->body_hot[i].inv_mass = sqrtf(w->body_hot[i].inv_mass);
-			w->body_hot[i].inv_inertia_local = scale(w->body_hot[i].inv_inertia_local, w->body_hot[i].inv_mass / save_inv_mass[i]);
-			body_compute_inv_inertia_world(&w->body_hot[i]);
+		float inv_m = w->body_hot[i].inv_mass;
+		if (inv_m > 0.0f) {
+			float comp_ratio = sqrtf(inv_m) / inv_m;
+			comp_bodies[i].inv_mass = sqrtf(inv_m);
+			comp_bodies[i].iw_diag = scale(w->body_hot[i].iw_diag, comp_ratio);
+			comp_bodies[i].iw_off = scale(w->body_hot[i].iw_off, comp_ratio);
+		} else {
+			comp_bodies[i].inv_mass = 0.0f;
+			comp_bodies[i].iw_diag = V3(0, 0, 0);
+			comp_bodies[i].iw_off = V3(0, 0, 0);
 		}
 	}
 
@@ -1582,18 +1602,11 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 			asetlen(c->solve_lambda, c->n);
 		}
 
-		// Numeric factorization with compressed masses
-		ldl_numeric_factor(c, w, sol_joints);
+		// Numeric factorization: K fill reads from compressed comp_bodies, not BodyHot
+		ldl_numeric_factor(c, w, sol_joints, comp_bodies);
 	}
 
-	// Restore real masses + world inertia (no recompute needed — saved values are exact).
-	for (int i = 0; i < body_count; i++) {
-		w->body_hot[i].inv_mass = save_inv_mass[i];
-		w->body_hot[i].inv_inertia_local = save_inv_inertia[i];
-		w->body_hot[i].iw_diag = save_iw_diag[i];
-		w->body_hot[i].iw_off = save_iw_off[i];
-	}
-	CK_FREE(save_buf);
+	CK_FREE(comp_bodies);
 }
 
 // Velocity correction using already-factored K. Solves and applies impulses.

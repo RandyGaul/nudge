@@ -149,7 +149,7 @@ static void test_shatter_hub_star_pipeline()
 	ldl_apply_shattering(&c, w);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
 
 	// Verify all pivots are positive (the assert that was crashing)
 	LDL_Topology* t = c.topo;
@@ -207,7 +207,7 @@ static void test_shatter_hub_star_extreme_mass()
 	ldl_apply_shattering(&c, w);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
 
 	// Check pivots
 	LDL_Topology* t = c.topo;
@@ -275,7 +275,7 @@ static void test_shatter_hub_with_soft_springs()
 	ldl_apply_shattering(&c, w);
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
-	ldl_numeric_factor(&c, w, sw.sol_joints);
+	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
 
 	LDL_Topology* t = c.topo;
 	for (int i = 0; i < t->node_count; i++)

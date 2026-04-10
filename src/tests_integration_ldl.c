@@ -62,7 +62,7 @@ static void integration_sparse_solve(LDL_Cache* c, IntegrationWorld* iw, double*
 
 	ldl_build_bundles(c);
 	ldl_build_topology(c, &w);
-	ldl_numeric_factor(c, &w, iw->sol_joints);
+	ldl_numeric_factor(c, &w, iw->sol_joints, NULL);
 	ldl_solve_topo(c->topo, c->diag_data, c->diag_D, c->L_factors, rhs, x);
 
 	afree(w.body_hot);
