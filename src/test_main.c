@@ -31,6 +31,10 @@ int main(int argc, char* argv[])
 	int bench_stack = 0;
 	int bench_pile = 0;
 	int bench_suite_flag = 0;
+	int bench_chaos = 0;
+	int chaos_bodies = 500;
+	int chaos_frames = 30;
+	int chaos_churn = 10;
 	int bench_pile_grid = 10;
 	int bench_pile_height = 5;
 	int bench_pile_frames = 300;
@@ -49,6 +53,14 @@ int main(int argc, char* argv[])
 			bench_pile = 1;
 		else if (strcmp(argv[i], "--bench-suite") == 0)
 			bench_suite_flag = 1;
+		else if (strcmp(argv[i], "--bench-chaos") == 0)
+			bench_chaos = 1;
+		else if (strcmp(argv[i], "--chaos-bodies") == 0 && i + 1 < argc)
+			chaos_bodies = atoi(argv[++i]);
+		else if (strcmp(argv[i], "--chaos-frames") == 0 && i + 1 < argc)
+			chaos_frames = atoi(argv[++i]);
+		else if (strcmp(argv[i], "--chaos-churn") == 0 && i + 1 < argc)
+			chaos_churn = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--pile-grid") == 0 && i + 1 < argc)
 			bench_pile_grid = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--pile-height") == 0 && i + 1 < argc)
@@ -63,6 +75,12 @@ int main(int argc, char* argv[])
 			hertz = (float)atof(argv[++i]);
 		else if (strcmp(argv[i], "--damping") == 0 && i + 1 < argc)
 			damping = (float)atof(argv[++i]);
+	}
+
+	if (bench_chaos) {
+		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .friction_model = FRICTION_PATCH, .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
+		bench_hull_chaos(chaos_bodies, chaos_frames, chaos_churn, wp);
+		return 0;
 	}
 
 	if (bench_suite_flag) {

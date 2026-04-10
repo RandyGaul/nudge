@@ -10957,6 +10957,144 @@ static void bench_box_pile(int grid_w, int height, int frames_count, WorldParams
 }
 
 // Run bench_box_pile at multiple scales for scaling analysis.
+// Simple deterministic RNG for benchmark reproducibility.
+static uint32_t bench_rng_state = 12345;
+static float bench_randf() { bench_rng_state = bench_rng_state * 1664525u + 1013904223u; return (float)(bench_rng_state >> 8) / (float)(1 << 24); }
+
+static Hull* bench_make_random_hull(float radius, int n)
+{
+	CK_DYNA v3* pts = NULL;
+	for (int i = 0; i < n; i++) {
+		float x, y, z, d2;
+		do { x = bench_randf()*2-1; y = bench_randf()*2-1; z = bench_randf()*2-1; d2 = x*x+y*y+z*z; } while (d2 < 0.01f || d2 > 1.0f);
+		float r = radius * (0.5f + 0.5f * bench_randf());
+		float inv = r / sqrtf(d2);
+		apush(pts, V3(x*inv, y*inv, z*inv));
+	}
+	Hull* h = quickhull(pts, asize(pts));
+	afree(pts);
+	return h;
+}
+
+static quat bench_random_quat()
+{
+	float u1 = bench_randf(), u2 = bench_randf() * 6.2831853f, u3 = bench_randf() * 6.2831853f;
+	float s1 = sqrtf(1-u1), s2 = sqrtf(u1);
+	return (quat){ s1*sinf(u2), s1*cosf(u2), s2*sinf(u3), s2*cosf(u3) };
+}
+
+// Stress test: huge pile of random hulls with rapid spawn/destroy churn.
+// Tests solver + broadphase + split_store under realistic conditions.
+static void bench_hull_chaos(int initial_bodies, int frames, int churn_per_frame, WorldParams wp)
+{
+	bench_rng_state = 42;
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	// Floor
+	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50) });
+
+	// Pre-generate a pool of hull shapes (reused across bodies)
+	#define HULL_POOL_SIZE 16
+	Hull* hull_pool[HULL_POOL_SIZE];
+	for (int i = 0; i < HULL_POOL_SIZE; i++)
+		hull_pool[i] = bench_make_random_hull(0.3f + bench_randf() * 0.7f, 8 + (int)(bench_randf() * 12));
+
+	// Spawn initial pile
+	CK_DYNA Body* alive = NULL;
+	float spawn_radius = sqrtf((float)initial_bodies) * 0.5f;
+	for (int i = 0; i < initial_bodies; i++) {
+		float x = (bench_randf() - 0.5f) * spawn_radius * 2;
+		float z = (bench_randf() - 0.5f) * spawn_radius * 2;
+		float y = 0.5f + bench_randf() * (float)initial_bodies * 0.02f;
+		Hull* h = hull_pool[(int)(bench_randf() * HULL_POOL_SIZE) % HULL_POOL_SIZE];
+		float sc = 0.5f + bench_randf() * 1.0f;
+		Body b = create_body(w, (BodyParams){ .position = V3(x, y, z), .rotation = bench_random_quat(), .mass = 0.5f + bench_randf() * 4.0f });
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h, .scale = V3(sc, sc, sc) } });
+		apush(alive, b);
+	}
+
+	// Mix in some boxes and spheres
+	for (int i = 0; i < initial_bodies / 4; i++) {
+		float x = (bench_randf() - 0.5f) * spawn_radius * 2;
+		float z = (bench_randf() - 0.5f) * spawn_radius * 2;
+		float y = 0.5f + bench_randf() * 5.0f;
+		Body b = create_body(w, (BodyParams){ .position = V3(x, y, z), .rotation = bench_random_quat(), .mass = 1.0f });
+		if (bench_randf() > 0.5f) body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f + bench_randf()*0.5f, 0.3f + bench_randf()*0.5f, 0.3f + bench_randf()*0.5f) });
+		else body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f + bench_randf() * 0.5f });
+		apush(alive, b);
+	}
+
+	int total = asize(alive);
+	printf("bench_hull_chaos: %d bodies (%d hulls + %d mixed), %d frames, churn=%d/frame\n", total, initial_bodies, initial_bodies / 4, frames, churn_per_frame);
+
+	PerfTimers acc = {0};
+	PGSTimers pacc = {0};
+	float dt = 1.0f / 60.0f;
+	for (int frame = 0; frame < frames; frame++) {
+		// Churn: destroy some random bodies and spawn replacements
+		if (churn_per_frame > 0 && asize(alive) > churn_per_frame + 1) {
+			for (int c = 0; c < churn_per_frame; c++) {
+				int idx = (int)(bench_randf() * (float)(asize(alive) - 1));
+				destroy_body(w, alive[idx]);
+				adel(alive, idx);
+			}
+			for (int c = 0; c < churn_per_frame; c++) {
+				float x = (bench_randf() - 0.5f) * spawn_radius * 2;
+				float z = (bench_randf() - 0.5f) * spawn_radius * 2;
+				float y = 5.0f + bench_randf() * 10.0f;
+				Hull* h = hull_pool[(int)(bench_randf() * HULL_POOL_SIZE) % HULL_POOL_SIZE];
+				float sc = 0.5f + bench_randf() * 1.0f;
+				Body b = create_body(w, (BodyParams){ .position = V3(x, y, z), .rotation = bench_random_quat(), .mass = 0.5f + bench_randf() * 4.0f });
+				body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h, .scale = V3(sc, sc, sc) } });
+				apush(alive, b);
+			}
+		}
+
+		world_step(w, dt);
+		PerfTimers p = world_get_perf(w);
+		acc.broadphase += p.broadphase;
+		acc.pre_solve += p.pre_solve;
+		acc.pgs_solve += p.pgs_solve;
+		acc.position_correct += p.position_correct;
+		acc.integrate += p.integrate;
+		acc.islands += p.islands;
+		acc.total += p.total;
+		pacc.pre_solve += p.pgs.pre_solve;
+		pacc.warm_start += p.pgs.warm_start;
+		pacc.graph_color += p.pgs.graph_color;
+		pacc.iterations += p.pgs.iterations;
+		pacc.joint_limits += p.pgs.joint_limits;
+		pacc.relax += p.pgs.relax;
+		pacc.pos_contacts += p.pgs.pos_contacts;
+		pacc.pos_joints += p.pgs.pos_joints;
+		pacc.post_solve += p.pgs.post_solve;
+	}
+
+	double n = (double)frames;
+	printf("  avg total:      %8.3f ms\n", acc.total / n * 1000.0);
+	printf("  broadphase:     %8.3f ms\n", acc.broadphase / n * 1000.0);
+	printf("  pre_solve:      %8.3f ms\n", acc.pre_solve / n * 1000.0);
+	printf("  pgs_solve:      %8.3f ms\n", acc.pgs_solve / n * 1000.0);
+	printf("  pos_correct:    %8.3f ms\n", acc.position_correct / n * 1000.0);
+	printf("  integrate:      %8.3f ms\n", acc.integrate / n * 1000.0);
+	printf("  islands:        %8.3f ms\n", acc.islands / n * 1000.0);
+	printf("  --- PGS breakdown ---\n");
+	printf("  pgs.pre_solve:  %8.3f ms\n", pacc.pre_solve / n * 1000.0);
+	printf("  pgs.warm_start: %8.3f ms\n", pacc.warm_start / n * 1000.0);
+	printf("  pgs.graph_color:%8.3f ms\n", pacc.graph_color / n * 1000.0);
+	printf("  pgs.iterations: %8.3f ms\n", pacc.iterations / n * 1000.0);
+	printf("  pgs.relax:      %8.3f ms\n", pacc.relax / n * 1000.0);
+	printf("  pgs.post_solve: %8.3f ms\n", pacc.post_solve / n * 1000.0);
+
+	afree(alive);
+	for (int i = 0; i < HULL_POOL_SIZE; i++) hull_free(hull_pool[i]);
+	destroy_world(w);
+	#undef HULL_POOL_SIZE
+}
+
 static void bench_suite(WorldParams wp)
 {
 	struct { int grid; int height; int frames; } configs[] = {
