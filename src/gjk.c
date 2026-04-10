@@ -193,7 +193,7 @@ static int gjk_hull_support_scan(const v3* verts, int count, const float* soa, v
 	return hbi;
 }
 // Box/cylinder support: separate functions to keep gjk_support macro small for inlining budget.
-static __forceinline v3 gjk_box_support(const GJK_Shape* sp, v3 sd, int* feat)
+static v3 gjk_box_support(const GJK_Shape* sp, v3 sd, int* feat)
 {
 	v3 ld = gjk_mat_rotate(sp->box.inv_row0, sp->box.inv_row1, sp->box.inv_row2, sd);
 	v3 he = sp->box.half_extents;
@@ -201,7 +201,7 @@ static __forceinline v3 gjk_box_support(const GJK_Shape* sp, v3 sd, int* feat)
 	*feat = (ld.x >= 0.0f) | ((ld.y >= 0.0f) << 1) | ((ld.z >= 0.0f) << 2);
 	return add(sp->box.center, gjk_mat_rotate(sp->box.rot_row0, sp->box.rot_row1, sp->box.rot_row2, lc));
 }
-static __forceinline v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
+static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
 {
 	v3 cu = sp->cylinder.axis;
 	if (sp->cylinder.inv_axis_len == 0.0f) { *feat = 0; return sp->cylinder.p; }
