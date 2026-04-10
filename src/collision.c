@@ -1232,6 +1232,15 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint)
 			uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
 		}
 
+		// Corner snap: 4 reference face corners from rotation columns.
+		v3 ref_center = add(ref_pos, scale(ref_cols[la], nsign * (&ref_he.x)[la]));
+		v3 ref_eu = scale(ref_cols[u], (&ref_he.x)[u]), ref_ev = scale(ref_cols[v_ax], (&ref_he.x)[v_ax]);
+		v3 corners[4] = { add(ref_center, add(ref_eu, ref_ev)), add(ref_center, sub(ref_eu, ref_ev)), add(ref_center, sub(neg(ref_eu), neg(ref_ev))), add(ref_center, sub(neg(ref_eu), ref_ev)) };
+		float snap_tol2 = 1e-6f;
+		for (int i = 0; i < clip_count; i++)
+			for (int c = 0; c < 4; c++)
+				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
+
 		// Build face indices for feature IDs. Map (la, nsign) to hull face index.
 		static const int face_map[3][2] = { {2, 3}, {4, 5}, {0, 1} };
 		int ref_face = face_map[la][nsign > 0 ? 1 : 0];
