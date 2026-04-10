@@ -1122,6 +1122,8 @@ static void ldl_cache_free(LDL_Cache* c)
 	if (c->topo) { ldl_topology_free(c->topo); CK_FREE(c->topo); }
 	afree(c->L_factors);
 	afree(c->jacobians);
+	afree(c->solve_rhs);
+	afree(c->solve_lambda);
 	afree(c->body_remap);
 	afree(c->shard_counts);
 	memset(c, 0, sizeof(*c));
@@ -1135,6 +1137,10 @@ static void ldl_cache_sleep(LDL_Cache* c)
 	c->L_factors = NULL;
 	afree(c->jacobians);
 	c->jacobians = NULL;
+	afree(c->solve_rhs);
+	c->solve_rhs = NULL;
+	afree(c->solve_lambda);
+	c->solve_lambda = NULL;
 }
 
 // Build blocks for an island's joints.
@@ -1252,8 +1258,8 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 
 	// --- Velocity solve ---
 	// Generic RHS: vel_rhs[d] = -J_d * v - compliance * lambda_d for each DOF row.
-	double* vel_rhs = CK_ALLOC(n * sizeof(double));
-	double* vel_lambda = CK_ALLOC(n * sizeof(double));
+	double* vel_rhs = c->solve_rhs;
+	double* vel_lambda = c->solve_lambda;
 	memset(vel_rhs, 0, n * sizeof(double));
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
@@ -1302,11 +1308,8 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 		}
 	}
 
-	if (!ldl_validate_lambda(vel_lambda, n)) {
-		CK_FREE(vel_rhs);
-		CK_FREE(vel_lambda);
+	if (!ldl_validate_lambda(vel_lambda, n))
 		return;
-	}
 
 	// Debug
 	int dbg = g_ldl_debug_enabled && n <= LDL_MAX_DOF;
@@ -1338,9 +1341,6 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 	}
 
 	ldl_apply_acc += perf_now() - t_apply_start;
-
-	CK_FREE(vel_rhs);
-	CK_FREE(vel_lambda);
 }
 
 // Position correction using factored K. Called AFTER integrate_positions to correct
@@ -1351,8 +1351,8 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 	int n = c->n;
 	LDL_Topology* t = c->topo;
 
-	double* pos_rhs = CK_ALLOC(n * sizeof(double));
-	double* pos_lambda = CK_ALLOC(n * sizeof(double));
+	double* pos_rhs = c->solve_rhs;
+	double* pos_lambda = c->solve_lambda;
 	memset(pos_rhs, 0, n * sizeof(double));
 	double beta = SOLVER_POS_BAUMGARTE;
 	double ptv = beta / sub_dt;
@@ -1411,9 +1411,6 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 		CK_FREE(pos_delta);
 		CK_FREE(ang_delta);
 	}
-
-	CK_FREE(pos_rhs);
-	CK_FREE(pos_lambda);
 }
 
 // -----------------------------------------------------------------------------
@@ -1474,10 +1471,16 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 		// Enable debug capture only for the inspected island
 		g_ldl_debug_enabled = (ii == g_ldl_debug_island);
 
-		// Re-allocate L_factors if freed by sleep cache
+		// Re-allocate L_factors and solve scratch if freed by sleep cache
 		if (!c->L_factors && c->topo && c->topo->L_factors_size > 0) {
 			afit(c->L_factors, c->topo->L_factors_size);
 			asetlen(c->L_factors, c->topo->L_factors_size);
+		}
+		if (!c->solve_rhs && c->n > 0) {
+			afit(c->solve_rhs, c->n);
+			asetlen(c->solve_rhs, c->n);
+			afit(c->solve_lambda, c->n);
+			asetlen(c->solve_lambda, c->n);
 		}
 
 		// Numeric factorization every substep (lever arms change after integrate_positions)

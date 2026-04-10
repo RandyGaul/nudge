@@ -236,6 +236,10 @@ typedef struct LDL_Cache
 	double diag_D[LDL_MAX_NODES][12];    // D pivots (max 12 per block)
 	int topo_version;   // world topo version when blocks were built
 
+	// Preallocated solve scratch buffers (sized to n DOFs, reused across substeps)
+	CK_DYNA double* solve_rhs;
+	CK_DYNA double* solve_lambda;
+
 	// Shattering state (weight-based: no virtual body copies)
 	int virtual_body_count;          // count of virtual shard indices (for graph topology)
 	CK_DYNA int* body_remap;         // real_body_idx -> first virtual shard index (-1 if not shattered)
