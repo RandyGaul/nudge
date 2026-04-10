@@ -112,7 +112,7 @@ typedef struct BVHTree
 typedef struct BroadPair { int a, b; } BroadPair;
 
 #define BVH_AABB_MARGIN 0.05f
-#define BVH_FAT_MARGIN  0.1f
+#define BVH_FAT_MARGIN  0.2f
 
 // -----------------------------------------------------------------------------
 // Tree lifecycle.
