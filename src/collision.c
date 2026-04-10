@@ -1139,12 +1139,13 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	for (int i = 0; i < sap_count; i++) {
 		float max_x = sap[i].max_x;
 		int a = sap[i].body_idx;
+		AABB ta = tight[a];
+		int isl_a = w->body_cold[a].island_id;
 		for (int j = i + 1; j < sap_count && sap[j].min_x <= max_x; j++) {
 			int b = sap[j].body_idx;
-			// y and z overlap (x already confirmed by sweep).
-			if (tight[a].min.y > tight[b].max.y || tight[a].max.y < tight[b].min.y) continue;
-			if (tight[a].min.z > tight[b].max.z || tight[a].max.z < tight[b].min.z) continue;
-			int isl_a = w->body_cold[a].island_id, isl_b = w->body_cold[b].island_id;
+			if (ta.min.y > tight[b].max.y || ta.max.y < tight[b].min.y) continue;
+			if (ta.min.z > tight[b].max.z || ta.max.z < tight[b].min.z) continue;
+			int isl_b = w->body_cold[b].island_id;
 			if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
 			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
 			narrowphase_pair(w, a, b, manifolds);
