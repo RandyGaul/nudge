@@ -312,6 +312,11 @@ typedef struct SolverContact
 	float lambda_t2;     // accumulated tangent2 impulse
 	float softness;      // soft constraint regularization (0 = rigid/NGS)
 	float penetration;   // cached for position correction pass
+	// Precomputed angular impulse: I_w * cross(r, direction) per row per body.
+	// Applying angular impulse = scale(w_*, delta) instead of cross+matmul.
+	v3 w_n_a, w_n_b;    // normal row
+	v3 w_t1_a, w_t1_b;  // tangent1 row
+	v3 w_t2_a, w_t2_b;  // tangent2 row
 	uint32_t feature_id; // geometric feature key for warm starting
 } SolverContact;
 

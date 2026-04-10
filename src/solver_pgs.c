@@ -49,6 +49,17 @@ static void apply_impulse(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, v3 impulse)
 	b->angular_velocity = add(b->angular_velocity, inv_inertia_world_mul(b, cross(r_b, impulse)));
 }
 
+// Apply a scalar impulse along a precomputed direction.
+// w_a/w_b = precomputed I_w * cross(r, direction), so angular part is just scale.
+static void apply_impulse_row(BodyHot* a, BodyHot* b, v3 direction, v3 w_a, v3 w_b, float delta)
+{
+	v3 P = scale(direction, delta);
+	a->velocity = sub(a->velocity, scale(P, a->inv_mass));
+	b->velocity = add(b->velocity, scale(P, b->inv_mass));
+	a->angular_velocity = sub(a->angular_velocity, scale(w_a, delta));
+	b->angular_velocity = add(b->angular_velocity, scale(w_b, delta));
+}
+
 // Match a new contact to a cached contact by feature ID. Returns index or -1.
 static int warm_match(WarmManifold* wm, uint32_t feature_id)
 {
@@ -119,10 +130,18 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 				}
 			}
 
+			// Precompute angular impulse vectors: I_w * cross(r, direction)
+			s.w_n_a = inv_inertia_world_mul(a, cross(s.r_a, s.normal));
+			s.w_n_b = inv_inertia_world_mul(b, cross(s.r_b, s.normal));
+
 			if (!patch_mode) {
 				contact_tangent_basis(ct->normal, &s.tangent1, &s.tangent2);
 				s.eff_mass_t1 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent1);
 				s.eff_mass_t2 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent2);
+				s.w_t1_a = inv_inertia_world_mul(a, cross(s.r_a, s.tangent1));
+				s.w_t1_b = inv_inertia_world_mul(b, cross(s.r_b, s.tangent1));
+				s.w_t2_a = inv_inertia_world_mul(a, cross(s.r_a, s.tangent2));
+				s.w_t2_b = inv_inertia_world_mul(b, cross(s.r_b, s.tangent2));
 			}
 
 			v3 vel_a = add(a->velocity, cross(a->angular_velocity, s.r_a));
@@ -529,7 +548,7 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
 				float old_n = s->lambda_n;
 				s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
-				apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
+				apply_impulse_row(a, b, s->normal, s->w_n_a, s->w_n_b, s->lambda_n - old_n);
 				total_lambda_n += s->lambda_n;
 			}
 
@@ -566,7 +585,7 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
 				float old_n = s->lambda_n;
 				s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
-				apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n - old_n));
+				apply_impulse_row(a, b, s->normal, s->w_n_a, s->w_n_b, s->lambda_n - old_n);
 			}
 			// Per-contact friction (uses normal impulse from above)
 			for (int ci = 0; ci < m->contact_count; ci++) {
@@ -576,13 +595,13 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 				float vt1 = dot(dv, s->tangent1);
 				float old_t1 = s->lambda_t1;
 				s->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + s->eff_mass_t1*(-vt1), max_f));
-				apply_impulse(a, b, s->r_a, s->r_b, scale(s->tangent1, s->lambda_t1 - old_t1));
+				apply_impulse_row(a, b, s->tangent1, s->w_t1_a, s->w_t1_b, s->lambda_t1 - old_t1);
 
 				dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
 				float vt2 = dot(dv, s->tangent2);
 				float old_t2 = s->lambda_t2;
 				s->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + s->eff_mass_t2*(-vt2), max_f));
-				apply_impulse(a, b, s->r_a, s->r_b, scale(s->tangent2, s->lambda_t2 - old_t2));
+				apply_impulse_row(a, b, s->tangent2, s->w_t2_a, s->w_t2_b, s->lambda_t2 - old_t2);
 			}
 		}
 		break;
