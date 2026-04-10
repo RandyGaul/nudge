@@ -132,13 +132,12 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 				}
 			}
 
-			// Precompute cross(r, normal) for dv dot product + angular impulse
-			s.rn_a = cross(s.r_a, s.normal);
-			s.rn_b = cross(s.r_b, s.normal);
-			s.w_n_a = inv_inertia_world_mul(a, s.rn_a);
-			s.w_n_b = inv_inertia_world_mul(b, s.rn_b);
-
 			if (!patch_mode) {
+				// Coulomb mode: precompute angular data (not used by patch fast path)
+				s.rn_a = cross(s.r_a, s.normal);
+				s.rn_b = cross(s.r_b, s.normal);
+				s.w_n_a = inv_inertia_world_mul(a, s.rn_a);
+				s.w_n_b = inv_inertia_world_mul(b, s.rn_b);
 				contact_tangent_basis(ct->normal, &s.tangent1, &s.tangent2);
 				s.eff_mass_t1 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent1);
 				s.eff_mass_t2 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent2);
