@@ -11092,6 +11092,7 @@ static void bench_hull_chaos(int initial_bodies, int frames, int churn_per_frame
 	int total = asize(alive);
 	printf("bench_hull_chaos: %d bodies (%d hulls + %d mixed), %d frames, churn=%d/frame\n", total, initial_bodies, initial_bodies / 4, frames, churn_per_frame);
 
+	narrowphase_reset_timers();
 	PerfTimers acc = {0};
 	PGSTimers pacc = {0};
 	float dt = 1.0f / 60.0f;
@@ -11116,6 +11117,7 @@ static void bench_hull_chaos(int initial_bodies, int frames, int churn_per_frame
 		}
 
 		world_step(w, dt);
+		narrowphase_end_frame();
 		PerfTimers p = world_get_perf(w);
 		acc.broadphase += p.broadphase;
 		acc.pre_solve += p.pre_solve;
@@ -11150,6 +11152,7 @@ static void bench_hull_chaos(int initial_bodies, int frames, int churn_per_frame
 	printf("  pgs.iterations: %8.3f ms\n", pacc.iterations / n * 1000.0);
 	printf("  pgs.relax:      %8.3f ms\n", pacc.relax / n * 1000.0);
 	printf("  pgs.post_solve: %8.3f ms\n", pacc.post_solve / n * 1000.0);
+	narrowphase_print_timers();
 
 	afree(alive);
 	for (int i = 0; i < HULL_POOL_SIZE; i++) hull_free(hull_pool[i]);
