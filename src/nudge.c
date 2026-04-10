@@ -10,9 +10,7 @@
 #include "solver_pgs.c"
 #include "joints.c"
 #include "solver_ldl.c"
-#include "solver_cr.c"
 #include "islands.c"
-#include "solver_avbd.c"
 
 // -----------------------------------------------------------------------------
 // World.
@@ -33,14 +31,6 @@ World create_world(WorldParams params)
 	w->max_push_velocity = params.max_push_velocity > 0.0f ? params.max_push_velocity : 3.0f;
 	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 4;
 	w->ldl_correction_iter = -2; // -2 = auto: velocity_iters/2 (mid-loop, PGS can recover after LDL)
-	w->cr_max_iters = 30;
-	w->cr_tolerance = 1e-6f;
-	w->cr_active_set_mask = 1;
-	w->avbd_alpha = 0.99f;
-	w->avbd_beta_lin = 10000.0f;
-	w->avbd_beta_ang = 100.0f;
-	w->avbd_gamma = 0.999f;
-	w->avbd_iterations = 20;
 	w->bvh_static = CK_ALLOC(sizeof(BVHTree));
 	w->bvh_dynamic = CK_ALLOC(sizeof(BVHTree));
 	bvh_init(w->bvh_static);
@@ -56,8 +46,6 @@ void destroy_world(World world)
 	}
 	afree(w->debug_contacts);
 	map_free(w->warm_cache);
-	map_free(w->avbd_warm_cache);
-	afree(w->avbd_prev_velocity);
 	bvh_free(w->bvh_static); CK_FREE(w->bvh_static);
 	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
 	split_free(w->body_cold, w->body_hot, w->body_gen, w->body_free);
@@ -65,6 +53,7 @@ void destroy_world(World world)
 	for (int i = 0; i < asize(w->islands); i++) ldl_cache_free(&w->islands[i].ldl);
 	afree(w->islands); afree(w->island_gen); afree(w->island_free);
 	map_free(w->prev_touching);
+	map_free(w->joint_pairs);
 	CK_FREE(w);
 }
 
@@ -131,17 +120,6 @@ void world_step(World world, float dt)
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
 
-	// AVBD takes a completely different path — it does its own collision
-	// detection after warmstarting body positions (so contacts are found at
-	// predicted positions, preventing tunneling). Must branch before the
-	// shared collision detection to avoid double island updates.
-	if (w->solver_type == SOLVER_AVBD) {
-		avbd_solve(w, dt);
-		if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
-		return;
-	}
-
-	// --- Dual solver path ---
 	warm_cache_age_and_evict(w);
 	integrate_velocities(w, sub_dt);
 
@@ -166,8 +144,16 @@ void world_step(World world, float dt)
 
 	// LDL is a direct solver -- rigid joints don't need warm-start. Stale
 	// warm-start impulses inject energy when lever arms rotate between frames.
+	// Only zero bilateral DOFs that LDL handles; preserve limit/motor DOF warm-start.
 	if (w->ldl_enabled) {
-		for (int i = 0; i < asize(sol_joints); i++) if (sol_joints[i].softness == 0.0f) for (int d = 0; d < sol_joints[i].dof; d++) sol_joints[i].lambda[d] = 0;
+		for (int i = 0; i < asize(sol_joints); i++) {
+			if (sol_joints[i].softness != 0.0f) continue;
+			JointInternal* j = &w->joints[sol_joints[i].joint_idx];
+			int ldl_dof = sol_joints[i].dof;
+			if (j->type == JOINT_HINGE && (j->hinge.limit_min != 0 || j->hinge.limit_max != 0 || j->hinge.motor_max_impulse > 0)) ldl_dof = 5;
+			if (j->type == JOINT_PRISMATIC && j->prismatic.motor_max_impulse > 0) ldl_dof = 5;
+			for (int d = 0; d < ldl_dof; d++) sol_joints[i].lambda[d] = 0;
+		}
 	}
 	joints_warm_start(w, sol_joints, asize(sol_joints));
 
@@ -190,12 +176,8 @@ void world_step(World world, float dt)
 			apush(crefs, r);
 		}
 	} else {
-		// LDL enabled: LDL handles ALL joints (rigid + soft) in a coupled solve.
-		// Soft joints get compliance regularization via their softness parameter.
-		// Do NOT add them to PGS -- double-solving causes the SET lambda from LDL
-		// to be misinterpreted by PGS's accumulate, injecting spurious impulse.
-		// TODO: joints with limits (once implemented) won't go through LDL and
-		// need to be added to PGS crefs here.
+		// LDL enabled: LDL handles all joints (bilateral DOFs).
+		// Limit DOFs are solved separately after PGS via joints_solve_limits().
 	}
 
 	int cref_count = asize(crefs);
@@ -209,11 +191,14 @@ void world_step(World world, float dt)
 	// When LDL enabled, K is factored once at substep start, and a mid-loop
 	// K^-1 residual correction is applied at the configured iteration.
 	for (int sub = 0; sub < n_sub; sub++) {
-		if (sub > 0)
+		if (sub > 0) {
 			integrate_velocities(w, sub_dt);
+			// Refresh joint Jacobians/limits from current body state (positions
+			// changed by integrate_positions last substep, velocities just updated).
+			joints_refresh_substep(w, sol_joints, asize(sol_joints), sub_dt);
+		}
 
 		int has_ldl = w->ldl_enabled && asize(sol_joints) > 0;
-		int has_cr = w->cr_enabled;
 
 		// Resolve LDL correction iteration: -2 = auto (velocity_iters/2), -1 = after loop
 		int ldl_iter = w->ldl_correction_iter;
@@ -224,7 +209,7 @@ void world_step(World world, float dt)
 			ldl_factor(w, sol_joints, asize(sol_joints), sub, sub_dt);
 
 		// LDL: direct solve for joints (velocity correction).
-		// Runs before PGS/CR so joint impulses are already applied.
+		// Runs before PGS so joint impulses are already applied.
 		if (has_ldl) {
 			if (sub > 0) {
 				for (int i = 0; i < asize(sol_joints); i++) if (sol_joints[i].softness > 0.0f) for (int d = 0; d < sol_joints[i].dof; d++) sol_joints[i].lambda[d] = 0;
@@ -232,27 +217,14 @@ void world_step(World world, float dt)
 			ldl_velocity_correct(w, sol_joints, asize(sol_joints), sub_dt);
 		}
 
-		if (has_cr) {
-			// PGS -> CR [-> PGS]: PGS handles constraint projection, CR accelerates
-			// global propagation as a pure unconstrained linear solve.
-			for (int iter = 0; iter < 3; iter++)
-				for (int c = 0; c < color_count; c++)
-					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
-			int contacts_only = has_ldl;
-			cr_velocity_solve(w, sm, asize(sm), sc, sol_joints, asize(sol_joints), sub_dt, contacts_only);
-		} else if (!has_ldl) {
-			// Plain PGS: no LDL, no CR.
-			for (int iter = 0; iter < w->velocity_iters; iter++)
-				for (int c = 0; c < color_count; c++)
-					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
-		} else {
-			// LDL only (no CR): PGS handles contacts, LDL already handled joints above.
-			for (int iter = 0; iter < w->velocity_iters; iter++)
-				for (int c = 0; c < color_count; c++)
-					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
+		// PGS: iterate all constraints (contacts, and joints when LDL is off).
+		for (int iter = 0; iter < w->velocity_iters; iter++) {
+			for (int c = 0; c < color_count; c++)
+				for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+					solve_constraint(w, &crefs[i], sm, sc, sol_joints);
+			// Joint limits: solved each PGS iteration (limit DOFs only).
+			// LDL handles the bilateral DOFs; this handles the unilateral limit.
+			joints_solve_limits(w, sol_joints, asize(sol_joints));
 		}
 
 		integrate_positions(w, sub_dt);
@@ -331,9 +303,6 @@ Body create_body(World world, BodyParams params)
 		.linear_damping = params.linear_damping,
 		.angular_damping = ang_damp,
 	};
-	if (idx < asize(w->avbd_prev_velocity))
-		w->avbd_prev_velocity[idx] = w->body_hot[idx].velocity;
-
 	return split_handle(Body, w->body_gen, idx);
 }
 
@@ -429,8 +398,6 @@ void body_set_velocity(World world, Body body, v3 vel)
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
 	w->body_hot[idx].velocity = vel;
-	if (idx < asize(w->avbd_prev_velocity))
-		w->avbd_prev_velocity[idx] = vel;
 	int isl = w->body_cold[idx].island_id;
 	if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
 		island_wake(w, isl);
@@ -571,14 +538,114 @@ Joint create_hinge(World world, HingeParams params)
 		apush(w->joint_gen, 1);
 	}
 
+	v3 axis_a_local = norm(params.local_axis_a);
+	v3 axis_b_local = norm(params.local_axis_b);
+
+	// Compute reference directions perpendicular to the hinge axis for angle measurement.
+	// local_ref_a: arbitrary unit vector perpendicular to axis_a in body A's local space.
+	// local_ref_b: chosen so measured angle = 0 at the initial configuration.
+	v3 ref_a, ref_a_t2;
+	hinge_tangent_basis(axis_a_local, &ref_a, &ref_a_t2);
+	// Transform ref_a into world, then into body B's local space
+	quat q_a = w->body_hot[ba].rotation;
+	quat q_b = w->body_hot[bb].rotation;
+	v3 ref_a_world = rotate(q_a, ref_a);
+	v3 ref_b = rotate(inv(q_b), ref_a_world);
+
 	w->joints[idx] = (JointInternal){
 		.type = JOINT_HINGE,
 		.body_a = ba, .body_b = bb,
 		.hinge = {
 			.local_a = params.local_offset_a,
 			.local_b = params.local_offset_b,
+			.local_axis_a = axis_a_local,
+			.local_axis_b = axis_b_local,
+			.local_ref_a = ref_a,
+			.local_ref_b = ref_b,
+			.spring = params.spring,
+		},
+		.island_id = -1, .island_prev = -1, .island_next = -1,
+	};
+	link_joint_to_islands(w, idx);
+	w->ldl_topo_version++;
+	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
+}
+
+Joint create_fixed(World world, FixedParams params)
+{
+	assert(is_valid(params.local_offset_a) && "create_fixed: local_offset_a is NaN/inf");
+	assert(is_valid(params.local_offset_b) && "create_fixed: local_offset_b is NaN/inf");
+
+	WorldInternal* w = (WorldInternal*)world.id;
+	int ba = handle_index(params.body_a);
+	int bb = handle_index(params.body_b);
+	assert(split_valid(w->body_gen, params.body_a));
+	assert(split_valid(w->body_gen, params.body_b));
+
+	int idx;
+	if (asize(w->joint_free) > 0) {
+		idx = apop(w->joint_free);
+		w->joint_gen[idx]++;
+	} else {
+		idx = asize(w->joints);
+		JointInternal zero = {0};
+		apush(w->joints, zero);
+		apush(w->joint_gen, 1);
+	}
+
+	quat q_a = w->body_hot[ba].rotation;
+	quat q_b = w->body_hot[bb].rotation;
+	w->joints[idx] = (JointInternal){
+		.type = JOINT_FIXED,
+		.body_a = ba, .body_b = bb,
+		.fixed = {
+			.local_a = params.local_offset_a,
+			.local_b = params.local_offset_b,
+			.local_rel_quat = mul(inv(q_a), q_b),
+			.spring = params.spring,
+		},
+		.island_id = -1, .island_prev = -1, .island_next = -1,
+	};
+	link_joint_to_islands(w, idx);
+	w->ldl_topo_version++;
+	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
+}
+
+Joint create_prismatic(World world, PrismaticParams params)
+{
+	assert(is_valid(params.local_offset_a) && "create_prismatic: local_offset_a is NaN/inf");
+	assert(is_valid(params.local_offset_b) && "create_prismatic: local_offset_b is NaN/inf");
+	assert(is_valid(params.local_axis_a) && "create_prismatic: local_axis_a is NaN/inf");
+	assert(is_valid(params.local_axis_b) && "create_prismatic: local_axis_b is NaN/inf");
+
+	WorldInternal* w = (WorldInternal*)world.id;
+	int ba = handle_index(params.body_a);
+	int bb = handle_index(params.body_b);
+	assert(split_valid(w->body_gen, params.body_a));
+	assert(split_valid(w->body_gen, params.body_b));
+
+	int idx;
+	if (asize(w->joint_free) > 0) {
+		idx = apop(w->joint_free);
+		w->joint_gen[idx]++;
+	} else {
+		idx = asize(w->joints);
+		JointInternal zero = {0};
+		apush(w->joints, zero);
+		apush(w->joint_gen, 1);
+	}
+
+	quat q_a = w->body_hot[ba].rotation;
+	quat q_b = w->body_hot[bb].rotation;
+	w->joints[idx] = (JointInternal){
+		.type = JOINT_PRISMATIC,
+		.body_a = ba, .body_b = bb,
+		.prismatic = {
+			.local_a = params.local_offset_a,
+			.local_b = params.local_offset_b,
 			.local_axis_a = norm(params.local_axis_a),
 			.local_axis_b = norm(params.local_axis_b),
+			.local_rel_quat = mul(inv(q_a), q_b),
 			.spring = params.spring,
 		},
 		.island_id = -1, .island_prev = -1, .island_next = -1,
@@ -598,6 +665,60 @@ void destroy_joint(World world, Joint joint)
 	w->joint_gen[idx]++; // even = dead
 	w->ldl_topo_version++;
 	apush(w->joint_free, idx);
+}
+
+void joint_set_hinge_limits(World world, Joint joint, float min_angle, float max_angle)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(joint);
+	assert(w->joint_gen[idx] == handle_gen(joint));
+	assert(w->joints[idx].type == JOINT_HINGE && "joint_set_hinge_limits: not a hinge joint");
+	w->joints[idx].hinge.limit_min = min_angle;
+	w->joints[idx].hinge.limit_max = max_angle;
+}
+
+void joint_set_distance_limits(World world, Joint joint, float min_distance, float max_distance)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(joint);
+	assert(w->joint_gen[idx] == handle_gen(joint));
+	assert(w->joints[idx].type == JOINT_DISTANCE && "joint_set_distance_limits: not a distance joint");
+	w->joints[idx].distance.limit_min = min_distance;
+	w->joints[idx].distance.limit_max = max_distance;
+}
+
+void joint_clear_limits(World world, Joint joint)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(joint);
+	assert(w->joint_gen[idx] == handle_gen(joint));
+	if (w->joints[idx].type == JOINT_HINGE) {
+		w->joints[idx].hinge.limit_min = 0;
+		w->joints[idx].hinge.limit_max = 0;
+	} else if (w->joints[idx].type == JOINT_DISTANCE) {
+		w->joints[idx].distance.limit_min = 0;
+		w->joints[idx].distance.limit_max = 0;
+	}
+}
+
+void joint_set_hinge_motor(World world, Joint joint, float speed, float max_impulse)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(joint);
+	assert(w->joint_gen[idx] == handle_gen(joint));
+	assert(w->joints[idx].type == JOINT_HINGE);
+	w->joints[idx].hinge.motor_speed = speed;
+	w->joints[idx].hinge.motor_max_impulse = max_impulse;
+}
+
+void joint_set_prismatic_motor(World world, Joint joint, float speed, float max_impulse)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(joint);
+	assert(w->joint_gen[idx] == handle_gen(joint));
+	assert(w->joints[idx].type == JOINT_PRISMATIC);
+	w->joints[idx].prismatic.motor_speed = speed;
+	w->joints[idx].prismatic.motor_max_impulse = max_impulse;
 }
 
 static void bvh_debug_walk(BVHTree* t, int ni, int depth, BVHDebugFn fn, void* user)
@@ -640,8 +761,28 @@ void world_debug_joints(World world, JointDebugFn fn, void* user)
 		} else if (j->type == JOINT_HINGE) {
 			info.anchor_a = add(a->position, rotate(a->rotation, j->hinge.local_a));
 			info.anchor_b = add(b->position, rotate(b->rotation, j->hinge.local_b));
-			info.axis_a = rotate(a->rotation, j->hinge.local_axis_a);
+			info.axis_a = norm(rotate(a->rotation, j->hinge.local_axis_a));
 			info.is_soft = j->hinge.spring.frequency > 0;
+			info.motor_speed = j->hinge.motor_speed;
+			info.motor_max_impulse = j->hinge.motor_max_impulse;
+			info.limit_min = j->hinge.limit_min;
+			info.limit_max = j->hinge.limit_max;
+			info.ref_a = rotate(a->rotation, j->hinge.local_ref_a);
+			info.ref_b = rotate(b->rotation, j->hinge.local_ref_b);
+			float angle = atan2f(dot(cross(info.ref_a, info.ref_b), info.axis_a), dot(info.ref_a, info.ref_b));
+			info.current_angle = angle;
+			info.limit_active = (j->hinge.limit_min != 0 && angle <= j->hinge.limit_min) || (j->hinge.limit_max != 0 && angle >= j->hinge.limit_max);
+		} else if (j->type == JOINT_FIXED) {
+			info.anchor_a = add(a->position, rotate(a->rotation, j->fixed.local_a));
+			info.anchor_b = add(b->position, rotate(b->rotation, j->fixed.local_b));
+			info.is_soft = j->fixed.spring.frequency > 0;
+		} else if (j->type == JOINT_PRISMATIC) {
+			info.anchor_a = add(a->position, rotate(a->rotation, j->prismatic.local_a));
+			info.anchor_b = add(b->position, rotate(b->rotation, j->prismatic.local_b));
+			info.axis_a = norm(rotate(a->rotation, j->prismatic.local_axis_a));
+			info.is_soft = j->prismatic.spring.frequency > 0;
+			info.motor_speed = j->prismatic.motor_speed;
+			info.motor_max_impulse = j->prismatic.motor_max_impulse;
 		}
 		fn(info, user);
 	}

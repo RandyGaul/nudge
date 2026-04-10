@@ -306,34 +306,31 @@ int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
 // GJK distance is fuzzy near zero -- use layered thresholds.
 // LINEAR_SLOP defined in nudge.c (solver constants)
 
-// GJK query helpers. Hull proxies need a temp buffer for pre-scaled verts.
+// GJK query helpers.
 #define MAX_HULL_VERTS 256
 
 static GJK_Result gjk_query_point_hull(v3 pt, ConvexHull h)
 {
 	v3 scaled[MAX_HULL_VERTS];
-	GJK_Proxy pa, pb;
-	gjk_proxy_point(&pa, pt);
-	gjk_proxy_hull(&pb, h.hull, h.center, h.rotation, h.scale, scaled);
-	return gjk_distance_ex(&pa, &pb);
+	GJK_Shape a = gjk_sphere(pt, 0);
+	GJK_Shape b = gjk_hull_scaled(h.hull, h.center, h.rotation, h.scale, scaled);
+	return gjk_distance(a, b);
 }
 
 static GJK_Result gjk_query_segment_hull(v3 p, v3 q, ConvexHull h)
 {
 	v3 scaled[MAX_HULL_VERTS];
-	GJK_Proxy pa, pb;
-	gjk_proxy_segment(&pa, p, q);
-	gjk_proxy_hull(&pb, h.hull, h.center, h.rotation, h.scale, scaled);
-	return gjk_distance_ex(&pa, &pb);
+	GJK_Shape a = gjk_capsule(p, q, 0);
+	GJK_Shape b = gjk_hull_scaled(h.hull, h.center, h.rotation, h.scale, scaled);
+	return gjk_distance(a, b);
 }
 
 static GJK_Result gjk_query_hull_hull(ConvexHull a, ConvexHull b)
 {
 	v3 sa[MAX_HULL_VERTS], sb[MAX_HULL_VERTS];
-	GJK_Proxy pa, pb;
-	gjk_proxy_hull(&pa, a.hull, a.center, a.rotation, a.scale, sa);
-	gjk_proxy_hull(&pb, b.hull, b.center, b.rotation, b.scale, sb);
-	return gjk_distance_ex(&pa, &pb);
+	GJK_Shape ga = gjk_hull_scaled(a.hull, a.center, a.rotation, a.scale, sa);
+	GJK_Shape gb = gjk_hull_scaled(b.hull, b.center, b.rotation, b.scale, sb);
+	return gjk_distance(ga, gb);
 }
 
 
@@ -1065,6 +1062,20 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	if (hit) apush(*manifolds, im);
 }
 
+static uint64_t body_pair_key(int a, int b)
+{
+	uint32_t lo = a < b ? a : b;
+	uint32_t hi = a < b ? b : a;
+	return ((uint64_t)lo << 32) | (uint64_t)hi;
+}
+
+static int jointed_pair_skip(CK_MAP(uint8_t) joint_pairs, int a, int b)
+{
+	if (!joint_pairs) return 0;
+	uint64_t key = body_pair_key(a, b);
+	return map_get_ptr(joint_pairs, key) != NULL;
+}
+
 static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
 {
 	int count = asize(w->body_hot);
@@ -1078,6 +1089,7 @@ static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
 			// Skip sleeping-vs-sleeping pairs
 			int isl_i = w->body_cold[i].island_id, isl_j = w->body_cold[j].island_id;
 			if (isl_i >= 0 && isl_j >= 0 && (w->island_gen[isl_i] & 1) && (w->island_gen[isl_j] & 1) && !w->islands[isl_i].awake && !w->islands[isl_j].awake) continue;
+			if (jointed_pair_skip(w->joint_pairs, i, j)) continue;
 			narrowphase_pair(w, i, j, manifolds);
 		}
 	}
@@ -1114,14 +1126,33 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		if (w->body_hot[a].inv_mass == 0.0f && w->body_hot[b].inv_mass == 0.0f) continue;
 		int isl_a = w->body_cold[a].island_id, isl_b = w->body_cold[b].island_id;
 		if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
+		if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
 		narrowphase_pair(w, a, b, manifolds);
 	}
 
 	afree(pairs);
 }
 
+// Rebuild joint_pairs map when joint topology changes (create/destroy joint).
+// O(joint_count) build, O(1) lookup per broadphase pair.
+static void joint_pairs_refresh(WorldInternal* w)
+{
+	if (w->joint_pairs_version == w->ldl_topo_version) return;
+	map_free(w->joint_pairs);
+	w->joint_pairs = NULL;
+	int jcount = asize(w->joints);
+	for (int i = 0; i < jcount; i++) {
+		if (!split_alive(w->joint_gen, i)) continue;
+		JointInternal* j = &w->joints[i];
+		uint64_t key = body_pair_key(j->body_a, j->body_b);
+		map_set(w->joint_pairs, key, (uint8_t)1);
+	}
+	w->joint_pairs_version = w->ldl_topo_version;
+}
+
 static void broadphase_and_collide(WorldInternal* w, InternalManifold** manifolds)
 {
+	joint_pairs_refresh(w);
 	if (w->broadphase_type == BROADPHASE_BVH) broadphase_bvh(w, manifolds);
 	else broadphase_n2(w, manifolds);
 }

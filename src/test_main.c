@@ -22,6 +22,7 @@
 #include "tests_spring_unit.c"
 #include "tests_shattering_unit.c"
 #include "tests_pgs_vs_ldl.c"
+#include "tests_gjk_perf.c"
 
 int main(int argc, char* argv[])
 {
@@ -118,33 +119,35 @@ int main(int argc, char* argv[])
 			else printf("unknown test: %s\n", argv[i]);
 		}
 		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
-	} else if (argc > 1 && strcmp(argv[1], "--cr-bench") == 0) {
-		test_cr_precond_comparison();
-	} else if (argc > 1 && strcmp(argv[1], "--cr") == 0) {
-		test_pass = 0; test_fail = 0;
-		for (int i = 2; i < argc; i++) {
-			if (strcmp(argv[i], "--bail") == 0) test_bail = 1;
-		}
-		run_block_lcp_tests();
-		run_cr_tests();
-		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	} else if (argc > 1 && strcmp(argv[1], "--quick") == 0) {
 		test_ldl_stress_single_constraint();
 		test_ldl_heavy_chain();
 		test_ldl_two_independent_chains();
 		test_ldl_hub_star_shattering();
 		test_ldl_topology_change();
-		test_ldl_energy_comprehensive();
-		test_ldl_long_chain();
 		test_ldl_stress_dense_clique();
 		test_ldl_stress_alternating_mass();
 		test_ldl_mixed_chain_and_hub();
-		test_ldl_stress_stretched_recovery();
-		test_ldl_stress_heavy_stretched_recovery();
+		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
+	} else if (argc > 1 && strcmp(argv[1], "--gjk-perf") == 0) {
+		test_pass = 0; test_fail = 0;
+		for (int i = 1; i < argc; i++) {
+			if (strcmp(argv[i], "--bail") == 0) test_bail = 1;
+		}
+		run_gjk_perf_tests();
+		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
+	} else if (argc > 1 && strcmp(argv[1], "--slow") == 0) {
+		test_pass = 0; test_fail = 0;
+		for (int i = 1; i < argc; i++) {
+			if (strcmp(argv[i], "--bail") == 0) test_bail = 1;
+		}
+		run_solver_tests_slow();
+		run_ldl_stress_tests();
 		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	} else {
 		for (int i = 1; i < argc; i++) {
 			if (strcmp(argv[i], "--bail") == 0) test_bail = 1;
+			if (strcmp(argv[i], "--timing") == 0) test_timing = 1;
 		}
 		run_tests();
 		run_ldl_unit_tests();
