@@ -97,7 +97,6 @@ typedef struct BVHLeaf
 	int node_idx;
 	int child_slot; // 0=A, 1=B
 	v3 fat_min, fat_max; // expanded AABB for motion threshold
-	AABB tight; // exact body AABB (no margin), cached during refit for narrowphase pre-filter
 } BVHLeaf;
 
 typedef struct BVHTree
@@ -154,11 +153,11 @@ static void bvh_child_set_aabb(BVHChild* c, AABB box) { c->min = box.min; c->max
 
 static void bvh_child_set_leaf(BVHChild* c, AABB box, int leaf_idx) { bvh_child_set_aabb(c, box); c->index = ~leaf_idx; c->leaf_count = 1; }
 
-// Place a leaf. Node child stores tight AABB for overlap queries; leaf stores fat AABB for refit threshold.
+// Place a leaf with fat AABB. The node child stores the fat AABB for conservative overlap.
 static void bvh_place_leaf(BVHTree* t, int ni, int slot, AABB tight, int leaf_idx)
 {
 	AABB fat = aabb_expand(tight, BVH_FAT_MARGIN);
-	bvh_child_set_leaf(bvh_child(&t->nodes[ni], slot), tight, leaf_idx);
+	bvh_child_set_leaf(bvh_child(&t->nodes[ni], slot), fat, leaf_idx);
 	t->leaves[leaf_idx].node_idx = ni;
 	t->leaves[leaf_idx].child_slot = slot;
 	t->leaves[leaf_idx].fat_min = fat.min;
@@ -740,14 +739,12 @@ static BVHChild bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int p
 		if (!bvh_body_sleeping(r->world, bi)) {
 			all_sleeping = 0;
 			AABB tight = aabb_expand(body_aabb(&r->world->body_hot[bi], &r->world->body_cold[bi]), BVH_AABB_MARGIN);
-			// Always write tight AABB to tree node for tighter query bounds.
-			bvh_child_set_aabb(&dst->a, tight);
-			// Fat AABB in leaf controls refit frequency -- only update when exceeded.
 			v3 fmin = r->tree->leaves[li].fat_min, fmax = r->tree->leaves[li].fat_max;
 			if (!(tight.min.x >= fmin.x && tight.min.y >= fmin.y && tight.min.z >= fmin.z && tight.max.x <= fmax.x && tight.max.y <= fmax.y && tight.max.z <= fmax.z)) {
 				AABB fat = aabb_expand(tight, BVH_FAT_MARGIN);
 				r->tree->leaves[li].fat_min = fat.min;
 				r->tree->leaves[li].fat_max = fat.max;
+				bvh_child_set_aabb(&dst->a, fat);
 				any_changed = 1;
 			}
 		}
@@ -771,14 +768,12 @@ static BVHChild bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int p
 		if (!bvh_body_sleeping(r->world, bi)) {
 			all_sleeping = 0;
 			AABB tight = aabb_expand(body_aabb(&r->world->body_hot[bi], &r->world->body_cold[bi]), BVH_AABB_MARGIN);
-			// Always write tight AABB to tree node for tighter query bounds.
-			bvh_child_set_aabb(&dst->b, tight);
-			// Fat AABB in leaf controls refit frequency -- only update when exceeded.
 			v3 fmin = r->tree->leaves[li].fat_min, fmax = r->tree->leaves[li].fat_max;
 			if (!(tight.min.x >= fmin.x && tight.min.y >= fmin.y && tight.min.z >= fmin.z && tight.max.x <= fmax.x && tight.max.y <= fmax.y && tight.max.z <= fmax.z)) {
 				AABB fat = aabb_expand(tight, BVH_FAT_MARGIN);
 				r->tree->leaves[li].fat_min = fat.min;
 				r->tree->leaves[li].fat_max = fat.max;
+				bvh_child_set_aabb(&dst->b, fat);
 				any_changed = 1;
 			}
 		}
