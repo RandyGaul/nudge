@@ -229,8 +229,12 @@ static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
 	// Branchless base: mid + copysign(half_axis, da)
 	__m128 sign = _mm_and_ps(_mm_set1_ps(cda), _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000)));
 	v3 cbase = add(sp->cylinder.mid, (v3){ .m = _mm_xor_ps(sp->cylinder.half_axis.m, sign) });
-	v3 cdp = sub(sd, scale(cu, cda)); float cpl = len(cdp);
-	return (cpl > FLT_EPSILON) ? add(cbase, scale(cdp, sp->cylinder.radius / cpl)) : cbase;
+	v3 cdp = sub(sd, scale(cu, cda));
+	__m128 cdp2 = v3_dot_m(cdp, cdp);
+	__m128 cpl = _mm_sqrt_ss(cdp2);
+	float cplf = _mm_cvtss_f32(cpl);
+	if (cplf <= FLT_EPSILON) return cbase;
+	return add(cbase, v3_scale_m(cdp, _mm_div_ss(_mm_set_ss(sp->cylinder.radius), cpl)));
 }
 // Support macro: dispatches per shape type. Box/cylinder/hull-scan are functions to reduce code size.
 #define gjk_support(shape, dir, out_feat, out_point) do {                                                                 \
