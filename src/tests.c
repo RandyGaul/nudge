@@ -11111,6 +11111,97 @@ static void bench_suite(WorldParams wp)
 	printf("=== Suite Complete ===\n");
 }
 
+// LDL joint benchmark: many distance joints + springs to stress the direct solver.
+// Creates N_chains chains of chain_len links each. Chains are grouped in pairs
+// connected by a spring cross-link (each pair forms one island, stays under LDL_MAX_NODES).
+// Reports average LDL sub-phase timing breakdown.
+static void bench_ldl_joints(int n_chains, int chain_len, int frames, WorldParams wp)
+{
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+	wi->ldl_enabled = 1;
+
+	// Floor
+	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50) });
+
+	float link_len = 0.8f;
+	int total_bodies = 0, total_joints = 0;
+
+	// Build chains in pairs: each pair shares a cross-link spring (one island per pair).
+	// chain_len up to ~60 per chain keeps pair under LDL_MAX_NODES (128).
+	Body pair_tip = {0};
+	for (int c = 0; c < n_chains; c++) {
+		float x0 = (float)(c - n_chains / 2) * 3.0f;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(x0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		total_bodies++;
+
+		Body prev = anchor;
+		Body tip = anchor;
+		for (int i = 0; i < chain_len; i++) {
+			float y = 10.0f - (float)(i + 1) * link_len;
+			float mass = (i == chain_len - 1) ? 5.0f : 1.0f;
+			Body b = create_body(w, (BodyParams){ .position = V3(x0, y, 0), .rotation = quat_identity(), .mass = mass });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			create_distance(w, (DistanceParams){ .body_a = prev, .body_b = b, .rest_length = link_len });
+			total_bodies++;
+			total_joints++;
+			prev = b;
+			tip = b;
+		}
+
+		// Cross-link pairs: odd-numbered chains link back to previous chain tip
+		if (c % 2 == 1 && pair_tip.id != 0) {
+			create_distance(w, (DistanceParams){ .body_a = pair_tip, .body_b = tip, .rest_length = 3.0f, .spring = { .frequency = 5.0f, .damping_ratio = 1.0f } });
+			total_joints++;
+		}
+		pair_tip = tip;
+	}
+
+	printf("bench_ldl_joints: %d chains x %d links = %d bodies, %d joints, %d frames\n", n_chains, chain_len, total_bodies, total_joints, frames);
+
+	// Reset LDL timing accumulators
+	extern double ldl_topo_acc, ldl_fill_K_acc, ldl_factorize_acc, ldl_solve_acc, ldl_apply_acc, ldl_pos_acc;
+	extern int ldl_frame_count;
+	ldl_topo_acc = ldl_fill_K_acc = ldl_factorize_acc = ldl_solve_acc = ldl_apply_acc = ldl_pos_acc = 0;
+	ldl_frame_count = 0;
+
+	PerfTimers acc = {0};
+	float dt = 1.0f / 60.0f;
+	for (int frame = 0; frame < frames; frame++) {
+		world_step(w, dt);
+		ldl_frame_count++;
+		PerfTimers p = world_get_perf(w);
+		acc.total += p.total;
+		acc.pgs.ldl += p.pgs.ldl;
+		acc.pgs.pre_solve += p.pgs.pre_solve;
+		acc.pgs.iterations += p.pgs.iterations;
+		acc.pgs.relax += p.pgs.relax;
+		acc.pgs.pos_joints += p.pgs.pos_joints;
+	}
+
+	double n = (double)frames;
+	double ldl_avg = acc.pgs.ldl / n * 1000.0;
+	printf("  avg total:       %8.3f ms\n", acc.total / n * 1000.0);
+	printf("  pgs.ldl:         %8.3f ms\n", ldl_avg);
+	printf("  pgs.pre_solve:   %8.3f ms\n", acc.pgs.pre_solve / n * 1000.0);
+	printf("  pgs.iterations:  %8.3f ms\n", acc.pgs.iterations / n * 1000.0);
+	printf("  pgs.relax:       %8.3f ms\n", acc.pgs.relax / n * 1000.0);
+	printf("  pgs.pos_joints:  %8.3f ms\n", acc.pgs.pos_joints / n * 1000.0);
+	printf("  --- LDL breakdown ---\n");
+	printf("  ldl.topology:    %8.3f ms\n", ldl_topo_acc / n * 1000.0);
+	printf("  ldl.fill_K:      %8.3f ms\n", ldl_fill_K_acc / n * 1000.0);
+	printf("  ldl.factorize:   %8.3f ms\n", ldl_factorize_acc / n * 1000.0);
+	printf("  ldl.solve:       %8.3f ms\n", ldl_solve_acc / n * 1000.0);
+	printf("  ldl.apply:       %8.3f ms\n", ldl_apply_acc / n * 1000.0);
+	printf("  ldl.pos_correct: %8.3f ms\n", ldl_pos_acc / n * 1000.0);
+	printf("METRIC: ldl_avg_ms=%.6f\n", ldl_avg);
+
+	destroy_world(w);
+}
+
 // Soak test: infinite-loop fuzz with crash logging to file.
 static void test_quickhull_soak()
 {

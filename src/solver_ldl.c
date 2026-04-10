@@ -52,6 +52,15 @@ int g_ldl_debug_enabled;
 int g_ldl_debug_island = -1; // which island to capture debug data for (-1 = none)
 int g_ldl_trace_solve; // set to 1 to print detailed solve info for next LDL call
 
+// LDL sub-phase timing accumulators (seconds, summed across frames, reset by consumer).
+double ldl_topo_acc;       // symbolic topology rebuild
+double ldl_fill_K_acc;     // Jacobian + K matrix fill
+double ldl_factorize_acc;  // LDL^T pivot loop
+double ldl_solve_acc;      // forward/diagonal/back substitution
+double ldl_apply_acc;      // apply impulses to bodies
+double ldl_pos_acc;        // position correction (refactor + solve)
+int ldl_frame_count;
+
 #define SHATTER_THRESHOLD 6 // DOF threshold: bodies with more DOF than this get shattered into virtual shards
 #define SHARD_TARGET      6 // target DOF per shard
 #define LDL_MIN_COMPLIANCE 5e-5 // min regularization floor: compliance * trace(K) / dim on K diagonal + compliance*lambda in RHS
@@ -808,6 +817,8 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 	int nc = t->node_count;
 	if (nc == 0) return;
 
+	double t_fill_start = perf_now();
+
 	// Zero buffers
 	memset(c->diag_data, 0, sizeof(c->diag_data));
 	memset(c->diag_D, 0, sizeof(c->diag_D));
@@ -963,6 +974,9 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 		}
 	}
 
+	double t_factorize_start = perf_now();
+	ldl_fill_K_acc += t_factorize_start - t_fill_start;
+
 	// Factorize using precomputed pivot sequence.
 	// Diagonal blocks are packed lower-triangular — symmetric by construction.
 	for (int step = 0; step < nc; step++) {
@@ -1032,6 +1046,8 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 			}
 		}
 	}
+
+	ldl_factorize_acc += perf_now() - t_factorize_start;
 
 	// Post-factorization: verify all pivots are healthy
 	ldl_condition_check(c, t);
@@ -1264,7 +1280,9 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 		}
 	}
 
+	double t_solve_start = perf_now();
 	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, vel_rhs, vel_lambda);
+	ldl_solve_acc += perf_now() - t_solve_start;
 
 	if (g_ldl_trace_solve) {
 		printf("  [TRACE] n=%d jc=%d frame=%d\n", n, jc, w->frame);
@@ -1298,6 +1316,7 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 	// Synthetic weld deltas are skipped -- they couple shards only.
 	// Apply to REAL bodies (con->body_a/b may be virtual from shattering).
 	// s->lambda accumulates PGS + LDL for next frame's warm-start.
+	double t_apply_start = perf_now();
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
 		if (con->is_synthetic) continue;
@@ -1317,6 +1336,8 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 			else sj->lambda[d] = (float)vel_lambda[oi + d];
 		}
 	}
+
+	ldl_apply_acc += perf_now() - t_apply_start;
 
 	CK_FREE(vel_rhs);
 	CK_FREE(vel_lambda);
@@ -1438,6 +1459,7 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 
 		// Rebuild blocks on first substep or topology change
 		if (sub == 0 || c->topo_version != w->ldl_topo_version) {
+			double t_topo_start = perf_now();
 			ldl_cache_rebuild_blocks(c, w, ii, sol_joints, joint_count);
 			ldl_apply_shattering(c, w);
 			ldl_build_bundles(c);
@@ -1445,6 +1467,7 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 			if (c->topo_version != w->ldl_topo_version)
 				ldl_build_topology(c, w);
 			c->topo_version = w->ldl_topo_version;
+			ldl_topo_acc += perf_now() - t_topo_start;
 		}
 		if (c->n == 0) continue;
 
@@ -1489,6 +1512,7 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 // not dynamics — using compressed masses is safe.
 static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt)
 {
+	double t_pos_start = perf_now();
 	// Compress inv_mass and inv_inertia for position stage
 	int body_count = asize(w->body_hot);
 	float* save_inv_mass = CK_ALLOC(body_count * sizeof(float));
@@ -1518,6 +1542,8 @@ static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 		ldl_numeric_factor(c, w, sol_joints);
 		ldl_island_position_correct(c, w, sol_joints, sub_dt);
 	}
+
+	ldl_pos_acc += perf_now() - t_pos_start;
 
 	// Restore real masses
 	for (int i = 0; i < body_count; i++) {
