@@ -1220,55 +1220,26 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint)
 		for (int i = 0; i < 4; i++) fid1[i] = 0x80 | (uint8_t)i;
 		int clip_count = 4;
 
-		// 2D projected Sutherland-Hodgman: project incident verts onto reference face
-		// tangent plane, clip against axis-aligned rectangle. Threshold checks replace 3D dots.
+		// 4 side planes from rotation columns (no cross product, no normalize).
+		v3 side_n[4] = { ref_cols[u], neg(ref_cols[u]), ref_cols[v_ax], neg(ref_cols[v_ax]) };
+		float side_d[4] = { dot(ref_cols[u], ref_pos) + (&ref_he.x)[u], dot(neg(ref_cols[u]), ref_pos) + (&ref_he.x)[u], dot(ref_cols[v_ax], ref_pos) + (&ref_he.x)[v_ax], dot(neg(ref_cols[v_ax]), ref_pos) + (&ref_he.x)[v_ax] };
+
+		v3* in_buf = buf1; v3* out_buf = buf2;
+		uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
+		for (int i = 0; i < 4; i++) {
+			clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n[i], side_d[i], (uint8_t)i, out_buf, out_fid);
+			v3* sw = in_buf; in_buf = out_buf; out_buf = sw;
+			uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
+		}
+
+		// Corner snap: 4 reference face corners from rotation columns.
 		v3 ref_center = add(ref_pos, scale(ref_cols[la], nsign * (&ref_he.x)[la]));
-		v3 tu = ref_cols[u], tv = ref_cols[v_ax];
-		float eu_lim = (&ref_he.x)[u], ev_lim = (&ref_he.x)[v_ax];
-
-		// Project to 2D + track 3D positions.
-		typedef struct { float u, v; v3 p; uint8_t fid; } ClipVert2D;
-		ClipVert2D a2d[MAX_CLIP_VERTS], b2d[MAX_CLIP_VERTS];
-		for (int i = 0; i < clip_count; i++) {
-			v3 rel = sub(buf1[i], ref_center);
-			a2d[i] = (ClipVert2D){ dot(rel, tu), dot(rel, tv), buf1[i], fid1[i] };
-		}
-
-		// Clip against 4 axis-aligned bounds: u<=eu, u>=-eu, v<=ev, v>=-ev.
-		// Each clip: iterate verts, test threshold, lerp intersection.
-		ClipVert2D* in_c = a2d, *out_c = b2d;
-		for (int plane = 0; plane < 4; plane++) {
-			int oc = 0;
-			if (clip_count == 0) break;
-			ClipVert2D prev = in_c[clip_count - 1];
-			float dp = plane < 2 ? (plane == 0 ? prev.u - eu_lim : -prev.u - eu_lim) : (plane == 2 ? prev.v - ev_lim : -prev.v - ev_lim);
-			for (int vi = 0; vi < clip_count; vi++) {
-				ClipVert2D cur = in_c[vi];
-				float dc = plane < 2 ? (plane == 0 ? cur.u - eu_lim : -cur.u - eu_lim) : (plane == 2 ? cur.v - ev_lim : -cur.v - ev_lim);
-				if (dp <= 0.0f) {
-					out_c[oc++] = prev;
-					if (dc > 0.0f) {
-						float t = dp / (dp - dc);
-						out_c[oc++] = (ClipVert2D){ prev.u + (cur.u - prev.u)*t, prev.v + (cur.v - prev.v)*t, add(prev.p, scale(sub(cur.p, prev.p), t)), (uint8_t)(plane | 0x40) };
-					}
-				} else if (dc <= 0.0f) {
-					float t = dp / (dp - dc);
-					out_c[oc++] = (ClipVert2D){ prev.u + (cur.u - prev.u)*t, prev.v + (cur.v - prev.v)*t, add(prev.p, scale(sub(cur.p, prev.p), t)), (uint8_t)plane };
-				}
-				dp = dc; prev = cur;
-			}
-			clip_count = oc;
-			ClipVert2D* sw = in_c; in_c = out_c; out_c = sw;
-		}
-
-		// Corner snap in 2D: compare (u,v) against (+-eu, +-ev). No 3D distance needed.
-		float snap_tol = 1e-3f;
-		float cu_pos[4] = { eu_lim, eu_lim, -eu_lim, -eu_lim }, cv_pos[4] = { ev_lim, -ev_lim, ev_lim, -ev_lim };
+		v3 ref_eu = scale(ref_cols[u], (&ref_he.x)[u]), ref_ev = scale(ref_cols[v_ax], (&ref_he.x)[v_ax]);
+		v3 corners[4] = { add(ref_center, add(ref_eu, ref_ev)), add(ref_center, sub(ref_eu, ref_ev)), add(ref_center, sub(neg(ref_eu), neg(ref_ev))), add(ref_center, sub(neg(ref_eu), ref_ev)) };
+		float snap_tol2 = 1e-6f;
 		for (int i = 0; i < clip_count; i++)
-			for (int c = 0; c < 4; c++) {
-				float du = in_c[i].u - cu_pos[c], dv = in_c[i].v - cv_pos[c];
-				if (du*du + dv*dv < snap_tol*snap_tol) { in_c[i].fid = 0xC0 | (uint8_t)c; break; }
-			}
+			for (int c = 0; c < 4; c++)
+				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
 
 		// Build face indices for feature IDs. Map (la, nsign) to hull face index.
 		static const int face_map[3][2] = { {2, 3}, {4, 5}, {0, 1} };
@@ -1279,10 +1250,10 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint)
 		Contact tmp_contacts[MAX_CLIP_VERTS];
 		int cp = 0;
 		for (int i = 0; i < clip_count; i++) {
-			float depth = ref_off - dot(ref_n, in_c[i].p);
+			float depth = ref_off - dot(ref_n, in_buf[i]);
 			if (depth >= -LINEAR_SLOP) {
-				uint32_t fid = flip ? ((uint32_t)inc_face | ((uint32_t)ref_face << 8) | ((uint32_t)in_c[i].fid << 16)) : ((uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_c[i].fid << 16));
-				tmp_contacts[cp++] = (Contact){ .point = in_c[i].p, .normal = contact_n, .penetration = depth, .feature_id = fid };
+				uint32_t fid = flip ? ((uint32_t)inc_face | ((uint32_t)ref_face << 8) | ((uint32_t)in_fid[i] << 16)) : ((uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16));
+				tmp_contacts[cp++] = (Contact){ .point = in_buf[i], .normal = contact_n, .penetration = depth, .feature_id = fid };
 			}
 		}
 		if (cp == 0) return 0;
