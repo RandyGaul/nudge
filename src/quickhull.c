@@ -564,24 +564,27 @@ static void qh_horizon_and_cone(QH_State* s, int eye, int eye_face, QH_FaceList*
 	HSTK_PUSH(((QH_HFrame){ e0, e0 }));
 
 	float eps = s->epsilon;
+	float eye_x = eye_pos.x, eye_y = eye_pos.y, eye_z = eye_pos.z;
+	QH_Edges* E = &s->edges;
 	while (!HSTK_EMPTY()) {
 		QH_HFrame* f = HSTK_TOP();
-		int ofi = qh_opp_face(s, f->edge);
+		int twin = E->etwin[f->edge];
+		int ofi = E->eface[twin];
 		if (s->faces[ofi].mark == QH_VISIBLE) {
-			if (dot(s->faces[ofi].plane.normal, eye_pos) - s->faces[ofi].plane.offset > eps) {
-				int child_e0 = s->edges.etwin[f->edge];
+			HullPlane op = s->faces[ofi].plane;
+			if (op.normal.x * eye_x + op.normal.y * eye_y + op.normal.z * eye_z - op.offset > eps) {
 				qh_delete_face_points(s, ofi, QH_INVALID, unclaimed);
 				s->faces[ofi].mark = QH_DELETED;
-				HSTK_PUSH(((QH_HFrame){ child_e0, s->edges.enext[child_e0] }));
+				HSTK_PUSH(((QH_HFrame){ twin, E->enext[twin] }));
 				continue;
 			} else {
 				// Horizon edge found: create cone triangle inline.
 				int horizon_edge = f->edge;
-				int tail = s->edges.eorigin[horizon_edge];
-				int head = s->edges.eorigin[s->edges.enext[horizon_edge]];
+				int tail = E->eorigin[horizon_edge];
+				int head = E->eorigin[E->enext[horizon_edge]];
 				int fi = qh_alloc_face(s);
 				int ce0 = qh_alloc_edge(s), ce1 = qh_alloc_edge(s), ce2 = qh_alloc_edge(s);
-				QH_Edges* E = &s->edges;
+				E = &s->edges; // re-fetch after potential realloc in qh_alloc_edge
 				E->enext[ce0]=ce1; E->eprev[ce0]=ce2; E->etwin[ce0]=QH_INVALID; E->eorigin[ce0]=eye; E->eface[ce0]=fi;
 				E->enext[ce1]=ce2; E->eprev[ce1]=ce0; E->etwin[ce1]=QH_INVALID; E->eorigin[ce1]=tail; E->eface[ce1]=fi;
 				E->enext[ce2]=ce0; E->eprev[ce2]=ce1; E->etwin[ce2]=QH_INVALID; E->eorigin[ce2]=head; E->eface[ce2]=fi;
@@ -597,15 +600,16 @@ static void qh_horizon_and_cone(QH_State* s, int eye, int eye_face, QH_FaceList*
 				s->faces[fi].centroid = c;
 				s->faces[fi].num_verts = 3;
 				s->faces[fi].area = a;
-				qh_set_opposite(s, ce1, s->edges.etwin[horizon_edge]);
+				qh_set_opposite(s, ce1, E->etwin[horizon_edge]);
 				if (prev != QH_INVALID) qh_set_opposite(s, ce0, prev);
 				else begin = ce0;
 				qh_face_list_add(s, nf, fi);
 				prev = ce2;
 			}
 		}
+		E = &s->edges; // re-fetch after potential realloc
 		f = HSTK_TOP();
-		f->edge = s->edges.enext[f->edge];
+		f->edge = E->enext[f->edge];
 		if (f->edge == f->edge0) HSTK_POP();
 	}
 	if (begin != QH_INVALID) qh_set_opposite(s, begin, prev);
@@ -1067,54 +1071,64 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 		}
 	});
 
-	// Vertex + edge remap in a single pass over live face edges.
+	// Count verts/edges first, then allocate hull arrays directly.
 	CK_DYNA int* vremap = NULL;
 	afit_set(vremap, s->verts.count);
 	memset(vremap, -1, s->verts.count * sizeof(int));
 	CK_DYNA int* eremap = NULL;
 	afit_set(eremap, s->edges.count);
 	memset(eremap, -1, s->edges.count * sizeof(int));
-	CK_DYNA v3* ov = NULL; afit(ov, s->verts.count); int vc = 0;
-	CK_DYNA HalfEdge* oe = NULL; afit(oe, s->edges.count); int ec = 0;
+	int vc = 0, ec = 0;
 	for (int i = 0; i < asize(live); i++) {
 		int e = s->faces[live[i]].edge, start = e;
 		do {
 			int vi = s->edges.eorigin[e];
-			if (vremap[vi] < 0) { vremap[vi] = vc++; apush(ov, qh_vert_pos(&s->verts, vi)); }
-			eremap[e] = ec++; HalfEdge he = {0}; apush(oe, he);
+			if (vremap[vi] < 0) vremap[vi] = vc++;
+			eremap[e] = ec++;
 			e = s->edges.enext[e];
 		} while (e != start);
 	}
-	for (int i = 0; i < asize(live); i++) {
+
+	// Allocate hull and its arrays directly (no temp arrays).
+	int nlive = asize(live);
+	Hull* h = CK_ALLOC(sizeof(Hull));
+	h->vert_count = vc; h->edge_count = ec; h->face_count = nlive;
+	h->epsilon = s->epsilon;
+	v3* vcp = CK_ALLOC(sizeof(v3)*vc); h->verts = vcp;
+	HalfEdge* ecp = CK_ALLOC(sizeof(HalfEdge)*ec); h->edges = ecp;
+	HullFace* fcp = CK_ALLOC(sizeof(HullFace)*nlive); h->faces = fcp;
+	HullPlane* pcp = CK_ALLOC(sizeof(HullPlane)*nlive); h->planes = pcp;
+
+	// Fill vertex positions (second pass over vremap to fill only assigned slots).
+	memset(vremap, -1, s->verts.count * sizeof(int));
+	vc = 0;
+	for (int i = 0; i < nlive; i++) {
 		int e = s->faces[live[i]].edge, start = e;
-		do { int o=eremap[e];
-			oe[o].next=(uint16_t)eremap[s->edges.enext[e]];
-			oe[o].twin=(uint16_t)eremap[s->edges.etwin[e]];
-			oe[o].origin=(uint16_t)vremap[s->edges.eorigin[e]];
-			oe[o].face=(uint16_t)i;
-			e=s->edges.enext[e];
-		} while (e!=start);
+		do {
+			int vi = s->edges.eorigin[e];
+			if (vremap[vi] < 0) { vremap[vi] = vc; vcp[vc++] = qh_vert_pos(&s->verts, vi); }
+			e = s->edges.enext[e];
+		} while (e != start);
 	}
 
-	CK_DYNA HullFace* of = NULL;
-	CK_DYNA HullPlane* op = NULL;
-	for (int i = 0; i < asize(live); i++) {
-		HullFace hf = { .edge=(uint16_t)eremap[s->faces[live[i]].edge] };
-		apush(of, hf); apush(op, s->faces[live[i]].plane);
+	// Fill edges and faces directly.
+	for (int i = 0; i < nlive; i++) {
+		int e = s->faces[live[i]].edge, start = e;
+		do { int o = eremap[e];
+			ecp[o].next = (uint16_t)eremap[s->edges.enext[e]];
+			ecp[o].twin = (uint16_t)eremap[s->edges.etwin[e]];
+			ecp[o].origin = (uint16_t)vremap[s->edges.eorigin[e]];
+			ecp[o].face = (uint16_t)i;
+			e = s->edges.enext[e];
+		} while (e != start);
+		fcp[i] = (HullFace){ .edge = (uint16_t)eremap[s->faces[live[i]].edge] };
+		pcp[i] = s->faces[live[i]].plane;
 	}
 
 	v3 centroid = V3(0,0,0);
-	for (int i = 0; i < vc; i++) centroid = add(centroid, ov[i]);
-	centroid = scale(centroid, 1.0f / vc);
-
-	Hull* h = CK_ALLOC(sizeof(Hull));
-	h->centroid = centroid; h->vert_count = vc; h->edge_count = ec; h->face_count = asize(live);
-	h->epsilon = s->epsilon;
-
-	v3* vcp = CK_ALLOC(sizeof(v3)*vc);       memcpy(vcp, ov, sizeof(v3)*vc);       h->verts = vcp;
-	HalfEdge* ecp = CK_ALLOC(sizeof(HalfEdge)*ec); memcpy(ecp, oe, sizeof(HalfEdge)*ec); h->edges = ecp;
-	HullFace* fcp = CK_ALLOC(sizeof(HullFace)*asize(live)); memcpy(fcp, of, sizeof(HullFace)*asize(live)); h->faces = fcp;
-	HullPlane* pcp = CK_ALLOC(sizeof(HullPlane)*asize(live)); memcpy(pcp, op, sizeof(HullPlane)*asize(live)); h->planes = pcp;
+	for (int i = 0; i < h->vert_count; i++) centroid = add(centroid, vcp[i]);
+	centroid = scale(centroid, 1.0f / h->vert_count);
+	h->centroid = centroid;
 
 	// Fix inward-facing normals: degenerate merges can produce Newell normals
 	// that point toward the hull interior. Flip them before widening.
@@ -1156,7 +1170,7 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	}
 	if (soa_bytes > 4096) free(nx);
 
-	afree(live); afree(vremap); afree(ov); afree(eremap); afree(oe); afree(of); afree(op);
+	afree(live); afree(vremap); afree(eremap);
 	return h;
 }
 
