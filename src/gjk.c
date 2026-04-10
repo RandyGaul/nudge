@@ -131,7 +131,7 @@ static __forceinline v3 gjk_support(const GJK_Shape* s, v3 d, int* feat)
 	return V3(0,0,0);
 }
 
-static __forceinline v3 gjk_center(const GJK_Shape* s)
+static v3 gjk_center(const GJK_Shape* s)
 {
 	switch (s->type) {
 	case GJK_POINT:    return s->point.center;
@@ -246,7 +246,7 @@ static __forceinline v3 gjk_closest_point(const GJK_Simplex* s)
 	return V3(0,0,0);
 }
 
-static __forceinline void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, int* f2)
+static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, int* f2)
 {
 	float inv = 1.0f / s->divisor;
 	*p1 = V3(0,0,0); *p2 = V3(0,0,0);
