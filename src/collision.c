@@ -878,8 +878,14 @@ static int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot,
 	{
 		v3 corners[MAX_CLIP_VERTS];
 		int ncorners = 0;
-		int ce = start_e;
-		do { corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[ce].origin, ref_sc))); ce = ref_hull->edges[ce].next; } while (ce != start_e);
+		if (ref_hull->verts == s_box_verts) {
+			v3 cx = scale(rotate(ref_rot, V3(1, 0, 0)), ref_sc.x), cy = scale(rotate(ref_rot, V3(0, 1, 0)), ref_sc.y), cz = scale(rotate(ref_rot, V3(0, 0, 1)), ref_sc.z);
+			int ce = start_e;
+			do { v3 lv = ref_hull->verts[ref_hull->edges[ce].origin]; corners[ncorners++] = add(ref_pos, add(add(scale(cx, lv.x), scale(cy, lv.y)), scale(cz, lv.z))); ce = ref_hull->edges[ce].next; } while (ce != start_e);
+		} else {
+			int ce = start_e;
+			do { corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[ce].origin, ref_sc))); ce = ref_hull->edges[ce].next; } while (ce != start_e);
+		}
 		float snap_tol2 = 1e-6f;
 		for (int i = 0; i < clip_count; i++)
 			for (int c = 0; c < ncorners; c++)
