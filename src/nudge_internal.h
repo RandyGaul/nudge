@@ -316,28 +316,27 @@ typedef struct WorldInternal
 
 typedef struct SolverContact
 {
+	// --- Hot fields for patch-mode PGS inner loop (first 92 bytes = 2 cache lines) ---
 	v3 r_a;              // contact offset from body A
 	v3 r_b;              // contact offset from body B
+	v3 rn_a, rn_b;      // precomputed cross(r, normal)
+	v3 w_n_a, w_n_b;    // precomputed I_w * cross(r, normal) — angular impulse direction
+	float eff_mass_n;    // 1/K for normal row
+	float bias;          // velocity bias for penetration recovery
+	float bounce;        // restitution velocity bias
+	float softness;      // soft constraint regularization (0 = rigid/NGS)
+	float lambda_n;      // accumulated normal impulse (>= 0)
+	// --- Cold fields (Coulomb mode, warm starting, position correction) ---
 	v3 normal;           // cached contact normal
 	v3 tangent1;         // friction direction 1
 	v3 tangent2;         // friction direction 2
-	float eff_mass_n;    // 1/K for normal row
 	float eff_mass_t1;   // 1/K for tangent1 row
 	float eff_mass_t2;   // 1/K for tangent2 row
-	float bias;          // velocity bias for penetration recovery
-	float bounce;        // restitution velocity bias
-	float lambda_n;      // accumulated normal impulse (>= 0)
 	float lambda_t1;     // accumulated tangent1 impulse
 	float lambda_t2;     // accumulated tangent2 impulse
-	float softness;      // soft constraint regularization (0 = rigid/NGS)
 	float penetration;   // cached for position correction pass
-	// Precomputed cross(r, direction) for fast dv dot product via triple product identity.
-	v3 rn_a, rn_b;      // cross(r, normal) — normal row
-	// Precomputed angular impulse: I_w * cross(r, direction) per row per body.
-	// Applying angular impulse = scale(w_*, delta) instead of cross+matmul.
-	v3 w_n_a, w_n_b;    // normal row
-	v3 w_t1_a, w_t1_b;  // tangent1 row
-	v3 w_t2_a, w_t2_b;  // tangent2 row
+	v3 w_t1_a, w_t1_b;  // tangent1 row — Coulomb mode only
+	v3 w_t2_a, w_t2_b;  // tangent2 row — Coulomb mode only
 	uint32_t feature_id; // geometric feature key for warm starting
 } SolverContact;
 
