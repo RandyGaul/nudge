@@ -1121,15 +1121,25 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	bvh_self_test(w->bvh_dynamic, &pairs);
 	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
 
+	// Precompute tight AABBs (no fat margin) for overlap pre-filter.
+	int body_count = asize(w->body_hot);
+	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
+	for (int i = 0; i < body_count; i++) {
+		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
+		tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]);
+	}
+
 	for (int i = 0; i < asize(pairs); i++) {
 		int a = pairs[i].a, b = pairs[i].b;
 		if (w->body_hot[a].inv_mass == 0.0f && w->body_hot[b].inv_mass == 0.0f) continue;
 		int isl_a = w->body_cold[a].island_id, isl_b = w->body_cold[b].island_id;
 		if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
 		if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
+		if (!aabb_overlaps(tight[a], tight[b])) continue;
 		narrowphase_pair(w, a, b, manifolds);
 	}
 
+	CK_FREE(tight);
 	afree(pairs);
 }
 
