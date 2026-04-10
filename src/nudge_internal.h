@@ -364,11 +364,11 @@ typedef struct SolverManifold
 // Warm starting: cached impulses from previous frame, keyed by body pair.
 typedef struct WarmContact
 {
-	uint32_t feature_id; // geometric feature key for matching
 	v3 r_a;              // body-A-relative position for spatial fallback matching
 	float lambda_n;
 	float lambda_t1;
 	float lambda_t2;
+	uint32_t feature_id; // geometric feature key for matching
 } WarmContact;
 
 struct WarmManifold

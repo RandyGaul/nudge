@@ -76,6 +76,22 @@
 #	define CK_FREE(p) free(p)
 #endif
 
+// Aligned allocation (for SIMD types, cache-line alignment, etc.).
+// CK_ALLOC_ALIGNED(sz, align) / CK_FREE_ALIGNED(p) use platform-specific aligned allocators.
+#ifdef _MSC_VER
+#	define CK_ALLOC_ALIGNED(sz, align) _aligned_malloc((sz), (align))
+#	define CK_REALLOC_ALIGNED(p, sz, align) _aligned_realloc((p), (sz), (align))
+#	define CK_FREE_ALIGNED(p) _aligned_free(p)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#	define CK_ALLOC_ALIGNED(sz, align) aligned_alloc((align), (((sz) + (align) - 1) & ~((size_t)(align) - 1)))
+#	define CK_REALLOC_ALIGNED(p, sz, align) ck_realloc_aligned_fallback((p), (sz), (align))
+#	define CK_FREE_ALIGNED(p) free(p)
+#else
+#	define CK_ALLOC_ALIGNED(sz, align) malloc(sz)
+#	define CK_REALLOC_ALIGNED(p, sz, align) realloc(p, sz)
+#	define CK_FREE_ALIGNED(p) free(p)
+#endif
+
 //--------------------------------------------------------------------------------------------------
 // Dynamic arrays (stretchy buffers).
 //
@@ -142,8 +158,12 @@
 // ahash: Hash all bytes in the array using FNV1a.
 #define ahash(a)      ((a) ? ck_hash_fnv1a(a, sizeof(*(a)) * asize(a)) : 0)
 
+// aalign: Set alignment for array data. Must be called before first allocation (afit/apush).
+// Elements will be aligned to N bytes. Use for SIMD types (16) or cache lines (64).
+#define aalign(a, n)  do { afit((a), 1); CK_AHDR(a)->alignment = (n); } while (0)
+
 // afree: Free array memory and set pointer to NULL.
-#define afree(a)      do { CK_ACANARY(a); if (a && !CK_AHDR(a)->is_static) CK_FREE(CK_AHDR(a)); (a) = NULL; } while (0)
+#define afree(a)      do { CK_ACANARY(a); if (a && !CK_AHDR(a)->is_static) { if (CK_AHDR(a)->alignment > 0) CK_FREE_ALIGNED(CK_AHDR(a)); else CK_FREE(CK_AHDR(a)); } (a) = NULL; } while (0)
 
 // Check if array is a valid dynamic array.
 #define avalid(a)  ((a) && CK_AHDR(a)->cookie.val == CK_ACOOKIE)
@@ -549,11 +569,13 @@ typedef struct CK_UniqueString
 } CK_UniqueString;
 
 // Hidden array header behind the user pointer.
+// Total 32 bytes: data always starts at a 16-byte-aligned offset from the allocation base.
 typedef struct CK_ArrayHeader
 {
 	int size;
 	int capacity;
 	int is_static;
+	int alignment;   // requested data alignment (0 = default malloc alignment)
 	char* data;
 	CK_Cookie cookie;
 } CK_ArrayHeader;
@@ -620,6 +642,7 @@ typedef struct CK_MapHeader
 	int          capacity;       // Capacity for items/keys/islot
 	int          slot_count;     // Number of used hash slots
 	int          slot_capacity;  // Capacity for hash slots (power of 2)
+	int          _pad[2];        // Pad to 32 bytes so items start 16-byte aligned
 } CK_MapHeader;
 
 // Alignment helper.
@@ -728,12 +751,13 @@ void* ck_agrow(const void* a, int new_size, size_t element_size)
 	assert(new_size <= new_capacity);
 	assert((size_t)new_capacity <= (SIZE_MAX - sizeof(CK_ArrayHeader)) / element_size);
 	size_t total_size = sizeof(CK_ArrayHeader) + (size_t)new_capacity * element_size;
+	int align = a ? CK_AHDR(a)->alignment : 0;
 	CK_ArrayHeader* hdr;
 	if (a) {
 		if (!CK_AHDR(a)->is_static) {
-			hdr = (CK_ArrayHeader*)CK_REALLOC(CK_AHDR(a), total_size);
+			hdr = align > 0 ? (CK_ArrayHeader*)CK_REALLOC_ALIGNED(CK_AHDR(a), total_size, align) : (CK_ArrayHeader*)CK_REALLOC(CK_AHDR(a), total_size);
 		} else {
-			hdr = (CK_ArrayHeader*)CK_ALLOC(total_size);
+			hdr = align > 0 ? (CK_ArrayHeader*)CK_ALLOC_ALIGNED(total_size, align) : (CK_ArrayHeader*)CK_ALLOC(total_size);
 			memcpy(hdr + 1, a, (size_t)asize(a) * element_size);
 			hdr->size = asize(a);
 			hdr->cookie.val = CK_ACOOKIE;
@@ -742,6 +766,7 @@ void* ck_agrow(const void* a, int new_size, size_t element_size)
 		hdr = (CK_ArrayHeader*)CK_ALLOC(total_size);
 		hdr->size = 0;
 		hdr->cookie.val = CK_ACOOKIE;
+		hdr->alignment = 0;
 	}
 	hdr->capacity = new_capacity;
 	hdr->is_static = 0;
