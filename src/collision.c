@@ -129,10 +129,13 @@ static inline v3 hull_vert_scaled(const Hull* hull, int i, v3 scale)
 // Transform a plane from hull-local into world space.
 static inline HullPlane plane_transform(HullPlane p, v3 pos, quat rot, v3 scale)
 {
-	// For axis-aligned unit box with uniform-ish scale:
-	// normal needs inverse-transpose scale, then rotate.
+	// Fast path: uniform scale skips inverse-transpose normalization (rotation preserves unit length).
+	if (scale.x == scale.y && scale.y == scale.z) {
+		v3 n = rotate(rot, p.normal);
+		float off = dot(n, pos) + p.offset * scale.x;
+		return (HullPlane){ .normal = n, .offset = off };
+	}
 	v3 n = norm(rotate(rot, V3(p.normal.x / scale.x, p.normal.y / scale.y, p.normal.z / scale.z)));
-	// A point on the plane in local space: normal * offset, then scale + transform
 	v3 local_pt = V3(p.normal.x * p.offset * scale.x, p.normal.y * p.offset * scale.y, p.normal.z * p.offset * scale.z);
 	v3 world_pt = add(pos, rotate(rot, local_pt));
 	return (HullPlane){ .normal = n, .offset = dot(n, world_pt) };
@@ -563,9 +566,70 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 	return 1;
 }
 
+// Analytical capsule-box: transform capsule to box local space, clamp segment to box,
+// compute closest point, then project back. Much faster than capsule_hull (GJK + SAT).
 int collide_capsule_box(Capsule a, Box b, Manifold* manifold)
 {
-	return collide_capsule_hull(a, (ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents }, manifold);
+	quat inv_rot = inv(b.rotation);
+	v3 lp = rotate(inv_rot, sub(a.p, b.center));
+	v3 lq = rotate(inv_rot, sub(a.q, b.center));
+	v3 he = b.half_extents;
+
+	// Find closest point on segment to box (in box local space).
+	// Clamp segment endpoints to box extents to get approximate closest point on box.
+	v3 seg_dir = sub(lq, lp);
+	float seg_len2 = len2(seg_dir);
+
+	// Find closest point on segment to box surface using iterative clamping.
+	// Start with segment closest point to box center, then clamp to box.
+	float t = seg_len2 > 1e-12f ? -dot(lp, seg_dir) / seg_len2 : 0.5f;
+	t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+	v3 seg_pt = add(lp, scale(seg_dir, t));
+
+	// Clamp to box = closest point on box to seg_pt.
+	v3 box_pt = V3(seg_pt.x < -he.x ? -he.x : (seg_pt.x > he.x ? he.x : seg_pt.x), seg_pt.y < -he.y ? -he.y : (seg_pt.y > he.y ? he.y : seg_pt.y), seg_pt.z < -he.z ? -he.z : (seg_pt.z > he.z ? he.z : seg_pt.z));
+
+	// Re-project: find closest point on segment to box_pt.
+	float t2 = seg_len2 > 1e-12f ? dot(sub(box_pt, lp), seg_dir) / seg_len2 : 0.5f;
+	t2 = t2 < 0.0f ? 0.0f : (t2 > 1.0f ? 1.0f : t2);
+	v3 seg_pt2 = add(lp, scale(seg_dir, t2));
+
+	// Re-clamp box point to segment's new closest point.
+	v3 box_pt2 = V3(seg_pt2.x < -he.x ? -he.x : (seg_pt2.x > he.x ? he.x : seg_pt2.x), seg_pt2.y < -he.y ? -he.y : (seg_pt2.y > he.y ? he.y : seg_pt2.y), seg_pt2.z < -he.z ? -he.z : (seg_pt2.z > he.z ? he.z : seg_pt2.z));
+
+	v3 diff = sub(seg_pt2, box_pt2);
+	float dist2 = len2(diff);
+
+	if (dist2 > a.radius * a.radius && dist2 > 1e-12f) return 0;
+
+	if (dist2 > 1e-12f) {
+		float dist = sqrtf(dist2);
+		v3 local_n = scale(diff, 1.0f / dist);
+		v3 world_n = rotate(b.rotation, local_n);
+		v3 world_pt = add(b.center, rotate(b.rotation, box_pt2));
+		manifold->count = 1;
+		manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius - dist, .feature_id = 0 };
+		return 1;
+	}
+
+	// Deep penetration: capsule segment inside box. Use face search like sphere-box.
+	float best_depth = he.x - fabsf(seg_pt2.x);
+	int best_face = seg_pt2.x > 0 ? 3 : 2;
+	float dy = he.y - fabsf(seg_pt2.y);
+	if (dy < best_depth) { best_depth = dy; best_face = seg_pt2.y > 0 ? 5 : 4; }
+	float dz = he.z - fabsf(seg_pt2.z);
+	if (dz < best_depth) { best_depth = dz; best_face = seg_pt2.z > 0 ? 1 : 0; }
+
+	v3 local_n = V3(0, 0, 0);
+	static const int face_axis[6] = {2, 2, 0, 0, 1, 1};
+	static const float face_sign[6] = {-1, 1, -1, 1, -1, 1};
+	(&local_n.x)[face_axis[best_face]] = face_sign[best_face];
+	v3 world_n = rotate(b.rotation, local_n);
+	v3 world_seg = add(b.center, rotate(b.rotation, seg_pt2));
+	v3 world_pt = sub(world_seg, scale(world_n, a.radius));
+	manifold->count = 1;
+	manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius + best_depth, .feature_id = 0 };
+	return 1;
 }
 
 // -----------------------------------------------------------------------------
@@ -579,10 +643,9 @@ typedef struct FaceQuery
 } FaceQuery;
 
 // Evaluate a single face of hull1 against hull2. Returns separation.
-static float sat_eval_face(const Hull* hull1, int face_idx, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
+static float sat_eval_face_ex(const Hull* hull1, int face_idx, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, quat inv2, v3 scale2)
 {
 	HullPlane pw = plane_transform(hull1->planes[face_idx], pos1, rot1, scale1);
-	quat inv2 = inv(rot2);
 	v3 sup_dir_local = rotate(inv2, neg(pw.normal));
 	v3 sup_local = hull_support(hull2, sup_dir_local);
 	v3 sup_scaled = V3(sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z);
@@ -616,21 +679,21 @@ static FaceQuery sat_query_faces_hint(const Hull* hull1, v3 pos1, quat rot1, v3 
 	}
 
 	// Hill-climb from cached face: walk to topological neighbors with better separation.
-	// For large hulls (20+ faces), this is O(sqrt(F)) vs O(F) for full scan.
+	// Precompute inv(rot2) once for all face evaluations.
+	quat inv2_pre = inv(rot2);
 	if (face_hint >= 0 && face_hint < hull1->face_count && hull1->face_count > 8) {
 		int cur = face_hint;
-		float cur_sep = sat_eval_face(hull1, cur, pos1, rot1, scale1, hull2, pos2, rot2, scale2);
+		float cur_sep = sat_eval_face_ex(hull1, cur, pos1, rot1, scale1, hull2, pos2, rot2, inv2_pre, scale2);
 		best.index = cur; best.separation = cur_sep;
 		for (int iter = 0; iter < hull1->face_count; iter++) {
 			int improved = 0;
-			// Walk adjacent faces via shared edges.
 			int start_e = hull1->faces[cur].edge;
 			int ei = start_e;
 			do {
 				int twin = hull1->edges[ei].twin;
 				int adj_face = hull1->edges[twin].face;
 				if (adj_face != cur) {
-					float adj_sep = sat_eval_face(hull1, adj_face, pos1, rot1, scale1, hull2, pos2, rot2, scale2);
+					float adj_sep = sat_eval_face_ex(hull1, adj_face, pos1, rot1, scale1, hull2, pos2, rot2, inv2_pre, scale2);
 					if (adj_sep > best.separation) { best.separation = adj_sep; best.index = adj_face; improved = 1; }
 				}
 				ei = hull1->edges[ei].next;
@@ -643,8 +706,7 @@ static FaceQuery sat_query_faces_hint(const Hull* hull1, v3 pos1, quat rot1, v3 
 
 	for (int i = 0; i < hull1->face_count; i++) {
 		HullPlane pw = plane_transform(hull1->planes[i], pos1, rot1, scale1);
-		quat inv2 = inv(rot2);
-		v3 sup_dir_local = rotate(inv2, neg(pw.normal));
+		v3 sup_dir_local = rotate(inv2_pre, neg(pw.normal));
 		v3 sup_local = hull_support(hull2, sup_dir_local);
 		v3 sup_scaled = { sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z };
 		v3 sup_world = add(pos2, rotate(rot2, sup_scaled));
@@ -680,14 +742,23 @@ static float sat_edge_project_full(v3 e1, v3 e2, v3 c1,
 	const Hull* hull2, v3 scale2)
 {
 	v3 e1_x_e2 = cross(e1, e2);
-	float l = len(e1_x_e2);
+	float l2 = len2(e1_x_e2);
 
-	// Skip near-parallel edges
-	float tolerance = 0.005f;
-	if (l < tolerance * sqrtf(len2(e1) * len2(e2)))
+	// Skip near-parallel edges (squared comparison avoids 2 sqrt calls).
+	float tol2 = 0.005f * 0.005f;
+	if (l2 < tol2 * len2(e1) * len2(e2))
 		return -1e18f;
 
-	v3 n = scale(e1_x_e2, 1.0f / l);
+	// Fast approximate normalize: rsqrt (1 Newton-Raphson iteration, ~5 cycles vs ~20 for sqrt+div).
+	float inv_l;
+#if SIMD_SSE
+	{ __m128 v = _mm_set_ss(l2); v = _mm_rsqrt_ss(v); _mm_store_ss(&inv_l, v); }
+	// One Newton-Raphson refinement: inv_l = inv_l * (1.5 - 0.5 * l2 * inv_l * inv_l)
+	inv_l = inv_l * (1.5f - 0.5f * l2 * inv_l * inv_l);
+#else
+	inv_l = 1.0f / sqrtf(l2);
+#endif
+	v3 n = scale(e1_x_e2, inv_l);
 
 	// For box hulls, use O(1) support function. For general hulls, keep O(V) vertex scan
 	// (avoids extra inv_rot overhead per edge pair).
@@ -731,39 +802,46 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 
 	EdgeQuery best = { .index1 = -1, .index2 = -1, .separation = -1e18f };
 
-	for (int i1 = 0; i1 < hull1->edge_count; i1 += 2) {
-		const HalfEdge* edge1 = &hull1->edges[i1];
-		const HalfEdge* twin1 = &hull1->edges[i1 + 1];
+	// Precompute both hulls' edge data into contiguous arrays.
+	int n1 = hull1->edge_count / 2, n2 = hull2->edge_count / 2;
+	assert(n1 <= 128 && n2 <= 128);
+	v3 e1_arr[128], u1_arr[128], v1_arr[128], ne1_arr[128];
+	v3 e2_arr[128], nu2_arr[128], nv2_arr[128], ne2_arr[128];
+	for (int k = 0; k < n1; k++) {
+		int i = k * 2;
+		v3 p = add(c1_local, rotate(rel_rot, hull_vert_scaled(hull1, hull1->edges[i].origin, scale1)));
+		v3 q = add(c1_local, rotate(rel_rot, hull_vert_scaled(hull1, hull1->edges[i+1].origin, scale1)));
+		e1_arr[k] = sub(q, p);
+		u1_arr[k] = rotate(rel_rot, hull1->planes[hull1->edges[i].face].normal);
+		v1_arr[k] = rotate(rel_rot, hull1->planes[hull1->edges[i+1].face].normal);
+		ne1_arr[k] = neg(e1_arr[k]);
+	}
+	for (int k = 0; k < n2; k++) {
+		int i = k * 2;
+		v3 p = hull_vert_scaled(hull2, hull2->edges[i].origin, scale2);
+		v3 q = hull_vert_scaled(hull2, hull2->edges[i+1].origin, scale2);
+		e2_arr[k] = sub(q, p);
+		nu2_arr[k] = neg(hull2->planes[hull2->edges[i].face].normal);
+		nv2_arr[k] = neg(hull2->planes[hull2->edges[i+1].face].normal);
+		ne2_arr[k] = neg(e2_arr[k]);
+	}
 
-		v3 p1 = hull_vert_scaled(hull1, edge1->origin, scale1);
-		v3 q1 = hull_vert_scaled(hull1, twin1->origin, scale1);
-		// Transform to hull2 local
-		p1 = add(c1_local, rotate(rel_rot, p1));
-		q1 = add(c1_local, rotate(rel_rot, q1));
-		v3 e1 = sub(q1, p1);
+	for (int k1 = 0; k1 < n1; k1++) {
+		v3 e1 = e1_arr[k1], u1 = u1_arr[k1], v1 = v1_arr[k1], b_x_a = ne1_arr[k1];
 
-		v3 u1 = rotate(rel_rot, hull1->planes[edge1->face].normal);
-		v3 v1 = rotate(rel_rot, hull1->planes[twin1->face].normal);
+		for (int k2 = 0; k2 < n2; k2++) {
+			v3 e2 = e2_arr[k2], ne2 = ne2_arr[k2];
 
-		for (int i2 = 0; i2 < hull2->edge_count; i2 += 2) {
-			const HalfEdge* edge2 = &hull2->edges[i2];
-			const HalfEdge* twin2 = &hull2->edges[i2 + 1];
-
-			v3 p2 = hull_vert_scaled(hull2, edge2->origin, scale2);
-			v3 q2 = hull_vert_scaled(hull2, twin2->origin, scale2);
-			v3 e2 = sub(q2, p2);
-
-			v3 u2 = hull2->planes[edge2->face].normal;
-			v3 v2 = hull2->planes[twin2->face].normal;
-
-			// Gauss map pruning
-			if (!is_minkowski_face(u1, v1, neg(e1), neg(u2), neg(v2), neg(e2)))
+			// Gauss map pruning (inlined is_minkowski_face).
+			float cba = dot(nu2_arr[k2], b_x_a), dba = dot(nv2_arr[k2], b_x_a);
+			float adc = dot(u1, ne2), bdc = dot(v1, ne2);
+			if (!((cba * dba < 0.0f) && (adc * bdc < 0.0f) && (cba * bdc > 0.0f)))
 				continue;
 
 			float sep = sat_edge_project_full(e1, e2, c1_local, hull1, rel_rot, scale1, hull2, scale2);
 			if (sep > best.separation) {
-				best.index1 = i1;
-				best.index2 = i2;
+				best.index1 = k1 * 2;
+				best.index2 = k2 * 2;
 				best.separation = sep;
 			}
 		}
