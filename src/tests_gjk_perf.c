@@ -772,27 +772,70 @@ static void test_gjk_properties()
 }
 
 // =============================================================================
-// Performance.
+// Performance: shapes rotate and translate each iteration to simulate rigid body motion.
 
 #define PERF_N       100000
 #define PERF_CONFIGS 32
+#define PERF_DT      (1.0f / 60.0f / 100.0f)  // sub-frame timestep
 
 typedef struct PerfRow { double ns; float iters; } PerfRow;
+
+// Integrate rotation: rot' = normalize(rot + 0.5 * quat(omega*dt, 0) * rot)
+static quat perf_integrate_rot(quat rot, v3 omega, float dt)
+{
+	v3 half_w = scale(omega, 0.5f * dt);
+	quat dq = { half_w.x * rot.w + half_w.y * rot.z - half_w.z * rot.y,
+	            -half_w.x * rot.z + half_w.y * rot.w + half_w.z * rot.x,
+	             half_w.x * rot.y - half_w.y * rot.x + half_w.z * rot.w,
+	            -half_w.x * rot.x - half_w.y * rot.y - half_w.z * rot.z };
+	quat r = { rot.x + dq.x, rot.y + dq.y, rot.z + dq.z, rot.w + dq.w };
+	float inv_len = 1.0f / sqrtf(r.x*r.x + r.y*r.y + r.z*r.z + r.w*r.w);
+	return (quat){ r.x*inv_len, r.y*inv_len, r.z*inv_len, r.w*inv_len };
+}
+
+// Per-config motion state
+typedef struct PerfMotion
+{
+	v3 posA, posB;       // current positions
+	v3 velA, velB;       // linear velocity
+	quat rotA, rotB;     // current rotations
+	v3 omegaA, omegaB;   // angular velocity (rad/s)
+	v3 heA, heB;         // half-extents / scale
+	float radiusA, radiusB; // for capsule/cylinder
+} PerfMotion;
 
 static PerfRow perf_box_box()
 {
 	gjk_perf_rng = 42;
-	GJK_Shape a[PERF_CONFIGS], b[PERF_CONFIGS];
+	PerfMotion m[PERF_CONFIGS];
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		float sep = 0.1f + (float)(c % 4) * 3.0f;
 		float sc = 0.5f + (float)(c / 4 % 4) * 2.5f;
-		a[c] = gjk_box(V3(0,0,0), gjk_perf_random_quat(), V3(sc, sc*0.7f, sc*0.5f));
-		b[c] = gjk_box(V3(sep + sc*2, 0, 0), gjk_perf_random_quat(), V3(sc*0.8f, sc, sc*0.6f));
+		m[c].posA = V3(0,0,0);
+		m[c].posB = V3(sep + sc*2, 0, 0);
+		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].rotA = gjk_perf_random_quat();
+		m[c].rotB = gjk_perf_random_quat();
+		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].heA = V3(sc, sc*0.7f, sc*0.5f);
+		m[c].heB = V3(sc*0.8f, sc, sc*0.6f);
 	}
 	int total = PERF_N * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
 	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) for (int i = 0; i < PERF_N; i++) { GJK_Result r = gjk_distance(a[c], b[c]); sum += r.distance; iters += r.iterations; }
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		PerfMotion* mc = &m[c];
+		for (int i = 0; i < PERF_N; i++) {
+			GJK_Result r = gjk_distance(gjk_box(mc->posA, mc->rotA, mc->heA), gjk_box(mc->posB, mc->rotB, mc->heB));
+			sum += r.distance; iters += r.iterations;
+			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
+			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
+			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
+			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
+		}
+	}
 	double t1 = qpc_now();
 	volatile float sink = sum; (void)sink;
 	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
@@ -801,17 +844,36 @@ static PerfRow perf_box_box()
 static PerfRow perf_capsule_box()
 {
 	gjk_perf_rng = 137;
-	GJK_Shape a[PERF_CONFIGS], b[PERF_CONFIGS];
+	PerfMotion m[PERF_CONFIGS];
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		float sep = 0.5f + (float)(c % 4) * 2.5f;
 		float sc = 0.5f + (float)(c / 4 % 4) * 2.0f;
-		a[c] = gjk_capsule(V3(0, -sc, 0), V3(0, sc, 0), sc * 0.3f);
-		b[c] = gjk_box(V3(sep + sc*2, 0, 0), gjk_perf_random_quat(), V3(sc, sc*0.8f, sc*0.6f));
+		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc*2, 0, 0);
+		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
+		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].heA = V3(sc, sc, sc); m[c].heB = V3(sc, sc*0.8f, sc*0.6f);
+		m[c].radiusA = sc * 0.3f;
 	}
 	int total = PERF_N * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
 	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) for (int i = 0; i < PERF_N; i++) { GJK_Result r = gjk_distance(a[c], b[c]); sum += r.distance; iters += r.iterations; }
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		PerfMotion* mc = &m[c];
+		for (int i = 0; i < PERF_N; i++) {
+			v3 cap_dir = quat_rotate(mc->rotA, V3(0,1,0));
+			v3 cap_p = sub(mc->posA, scale(cap_dir, mc->heA.y));
+			v3 cap_q = add(mc->posA, scale(cap_dir, mc->heA.y));
+			GJK_Result r = gjk_distance(gjk_capsule(cap_p, cap_q, mc->radiusA), gjk_box(mc->posB, mc->rotB, mc->heB));
+			sum += r.distance; iters += r.iterations;
+			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
+			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
+			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
+			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
+		}
+	}
 	double t1 = qpc_now();
 	volatile float sink = sum; (void)sink;
 	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
@@ -820,17 +882,36 @@ static PerfRow perf_capsule_box()
 static PerfRow perf_capsule_capsule()
 {
 	gjk_perf_rng = 271;
-	GJK_Shape a[PERF_CONFIGS], b[PERF_CONFIGS];
+	PerfMotion m[PERF_CONFIGS];
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		float sep = 0.5f + (float)(c % 4) * 2.5f;
 		float sc = 0.5f + (float)(c / 4 % 4) * 2.0f;
-		a[c] = gjk_capsule(V3(0, -sc, 0), V3(0, sc, 0), sc * 0.3f);
-		b[c] = gjk_capsule(V3(sep + sc, -sc*0.8f, 0), V3(sep + sc, sc*0.8f, 0), sc * 0.4f);
+		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc, 0, 0);
+		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
+		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].heA = V3(sc, sc, sc); m[c].heB = V3(sc*0.8f, sc*0.8f, sc*0.8f);
+		m[c].radiusA = sc * 0.3f; m[c].radiusB = sc * 0.4f;
 	}
 	int total = PERF_N * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
 	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) for (int i = 0; i < PERF_N; i++) { GJK_Result r = gjk_distance(a[c], b[c]); sum += r.distance; iters += r.iterations; }
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		PerfMotion* mc = &m[c];
+		for (int i = 0; i < PERF_N; i++) {
+			v3 da = quat_rotate(mc->rotA, V3(0,1,0)), db = quat_rotate(mc->rotB, V3(0,1,0));
+			GJK_Result r = gjk_distance(
+				gjk_capsule(sub(mc->posA, scale(da, mc->heA.y)), add(mc->posA, scale(da, mc->heA.y)), mc->radiusA),
+				gjk_capsule(sub(mc->posB, scale(db, mc->heB.y)), add(mc->posB, scale(db, mc->heB.y)), mc->radiusB));
+			sum += r.distance; iters += r.iterations;
+			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
+			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
+			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
+			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
+		}
+	}
 	double t1 = qpc_now();
 	volatile float sink = sum; (void)sink;
 	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
@@ -839,17 +920,36 @@ static PerfRow perf_capsule_capsule()
 static PerfRow perf_cylinder_box()
 {
 	gjk_perf_rng = 401;
-	GJK_Shape a[PERF_CONFIGS], b[PERF_CONFIGS];
+	PerfMotion m[PERF_CONFIGS];
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		float sep = 0.5f + (float)(c % 4) * 2.5f;
 		float sc = 0.5f + (float)(c / 4 % 4) * 2.0f;
-		a[c] = gjk_cylinder(V3(0, -sc, 0), V3(0, sc, 0), sc * 0.5f);
-		b[c] = gjk_box(V3(sep + sc*2, 0, 0), gjk_perf_random_quat(), V3(sc, sc*0.8f, sc*0.6f));
+		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc*2, 0, 0);
+		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
+		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].heA = V3(sc, sc, sc); m[c].heB = V3(sc, sc*0.8f, sc*0.6f);
+		m[c].radiusA = sc * 0.5f;
 	}
 	int total = PERF_N * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
 	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) for (int i = 0; i < PERF_N; i++) { GJK_Result r = gjk_distance(a[c], b[c]); sum += r.distance; iters += r.iterations; }
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		PerfMotion* mc = &m[c];
+		for (int i = 0; i < PERF_N; i++) {
+			v3 ca = quat_rotate(mc->rotA, V3(0,1,0));
+			v3 cp = sub(mc->posA, scale(ca, mc->heA.y));
+			v3 cq = add(mc->posA, scale(ca, mc->heA.y));
+			GJK_Result r = gjk_distance(gjk_cylinder(cp, cq, mc->radiusA), gjk_box(mc->posB, mc->rotB, mc->heB));
+			sum += r.distance; iters += r.iterations;
+			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
+			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
+			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
+			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
+		}
+	}
 	double t1 = qpc_now();
 	volatile float sink = sum; (void)sink;
 	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
@@ -858,17 +958,36 @@ static PerfRow perf_cylinder_box()
 static PerfRow perf_cylinder_cylinder()
 {
 	gjk_perf_rng = 523;
-	GJK_Shape a[PERF_CONFIGS], b[PERF_CONFIGS];
+	PerfMotion m[PERF_CONFIGS];
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		float sep = 0.5f + (float)(c % 4) * 2.5f;
 		float sc = 0.5f + (float)(c / 4 % 4) * 2.0f;
-		a[c] = gjk_cylinder(V3(0, -sc, 0), V3(0, sc, 0), sc * 0.5f);
-		b[c] = gjk_cylinder(V3(sep + sc*2, -sc*0.7f, 0), V3(sep + sc*2, sc*0.7f, 0), sc * 0.4f);
+		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc*2, 0, 0);
+		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
+		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].heA = V3(sc, sc, sc); m[c].heB = V3(sc*0.7f, sc*0.7f, sc*0.7f);
+		m[c].radiusA = sc * 0.5f; m[c].radiusB = sc * 0.4f;
 	}
 	int total = PERF_N * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
 	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) for (int i = 0; i < PERF_N; i++) { GJK_Result r = gjk_distance(a[c], b[c]); sum += r.distance; iters += r.iterations; }
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		PerfMotion* mc = &m[c];
+		for (int i = 0; i < PERF_N; i++) {
+			v3 da = quat_rotate(mc->rotA, V3(0,1,0)), db = quat_rotate(mc->rotB, V3(0,1,0));
+			GJK_Result r = gjk_distance(
+				gjk_cylinder(sub(mc->posA, scale(da, mc->heA.y)), add(mc->posA, scale(da, mc->heA.y)), mc->radiusA),
+				gjk_cylinder(sub(mc->posB, scale(db, mc->heB.y)), add(mc->posB, scale(db, mc->heB.y)), mc->radiusB));
+			sum += r.distance; iters += r.iterations;
+			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
+			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
+			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
+			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
+		}
+	}
 	double t1 = qpc_now();
 	volatile float sink = sum; (void)sink;
 	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
@@ -877,29 +996,45 @@ static PerfRow perf_cylinder_cylinder()
 // =============================================================================
 // Entry point.
 
-// Hull-hull perf: two random convex hulls of n_target verts each.
+// Hull-hull perf: two random convex hulls of n_target verts each, rotating + translating.
 static PerfRow perf_hull_hull(int n_target)
 {
 	gjk_perf_rng = 7000 + n_target;
 	Hull* ha = gjk_perf_make_random_hull(n_target, 1.0f);
 	Hull* hb = gjk_perf_make_random_hull(n_target, 1.0f);
 
-	GJK_Shape a[PERF_CONFIGS], b[PERF_CONFIGS];
-	v3 sca[PERF_CONFIGS][1024], scb[PERF_CONFIGS][1024]; float soac[PERF_CONFIGS][3072], sobc[PERF_CONFIGS][3072];
+	PerfMotion m[PERF_CONFIGS];
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		float sep = 0.5f + (float)(c % 4) * 2.5f;
 		float sc = 0.5f + (float)(c / 4 % 4) * 2.0f;
-		a[c] = gjk_hull_scaled(ha, V3(0,0,0), gjk_perf_random_quat(), V3(sc, sc*0.7f, sc*0.5f), sca[c], soac[c]);
-		b[c] = gjk_hull_scaled(hb, V3(sep + sc*3, 0, 0), gjk_perf_random_quat(), V3(sc*0.8f, sc, sc*0.6f), scb[c], sobc[c]);
+		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc*3, 0, 0);
+		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
+		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].heA = V3(sc, sc*0.7f, sc*0.5f); m[c].heB = V3(sc*0.8f, sc, sc*0.6f);
 	}
-	// Scale iteration count down for large hulls to keep runtime reasonable
 	int n_iters = PERF_N;
 	if (n_target >= 200) n_iters = PERF_N / 10;
 	if (n_target >= 1000) n_iters = PERF_N / 100;
 	int total = n_iters * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
 	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) for (int i = 0; i < n_iters; i++) { GJK_Result r = gjk_distance(a[c], b[c]); sum += r.distance; iters += r.iterations; }
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		PerfMotion* mc = &m[c];
+		v3 sva[1024], svb[1024]; float soaa[3072], soab[3072];
+		for (int i = 0; i < n_iters; i++) {
+			GJK_Shape ga = gjk_hull_scaled(ha, mc->posA, mc->rotA, mc->heA, sva, soaa);
+			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB, svb, soab);
+			GJK_Result r = gjk_distance(ga, gb);
+			sum += r.distance; iters += r.iterations;
+			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
+			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
+			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
+			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
+		}
+	}
 	double t1 = qpc_now();
 	volatile float sink = sum; (void)sink;
 	hull_free(ha); hull_free(hb);
