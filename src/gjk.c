@@ -25,12 +25,11 @@ typedef struct GJK_Simplex
 {
 	GJK_Vertex v[4];
 	float divisor;
-	float inv_divisor;
 	int count;
 } GJK_Simplex;
 
-// Byte size of a simplex with n active vertices (vertices + divisor + inv_divisor + count).
-#define gjk_simplex_size(n) (sizeof(GJK_Vertex) * (n) + sizeof(float) * 2 + sizeof(int))
+// Byte size of a simplex with n active vertices (vertices + divisor + count).
+#define gjk_simplex_size(n) (sizeof(GJK_Vertex) * (n) + sizeof(float) + sizeof(int))
 
 typedef struct GJK_Result
 {
@@ -129,7 +128,7 @@ static v3 gjk_center(const GJK_Shape* s)
 
 #define gjk_closest_point(simplex, out) do {                                                                        \
 	const GJK_Simplex* cs = (simplex);                                                                              \
-	float cinv = cs->inv_divisor;                                                                                \
+	float cinv = 1.0f / cs->divisor;                                                                                \
 	switch (cs->count) {                                                                                            \
 	case 1: (out) = cs->v[0].point; break;                                                                          \
 	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break; \
@@ -141,7 +140,7 @@ static v3 gjk_center(const GJK_Shape* s)
 
 static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, int* f2)
 {
-	float inv = s->inv_divisor;
+	float inv = 1.0f / s->divisor;
 	*p1 = V3(0,0,0); *p2 = V3(0,0,0);
 	float best_u = -1.0f;
 	*f1 = 0; *f2 = 0;
@@ -161,11 +160,11 @@ static int gjk_solve2(GJK_Simplex* s)
 	v3 a = s->v[0].point, b = s->v[1].point;
 	float u = dot(b, sub(b, a));
 	float v = dot(a, sub(a, b));
-	if (v <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->inv_divisor = 1.0f; s->count = 1; return 1; }
-	if (u <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->inv_divisor = 1.0f; s->count = 1; return 1; }
+	if (v <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	if (u <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
 	s->divisor = u + v;
 	if (s->divisor == 0.0f) return 0;
-	s->inv_divisor = 1.0f / s->divisor; s->v[0].u = u; s->v[1].u = v; s->count = 2;
+	s->v[0].u = u; s->v[1].u = v; s->count = 2;
 	return 1;
 }
 
@@ -178,15 +177,15 @@ static int gjk_solve3(GJK_Simplex* s)
 	v3 n = cross(sub(b, a), sub(c, a));
 	float uABC = dot(cross(b, c), n), vABC = dot(cross(c, a), n), wABC = dot(cross(a, b), n);
 
-	if (vAB <= 0.0f && uCA <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->inv_divisor = 1.0f; s->count = 1; return 1; }
-	if (uAB <= 0.0f && vBC <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->inv_divisor = 1.0f; s->count = 1; return 1; }
-	if (uBC <= 0.0f && vCA <= 0.0f) { s->v[0] = s->v[2]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->inv_divisor = 1.0f; s->count = 1; return 1; }
-	if (uAB > 0.0f && vAB > 0.0f && wABC <= 0.0f) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->inv_divisor = 1.0f / (uAB + vAB); s->count = 2; return 1; }
-	if (uBC > 0.0f && vBC > 0.0f && uABC <= 0.0f) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->inv_divisor = 1.0f / (uBC + vBC); s->count = 2; return 1; }
-	if (uCA > 0.0f && vCA > 0.0f && vABC <= 0.0f) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->inv_divisor = 1.0f / (uCA + vCA); s->count = 2; return 1; }
+	if (vAB <= 0.0f && uCA <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	if (uAB <= 0.0f && vBC <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	if (uBC <= 0.0f && vCA <= 0.0f) { s->v[0] = s->v[2]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	if (uAB > 0.0f && vAB > 0.0f && wABC <= 0.0f) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
+	if (uBC > 0.0f && vBC > 0.0f && uABC <= 0.0f) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
+	if (uCA > 0.0f && vCA > 0.0f && vABC <= 0.0f) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
 	s->divisor = uABC + vABC + wABC;
 	if (s->divisor == 0.0f) return 0;
-	s->inv_divisor = 1.0f / s->divisor; s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->count = 3;
+	s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->count = 3;
 	return 1;
 }
 
@@ -219,25 +218,25 @@ static int gjk_solve4(GJK_Simplex* s)
 	float uABCD = stp(c, d, b) * vol, vABCD = stp(c, a, d) * vol;
 	float wABCD = stp(d, a, b) * vol, xABCD = stp(b, a, c) * vol;
 
-	if (vAB <= 0 && uCA <= 0 && vAD <= 0) { s->v[0].u = 1; s->divisor = 1; s->inv_divisor = 1; s->count = 1; return 1; }
-	if (uAB <= 0 && vBC <= 0 && vBD <= 0) { s->v[0] = s->v[1]; s->v[0].u = 1; s->divisor = 1; s->inv_divisor = 1; s->count = 1; return 1; }
-	if (uBC <= 0 && vCA <= 0 && uDC <= 0) { s->v[0] = s->v[2]; s->v[0].u = 1; s->divisor = 1; s->inv_divisor = 1; s->count = 1; return 1; }
-	if (uBD <= 0 && vDC <= 0 && uAD <= 0) { s->v[0] = s->v[3]; s->v[0].u = 1; s->divisor = 1; s->inv_divisor = 1; s->count = 1; return 1; }
+	if (vAB <= 0 && uCA <= 0 && vAD <= 0) { s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if (uAB <= 0 && vBC <= 0 && vBD <= 0) { s->v[0] = s->v[1]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if (uBC <= 0 && vCA <= 0 && uDC <= 0) { s->v[0] = s->v[2]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if (uBD <= 0 && vDC <= 0 && uAD <= 0) { s->v[0] = s->v[3]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
 
-	if (wABC <= 0 && vADB <= 0 && uAB > 0 && vAB > 0) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->inv_divisor = 1.0f / (uAB + vAB); s->count = 2; return 1; }
-	if (uABC <= 0 && wCBD <= 0 && uBC > 0 && vBC > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->inv_divisor = 1.0f / (uBC + vBC); s->count = 2; return 1; }
-	if (vABC <= 0 && wACD <= 0 && uCA > 0 && vCA > 0) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->inv_divisor = 1.0f / (uCA + vCA); s->count = 2; return 1; }
-	if (vCBD <= 0 && uACD <= 0 && uDC > 0 && vDC > 0) { s->v[0] = s->v[3]; s->v[1] = s->v[2]; s->v[0].u = uDC; s->v[1].u = vDC; s->divisor = uDC + vDC; s->inv_divisor = 1.0f / (uDC + vDC); s->count = 2; return 1; }
-	if (vACD <= 0 && wADB <= 0 && uAD > 0 && vAD > 0) { s->v[1] = s->v[3]; s->v[0].u = uAD; s->v[1].u = vAD; s->divisor = uAD + vAD; s->inv_divisor = 1.0f / (uAD + vAD); s->count = 2; return 1; }
-	if (uCBD <= 0 && uADB <= 0 && uBD > 0 && vBD > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uBD; s->v[1].u = vBD; s->divisor = uBD + vBD; s->inv_divisor = 1.0f / (uBD + vBD); s->count = 2; return 1; }
+	if (wABC <= 0 && vADB <= 0 && uAB > 0 && vAB > 0) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
+	if (uABC <= 0 && wCBD <= 0 && uBC > 0 && vBC > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
+	if (vABC <= 0 && wACD <= 0 && uCA > 0 && vCA > 0) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
+	if (vCBD <= 0 && uACD <= 0 && uDC > 0 && vDC > 0) { s->v[0] = s->v[3]; s->v[1] = s->v[2]; s->v[0].u = uDC; s->v[1].u = vDC; s->divisor = uDC + vDC; s->count = 2; return 1; }
+	if (vACD <= 0 && wADB <= 0 && uAD > 0 && vAD > 0) { s->v[1] = s->v[3]; s->v[0].u = uAD; s->v[1].u = vAD; s->divisor = uAD + vAD; s->count = 2; return 1; }
+	if (uCBD <= 0 && uADB <= 0 && uBD > 0 && vBD > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uBD; s->v[1].u = vBD; s->divisor = uBD + vBD; s->count = 2; return 1; }
 
-	if (xABCD <= 0 && uABC > 0 && vABC > 0 && wABC > 0) { s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = uABC + vABC + wABC; s->inv_divisor = 1.0f / (uABC + vABC + wABC); s->count = 3; return 1; }
-	if (uABCD <= 0 && uCBD > 0 && vCBD > 0 && wCBD > 0) { s->v[0] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uCBD; s->v[1].u = vCBD; s->v[2].u = wCBD; s->divisor = uCBD + vCBD + wCBD; s->inv_divisor = 1.0f / (uCBD + vCBD + wCBD); s->count = 3; return 1; }
-	if (vABCD <= 0 && uACD > 0 && vACD > 0 && wACD > 0) { s->v[1] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uACD; s->v[1].u = vACD; s->v[2].u = wACD; s->divisor = uACD + vACD + wACD; s->inv_divisor = 1.0f / (uACD + vACD + wACD); s->count = 3; return 1; }
-	if (wABCD <= 0 && uADB > 0 && vADB > 0 && wADB > 0) { s->v[2] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uADB; s->v[1].u = vADB; s->v[2].u = wADB; s->divisor = uADB + vADB + wADB; s->inv_divisor = 1.0f / (uADB + vADB + wADB); s->count = 3; return 1; }
+	if (xABCD <= 0 && uABC > 0 && vABC > 0 && wABC > 0) { s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = uABC + vABC + wABC; s->count = 3; return 1; }
+	if (uABCD <= 0 && uCBD > 0 && vCBD > 0 && wCBD > 0) { s->v[0] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uCBD; s->v[1].u = vCBD; s->v[2].u = wCBD; s->divisor = uCBD + vCBD + wCBD; s->count = 3; return 1; }
+	if (vABCD <= 0 && uACD > 0 && vACD > 0 && wACD > 0) { s->v[1] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uACD; s->v[1].u = vACD; s->v[2].u = wACD; s->divisor = uACD + vACD + wACD; s->count = 3; return 1; }
+	if (wABCD <= 0 && uADB > 0 && vADB > 0 && wADB > 0) { s->v[2] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uADB; s->v[1].u = vADB; s->v[2].u = wADB; s->divisor = uADB + vADB + wADB; s->count = 3; return 1; }
 
 	s->v[0].u = uABCD; s->v[1].u = vABCD; s->v[2].u = wABCD; s->v[3].u = xABCD;
-	s->divisor = 1.0f; s->inv_divisor = 1.0f; s->count = 4;
+	s->divisor = 1.0f; s->count = 4;
 	return 1;
 }
 
@@ -267,7 +266,6 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 	simplex.v[0].feat2 = fB;
 	simplex.v[0].u = 1.0f;
 	simplex.divisor = 1.0f;
-	simplex.inv_divisor = 1.0f;
 	simplex.count = 1;
 
 	float dsq_prev = FLT_MAX;
