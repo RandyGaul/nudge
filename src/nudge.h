@@ -192,7 +192,6 @@ typedef enum SolverType
 	SOLVER_SOFT_STEP,  // soft contacts, relax each substep (default)
 	SOLVER_SI_SOFT,    // soft contacts, no relax between substeps
 	SOLVER_SI,         // hard constraints, NGS position correction
-	SOLVER_AVBD,       // augmented vertex block descent (primal-dual position solver)
 } SolverType;
 
 typedef struct WorldParams
@@ -291,10 +290,35 @@ typedef struct HingeParams
 	SpringParams spring;  // {0,0} = rigid
 } HingeParams;
 
+typedef struct FixedParams
+{
+	Body body_a, body_b;
+	v3 local_offset_a;
+	v3 local_offset_b;
+	SpringParams spring;  // {0,0} = rigid weld
+} FixedParams;
+
+typedef struct PrismaticParams
+{
+	Body body_a, body_b;
+	v3 local_offset_a;
+	v3 local_offset_b;
+	v3 local_axis_a;      // slide axis in body A local space
+	v3 local_axis_b;      // slide axis in body B local space
+	SpringParams spring;
+} PrismaticParams;
+
 Joint create_ball_socket(World world, BallSocketParams params);
 Joint create_distance(World world, DistanceParams params);
 Joint create_hinge(World world, HingeParams params);
+Joint create_fixed(World world, FixedParams params);
+Joint create_prismatic(World world, PrismaticParams params);
 void destroy_joint(World world, Joint joint);
+void joint_set_hinge_limits(World world, Joint joint, float min_angle, float max_angle);
+void joint_set_distance_limits(World world, Joint joint, float min_distance, float max_distance);
+void joint_clear_limits(World world, Joint joint);
+void joint_set_hinge_motor(World world, Joint joint, float speed, float max_impulse);
+void joint_set_prismatic_motor(World world, Joint joint, float speed, float max_impulse);
 
 // Debug: iterate BVH nodes. Calls fn(min, max, depth, is_leaf, user) for each node child.
 typedef void (*BVHDebugFn)(v3 min, v3 max, int depth, int is_leaf, void* user);
@@ -303,11 +327,16 @@ void world_debug_bvh(World world, BVHDebugFn fn, void* user);
 // Debug: iterate all joints. Calls fn with world-space anchor points.
 typedef struct JointDebugInfo
 {
-	int type;            // 0=ball_socket, 1=distance, 2=hinge
-	v3 anchor_a;     // world-space anchor on body A
-	v3 anchor_b;     // world-space anchor on body B
-	v3 axis_a;       // hinge axis in world space (hinge only)
-	int is_soft;     // 1 if spring.frequency > 0
+	int type;                // JOINT_BALL_SOCKET..JOINT_PRISMATIC
+	v3 anchor_a, anchor_b;  // world-space anchor on body A/B
+	v3 axis_a;              // hinge/prismatic axis in world space
+	int is_soft;            // 1 if spring.frequency > 0
+	float motor_speed;      // target speed (0 = no motor)
+	float motor_max_impulse; // 0 = no motor
+	float limit_min, limit_max; // 0/0 = no limits
+	float current_angle;    // current hinge angle
+	int limit_active;       // 1 if angle is at a limit boundary
+	v3 ref_a, ref_b;        // hinge reference directions (world space, for arc drawing)
 } JointDebugInfo;
 typedef void (*JointDebugFn)(JointDebugInfo info, void* user);
 void world_debug_joints(World world, JointDebugFn fn, void* user);

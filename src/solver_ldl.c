@@ -1143,7 +1143,13 @@ static int ldl_cache_rebuild_blocks(LDL_Cache* c, WorldInternal* w, int island_i
 		for (int i = 0; i < joint_count; i++) {
 			if (sol_joints[i].joint_idx == ji) {
 				SolverJoint* sj = &sol_joints[i];
-				LDL_Constraint con = { .type = sj->type, .dof = sj->dof, .body_a = sj->body_a, .body_b = sj->body_b, .real_body_a = sj->body_a, .real_body_b = sj->body_b, .weight_a = 1.0f, .weight_b = 1.0f, .solver_idx = i };
+				// LDL handles bilateral DOFs only. For joints with limits, use the
+				// base DOF count (excluding the limit DOF which is solved separately).
+				int ldl_dof = sj->dof;
+				JointInternal* jj = &w->joints[ji];
+				if (jj->type == JOINT_HINGE && (jj->hinge.limit_min != 0.0f || jj->hinge.limit_max != 0.0f || jj->hinge.motor_max_impulse > 0.0f)) ldl_dof = 5;
+				if (jj->type == JOINT_PRISMATIC && jj->prismatic.motor_max_impulse > 0.0f) ldl_dof = 5;
+				LDL_Constraint con = { .type = sj->type, .dof = ldl_dof, .body_a = sj->body_a, .body_b = sj->body_b, .real_body_a = sj->body_a, .real_body_b = sj->body_b, .weight_a = 1.0f, .weight_b = 1.0f, .solver_idx = i };
 				assert(con.body_a != con.body_b && "Joint between body and itself");
 				assert((w->body_hot[con.body_a].inv_mass > 0.0f || w->body_hot[con.body_b].inv_mass > 0.0f) && "Both bodies are static");
 				apush(c->constraints, con);

@@ -56,10 +56,10 @@ typedef struct BodyHot
 } BodyHot;
 
 typedef struct WarmManifold WarmManifold; // forward decl for warm cache
-typedef struct AVBD_WarmManifold AVBD_WarmManifold;
+
 
 // Joint persistent storage (handle-based, parallel arrays like bodies).
-typedef enum JointType { JOINT_BALL_SOCKET, JOINT_DISTANCE, JOINT_HINGE } JointType;
+typedef enum JointType { JOINT_BALL_SOCKET, JOINT_DISTANCE, JOINT_HINGE, JOINT_FIXED, JOINT_PRISMATIC } JointType;
 
 typedef struct JointInternal
 {
@@ -67,15 +67,13 @@ typedef struct JointInternal
 	int body_a, body_b; // array indices (resolved from handles at creation)
 	union {
 		struct { v3 local_a, local_b; SpringParams spring; } ball_socket;
-		struct { v3 local_a, local_b; float rest_length; SpringParams spring; } distance;
-		struct { v3 local_a, local_b; v3 local_axis_a, local_axis_b; SpringParams spring; } hinge;
+		struct { v3 local_a, local_b; float rest_length; SpringParams spring; float limit_min, limit_max; } distance;
+		struct { v3 local_a, local_b; v3 local_axis_a, local_axis_b; v3 local_ref_a, local_ref_b; SpringParams spring; float limit_min, limit_max; float motor_speed, motor_max_impulse; } hinge;
+		struct { v3 local_a, local_b; quat local_rel_quat; SpringParams spring; } fixed;
+		struct { v3 local_a, local_b; v3 local_axis_a, local_axis_b; quat local_rel_quat; SpringParams spring; float motor_speed, motor_max_impulse; } prismatic;
 	};
 	// Warm starting: accumulated impulses persisted across frames (up to 6 DOF).
 	float warm_lambda[6];
-	// AVBD warm state (penalty/lambda for augmented Lagrangian)
-	v3 avbd_penalty_lin;
-	v3 avbd_lambda_lin;
-	v3 avbd_C0_lin;        // constraint error at x- for stabilization
 	// Island linked list fields.
 	int island_id;    // -1 = none
 	int island_prev;  // -1 = head
@@ -252,8 +250,6 @@ typedef struct WorldInternal
 	CK_DYNA int*         body_free;
 	CK_DYNA Contact*     debug_contacts;
 	CK_MAP(WarmManifold) warm_cache;
-	CK_MAP(AVBD_WarmManifold) avbd_warm_cache;
-	CK_DYNA v3* avbd_prev_velocity; // per-body prev velocity for adaptive warm-start
 	// Joints
 	CK_DYNA JointInternal* joints;
 	CK_DYNA uint32_t*      joint_gen;
@@ -267,6 +263,8 @@ typedef struct WorldInternal
 	CK_DYNA uint32_t*   island_gen;
 	CK_DYNA int*        island_free;
 	CK_MAP(uint8_t)     prev_touching; // body_pair_key -> 1 for pairs touching last frame
+	CK_MAP(uint8_t)     joint_pairs;   // body_pair_key -> 1 for bodies connected by joints (skip collisions)
+	int joint_pairs_version;             // ldl_topo_version when joint_pairs was last built
 	int sleep_enabled;       // 1 = island sleep active (default)
 	int ldl_enabled;         // 1 = LDL direct correction for joints (dual solvers only)
 	int ldl_topo_version;    // incremented on joint create/destroy
@@ -279,19 +277,6 @@ typedef struct WorldInternal
 	float contact_damping_ratio;
 	float max_push_velocity;
 	int sub_steps;
-	// CR (Conjugate Residual) solver parameters
-	int cr_enabled;          // 1 = use CR as linear accelerator between PGS passes
-	int cr_max_iters;        // max CR iterations per island (default 5)
-	float cr_tolerance;      // convergence tolerance on residual norm (default 1e-6)
-	int cr_active_set_mask;  // 1 = skip inactive contacts (lambda_n=0 after PGS warmup)
-	int cr_last_iters;       // max CR iterations across islands in most recent solve
-	int cr_peak_iters;       // highest cr_last_iters seen (reset on scene swap)
-	// AVBD parameters
-	float avbd_alpha;        // stabilization (0.95-0.99)
-	float avbd_beta_lin;     // penalty ramp, linear constraints
-	float avbd_beta_ang;     // penalty ramp, angular constraints
-	float avbd_gamma;        // warm-start decay
-	int avbd_iterations;     // solver iterations
 } WorldInternal;
 
 // -----------------------------------------------------------------------------
@@ -417,82 +402,6 @@ typedef struct ConstraintRef
 	int index;
 	int body_a, body_b;
 } ConstraintRef;
-
-// -----------------------------------------------------------------------------
-// AVBD (Augmented Vertex Block Descent) solver types.
-
-#define AVBD_STABLE_THRESH 0.05f // adaptive alpha: below this error, use full stabilization
-#define AVBD_PENALTY_MIN   1.0f
-#define AVBD_PENALTY_MAX   1e10f
-#define AVBD_MARGIN        0.0f   // must be 0: nudge penetration is always positive, margin would hide it
-#define AVBD_STICK_THRESH  0.00001f
-
-typedef struct AVBD_Contact
-{
-	v3 r_a, r_b;       // contact offsets in body-local space
-	v3 C0;             // constraint error at x- (normal, tangent1, tangent2)
-	float normal_bias; // one-frame bias added directly to the normal C (restitution)
-	v3 penalty;        // per-axis penalty parameters (ramp over iterations)
-	v3 lambda;         // accumulated dual variables (clamped force)
-	int stick;         // static friction flag
-	uint32_t feature_id;
-} AVBD_Contact;
-
-typedef struct AVBD_Manifold
-{
-	int body_a, body_b;
-	int contact_count;
-	float friction;
-	m3x3 basis;        // [normal; tangent1; tangent2] row-major
-	AVBD_Contact contacts[MAX_CONTACTS];
-} AVBD_Manifold;
-
-// CSR adjacency: separate arrays for contacts and joints.
-// body i's contact refs at ct_adj[ct_start[i]..ct_start[i+1]]
-// body i's joint refs at jt_adj[jt_start[i]..jt_start[i+1]]
-
-typedef struct AVBD_ContactAdj
-{
-	int manifold_idx;
-	int contact_idx;
-	int is_body_a;
-} AVBD_ContactAdj;
-
-typedef struct AVBD_JointAdj
-{
-	int joint_idx;
-	int is_body_a;
-} AVBD_JointAdj;
-
-// AVBD warm cache: persists penalty/lambda across frames (keyed by body pair).
-typedef struct AVBD_WarmContact
-{
-	uint32_t feature_id;
-	v3 r_a;             // body-local contact offset A (also used for spatial matching)
-	v3 r_b;             // body-local contact offset B
-	v3 penalty;
-	v3 lambda;
-	int stick;
-} AVBD_WarmContact;
-
-typedef struct AVBD_WarmManifold
-{
-	AVBD_WarmContact contacts[MAX_CONTACTS];
-	int count;
-	int stale;
-	int touching;       // previous frame had an active/touching contact in this pair
-	m3x3 basis;         // cached [normal; tangent1; tangent2] for synthetic contacts
-	float friction;
-} AVBD_WarmManifold;
-
-// Per-body temporary state for AVBD (not stored in BodyHot)
-typedef struct AVBD_BodyState
-{
-	v3 inertial_lin;
-	v3 initial_lin;    // x- for velocity recovery
-	quat inertial_ang;
-	quat initial_ang;  // q- for angular velocity recovery
-} AVBD_BodyState;
 
 // -----------------------------------------------------------------------------
 // LDL debug visualization data (populated by solver_ldl.c, read by UI).

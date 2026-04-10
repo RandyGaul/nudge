@@ -5,12 +5,7 @@
 // so modular and well-understood it often becomes useful as a supporting algorithm in other more
 // advanced solvers, or hybrid approaches.
 
-static uint64_t body_pair_key(int a, int b)
-{
-	uint32_t lo = a < b ? a : b;
-	uint32_t hi = a < b ? b : a;
-	return ((uint64_t)lo << 32) | (uint64_t)hi;
-}
+// body_pair_key defined in collision.c (included before this file)
 
 static void contact_tangent_basis(v3 n, v3* t1, v3* t2)
 {

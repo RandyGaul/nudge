@@ -80,9 +80,15 @@ static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) {
 	v3 c0 = quat_rotate(rot, V3(1,0,0)), c1 = quat_rotate(rot, V3(0,1,0)), c2 = quat_rotate(rot, V3(0,0,1));
 	return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.col0 = c0, .box.col1 = c1, .box.col2 = c2, .box.half_extents = half_extents };
 }
+static GJK_Shape gjk_box_m(v3 center, v3 col0, v3 col1, v3 col2, v3 half_extents) {
+	return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.col0 = col0, .box.col1 = col1, .box.col2 = col2, .box.half_extents = half_extents };
+}
 static GJK_Shape gjk_hull(v3 center, quat rot, v3 sc, const v3* verts, int count, const float* soa, const HalfEdge* edges, const int* vert_edge) {
 	v3 c0 = quat_rotate(rot, V3(1,0,0)), c1 = quat_rotate(rot, V3(0,1,0)), c2 = quat_rotate(rot, V3(0,0,1));
 	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = c0, .hull.col1 = c1, .hull.col2 = c2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edges = edges, .hull.vert_edge = vert_edge, .hull.count = count };
+}
+static GJK_Shape gjk_hull_m(v3 center, v3 col0, v3 col1, v3 col2, v3 sc, const v3* verts, int count, const float* soa, const HalfEdge* edges, const int* vert_edge) {
+	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = col0, .hull.col1 = col1, .hull.col2 = col2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edges = edges, .hull.vert_edge = vert_edge, .hull.count = count };
 }
 static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
 	v3 axis = sub(q, p);

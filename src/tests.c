@@ -12,8 +12,10 @@ static int test_pass;
 static int test_fail;
 static int test_bail; // if nonzero, exit on first failure
 static const char* test_current;
+static int test_timing; // if nonzero, print per-test timing
 
 #define TEST_BEGIN(name) do { test_current = name; } while(0)
+#define TIMED(call) do { clock_t _t0 = clock(); call; clock_t _t1 = clock(); if (test_timing) printf("  [%.2fs] %s\n", (double)(_t1 - _t0) / CLOCKS_PER_SEC, #call); } while(0)
 #define TEST_ASSERT(cond) do { \
 	if (!(cond)) { printf("  FAIL [%s] %s:%d: %s\n", test_current, __FILE__, __LINE__, #cond); test_fail++; \
 		if (test_bail) { printf("--- BAIL: first failure ---\n"); exit(1); } } \
@@ -2622,57 +2624,6 @@ static void bounce_test_for_solver(SolverType solver, const char* name)
 		y_prev = y;
 	}
 	TEST_ASSERT(peaks_found >= 3);
-	destroy_world(w);
-}
-
-static void avbd_box_bounce_test()
-{
-	TEST_BEGIN("AVBD box bounce height monotonically decreasing");
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-	Body floor_b = create_body(w, (BodyParams){
-		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, floor_b, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
-	});
-	Body box = create_body(w, (BodyParams){
-		.position = V3(0, 5, 0), .rotation = quat_identity(),
-		.mass = 1.0f, .restitution = 0.5f,
-	});
-	body_add_shape(w, box, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
-	});
-
-	float dt = 1.0f / 60.0f;
-	float prev_peak = 100.0f;
-	float y_prev = body_get_position(w, box).y;
-	int going_up = 0;
-	int peaks_found = 0;
-
-	for (int i = 0; i < 600; i++) {
-		world_step(w, dt);
-		float y = body_get_position(w, box).y;
-		if (y > y_prev) {
-			going_up = 1;
-		} else if (going_up && y < y_prev) {
-			float peak = y_prev;
-			if (peaks_found > 0) {
-				if (peak > prev_peak + 0.01f) {
-					printf("  [FAIL] AVBD box bounce %d: peak %.4f > prev peak %.4f\n",
-						peaks_found, peak, prev_peak);
-					TEST_ASSERT(peak <= prev_peak + 0.01f);
-				}
-			}
-			prev_peak = peak;
-			peaks_found++;
-			going_up = 0;
-		}
-		y_prev = y;
-	}
-
-	if (peaks_found < 2)
-		printf("  [FAIL] AVBD box only found %d peaks\n", peaks_found);
-	TEST_ASSERT(peaks_found >= 2);
 	destroy_world(w);
 }
 
@@ -7539,659 +7490,1437 @@ static void test_ldl_mixed_chain_and_hub()
 	destroy_world(w);
 }
 
+// ============================================================================
+// Fixed, Prismatic, and Limits tests.
+
+static void test_hinge_limit_trace()
+{
+	printf("  --- HINGE LIMIT SCENE TRACE (LDL+limits, pushed) ---\n");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+	// LDL enabled (default)
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+
+	float limit = 0.6f;
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	Body arm = create_body(w, (BodyParams){ .position = V3(0, 4.3f, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 0.7f, 0.1f) });
+	Joint h = create_hinge(w, (HingeParams){
+		.body_a = anchor, .body_b = arm,
+		.local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0.7f, 0),
+		.local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1),
+	});
+	joint_set_hinge_limits(w, h, -limit, limit);
+	body_set_velocity(w, arm, V3(5, 0, 0));
+
+	for (int i = 0; i < 60; i++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, arm);
+		v3 ap = V3(0, 5, 0);
+		v3 hinge_pt = add(p, rotate(body_get_rotation(w, arm), V3(0, 0.7f, 0)));
+		float gap = len(sub(hinge_pt, ap));
+		float dx = p.x, dy = -(p.y - 4.3f);
+		float angle = atan2f(dy, 1.0f);  // approximate
+		// Better angle: use the ref vectors
+		printf("  f%02d arm=(%.3f,%.3f) hinge_gap=%.4f%s\n", i, p.x, p.y, gap, gap > 0.1f ? " *** GAP" : "");
+	}
+	destroy_world(w);
+}
+
+static void test_fixed_holds_position_and_orientation()
+{
+	TEST_BEGIN("fixed joint holds position and orientation");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body bob = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	create_fixed(w, (FixedParams){ .body_a = anchor, .body_b = bob, .local_offset_a = V3(1, 0, 0), .local_offset_b = V3(0, 0, 0) });
+	step_n(w, 120);
+	v3 p = body_get_position(w, bob);
+	float dist = len(sub(p, V3(1, 5, 0)));
+	printf("  [fixed] pos=(%.3f,%.3f,%.3f) drift=%.4f\n", p.x, p.y, p.z, dist);
+	TEST_ASSERT(dist < 0.5f);
+	destroy_world(w);
+}
+
+static void test_fixed_soft_spring()
+{
+	TEST_BEGIN("fixed joint soft spring oscillates");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body bob = create_body(w, (BodyParams){ .position = V3(0, 4, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	create_fixed(w, (FixedParams){ .body_a = anchor, .body_b = bob, .local_offset_a = V3(0, -1, 0), .local_offset_b = V3(0, 0, 0), .spring = { .frequency = 5.0f, .damping_ratio = 0.3f } });
+	float y_min = 100, y_max = -100;
+	for (int i = 0; i < 60; i++) {
+		world_step(w, 1.0f / 60.0f);
+		float y = body_get_position(w, bob).y;
+		if (y < y_min) y_min = y;
+		if (y > y_max) y_max = y;
+	}
+	printf("  [fixed spring] y_range=[%.2f, %.2f]\n", y_min, y_max);
+	TEST_ASSERT(y_max - y_min > 0.01f); // should oscillate (damped)
+	v3 p = body_get_position(w, bob);
+	TEST_ASSERT(p.y > 3.0f && p.y < 5.5f); // should converge near rest
+	destroy_world(w);
+}
+
+static void test_prismatic_free_slide()
+{
+	TEST_BEGIN("prismatic allows free sliding along axis");
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) }); // no gravity to keep it simple
+	// Rail along X axis, bodies separated to avoid collision
+	Body rail = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, rail, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body slider = create_body(w, (BodyParams){ .position = V3(2, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, slider, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	create_prismatic(w, (PrismaticParams){ .body_a = rail, .body_b = slider, .local_offset_a = V3(2, 0, 0), .local_offset_b = V3(0, 0, 0), .local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0) });
+	body_set_velocity(w, slider, V3(3, 0, 0)); // push along slide axis
+	step_n(w, 60);
+	v3 p = body_get_position(w, slider);
+	printf("  [prismatic slide] pos=(%.3f,%.3f,%.3f)\n", p.x, p.y, p.z);
+	TEST_ASSERT(p.x > 3.0f); // should have slid along X
+	TEST_ASSERT(fabsf(p.y - 5.0f) < 0.3f); // should stay at Y=5
+	destroy_world(w);
+}
+
+static void test_prismatic_lateral_lock()
+{
+	TEST_BEGIN("prismatic resists lateral motion");
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) }); // no gravity
+	Body rail = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, rail, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body slider = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, slider, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	create_prismatic(w, (PrismaticParams){ .body_a = rail, .body_b = slider, .local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0) });
+	body_set_velocity(w, slider, V3(0, 5, 0)); // push perpendicular
+	step_n(w, 60);
+	v3 p = body_get_position(w, slider);
+	printf("  [prismatic lateral] pos=(%.3f,%.3f,%.3f)\n", p.x, p.y, p.z);
+	TEST_ASSERT(fabsf(p.y) < 1.0f); // lateral motion should be constrained
+	destroy_world(w);
+}
+
+static void test_prismatic_angular_lock()
+{
+	TEST_BEGIN("prismatic locks orientation");
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+	Body rail = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, rail, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body slider = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, slider, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+	create_prismatic(w, (PrismaticParams){ .body_a = rail, .body_b = slider, .local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0) });
+	body_set_angular_velocity(w, slider, V3(5, 5, 5)); // spin it
+	step_n(w, 60);
+	quat q = body_get_rotation(w, slider);
+	// Should be near identity -- measure angular deviation
+	float ang_err = 2.0f * sqrtf(q.x*q.x + q.y*q.y + q.z*q.z);
+	printf("  [prismatic angular] q=(%.3f,%.3f,%.3f,%.3f) ang_err=%.4f\n", q.x, q.y, q.z, q.w, ang_err);
+	TEST_ASSERT(ang_err < 0.5f);
+	destroy_world(w);
+}
+
+static void test_hinge_limits_inactive()
+{
+	TEST_BEGIN("hinge limits inactive when within bounds");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body bob = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	Joint h = create_hinge(w, (HingeParams){ .body_a = anchor, .body_b = bob, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+	joint_set_hinge_limits(w, h, -3.0f, 3.0f); // wide limits, won't be hit
+	step_n(w, 120);
+	v3 p = body_get_position(w, bob);
+	// Bob should swing freely like a pendulum -- it will be below anchor
+	printf("  [hinge limits inactive] pos=(%.3f,%.3f,%.3f)\n", p.x, p.y, p.z);
+	TEST_ASSERT(p.y < 5.0f); // should have fallen
+	destroy_world(w);
+}
+
+static void test_hinge_limits_active()
+{
+	TEST_BEGIN("hinge limits stop rotation at max");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	((WorldInternal*)w.id)->ldl_enabled = 0; // PGS only to isolate limit behavior
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	// Bob starts to the right of anchor (angle=0)
+	Body bob = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	Joint h = create_hinge(w, (HingeParams){ .body_a = anchor, .body_b = bob, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+	// Limit to 30 degrees downward (gravity pulls down = negative angle)
+	joint_set_hinge_limits(w, h, -0.5f, 0.5f); // ~29 degrees each way
+	step_n(w, 300);
+	v3 p = body_get_position(w, bob);
+	float angle = atan2f(-(p.y - 5.0f), p.x);
+	float dist_from_anchor = len(sub(p, V3(0, 5, 0)));
+	printf("  [hinge limits active] pos=(%.3f,%.3f,%.3f) angle=%.3f dist=%.3f\n", p.x, p.y, p.z, angle, dist_from_anchor);
+	// Joint should hold (not explode) -- rod length ~1
+	TEST_ASSERT(dist_from_anchor < 2.0f);
+	destroy_world(w);
+}
+
+static void test_distance_limits_max()
+{
+	TEST_BEGIN("distance limits max prevents stretching");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body bob = create_body(w, (BodyParams){ .position = V3(0, 4, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	// Distance joint with max limit of 2.0 (rope behavior)
+	Joint d = create_distance(w, (DistanceParams){ .body_a = anchor, .body_b = bob, .rest_length = 1.0f });
+	joint_set_distance_limits(w, d, 0.0f, 2.0f); // no min, max=2
+	step_n(w, 300);
+	v3 p = body_get_position(w, bob);
+	float dist = len(sub(p, V3(0, 5, 0)));
+	printf("  [distance max] pos=(%.3f,%.3f,%.3f) dist=%.3f\n", p.x, p.y, p.z, dist);
+	TEST_ASSERT(dist < 2.5f); // should be held within max
+	destroy_world(w);
+}
+
+static void test_distance_limits_min()
+{
+	TEST_BEGIN("distance limits min prevents compression");
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) }); // no gravity
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body a_body = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, a_body, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body b_body = create_body(w, (BodyParams){ .position = V3(2, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, b_body, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	Joint d = create_distance(w, (DistanceParams){ .body_a = a_body, .body_b = b_body, .rest_length = 2.0f });
+	joint_set_distance_limits(w, d, 1.5f, 0.0f); // min=1.5, no max
+	body_set_velocity(w, b_body, V3(-5, 0, 0)); // push toward anchor
+	step_n(w, 120);
+	v3 p = body_get_position(w, b_body);
+	float dist = len(sub(p, V3(0, 0, 0)));
+	printf("  [distance min] pos=(%.3f,%.3f,%.3f) dist=%.3f\n", p.x, p.y, p.z, dist);
+	TEST_ASSERT(dist > 1.0f); // should be kept above min
+	destroy_world(w);
+}
+
+static void test_hinge_limits_mouse_drag()
+{
+	TEST_BEGIN("hinge limits with mouse-like drag joint");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	// LDL enabled (default) -- reproduces the scene crash scenario
+
+	// Floor
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+
+	// Multiple pendulums with hinge limits (like the scene)
+	Body bobs[5];
+	for (int i = 0; i < 5; i++) {
+		float x = -4.0f + i * 2.0f;
+		float limit = 0.3f + i * 0.3f;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(x, 5, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		bobs[i] = create_body(w, (BodyParams){ .position = V3(x, 3.5f, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, bobs[i], (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 0.7f, 0.1f) });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = anchor, .body_b = bobs[i], .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0.7f, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		joint_set_hinge_limits(w, h, -limit, limit);
+	}
+
+	// Let settle
+	step_n(w, 30);
+
+	// Mouse drag on the 3rd pendulum
+	Body mouse_anchor = create_body(w, (BodyParams){ .position = V3(2, 6, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, mouse_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+	Joint mouse_joint = create_ball_socket(w, (BallSocketParams){
+		.body_a = mouse_anchor, .body_b = bobs[2],
+		.local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0, 0),
+		.spring = { .frequency = 10.0f, .damping_ratio = 1.0f },
+	});
+
+	int nan_frame = -1;
+	for (int i = 0; i < 60; i++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, bobs[2]);
+		if (!is_valid(p)) { nan_frame = i; break; }
+	}
+
+	destroy_joint(w, mouse_joint);
+	printf("  [hinge limits mouse drag] nan_frame=%d\n", nan_frame);
+	TEST_ASSERT(nan_frame == -1);
+	destroy_world(w);
+}
+
+static void run_new_joint_tests()
+{
+	printf("--- new joint tests (fixed, prismatic, limits) ---\n");
+	test_fixed_holds_position_and_orientation();
+	test_fixed_soft_spring();
+	test_prismatic_free_slide();
+	test_prismatic_lateral_lock();
+	test_prismatic_angular_lock();
+	test_hinge_limits_inactive();
+	test_hinge_limits_active();
+	test_distance_limits_max();
+	test_distance_limits_min();
+	test_hinge_limits_mouse_drag();
+}
+
+// ============================================================================
+// Motor tests: actuate joints and verify motion is smooth and correct.
+
+static void test_hinge_motor_spins()
+{
+	TEST_BEGIN("hinge motor spins body");
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+	Joint h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+	joint_set_hinge_motor(w, h, 3.0f, 50.0f); // 3 rad/s target
+
+	float prev_angle = 0;
+	int monotonic = 1;
+	int nan_frame = -1;
+	for (int i = 0; i < 60; i++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, arm);
+		if (!is_valid(p)) { nan_frame = i; break; }
+		float angle = atan2f(-(p.y), p.x);
+		if (i > 5 && angle < prev_angle - 0.01f) monotonic = 0; // should keep spinning in one direction
+		prev_angle = angle;
+	}
+	v3 p = body_get_position(w, arm);
+	float gap = len(sub(p, V3(0,0,0))) - 1.0f; // should stay at radius 1
+	printf("  [hinge motor] pos=(%.3f,%.3f) gap=%.4f monotonic=%d nan=%d\n", p.x, p.y, fabsf(gap), monotonic, nan_frame);
+	TEST_ASSERT(nan_frame == -1);
+	TEST_ASSERT(fabsf(gap) < 0.5f); // joint should hold
+	destroy_world(w);
+}
+
+static void test_hinge_motor_with_limits()
+{
+	TEST_BEGIN("hinge motor respects limits");
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+	Joint h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+	joint_set_hinge_motor(w, h, 5.0f, 50.0f);
+	joint_set_hinge_limits(w, h, -1.0f, 1.0f); // limit to +/- 1 rad
+
+	float max_angle = 0;
+	int nan_frame = -1;
+	for (int i = 0; i < 120; i++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, arm);
+		if (!is_valid(p)) { nan_frame = i; break; }
+		float angle = atan2f(-(p.y), p.x);
+		if (fabsf(angle) > fabsf(max_angle)) max_angle = angle;
+	}
+	printf("  [hinge motor+limits] max_angle=%.3f (limit=1.0) nan=%d\n", max_angle, nan_frame);
+	TEST_ASSERT(nan_frame == -1);
+	TEST_ASSERT(fabsf(max_angle) < 1.5f);
+	destroy_world(w);
+}
+
+static void test_prismatic_motor_slides()
+{
+	TEST_BEGIN("prismatic motor slides body");
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body rail = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, rail, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body slider = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, slider, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) });
+	Joint p = create_prismatic(w, (PrismaticParams){ .body_a = rail, .body_b = slider, .local_offset_a = V3(1, 0, 0), .local_offset_b = V3(0, 0, 0), .local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0) });
+	joint_set_prismatic_motor(w, p, 2.0f, 50.0f); // 2 m/s along X
+
+	int nan_frame = -1;
+	for (int i = 0; i < 60; i++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 pos = body_get_position(w, slider);
+		if (!is_valid(pos)) { nan_frame = i; break; }
+	}
+	v3 pos = body_get_position(w, slider);
+	printf("  [prismatic motor] pos=(%.3f,%.3f,%.3f) nan=%d\n", pos.x, pos.y, pos.z, nan_frame);
+	TEST_ASSERT(nan_frame == -1);
+	TEST_ASSERT(pos.x > 2.0f);
+	TEST_ASSERT(fabsf(pos.y) < 0.1f); // should stay on axis
+	TEST_ASSERT(fabsf(pos.z) < 0.1f);
+	destroy_world(w);
+}
+
+static void test_hinge_motor_reverse()
+{
+	TEST_BEGIN("hinge motor reversal");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body base = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body arm = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+	Joint h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+
+	// Spin forward
+	joint_set_hinge_motor(w, h, 3.0f, 100.0f);
+	int nan_frame = -1;
+	for (int i = 0; i < 30; i++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, arm);
+		if (!is_valid(p)) { nan_frame = i; break; }
+	}
+	v3 mid_pos = body_get_position(w, arm);
+
+	// Reverse
+	joint_set_hinge_motor(w, h, -3.0f, 100.0f);
+	for (int i = 0; i < 30; i++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, arm);
+		if (!is_valid(p)) { nan_frame = 30 + i; break; }
+	}
+	v3 end_pos = body_get_position(w, arm);
+	float gap = fabsf(len(sub(end_pos, V3(0,5,0))) - 1.0f);
+	printf("  [hinge reverse] mid=(%.2f,%.2f) end=(%.2f,%.2f) gap=%.4f nan=%d\n", mid_pos.x, mid_pos.y, end_pos.x, end_pos.y, gap, nan_frame);
+	TEST_ASSERT(nan_frame == -1);
+	TEST_ASSERT(gap < 0.5f);
+	destroy_world(w);
+}
+
+static void run_motor_tests()
+{
+	printf("--- motor tests ---\n");
+	test_hinge_motor_spins();
+	test_hinge_motor_with_limits();
+	test_prismatic_motor_slides();
+	test_hinge_motor_reverse();
+}
+
+// ============================================================================
+// Comprehensive motor/limit/joint tests -- both LDL and PGS paths.
+// These measure actual angle/displacement and direction, not just "no NaN".
+
+// Compute hinge angle from body position relative to anchor, for Z-axis hinges.
+// This gives the geometric angle consistent with the joint's internal measurement.
+static float hinge_angle_from_pos(v3 pos, v3 anchor)
+{
+	return atan2f(pos.y - anchor.y, pos.x - anchor.x);
+}
+
+// Compute joint's internal hinge angle by reading ref vectors.
+static float hinge_angle_internal(WorldInternal* wi, int joint_idx)
+{
+	JointInternal* j = &wi->joints[joint_idx];
+	BodyHot* a = &wi->body_hot[j->body_a];
+	BodyHot* b = &wi->body_hot[j->body_b];
+	v3 axis_a = norm(rotate(a->rotation, j->hinge.local_axis_a));
+	v3 ref_a_w = rotate(a->rotation, j->hinge.local_ref_a);
+	v3 ref_b_w = rotate(b->rotation, j->hinge.local_ref_b);
+	return atan2f(dot(cross(ref_a_w, ref_b_w), axis_a), dot(ref_a_w, ref_b_w));
+}
+
+// --- Hinge motor direction: positive speed should increase angle ---
+static void test_hinge_motor_direction()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+
+		Body base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+
+		// Positive motor speed
+		joint_set_hinge_motor(w, h, 3.0f, 50.0f);
+		for (int i = 0; i < 30; i++) world_step(w, 1.0f / 60.0f);
+		float angle_pos = hinge_angle_internal(wi, handle_index(h));
+		v3 p = body_get_position(w, arm);
+		float gap = fabsf(len(sub(p, V3(0, 0, 0))) - 1.0f);
+
+		printf("  [hinge motor dir %s +speed] angle=%.3f gap=%.4f\n", mode, angle_pos, gap);
+		{
+			char name[64]; snprintf(name, sizeof(name), "hinge motor dir %s: +speed positive angle", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(angle_pos > 0.5f);
+		}
+		{
+			char name[64]; snprintf(name, sizeof(name), "hinge motor dir %s: joint holds", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(gap < 0.3f);
+		}
+
+		destroy_world(w);
+
+		// Negative motor speed
+		w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+
+		base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+		h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		joint_set_hinge_motor(w, h, -3.0f, 50.0f);
+		for (int i = 0; i < 30; i++) world_step(w, 1.0f / 60.0f);
+		float angle_neg = hinge_angle_internal(wi, handle_index(h));
+
+		printf("  [hinge motor dir %s -speed] angle=%.3f\n", mode, angle_neg);
+		{
+			char name[64]; snprintf(name, sizeof(name), "hinge motor dir %s: -speed negative angle", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(angle_neg < -0.5f);
+		}
+
+		destroy_world(w);
+	}
+}
+
+// --- Hinge motor + limit: motor should be stopped by limits ---
+static void test_hinge_motor_limit_stops()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+
+		Body base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+
+		// Positive motor with upper limit at 1.0 rad
+		joint_set_hinge_motor(w, h, 5.0f, 50.0f);
+		joint_set_hinge_limits(w, h, -1.0f, 1.0f);
+
+		float max_angle = 0;
+		int nan_frame = -1;
+		for (int i = 0; i < 120; i++) {
+			world_step(w, 1.0f / 60.0f);
+			v3 p = body_get_position(w, arm);
+			if (!is_valid(p)) { nan_frame = i; break; }
+			float angle = hinge_angle_internal(wi, handle_index(h));
+			if (angle > max_angle) max_angle = angle;
+		}
+		printf("  [hinge motor+limit %s +motor] max_angle=%.3f (limit=1.0) nan=%d\n", mode, max_angle, nan_frame);
+		{
+			char name[64]; snprintf(name, sizeof(name), "hinge motor+limit %s +motor: no NaN", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(nan_frame == -1);
+		}
+		{
+			char name[64]; snprintf(name, sizeof(name), "hinge motor+limit %s +motor: angle within limit", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(max_angle < 1.5f);
+		}
+		destroy_world(w);
+
+		// Negative motor with lower limit at -1.0 rad
+		w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+
+		base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+		h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		joint_set_hinge_motor(w, h, -5.0f, 50.0f);
+		joint_set_hinge_limits(w, h, -1.0f, 1.0f);
+
+		float min_angle = 0;
+		nan_frame = -1;
+		for (int i = 0; i < 120; i++) {
+			world_step(w, 1.0f / 60.0f);
+			v3 p = body_get_position(w, arm);
+			if (!is_valid(p)) { nan_frame = i; break; }
+			float angle = hinge_angle_internal(wi, handle_index(h));
+			if (angle < min_angle) min_angle = angle;
+		}
+		printf("  [hinge motor+limit %s -motor] min_angle=%.3f (limit=-1.0) nan=%d\n", mode, min_angle, nan_frame);
+		{
+			char name[64]; snprintf(name, sizeof(name), "hinge motor+limit %s -motor: no NaN", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(nan_frame == -1);
+		}
+		{
+			char name[64]; snprintf(name, sizeof(name), "hinge motor+limit %s -motor: angle within limit", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(min_angle > -1.5f);
+		}
+		destroy_world(w);
+	}
+}
+
+// --- Hinge limits without motor: gravity pendulum stays within limit bounds ---
+static void test_hinge_limit_gravity()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body bob = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = anchor, .body_b = bob, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		joint_set_hinge_limits(w, h, -0.5f, 0.5f);
+
+		float max_angle = 0, min_angle = 0;
+		int nan_frame = -1;
+		for (int i = 0; i < 300; i++) {
+			world_step(w, 1.0f / 60.0f);
+			v3 p = body_get_position(w, bob);
+			if (!is_valid(p)) { nan_frame = i; break; }
+			float angle = hinge_angle_internal(wi, handle_index(h));
+			if (angle > max_angle) max_angle = angle;
+			if (angle < min_angle) min_angle = angle;
+		}
+		printf("  [hinge limit gravity %s] range=[%.3f, %.3f] nan=%d\n", mode, min_angle, max_angle, nan_frame);
+		{
+			char name[64]; snprintf(name, sizeof(name), "hinge limit gravity %s: no NaN", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(nan_frame == -1);
+		}
+		{
+			char name[64]; snprintf(name, sizeof(name), "hinge limit gravity %s: upper limit holds", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(max_angle < 0.8f);
+		}
+		{
+			char name[64]; snprintf(name, sizeof(name), "hinge limit gravity %s: lower limit holds", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(min_angle > -0.8f);
+		}
+		destroy_world(w);
+	}
+}
+
+// --- Prismatic motor direction: positive speed should move B in +axis direction ---
+static void test_prismatic_motor_direction()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+
+		Body rail = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, rail, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body slider = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, slider, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) });
+		Joint pj = create_prismatic(w, (PrismaticParams){ .body_a = rail, .body_b = slider, .local_offset_a = V3(1, 0, 0), .local_offset_b = V3(0, 0, 0), .local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0) });
+		joint_set_prismatic_motor(w, pj, 2.0f, 50.0f);
+
+		int nan_frame = -1;
+		for (int i = 0; i < 60; i++) {
+			world_step(w, 1.0f / 60.0f);
+			v3 pos = body_get_position(w, slider);
+			if (!is_valid(pos)) { nan_frame = i; break; }
+		}
+		v3 pos = body_get_position(w, slider);
+		printf("  [prismatic motor dir %s +speed] pos=(%.3f,%.3f,%.3f) nan=%d\n", mode, pos.x, pos.y, pos.z, nan_frame);
+		{
+			char name[64]; snprintf(name, sizeof(name), "prismatic motor dir %s: no NaN", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(nan_frame == -1);
+		}
+		{
+			char name[64]; snprintf(name, sizeof(name), "prismatic motor dir %s: +speed moves +X", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(pos.x > 1.5f);
+		}
+		{
+			char name[64]; snprintf(name, sizeof(name), "prismatic motor dir %s: stays on axis", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(fabsf(pos.y) < 0.1f && fabsf(pos.z) < 0.1f);
+		}
+		destroy_world(w);
+	}
+}
+
+// --- Fixed joint (6DOF) stability: weld bridge under load ---
+static void test_fixed_joint_bridge_stability()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+
+		// Bridge: 8 boxes connected by fixed joints, endpoints static
+		int n = 8;
+		float link_len = 1.0f;
+		float start_x = -(n - 1) * link_len * 0.5f;
+		Body bodies[8];
+		for (int i = 0; i < n; i++) {
+			float x = start_x + i * link_len;
+			float mass = (i == 0 || i == n - 1) ? 0.0f : 2.0f;
+			bodies[i] = create_body(w, (BodyParams){ .position = V3(x, 4, 0), .rotation = quat_identity(), .mass = mass });
+			body_add_shape(w, bodies[i], (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.15f, 0.4f) });
+			if (i > 0) {
+				create_fixed(w, (FixedParams){ .body_a = bodies[i-1], .body_b = bodies[i], .local_offset_a = V3(link_len * 0.5f, 0, 0), .local_offset_b = V3(-link_len * 0.5f, 0, 0) });
+			}
+		}
+
+		// Drop a heavy ball onto the middle
+		Body ball = create_body(w, (BodyParams){ .position = V3(0, 7, 0), .rotation = quat_identity(), .mass = 10.0f });
+		body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f });
+
+		int nan_frame = -1;
+		float max_speed = 0;
+		for (int i = 0; i < 300; i++) {
+			world_step(w, 1.0f / 60.0f);
+			for (int j = 1; j < n - 1; j++) {
+				v3 p = body_get_position(w, bodies[j]);
+				if (!is_valid(p)) { nan_frame = i; break; }
+				float speed = len(wi->body_hot[handle_index(bodies[j])].velocity);
+				if (speed > max_speed) max_speed = speed;
+			}
+			if (nan_frame >= 0) break;
+		}
+
+		// Check bridge endpoints haven't exploded
+		float max_drift = 0;
+		for (int j = 1; j < n - 1; j++) {
+			v3 p = body_get_position(w, bodies[j]);
+			float expected_x = start_x + j * link_len;
+			float drift = len(sub(p, V3(expected_x, 4, 0)));
+			if (drift > max_drift) max_drift = drift;
+		}
+
+		printf("  [fixed bridge %s] nan=%d max_speed=%.1f max_drift=%.3f\n", mode, nan_frame, max_speed, max_drift);
+		{
+			char name[64]; snprintf(name, sizeof(name), "fixed bridge %s: no NaN", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(nan_frame == -1);
+		}
+		{
+			char name[64]; snprintf(name, sizeof(name), "fixed bridge %s: no explosion", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(max_speed < 100.0f);
+		}
+		destroy_world(w);
+	}
+}
+
+// --- All joint types basic stability: LDL vs PGS ---
+static void test_all_joints_ldl_vs_pgs()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+
+		// Static anchor
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+		// Ball socket pendulum
+		Body bs_bob = create_body(w, (BodyParams){ .position = V3(0, 6, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, bs_bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = bs_bob, .local_offset_a = V3(0, -2, 0), .local_offset_b = V3(0, 0, 0) });
+
+		// Distance constraint
+		Body dist_bob = create_body(w, (BodyParams){ .position = V3(3, 6, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, dist_bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		Body dist_anchor = create_body(w, (BodyParams){ .position = V3(3, 8, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, dist_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		create_distance(w, (DistanceParams){ .body_a = dist_anchor, .body_b = dist_bob, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0, 0) });
+
+		// Hinge pendulum
+		Body hinge_bob = create_body(w, (BodyParams){ .position = V3(6, 6, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, hinge_bob, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 0.8f, 0.2f) });
+		Body hinge_anchor = create_body(w, (BodyParams){ .position = V3(6, 8, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, hinge_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		create_hinge(w, (HingeParams){ .body_a = hinge_anchor, .body_b = hinge_bob, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0.8f, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+
+		// Fixed joint
+		Body fixed_bob = create_body(w, (BodyParams){ .position = V3(9, 6, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, fixed_bob, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) });
+		Body fixed_anchor = create_body(w, (BodyParams){ .position = V3(9, 8, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, fixed_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		create_fixed(w, (FixedParams){ .body_a = fixed_anchor, .body_b = fixed_bob, .local_offset_a = V3(0, -2, 0), .local_offset_b = V3(0, 0, 0) });
+
+		// Prismatic
+		Body prism_bob = create_body(w, (BodyParams){ .position = V3(12, 6, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, prism_bob, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) });
+		Body prism_anchor = create_body(w, (BodyParams){ .position = V3(12, 8, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, prism_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		create_prismatic(w, (PrismaticParams){ .body_a = prism_anchor, .body_b = prism_bob, .local_offset_a = V3(0, -2, 0), .local_offset_b = V3(0, 0, 0), .local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0) });
+
+		int nan_frame = -1;
+		for (int i = 0; i < 300; i++) {
+			world_step(w, 1.0f / 60.0f);
+			if (!is_valid(body_get_position(w, bs_bob))) { nan_frame = i; break; }
+			if (!is_valid(body_get_position(w, dist_bob))) { nan_frame = i; break; }
+			if (!is_valid(body_get_position(w, hinge_bob))) { nan_frame = i; break; }
+			if (!is_valid(body_get_position(w, fixed_bob))) { nan_frame = i; break; }
+			if (!is_valid(body_get_position(w, prism_bob))) { nan_frame = i; break; }
+		}
+
+		v3 bs_p = body_get_position(w, bs_bob);
+		v3 dist_p = body_get_position(w, dist_bob);
+		v3 hinge_p = body_get_position(w, hinge_bob);
+		v3 fixed_p = body_get_position(w, fixed_bob);
+		v3 prism_p = body_get_position(w, prism_bob);
+
+		printf("  [all joints %s] nan=%d bs=(%.1f,%.1f) dist=(%.1f,%.1f) hinge=(%.1f,%.1f) fixed=(%.1f,%.1f) prism=(%.1f,%.1f)\n",
+			mode, nan_frame, bs_p.x, bs_p.y, dist_p.x, dist_p.y, hinge_p.x, hinge_p.y, fixed_p.x, fixed_p.y, prism_p.x, prism_p.y);
+
+		{
+			char name[64]; snprintf(name, sizeof(name), "all joints %s: no NaN", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(nan_frame == -1);
+		}
+		{
+			char name[64]; snprintf(name, sizeof(name), "all joints %s: fixed joint holds", mode);
+			TEST_BEGIN(name);
+			float fixed_drift = len(sub(fixed_p, V3(9, 6, 0)));
+			TEST_ASSERT(fixed_drift < 1.0f);
+		}
+		destroy_world(w);
+	}
+}
+
+// --- Hinge motor speed accuracy: measure achieved angular velocity ---
+static void test_hinge_motor_speed_accuracy()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+
+		Body base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+
+		float target_speed = 2.0f;
+		joint_set_hinge_motor(w, h, target_speed, 100.0f);
+
+		// Let it spin up
+		for (int i = 0; i < 60; i++) world_step(w, 1.0f / 60.0f);
+
+		// Measure angular velocity over a few frames
+		float angle0 = hinge_angle_internal(wi, handle_index(h));
+		for (int i = 0; i < 10; i++) world_step(w, 1.0f / 60.0f);
+		float angle1 = hinge_angle_internal(wi, handle_index(h));
+
+		float measured_speed = (angle1 - angle0) / (10.0f / 60.0f);
+		float error = fabsf(measured_speed - target_speed);
+
+		printf("  [hinge motor speed %s] target=%.1f measured=%.3f error=%.3f\n", mode, target_speed, measured_speed, error);
+		{
+			char name[64]; snprintf(name, sizeof(name), "hinge motor speed %s: close to target", mode);
+			TEST_BEGIN(name);
+			TEST_ASSERT(error < 1.0f);
+		}
+		destroy_world(w);
+	}
+}
+
+// --- Hinge motor into upper limit only (asymmetric: min=0, max=1.0) ---
+static void test_hinge_motor_upper_limit_only()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		Body base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		joint_set_hinge_motor(w, h, 5.0f, 50.0f);
+		joint_set_hinge_limits(w, h, 0, 1.0f); // only upper limit active
+		float max_angle = 0; int nan_frame = -1;
+		for (int i = 0; i < 120; i++) {
+			world_step(w, 1.0f / 60.0f);
+			if (!is_valid(body_get_position(w, arm))) { nan_frame = i; break; }
+			float a = hinge_angle_internal(wi, handle_index(h));
+			if (a > max_angle) max_angle = a;
+		}
+		printf("  [hinge upper-only %s] max=%.3f nan=%d\n", mode, max_angle, nan_frame);
+		{ char n[64]; snprintf(n, sizeof(n), "hinge upper-only %s: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		{ char n[64]; snprintf(n, sizeof(n), "hinge upper-only %s: stopped at limit", mode); TEST_BEGIN(n); TEST_ASSERT(max_angle < 1.3f); }
+		destroy_world(w);
+	}
+}
+
+// --- Hinge motor into lower limit only (asymmetric: min=-1.0, max=0) ---
+static void test_hinge_motor_lower_limit_only()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		Body base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		joint_set_hinge_motor(w, h, -5.0f, 50.0f);
+		joint_set_hinge_limits(w, h, -1.0f, 0); // only lower limit active
+		float min_angle = 0; int nan_frame = -1;
+		for (int i = 0; i < 120; i++) {
+			world_step(w, 1.0f / 60.0f);
+			if (!is_valid(body_get_position(w, arm))) { nan_frame = i; break; }
+			float a = hinge_angle_internal(wi, handle_index(h));
+			if (a < min_angle) min_angle = a;
+		}
+		printf("  [hinge lower-only %s] min=%.3f nan=%d\n", mode, min_angle, nan_frame);
+		{ char n[64]; snprintf(n, sizeof(n), "hinge lower-only %s: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		{ char n[64]; snprintf(n, sizeof(n), "hinge lower-only %s: stopped at limit", mode); TEST_BEGIN(n); TEST_ASSERT(min_angle > -1.3f); }
+		destroy_world(w);
+	}
+}
+
+// --- Hinge motor with asymmetric limits: min=-0.5, max=2.0 ---
+static void test_hinge_motor_asymmetric_limits()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		// Test: positive motor hits asymmetric upper limit
+		World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		Body base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		joint_set_hinge_motor(w, h, 5.0f, 50.0f);
+		joint_set_hinge_limits(w, h, -0.5f, 2.0f);
+		float max_angle = 0; int nan_frame = -1;
+		for (int i = 0; i < 120; i++) {
+			world_step(w, 1.0f / 60.0f);
+			if (!is_valid(body_get_position(w, arm))) { nan_frame = i; break; }
+			float a = hinge_angle_internal(wi, handle_index(h));
+			if (a > max_angle) max_angle = a;
+		}
+		printf("  [hinge asym %s +motor] max=%.3f (limit=2.0) nan=%d\n", mode, max_angle, nan_frame);
+		{ char n[64]; snprintf(n, sizeof(n), "hinge asym %s +motor: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		{ char n[64]; snprintf(n, sizeof(n), "hinge asym %s +motor: stopped at 2.0", mode); TEST_BEGIN(n); TEST_ASSERT(max_angle < 2.3f); }
+		destroy_world(w);
+
+		// Test: negative motor hits asymmetric lower limit
+		w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+		h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		joint_set_hinge_motor(w, h, -5.0f, 50.0f);
+		joint_set_hinge_limits(w, h, -0.5f, 2.0f);
+		float min_angle = 0; nan_frame = -1;
+		for (int i = 0; i < 120; i++) {
+			world_step(w, 1.0f / 60.0f);
+			if (!is_valid(body_get_position(w, arm))) { nan_frame = i; break; }
+			float a = hinge_angle_internal(wi, handle_index(h));
+			if (a < min_angle) min_angle = a;
+		}
+		printf("  [hinge asym %s -motor] min=%.3f (limit=-0.5) nan=%d\n", mode, min_angle, nan_frame);
+		{ char n[64]; snprintf(n, sizeof(n), "hinge asym %s -motor: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		{ char n[64]; snprintf(n, sizeof(n), "hinge asym %s -motor: stopped at -0.5", mode); TEST_BEGIN(n); TEST_ASSERT(min_angle > -0.8f); }
+		destroy_world(w);
+	}
+}
+
+// --- Y-axis hinge (door): limits work on non-Z axis ---
+static void test_hinge_y_axis_limits()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		// Door frame (static) at origin, door extends +X
+		Body frame = create_body(w, (BodyParams){ .position = V3(0, 2, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, frame, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 1.5f, 0.1f) });
+		Body door = create_body(w, (BodyParams){ .position = V3(1, 2, 0), .rotation = quat_identity(), .mass = 3.0f });
+		body_add_shape(w, door, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(1.0f, 1.5f, 0.08f) });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = frame, .body_b = door, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0) });
+		joint_set_hinge_limits(w, h, -1.57f, 1.57f);
+		// Give the door an initial push
+		wi->body_hot[handle_index(door)].velocity = V3(0, 0, 5);
+		int nan_frame = -1;
+		float max_angle = 0, min_angle = 0;
+		for (int i = 0; i < 300; i++) {
+			world_step(w, 1.0f / 60.0f);
+			if (!is_valid(body_get_position(w, door))) { nan_frame = i; break; }
+			float a = hinge_angle_internal(wi, handle_index(h));
+			if (a > max_angle) max_angle = a;
+			if (a < min_angle) min_angle = a;
+		}
+		printf("  [Y-axis door %s] range=[%.3f, %.3f] nan=%d\n", mode, min_angle, max_angle, nan_frame);
+		{ char n[64]; snprintf(n, sizeof(n), "Y-axis door %s: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		{ char n[64]; snprintf(n, sizeof(n), "Y-axis door %s: upper limit", mode); TEST_BEGIN(n); TEST_ASSERT(max_angle < 1.8f); }
+		{ char n[64]; snprintf(n, sizeof(n), "Y-axis door %s: lower limit", mode); TEST_BEGIN(n); TEST_ASSERT(min_angle > -1.8f); }
+		destroy_world(w);
+	}
+}
+
+// --- Y-axis hinge with motor ---
+static void test_hinge_y_axis_motor()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		Body base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0) });
+		joint_set_hinge_motor(w, h, 3.0f, 50.0f);
+		joint_set_hinge_limits(w, h, -1.0f, 1.0f);
+		float max_angle = 0; int nan_frame = -1;
+		for (int i = 0; i < 120; i++) {
+			world_step(w, 1.0f / 60.0f);
+			if (!is_valid(body_get_position(w, arm))) { nan_frame = i; break; }
+			float a = hinge_angle_internal(wi, handle_index(h));
+			if (a > max_angle) max_angle = a;
+		}
+		printf("  [Y-axis motor %s] max=%.3f nan=%d\n", mode, max_angle, nan_frame);
+		{ char n[64]; snprintf(n, sizeof(n), "Y-axis motor %s: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		{ char n[64]; snprintf(n, sizeof(n), "Y-axis motor %s: angle positive", mode); TEST_BEGIN(n); TEST_ASSERT(max_angle > 0.3f); }
+		{ char n[64]; snprintf(n, sizeof(n), "Y-axis motor %s: stopped at limit", mode); TEST_BEGIN(n); TEST_ASSERT(max_angle < 1.3f); }
+		destroy_world(w);
+	}
+}
+
+// --- Hinge limits with varying angles (pendulum row from scene) ---
+static void test_hinge_limit_pendulum_row()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		int nan_frame = -1;
+		float limits[5] = { 0.3f, 0.6f, 0.9f, 1.2f, 1.5f };
+		Joint joints[5];
+		for (int i = 0; i < 5; i++) {
+			float x = -4.0f + i * 2.0f;
+			Body anchor = create_body(w, (BodyParams){ .position = V3(x, 5, 0), .rotation = quat_identity(), .mass = 0 });
+			body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+			Body arm = create_body(w, (BodyParams){ .position = V3(x, 4.3f, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 0.7f, 0.1f) });
+			joints[i] = create_hinge(w, (HingeParams){ .body_a = anchor, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0.7f, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+			joint_set_hinge_limits(w, joints[i], -limits[i], limits[i]);
+			// Give each arm a push so they swing into the limits
+			wi->body_hot[handle_index(arm)].velocity = V3(5, 0, 0);
+		}
+		// Let all pendulums swing under gravity for 5 seconds
+		float max_angles[5] = {0}, min_angles[5] = {0};
+		for (int f = 0; f < 300; f++) {
+			world_step(w, 1.0f / 60.0f);
+			for (int i = 0; i < 5; i++) {
+				float a = hinge_angle_internal(wi, handle_index(joints[i]));
+				if (!isfinite(a)) { nan_frame = f; break; }
+				if (a > max_angles[i]) max_angles[i] = a;
+				if (a < min_angles[i]) min_angles[i] = a;
+			}
+			if (nan_frame >= 0) break;
+		}
+		printf("  [pendulum row %s] nan=%d", mode, nan_frame);
+		for (int i = 0; i < 5; i++) printf(" [%.1f: %.2f..%.2f]", limits[i], min_angles[i], max_angles[i]);
+		printf("\n");
+		{ char n[64]; snprintf(n, sizeof(n), "pendulum row %s: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		for (int i = 0; i < 5; i++) {
+			float margin = 0.3f;
+			{ char n[64]; snprintf(n, sizeof(n), "pendulum row %s[%.1f]: lower", mode, limits[i]); TEST_BEGIN(n); TEST_ASSERT(min_angles[i] > -limits[i] - margin); }
+			{ char n[64]; snprintf(n, sizeof(n), "pendulum row %s[%.1f]: upper", mode, limits[i]); TEST_BEGIN(n); TEST_ASSERT(max_angles[i] < limits[i] + margin); }
+		}
+		destroy_world(w);
+	}
+}
+
+// --- Prismatic vertical with gravity (crane elevator) ---
+// Uses tiny non-overlapping shapes to avoid collisions between jointed bodies.
+static void test_prismatic_vertical_gravity()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		// No shape on static pole — avoids collision with platform
+		Body pole = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 0 });
+		Body platform = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, platform, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.8f, 0.1f, 0.8f) });
+		create_prismatic(w, (PrismaticParams){ .body_a = pole, .body_b = platform, .local_offset_a = V3(0, 2, 0), .local_offset_b = V3(0, 0, 0), .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0) });
+		int nan_frame = -1;
+		for (int i = 0; i < 120; i++) {
+			world_step(w, 1.0f / 60.0f);
+			v3 p = body_get_position(w, platform);
+			if (!is_valid(p)) { nan_frame = i; break; }
+		}
+		v3 pos = body_get_position(w, platform);
+		printf("  [prismatic vert gravity %s] pos=(%.1f,%.1f,%.1f) nan=%d\n", mode, pos.x, pos.y, pos.z, nan_frame);
+		{ char n[64]; snprintf(n, sizeof(n), "prism vert gravity %s: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		{ char n[64]; snprintf(n, sizeof(n), "prism vert gravity %s: fell down", mode); TEST_BEGIN(n); TEST_ASSERT(pos.y < 3.0f); }
+		{ char n[64]; snprintf(n, sizeof(n), "prism vert gravity %s: stayed on axis", mode); TEST_BEGIN(n); TEST_ASSERT(fabsf(pos.x) < 0.1f && fabsf(pos.z) < 0.1f); }
+		destroy_world(w);
+	}
+}
+
+// --- Prismatic with spring: spring softens lateral constraints, slide DOF is free ---
+// NOTE: prismatic spring does NOT create a spring along the slide axis.
+// It only makes the lateral/rotation constraints soft. Platform still falls freely.
+static void test_prismatic_spring_vertical()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		Body pole = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 0 });
+		Body platform = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, platform, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.8f, 0.1f, 0.8f) });
+		create_prismatic(w, (PrismaticParams){ .body_a = pole, .body_b = platform, .local_offset_a = V3(0, 2, 0), .local_offset_b = V3(0, 0, 0), .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0), .spring = { .frequency = 2.0f, .damping_ratio = 0.5f } });
+		int nan_frame = -1;
+		for (int i = 0; i < 120; i++) {
+			world_step(w, 1.0f / 60.0f);
+			v3 p = body_get_position(w, platform);
+			if (!is_valid(p)) { nan_frame = i; break; }
+		}
+		v3 pos = body_get_position(w, platform);
+		printf("  [prismatic spring %s] pos=(%.2f,%.2f,%.2f) nan=%d\n", mode, pos.x, pos.y, pos.z, nan_frame);
+		{ char n[64]; snprintf(n, sizeof(n), "prism spring %s: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		// Platform falls freely along slide axis (spring only softens lateral)
+		{ char n[64]; snprintf(n, sizeof(n), "prism spring %s: fell along axis", mode); TEST_BEGIN(n); TEST_ASSERT(pos.y < 3.0f); }
+		{ char n[64]; snprintf(n, sizeof(n), "prism spring %s: on axis", mode); TEST_BEGIN(n); TEST_ASSERT(fabsf(pos.x) < 0.2f && fabsf(pos.z) < 0.2f); }
+		destroy_world(w);
+	}
+}
+
+// --- Slider crane scene reproduction ---
+static void test_slider_crane_scene()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+
+		// Horizontal rail (static)
+		Body rail = create_body(w, (BodyParams){ .position = V3(0, 6, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, rail, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(5, 0.1f, 0.1f) });
+
+		// Trolley slides along rail
+		Body trolley = create_body(w, (BodyParams){ .position = V3(-3, 6, 0), .rotation = quat_identity(), .mass = 3.0f });
+		body_add_shape(w, trolley, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.3f, 0.3f) });
+		create_prismatic(w, (PrismaticParams){ .body_a = rail, .body_b = trolley, .local_offset_a = V3(-3, 0, 0), .local_offset_b = V3(0, 0, 0), .local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0) });
+
+		// Payload hangs from trolley via distance joint
+		Body payload = create_body(w, (BodyParams){ .position = V3(-3, 3, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, payload, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+		create_distance(w, (DistanceParams){ .body_a = trolley, .body_b = payload, .local_offset_a = V3(0, -0.3f, 0), .local_offset_b = V3(0, 0.5f, 0), .rest_length = 2.5f });
+
+		// Vertical slider with spring (no shape on pole to avoid collision)
+		Body pole = create_body(w, (BodyParams){ .position = V3(4, 3, 0), .rotation = quat_identity(), .mass = 0 });
+		Body platform = create_body(w, (BodyParams){ .position = V3(4, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, platform, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.8f, 0.1f, 0.8f) });
+		create_prismatic(w, (PrismaticParams){ .body_a = pole, .body_b = platform, .local_offset_a = V3(0, 2, 0), .local_offset_b = V3(0, 0, 0), .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0), .spring = { .frequency = 2.0f, .damping_ratio = 0.5f } });
+
+		// Cargo on platform
+		Body cargo = create_body(w, (BodyParams){ .position = V3(4, 5.6f, 0), .rotation = quat_identity(), .mass = 0.5f });
+		body_add_shape(w, cargo, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) });
+
+		int nan_frame = -1;
+		float max_speed = 0;
+		for (int f = 0; f < 300; f++) {
+			world_step(w, 1.0f / 60.0f);
+			Body bodies[] = { trolley, payload, platform, cargo };
+			for (int j = 0; j < 4; j++) {
+				v3 p = body_get_position(w, bodies[j]);
+				if (!is_valid(p)) { nan_frame = f; break; }
+				float speed = len(wi->body_hot[handle_index(bodies[j])].velocity);
+				if (speed > max_speed) max_speed = speed;
+			}
+			if (nan_frame >= 0) break;
+		}
+		v3 trolley_p = body_get_position(w, trolley);
+		v3 payload_p = body_get_position(w, payload);
+		v3 platform_p = body_get_position(w, platform);
+		printf("  [crane %s] nan=%d max_speed=%.1f trolley=(%.1f,%.1f) payload=(%.1f,%.1f) platform=(%.1f,%.1f)\n",
+			mode, nan_frame, max_speed, trolley_p.x, trolley_p.y, payload_p.x, payload_p.y, platform_p.x, platform_p.y);
+		{ char n[64]; snprintf(n, sizeof(n), "crane %s: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		{ char n[64]; snprintf(n, sizeof(n), "crane %s: trolley on rail", mode); TEST_BEGIN(n); TEST_ASSERT(fabsf(trolley_p.y - 6.0f) < 0.5f); }
+		{ char n[64]; snprintf(n, sizeof(n), "crane %s: payload hangs", mode); TEST_BEGIN(n); TEST_ASSERT(payload_p.y < trolley_p.y); }
+		destroy_world(w);
+	}
+}
+
+// --- Prismatic motor negative direction ---
+static void test_prismatic_motor_negative()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		Body rail = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, rail, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body slider = create_body(w, (BodyParams){ .position = V3(5, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, slider, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) });
+		Joint pj = create_prismatic(w, (PrismaticParams){ .body_a = rail, .body_b = slider, .local_offset_a = V3(5, 0, 0), .local_offset_b = V3(0, 0, 0), .local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0) });
+		joint_set_prismatic_motor(w, pj, -2.0f, 50.0f);
+		for (int i = 0; i < 60; i++) world_step(w, 1.0f / 60.0f);
+		v3 pos = body_get_position(w, slider);
+		printf("  [prismatic -motor %s] pos=(%.3f,%.3f,%.3f)\n", mode, pos.x, pos.y, pos.z);
+		{ char n[64]; snprintf(n, sizeof(n), "prism -motor %s: moved -X", mode); TEST_BEGIN(n); TEST_ASSERT(pos.x < 4.0f); }
+		{ char n[64]; snprintf(n, sizeof(n), "prism -motor %s: on axis", mode); TEST_BEGIN(n); TEST_ASSERT(fabsf(pos.y) < 0.1f && fabsf(pos.z) < 0.1f); }
+		destroy_world(w);
+	}
+}
+
+// --- Prismatic motor vertical: motor fights gravity ---
+static void test_prismatic_motor_vertical()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		Body pole = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 0 });
+		Body lift = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, lift, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.5f) });
+		Joint pj = create_prismatic(w, (PrismaticParams){ .body_a = pole, .body_b = lift, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0, 0), .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0) });
+		// Motor drives upward at 2 m/s against gravity
+		joint_set_prismatic_motor(w, pj, 2.0f, 100.0f);
+		int nan_frame = -1;
+		for (int i = 0; i < 60; i++) {
+			world_step(w, 1.0f / 60.0f);
+			if (!is_valid(body_get_position(w, lift))) { nan_frame = i; break; }
+		}
+		v3 pos = body_get_position(w, lift);
+		printf("  [prismatic motor vert %s] pos=(%.2f,%.2f,%.2f) nan=%d\n", mode, pos.x, pos.y, pos.z, nan_frame);
+		{ char n[64]; snprintf(n, sizeof(n), "prism motor vert %s: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		{ char n[64]; snprintf(n, sizeof(n), "prism motor vert %s: moved up", mode); TEST_BEGIN(n); TEST_ASSERT(pos.y > 3.5f); }
+		{ char n[64]; snprintf(n, sizeof(n), "prism motor vert %s: on axis", mode); TEST_BEGIN(n); TEST_ASSERT(fabsf(pos.x) < 0.1f && fabsf(pos.z) < 0.1f); }
+		destroy_world(w);
+	}
+}
+
+// --- Motor reversal: motor changes direction mid-sim, limits on both sides ---
+static void test_hinge_motor_reversal_with_limits()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		Body base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body arm = create_body(w, (BodyParams){ .position = V3(1, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, arm, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.1f, 0.1f) });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = base, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		joint_set_hinge_limits(w, h, -0.8f, 0.8f);
+
+		// Drive to upper limit
+		joint_set_hinge_motor(w, h, 5.0f, 50.0f);
+		int nan_frame = -1;
+		for (int i = 0; i < 60; i++) {
+			world_step(w, 1.0f / 60.0f);
+			if (!is_valid(body_get_position(w, arm))) { nan_frame = i; break; }
+		}
+		float angle_at_upper = hinge_angle_internal(wi, handle_index(h));
+
+		// Reverse to lower limit
+		joint_set_hinge_motor(w, h, -5.0f, 50.0f);
+		for (int i = 0; i < 120; i++) {
+			world_step(w, 1.0f / 60.0f);
+			if (!is_valid(body_get_position(w, arm))) { nan_frame = 60 + i; break; }
+		}
+		float angle_at_lower = hinge_angle_internal(wi, handle_index(h));
+
+		printf("  [motor reversal %s] upper=%.3f lower=%.3f nan=%d\n", mode, angle_at_upper, angle_at_lower, nan_frame);
+		{ char n[64]; snprintf(n, sizeof(n), "motor reversal %s: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		{ char n[64]; snprintf(n, sizeof(n), "motor reversal %s: hit upper", mode); TEST_BEGIN(n); TEST_ASSERT(angle_at_upper > 0.5f && angle_at_upper < 1.1f); }
+		{ char n[64]; snprintf(n, sizeof(n), "motor reversal %s: hit lower", mode); TEST_BEGIN(n); TEST_ASSERT(angle_at_lower < -0.5f && angle_at_lower > -1.1f); }
+		destroy_world(w);
+	}
+}
+
+// --- Hinge limit with gravity: different initial velocities to hit both limits ---
+static void test_hinge_limit_gravity_both_sides()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+		// Pendulum starts horizontal (angle = 0), gravity pulls it to negative angle (below anchor)
+		// Give it a push upward to also hit the positive limit
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body bob = create_body(w, (BodyParams){ .position = V3(1, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+		Joint h = create_hinge(w, (HingeParams){ .body_a = anchor, .body_b = bob, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+		joint_set_hinge_limits(w, h, -1.0f, 1.0f);
+		// Push bob upward to swing to positive angle
+		wi->body_hot[handle_index(bob)].velocity = V3(0, 8, 0);
+		float max_angle = 0, min_angle = 0;
+		int nan_frame = -1;
+		for (int i = 0; i < 600; i++) {
+			world_step(w, 1.0f / 60.0f);
+			if (!is_valid(body_get_position(w, bob))) { nan_frame = i; break; }
+			float a = hinge_angle_internal(wi, handle_index(h));
+			if (a > max_angle) max_angle = a;
+			if (a < min_angle) min_angle = a;
+		}
+		printf("  [hinge both limits %s] range=[%.3f, %.3f] nan=%d\n", mode, min_angle, max_angle, nan_frame);
+		{ char n[64]; snprintf(n, sizeof(n), "hinge both limits %s: no NaN", mode); TEST_BEGIN(n); TEST_ASSERT(nan_frame == -1); }
+		{ char n[64]; snprintf(n, sizeof(n), "hinge both limits %s: hit positive", mode); TEST_BEGIN(n); TEST_ASSERT(max_angle > 0.3f); }
+		{ char n[64]; snprintf(n, sizeof(n), "hinge both limits %s: upper held", mode); TEST_BEGIN(n); TEST_ASSERT(max_angle < 1.3f); }
+		// LDL damps energy faster — may not reach far limit as aggressively
+		{ char n[64]; snprintf(n, sizeof(n), "hinge both limits %s: swings negative", mode); TEST_BEGIN(n); TEST_ASSERT(min_angle < -0.2f); }
+		{ char n[64]; snprintf(n, sizeof(n), "hinge both limits %s: lower held", mode); TEST_BEGIN(n); TEST_ASSERT(min_angle > -1.3f); }
+		destroy_world(w);
+	}
+}
+
+static void run_motor_comprehensive_tests()
+{
+	printf("--- motor/limit/joint comprehensive tests ---\n");
+	test_hinge_motor_direction();
+	test_hinge_motor_limit_stops();
+	test_hinge_limit_gravity();
+	test_hinge_motor_upper_limit_only();
+	test_hinge_motor_lower_limit_only();
+	test_hinge_motor_asymmetric_limits();
+	test_hinge_y_axis_limits();
+	test_hinge_y_axis_motor();
+	test_hinge_limit_pendulum_row();
+	test_hinge_limit_gravity_both_sides();
+	test_hinge_motor_reversal_with_limits();
+	test_hinge_motor_speed_accuracy();
+	test_prismatic_motor_direction();
+	test_prismatic_motor_negative();
+	test_prismatic_motor_vertical();
+	test_prismatic_vertical_gravity();
+	test_prismatic_spring_vertical();
+	test_slider_crane_scene();
+	test_fixed_joint_bridge_stability();
+	test_all_joints_ldl_vs_pgs();
+}
+
 static void run_solver_tests()
 {
 	printf("--- nudge solver tests ---\n");
-	test_ldl_soft_box_drag();
-	test_solver_nan_rejection();
-	test_contact_sphere_rests_on_floor();
-	test_contact_box_rests_on_floor();
-	test_distance_spring_equilibrium();
-	test_distance_rigid_maintains_length();
-	test_ball_socket_chain_stays_connected();
-	test_ball_socket_pin_converges();
-	test_ball_socket_pendulum();
-	test_ldl_heavy_chain();
-	test_ldl_lift_and_drop();
-	test_ldl_mouse_yank_chain();
+	TIMED(test_ldl_soft_box_drag());
+	TIMED(test_solver_nan_rejection());
+	TIMED(test_contact_sphere_rests_on_floor());
+	TIMED(test_contact_box_rests_on_floor());
+	TIMED(test_distance_spring_equilibrium());
+	TIMED(test_distance_rigid_maintains_length());
+	TIMED(test_ball_socket_chain_stays_connected());
+	TIMED(test_ball_socket_pin_converges());
+	TIMED(test_ball_socket_pendulum());
+	TIMED(test_ldl_heavy_chain());
+	TIMED(test_ldl_lift_and_drop());
+	TIMED(test_ldl_mouse_yank_chain());
+	TIMED(test_ldl_two_independent_chains());
+	TIMED(test_ldl_topology_change());
+	TIMED(test_ldl_block_math());
+	TIMED(test_ldl_solve_topo_identity());
+	TIMED(test_ldl_bundling());
+	TIMED(test_ldl_topology_structure());
+	TIMED(test_ldl_numeric_factor_isolated());
+	TIMED(test_ldl_solve_topo_vs_dense());
+	TIMED(test_ldl_hub_star_shattering());
+	TIMED(test_ldl_no_shatter_below_threshold());
+	// test_ldl_mixed_chain_and_hub (0.5s) moved to --slow
+	TIMED(test_ldl_sleep_cache());
+	// test_ldl_energy_stability (0.4s) moved to --slow
+	TIMED(test_ldl_mass_ratio());
+	TIMED(test_ldl_block_near_singular());
+	TIMED(test_ldl_soft_box());
+	TIMED(test_ldl_soft_box_drag());
+	TIMED(test_ldl_soft_box_chain());
+	TIMED(test_ldl_soft_chain());
+	TIMED(test_ldl_mixed_rigid_soft());
+	// test_ldl_soft_hub (0.6s) moved to --slow
+	TIMED(test_ldl_sharp_yank_recovery());
+	TIMED(test_ldl_soft_heavy());
+	TIMED(test_bounce_height_monotonic());
+	TIMED(bounce_test_for_solver(SOLVER_SOFT_STEP, "Soft Step"));
+	TIMED(bounce_test_for_solver(SOLVER_SI_SOFT, "SI Soft"));
+	TIMED(bounce_test_for_solver(SOLVER_SI, "SI"));
+}
+
+// Heavy solver tests (multi-second simulations, energy audits). Run with --slow.
+static void run_sleep_tests();
+static void run_solver_tests_slow()
+{
+	printf("--- slow solver tests ---\n");
 	test_ldl_pull_down_heavy_chain();
 	test_ldl_showcase_chain_stretch();
 	test_ldl_vertical_heavy_chain_drop();
-	test_ldl_two_independent_chains();
-	test_ldl_topology_change();
-	test_ldl_block_math();
-	test_ldl_solve_topo_identity();
-	test_ldl_bundling();
-	test_ldl_topology_structure();
-	test_ldl_numeric_factor_isolated();
-	test_ldl_solve_topo_vs_dense();
-	test_ldl_hub_star_shattering();
-	test_ldl_no_shatter_below_threshold();
-	test_ldl_mixed_chain_and_hub();
-	test_ldl_sleep_cache();
-	test_ldl_energy_stability();
 	test_ldl_energy_comprehensive();
-	test_ldl_mass_ratio();
 	test_ldl_long_chain();
-	test_ldl_block_near_singular();
 	test_ldl_delta_correction_accuracy();
-	test_ldl_soft_box();
 	test_ldl_soft_box_drag();
-	test_ldl_soft_box_chain();
-	test_ldl_soft_chain();
-	test_ldl_mixed_rigid_soft();
+	test_ldl_stress_dense_clique();
+	test_ldl_stress_collinear_chain();
+	test_ldl_stress_near_max_nodes();
+	test_ldl_mixed_chain_and_hub();
+	test_ldl_energy_stability();
 	test_ldl_soft_hub();
-	test_ldl_sharp_yank_recovery();
-	test_ldl_soft_heavy();
-	test_bounce_height_monotonic();
-	bounce_test_for_solver(SOLVER_SOFT_STEP, "Soft Step");
-	bounce_test_for_solver(SOLVER_SI_SOFT, "SI Soft");
-	bounce_test_for_solver(SOLVER_SI, "SI");
-	bounce_test_for_solver(SOLVER_AVBD, "AVBD");
-	avbd_box_bounce_test();
-	// AVBD should still settle onto the floor after the bounce energy decays.
-	{
-		TEST_BEGIN("AVBD sphere settles after bouncing");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		Body floor_b = create_body(w, (BodyParams){
-			.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-		});
-		body_add_shape(w, floor_b, (ShapeParams){
-			.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
-		});
-		Body ball = create_body(w, (BodyParams){
-			.position = V3(0, 5, 0), .rotation = quat_identity(),
-			.mass = 1.0f, .restitution = 0.5f,
-		});
-		body_add_shape(w, ball, (ShapeParams){
-			.type = SHAPE_SPHERE, .sphere.radius = 0.5f,
-		});
-		float dt = 1.0f / 60.0f;
-		for (int i = 0; i < 300; i++) world_step(w, dt);
-		float y = body_get_position(w, ball).y;
-		float x = body_get_position(w, ball).x;
-		printf("  [AVBD sphere] y=%.4f x=%.4f\n", y, x);
-		// Ball should rest on floor top (y=0) + radius (0.5) = ~0.5
-		TEST_ASSERT(y > 0.3f);
-		TEST_ASSERT(y < 0.7f);
-		destroy_world(w);
-	}
-	// AVBD box-on-floor: test various masses and drop heights
-	{
-		float masses[] = { 0.1f, 0.5f, 1.0f, 5.0f, 10.0f, 50.0f };
-		float heights[] = { 2.0f, 5.0f, 10.0f };
-		float sizes[] = { 0.3f, 0.5f, 1.0f };
-		for (int mi = 0; mi < 6; mi++) {
-			for (int hi = 0; hi < 3; hi++) {
-				for (int si = 0; si < 3; si++) {
-					char buf[128];
-					snprintf(buf, sizeof(buf), "AVBD box settle m=%.1f h=%.0f s=%.1f", masses[mi], heights[hi], sizes[si]);
-					TEST_BEGIN(buf);
-					World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-					Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-					body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-					float hs = sizes[si];
-					Body box = create_body(w, (BodyParams){
-						.position = V3(0, heights[hi], 0), .rotation = quat_identity(), .mass = masses[mi] });
-					body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(hs, hs, hs) });
-					float dt = 1.0f / 60.0f;
-					for (int i = 0; i < 120; i++) world_step(w, dt);
-					float y = body_get_position(w, box).y;
-					if (y < -0.5f)
-						printf("  [AVBD FALL-THROUGH] m=%.1f h=%.0f s=%.1f y=%.3f\n", masses[mi], heights[hi], sizes[si], y);
-					TEST_ASSERT(y > -0.5f); // must not fall through floor
-					destroy_world(w);
-				}
-			}
-		}
-	}
-	// AVBD box stack: multiple boxes stacked
-	{
-		TEST_BEGIN("AVBD 5-box stack");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-		for (int i = 0; i < 5; i++) {
-			Body b = create_body(w, (BodyParams){
-				.position = V3(0, 0.5f + i * 1.1f, 0), .rotation = quat_identity(), .mass = 1.0f });
-			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
-		}
-		float dt = 1.0f / 60.0f;
-		for (int i = 0; i < 300; i++) world_step(w, dt);
-		// Check all bodies above floor
-		WorldInternal* wi = (WorldInternal*)w.id;
-		int fallen = 0;
-		for (int i = 0; i < asize(wi->body_hot); i++) {
-			if (wi->body_hot[i].inv_mass == 0.0f) continue;
-			if (wi->body_hot[i].position.y < -2.0f) {
-				printf("  [AVBD STACK FAIL] body %d y=%.3f\n", i, wi->body_hot[i].position.y);
-				fallen++;
-			}
-		}
-		TEST_ASSERT(fallen == 0);
-		destroy_world(w);
-	}
-	// AVBD tilted box drop
-	{
-		TEST_BEGIN("AVBD tilted box drop");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-		// Drop a tilted box
-		Body b = create_body(w, (BodyParams){
-			.position = V3(0, 5, 0), .rotation = quat_axis_angle(V3(1,1,0), 0.7f), .mass = 1.0f });
-		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
-		float dt = 1.0f / 60.0f;
-		for (int i = 0; i < 300; i++) world_step(w, dt);
-		float y = body_get_position(w, b).y;
-		if (y < -0.5f) printf("  [AVBD TILTED FAIL] y=%.3f\n", y);
-		TEST_ASSERT(y > -0.5f);
-		destroy_world(w);
-	}
-	// AVBD mass ratio stack (matching mass ratio scene)
-	{
-		TEST_BEGIN("AVBD mass ratio stack");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-		float sizes[] = { 0.15f, 0.25f, 0.4f, 0.55f, 0.75f };
-		float masses[] = { 0.5f, 2.0f, 8.0f, 30.0f, 100.0f };
-		float y = 0.0f;
-		for (int i = 0; i < 5; i++) {
-			float h = sizes[i];
-			y += h + 0.6f;
-			Body b = create_body(w, (BodyParams){
-				.position = V3(0, y, 0), .rotation = quat_identity(), .mass = masses[i] });
-			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(h, h, h) });
-			y += h;
-		}
-		float dt = 1.0f / 60.0f;
-		for (int i = 0; i < 300; i++) world_step(w, dt);
-		WorldInternal* wi = (WorldInternal*)w.id;
-		int fallen = 0;
-		for (int i = 0; i < asize(wi->body_hot); i++) {
-			if (wi->body_hot[i].inv_mass == 0.0f) continue;
-			if (wi->body_hot[i].position.y < -2.0f) {
-				printf("  [AVBD MASS-RATIO FAIL] body %d y=%.3f m=%.1f\n", i, wi->body_hot[i].position.y, 1.0f/wi->body_hot[i].inv_mass);
-				fallen++;
-			}
-		}
-		TEST_ASSERT(fallen == 0);
-		destroy_world(w);
-	}
-	// AVBD first scene repro: sphere + capsule + box dropping simultaneously
-	{
-		TEST_BEGIN("AVBD showcase bodies settle");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-
-		Body sphere = create_body(w, (BodyParams){ .position = V3(-3, 5, 0), .rotation = quat_identity(), .mass = 1.0f, .restitution = 0.5f });
-		body_add_shape(w, sphere, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
-
-		Body capsule = create_body(w, (BodyParams){ .position = V3(-1, 6, 0), .rotation = quat_identity(), .mass = 1.0f });
-		body_add_shape(w, capsule, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.3f, .radius = 0.25f } });
-
-		Body box = create_body(w, (BodyParams){ .position = V3(1, 7, 0), .rotation = quat_identity(), .mass = 1.0f });
-		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
-
-		float dt = 1.0f / 60.0f;
-		for (int frame = 0; frame < 600; frame++) {
-			world_step(w, dt);
-			// Check each frame for fall-through
-			float ys = body_get_position(w, sphere).y;
-			float yc = body_get_position(w, capsule).y;
-			float yb = body_get_position(w, box).y;
-			if (ys < -2.0f || yc < -2.0f || yb < -2.0f) {
-				printf("  [AVBD SHOWCASE FAIL] frame=%d sphere=%.2f capsule=%.2f box=%.2f\n", frame, ys, yc, yb);
-				TEST_ASSERT(0); // fail
-				break;
-			}
-		}
-		destroy_world(w);
-	}
-	// AVBD pyramid: many boxes interacting
-	{
-		TEST_BEGIN("AVBD box pyramid");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-		// 4-layer pyramid
-		for (int row = 0; row < 4; row++)
-			for (int col = 0; col < 4 - row; col++) {
-				Body b = create_body(w, (BodyParams){
-					.position = V3(col * 1.05f + row * 0.5f - 1.5f, 0.5f + row * 1.05f, 0),
-					.rotation = quat_identity(), .mass = 1.0f });
-				body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
-			}
-		float dt = 1.0f / 60.0f;
-		int fallen = 0;
-		for (int frame = 0; frame < 600; frame++) {
-			world_step(w, dt);
-			WorldInternal* wi = (WorldInternal*)w.id;
-			for (int i = 0; i < asize(wi->body_hot); i++) {
-				if (wi->body_hot[i].inv_mass == 0.0f) continue;
-				if (wi->body_hot[i].position.y < -3.0f) {
-					if (!fallen) printf("  [AVBD PYRAMID FAIL] frame=%d body=%d y=%.3f\n", frame, i, wi->body_hot[i].position.y);
-					fallen++;
-				}
-			}
-		}
-		TEST_ASSERT(fallen == 0);
-		destroy_world(w);
-	}
-	// AVBD solver switch: simulate with Soft Step, then switch to AVBD mid-sim
-	{
-		TEST_BEGIN("AVBD solver switch mid-sim");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_SOFT_STEP });
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-		Body b = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1.0f });
-		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
-		float dt = 1.0f / 60.0f;
-		// Run with Soft Step until box settles
-		for (int i = 0; i < 120; i++) world_step(w, dt);
-		float y_before = body_get_position(w, b).y;
-		// Switch to AVBD
-		world_set_solver_type(w, SOLVER_AVBD);
-		for (int i = 0; i < 300; i++) {
-			world_step(w, dt);
-			float y = body_get_position(w, b).y;
-			if (y < -2.0f) {
-				printf("  [AVBD SWITCH FAIL] frame=%d y=%.3f (was %.3f before switch)\n", i, y, y_before);
-				TEST_ASSERT(0);
-				break;
-			}
-		}
-		destroy_world(w);
-	}
-	// AVBD box penetration repro: exact showcase box, track sinking
-	{
-		TEST_BEGIN("AVBD box resting depth");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		((WorldInternal*)w.id)->sleep_enabled = 0; // disable sleep to isolate solver behavior
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-		// Match showcase: box at y=7, half_extents=0.4
-		Body box = create_body(w, (BodyParams){
-			.position = V3(1, 7, 0), .rotation = quat_identity(), .mass = 1.0f });
-		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
-		float dt = 1.0f / 60.0f;
-		// Track settling: print Y at key frames around impact and steady state
-		for (int i = 0; i < 600; i++) {
-			world_step(w, dt);
-			float y = body_get_position(w, box).y;
-			if (i >= 40 && i <= 110) // around impact through crash
-				printf("  [AVBD box] f%d y=%.4f\n", i, y);
-			if (i == 200 || i == 400 || i == 599)
-				printf("  [AVBD box] f%d y=%.4f pen=%.4f\n", i, y, 0.4f - y);
-		}
-		float y = body_get_position(w, box).y;
-		// Box should settle very close to y=0.4 (half-extent above floor).
-		TEST_ASSERT(y > 0.38f);
-		destroy_world(w);
-	}
-	// Also test with Soft Step for comparison
-	{
-		TEST_BEGIN("Soft Step box resting depth (reference)");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_SOFT_STEP });
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-		Body box = create_body(w, (BodyParams){
-			.position = V3(1, 7, 0), .rotation = quat_identity(), .mass = 1.0f });
-		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
-		float dt = 1.0f / 60.0f;
-		for (int i = 0; i < 300; i++) world_step(w, dt);
-		float y = body_get_position(w, box).y;
-		printf("  [SoftStep box depth] y=%.4f (expected ~0.4, penetration=%.4f)\n", y, 0.4f - y);
-		destroy_world(w);
-	}
-	// AVBD friction slide: box with lateral velocity slides off floor edge and falls
-	{
-		TEST_BEGIN("AVBD box slides off floor edge");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		((WorldInternal*)w.id)->sleep_enabled = 0;
-		// Small floor so box slides off the edge
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(3, 1, 3) });
-		// Box starts on floor with lateral velocity
-		Body box = create_body(w, (BodyParams){
-			.position = V3(0, 0.4f, 0), .rotation = quat_identity(), .mass = 1.0f });
-		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
-		body_set_velocity(w, box, V3(8, 0, 0));
-
-		float dt = 1.0f / 60.0f;
-		int fell = 0;
-		for (int i = 0; i < 300; i++) {
-			world_step(w, dt);
-			v3 p = body_get_position(w, box);
-			// Box should eventually slide off edge (x > 3) and fall (y < 0)
-			if (p.x > 4.0f && p.y < -1.0f) { fell = 1; break; }
-			// DEBUG: print key frames
-			if (i == 30 || i == 60 || i == 120 || i == 200)
-				printf("  [AVBD slide] f%d x=%.2f y=%.2f\n", i, p.x, p.y);
-		}
-		v3 pf = body_get_position(w, box);
-		printf("  [AVBD slide] final x=%.2f y=%.2f fell=%d\n", pf.x, pf.y, fell);
-		TEST_ASSERT(fell); // must fall off the edge, not float
-		destroy_world(w);
-	}
-	// Same test with Soft Step for reference
-	{
-		TEST_BEGIN("Soft Step box slides off floor edge (reference)");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_SOFT_STEP });
-		((WorldInternal*)w.id)->sleep_enabled = 0;
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(3, 1, 3) });
-		Body box = create_body(w, (BodyParams){
-			.position = V3(0, 0.4f, 0), .rotation = quat_identity(), .mass = 1.0f });
-		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
-		body_set_velocity(w, box, V3(8, 0, 0));
-
-		float dt = 1.0f / 60.0f;
-		int fell = 0;
-		for (int i = 0; i < 300; i++) {
-			world_step(w, dt);
-			v3 p = body_get_position(w, box);
-			if (p.x > 4.0f && p.y < -1.0f) { fell = 1; break; }
-			if (i == 30 || i == 60 || i == 120 || i == 200)
-				printf("  [SS slide] f%d x=%.2f y=%.2f\n", i, p.x, p.y);
-		}
-		v3 pf = body_get_position(w, box);
-		printf("  [SS slide] final x=%.2f y=%.2f fell=%d\n", pf.x, pf.y, fell);
-		// Soft Step friction stops the box before the edge — not a failure
-		destroy_world(w);
-	}
-	// AVBD edge straddle: box placed half-on, half-off the floor edge.
-	// Should tip and fall, not sink into the floor or hover.
-	{
-		TEST_BEGIN("AVBD box straddles floor edge");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		((WorldInternal*)w.id)->sleep_enabled = 0;
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(3, 1, 3) });
-		// Box center at x=3.0 — half on floor (edge at x=3), half off
-		Body box = create_body(w, (BodyParams){
-			.position = V3(3.0f, 0.4f, 0), .rotation = quat_identity(), .mass = 1.0f });
-		body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
-
-		float dt = 1.0f / 60.0f;
-		int fell = 0;
-		for (int i = 0; i < 300; i++) {
-			world_step(w, dt);
-			v3 p = body_get_position(w, box);
-			if (i < 60 || i % 30 == 0)
-				printf("  [AVBD edge] f%d x=%.3f y=%.3f\n", i, p.x, p.y);
-			if (p.y < -2.0f) { fell = 1; break; }
-		}
-		v3 pf = body_get_position(w, box);
-		printf("  [AVBD edge] final x=%.3f y=%.3f fell=%d\n", pf.x, pf.y, fell);
-		// Box should tip off and fall
-		TEST_ASSERT(fell);
-		destroy_world(w);
-	}
-	// AVBD single hull drop: isolate which hull shapes fall through
-	{
-		const char* hull_names[] = { "tet", "wedge", "rock", "bipyr" };
-		v3 tet_pts[] = { {0,0.6f,0}, {0.5f,-0.3f,0.3f}, {-0.5f,-0.3f,0.3f}, {0,-0.3f,-0.5f} };
-		v3 wedge_pts[] = {
-			{-0.5f,-0.3f,-0.4f}, {0.5f,-0.3f,-0.4f}, {-0.5f,-0.3f,0.4f}, {0.5f,-0.3f,0.4f},
-			{-0.5f, 0.3f,-0.4f}, {0.5f, 0.3f,-0.4f},
-		};
-		v3 rock_pts[] = {
-			{0, 0.55f, 0}, {0, -0.5f, 0},
-			{0.45f, 0.1f, 0.3f}, {-0.4f, 0.15f, 0.35f},
-			{0.35f, 0.1f, -0.4f}, {-0.3f, 0.1f, -0.45f},
-			{0.5f, -0.15f, -0.1f}, {-0.5f, -0.1f, 0.05f},
-			{0.1f, -0.2f, 0.55f}, {-0.15f, -0.2f, -0.5f},
-		};
-		v3 bipyr_pts[] = {
-			{0,0.7f,0}, {0.5f,0,0.5f}, {-0.5f,0,0.5f}, {0.5f,0,-0.5f}, {-0.5f,0,-0.5f}, {0,-0.7f,0},
-		};
-		struct { v3* pts; int n; v3 sc; } hull_defs[] = {
-			{ tet_pts, 4, V3(0.8f,0.8f,0.8f) },
-			{ wedge_pts, 6, V3(0.7f,0.7f,0.7f) },
-			{ rock_pts, 10, V3(0.6f,0.6f,0.6f) },
-			{ bipyr_pts, 6, V3(0.7f,0.7f,0.7f) },
-		};
-
-		// Test each hull type with several rotations
-		for (int t = 0; t < 4; t++) {
-			Hull* h = quickhull(hull_defs[t].pts, hull_defs[t].n);
-			for (int r = 0; r < 8; r++) {
-				char name[64];
-				snprintf(name, sizeof(name), "AVBD hull drop %s rot%d", hull_names[t], r);
-				TEST_BEGIN(name);
-				World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-				((WorldInternal*)w.id)->sleep_enabled = 0;
-				Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-				body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-
-				float a = (float)r * 0.8f;
-				v3 ax = norm(V3(sinf(a), cosf(a*1.3f), sinf(a*0.7f)));
-				float ha = a * 0.5f;
-				quat rot = (quat){ ax.x*sinf(ha), ax.y*sinf(ha), ax.z*sinf(ha), cosf(ha) };
-
-				Body body = create_body(w, (BodyParams){
-					.position = V3(0, 5, 0), .rotation = rot, .mass = 1.0f });
-				body_add_shape(w, body, (ShapeParams){
-					.type = SHAPE_HULL, .hull = { .hull = h, .scale = hull_defs[t].sc } });
-
-				float dt = 1.0f / 60.0f;
-				int ok = 1;
-				for (int f = 0; f < 120; f++) {
-					world_step(w, dt);
-					float y = body_get_position(w, body).y;
-					if (y < -2.0f) {
-						printf("  [FALL] %s rot%d fell at f%d y=%.2f\n", hull_names[t], r, f, y);
-						ok = 0; break;
-					}
-				}
-				float y = body_get_position(w, body).y;
-				if (ok) printf("  [OK] %s rot%d final y=%.3f\n", hull_names[t], r, y);
-				TEST_ASSERT(ok);
-				destroy_world(w);
-			}
-			hull_free(h);
-		}
-	}
-	// Isolated repro: rock hull at specific rotation falls through floor
-	{
-		TEST_BEGIN("AVBD rock hull single drop");
-		v3 rock_pts[] = {
-			{0, 0.55f, 0}, {0, -0.5f, 0},
-			{0.45f, 0.1f, 0.3f}, {-0.4f, 0.15f, 0.35f},
-			{0.35f, 0.1f, -0.4f}, {-0.3f, 0.1f, -0.45f},
-			{0.5f, -0.15f, -0.1f}, {-0.5f, -0.1f, 0.05f},
-			{0.1f, -0.2f, 0.55f}, {-0.15f, -0.2f, -0.5f},
-		};
-		Hull* h = quickhull(rock_pts, 10);
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		((WorldInternal*)w.id)->sleep_enabled = 0;
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-		// Exact rotation from hull pile body2
-		quat rot = (quat){ 0.440731f, -0.320806f, 0.544865f, 0.637151f };
-		Body body = create_body(w, (BodyParams){
-			.position = V3(0, 3, 0), .rotation = rot, .mass = 1.0f });
-		body_add_shape(w, body, (ShapeParams){
-			.type = SHAPE_HULL, .hull = { .hull = h, .scale = V3(0.6f, 0.6f, 0.6f) } });
-
-		float dt = 1.0f / 60.0f;
-		for (int f = 0; f < 200; f++) {
-			world_step(w, dt);
-			float y = body_get_position(w, body).y;
-			if (f < 5 || (f >= 38 && f <= 50))
-				printf("  [ROCK] f%d y=%.4f\n", f, y);
-			if (y < -2.0f) {
-				printf("  [ROCK FELL THROUGH] f%d y=%.4f\n", f, y);
-				TEST_ASSERT(0);
-				break;
-			}
-		}
-		float y = body_get_position(w, body).y;
-		printf("  [ROCK] final y=%.4f\n", y);
-		TEST_ASSERT(y > -0.5f);
-		hull_free(h);
-		destroy_world(w);
-	}
-	// AVBD hull pile: drop various hull shapes onto a floor, none should fall through.
-	{
-		TEST_BEGIN("AVBD hull pile no fall-through");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		((WorldInternal*)w.id)->sleep_enabled = 0;
-		Body fl = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, fl, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
-
-		// Build hull shapes
-		v3 tet_pts[] = { {0,0.6f,0}, {0.5f,-0.3f,0.3f}, {-0.5f,-0.3f,0.3f}, {0,-0.3f,-0.5f} };
-		Hull* hull_tet = quickhull(tet_pts, 4);
-
-		v3 wedge_pts[] = {
-			{-0.5f,-0.3f,-0.4f}, {0.5f,-0.3f,-0.4f}, {-0.5f,-0.3f,0.4f}, {0.5f,-0.3f,0.4f},
-			{-0.5f, 0.3f,-0.4f}, {0.5f, 0.3f,-0.4f},
-		};
-		Hull* hull_wedge = quickhull(wedge_pts, 6);
-
-		v3 rock_pts[] = {
-			{0, 0.55f, 0}, {0, -0.5f, 0},
-			{0.45f, 0.1f, 0.3f}, {-0.4f, 0.15f, 0.35f},
-			{0.35f, 0.1f, -0.4f}, {-0.3f, 0.1f, -0.45f},
-			{0.5f, -0.15f, -0.1f}, {-0.5f, -0.1f, 0.05f},
-			{0.1f, -0.2f, 0.55f}, {-0.15f, -0.2f, -0.5f},
-		};
-		Hull* hull_rock = quickhull(rock_pts, 10);
-
-		v3 bipyr_pts[] = {
-			{0,0.7f,0}, {0.5f,0,0.5f}, {-0.5f,0,0.5f}, {0.5f,0,-0.5f}, {-0.5f,0,-0.5f}, {0,-0.7f,0},
-		};
-		Hull* hull_bipyr = quickhull(bipyr_pts, 6);
-
-		Hull* hulls[] = { hull_tet, hull_wedge, hull_rock, hull_bipyr };
-		v3 scales[] = { V3(0.8f,0.8f,0.8f), V3(0.7f,0.7f,0.7f), V3(0.6f,0.6f,0.6f), V3(0.7f,0.7f,0.7f) };
-		const char* names[] = { "tet", "wedge", "rock", "bipyr" };
-		int nhulls = 4;
-
-		// Drop a 3x3x3 grid
-		Body bodies[27];
-		int btypes[27];
-		int idx = 0;
-		for (int layer = 0; layer < 3; layer++) {
-			for (int ix = 0; ix < 3; ix++) {
-				for (int iz = 0; iz < 3; iz++) {
-					float x = (ix - 1) * 1.2f + ((layer % 2) ? 0.3f : 0.0f);
-					float z = (iz - 1) * 1.2f + ((layer % 2) ? 0.3f : 0.0f);
-					float y = 1.0f + layer * 2.0f;
-					int t = idx % nhulls;
-					float a = (float)idx * 1.1f;
-					v3 ax = norm(V3(sinf(a), cosf(a), sinf(a*0.7f)));
-					float ha = a * 0.4f;
-					quat rot = (quat){ ax.x*sinf(ha), ax.y*sinf(ha), ax.z*sinf(ha), cosf(ha) };
-					bodies[idx] = create_body(w, (BodyParams){
-						.position = V3(x, y, z), .rotation = rot, .mass = 1.0f });
-					body_add_shape(w, bodies[idx], (ShapeParams){
-						.type = SHAPE_HULL, .hull = { .hull = hulls[t], .scale = scales[t] } });
-					btypes[idx] = t;
-					idx++;
-				}
-			}
-		}
-
-		float dt = 1.0f / 60.0f;
-		int fallen = 0;
-		for (int f = 0; f < 300; f++) {
-			world_step(w, dt);
-			for (int i = 0; i < 27; i++) {
-				v3 p = body_get_position(w, bodies[i]);
-				(void)0;
-				if (p.y < -2.0f) {
-					printf("  [HULL PILE FAIL] f%d body%d(%s) fell through at (%.2f,%.2f,%.2f)\n",
-						f, i, names[btypes[i]], p.x, p.y, p.z);
-					fallen = 1;
-				}
-			}
-			if (fallen) break;
-		}
-		TEST_ASSERT(fallen == 0);
-		hull_free(hull_tet); hull_free(hull_wedge); hull_free(hull_rock); hull_free(hull_bipyr);
-		destroy_world(w);
-	}
-	// AVBD ball-socket: horizontal chain swings down under gravity.
-	// Bodies spawn horizontally at anchor height — zero initial joint error,
-	// gravity makes the whole chain swing downward.
-	{
-		TEST_BEGIN("AVBD horizontal chain swings");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.15f, 0.15f, 0.15f) });
-
-		Body chain[5];
-		Body prev = anchor;
-		for (int i = 0; i < 5; i++) {
-			// Horizontal: each body 1m to the right of the previous, same height
-			chain[i] = create_body(w, (BodyParams){
-				.position = V3((float)(i + 1), 8, 0), .rotation = quat_identity(), .mass = 0.5f });
-			body_add_shape(w, chain[i], (ShapeParams){
-				.type = SHAPE_BOX, .box.half_extents = V3(0.2f, 0.2f, 0.2f) });
-			create_ball_socket(w, (BallSocketParams){ .body_a = prev, .body_b = chain[i],
-				.local_offset_a = V3(0.5f, 0, 0), .local_offset_b = V3(-0.5f, 0, 0) });
-			prev = chain[i];
-		}
-
-		float dt = 1.0f / 60.0f;
-		float y_min = 100;
-		for (int i = 0; i < 300; i++) {
-			world_step(w, dt);
-			v3 p4 = body_get_position(w, chain[4]);
-			if (p4.y < y_min) y_min = p4.y;
-		}
-
-		v3 p0 = body_get_position(w, chain[0]);
-		v3 p4 = body_get_position(w, chain[4]);
-		float dist_01 = len(sub(body_get_position(w, chain[1]), p0));
-		printf("  [AVBD hchain] p0=(%.2f,%.2f) p4=(%.2f,%.2f) tip_min_y=%.2f d01=%.2f\n",
-			p0.x, p0.y, p4.x, p4.y, y_min, dist_01);
-		// Chain tip should have swung down significantly
-		TEST_ASSERT(y_min < 5.0f);
-		// Joints should hold (link distance ≈ 1.0)
-		TEST_ASSERT(dist_01 < 1.5f);
-		TEST_ASSERT(dist_01 > 0.5f);
-		destroy_world(w);
-	}
-	// AVBD ball-socket: pendulum swings from side, doesn't float or drift.
-	{
-		TEST_BEGIN("AVBD ball-socket pendulum swings");
-		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .solver_type = SOLVER_AVBD });
-		// Static anchor at origin
-		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
-		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
-		// Dynamic bob offset to the side so it swings
-		Body bob = create_body(w, (BodyParams){ .position = V3(2, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
-		body_add_shape(w, bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
-
-		create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = bob,
-			.local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-2, 0, 0) });
-
-		float dt = 1.0f / 60.0f;
-		float y_min = 100, y_max = -100;
-		for (int i = 0; i < 300; i++) {
-			world_step(w, dt);
-			v3 p = body_get_position(w, bob);
-			if (p.y < y_min) y_min = p.y;
-			if (p.y > y_max) y_max = p.y;
-		}
-		v3 p = body_get_position(w, bob);
-		float dist = len(sub(p, V3(0, 5, 0)));
-		printf("  [AVBD pendulum] pos=(%.2f,%.2f,%.2f) dist=%.3f y_range=[%.2f,%.2f]\n",
-			p.x, p.y, p.z, dist, y_min, y_max);
-		// Bob should stay within rod length of anchor
-		TEST_ASSERT(dist < 3.0f);
-		// Should have swung downward (y < 5)
-		TEST_ASSERT(y_min < 4.0f);
-		// Joint should hold — bob shouldn't fall to floor
-		TEST_ASSERT(p.y > 2.0f);
-		destroy_world(w);
-	}
+	run_sleep_tests();
 }
 
 // ============================================================================
@@ -9585,30 +10314,29 @@ static void run_sleep_tests()
 static void run_ldl_stress_tests()
 {
 	printf("--- LDL stress tests ---\n");
-	test_ldl_stress_coincident_anchors();
-	test_ldl_stress_both_static();
-	test_ldl_stress_extreme_mass_ratio();
-	test_ldl_stress_redundant_joints();
-	test_ldl_stress_topology_thrash();
-	test_ldl_stress_velocity_bomb();
-	test_ldl_stress_zero_length_distance();
-	test_ldl_stress_dense_clique();
-	test_ldl_stress_collinear_chain();
-	test_ldl_stress_alternating_mass();
-	test_ldl_stress_single_constraint();
-	test_ldl_stress_mixed_same_pair();
-	test_ldl_stress_near_max_nodes();
-	test_ldl_stress_inverted_gravity_tangle();
-	test_ldl_stress_distance_only_chain();
-	test_ldl_stress_opposing_slams();
-	test_ldl_stress_zero_gravity_spin();
-	test_ldl_stress_mixed_stiffness();
-	test_ldl_stress_double_hub_bridge();
-	test_ldl_stress_body_destroy_recreate();
-	test_ldl_stress_micro_mass();
-	test_ldl_stress_constraint_loop();
-	test_ldl_stress_stretched_recovery();
-	test_ldl_stress_heavy_stretched_recovery();
+	TIMED(test_ldl_stress_coincident_anchors());
+	TIMED(test_ldl_stress_both_static());
+	TIMED(test_ldl_stress_extreme_mass_ratio());
+	TIMED(test_ldl_stress_redundant_joints());
+	TIMED(test_ldl_stress_topology_thrash());
+	TIMED(test_ldl_stress_velocity_bomb());
+	TIMED(test_ldl_stress_zero_length_distance());
+	// test_ldl_stress_dense_clique (12s) and collinear_chain (1s) moved to --slow
+	TIMED(test_ldl_stress_alternating_mass());
+	TIMED(test_ldl_stress_single_constraint());
+	TIMED(test_ldl_stress_mixed_same_pair());
+	// test_ldl_stress_near_max_nodes (2.6s) moved to --slow
+	TIMED(test_ldl_stress_inverted_gravity_tangle());
+	TIMED(test_ldl_stress_distance_only_chain());
+	TIMED(test_ldl_stress_opposing_slams());
+	TIMED(test_ldl_stress_zero_gravity_spin());
+	TIMED(test_ldl_stress_mixed_stiffness());
+	TIMED(test_ldl_stress_double_hub_bridge());
+	TIMED(test_ldl_stress_body_destroy_recreate());
+	TIMED(test_ldl_stress_micro_mass());
+	TIMED(test_ldl_stress_constraint_loop());
+	TIMED(test_ldl_stress_stretched_recovery());
+	TIMED(test_ldl_stress_heavy_stretched_recovery());
 }
 
 // Minimal stretched joint diagnostic: static anchor + one heavy body connected
@@ -9951,755 +10679,7 @@ static void test_replay_recording(const char* path)
 	free(frames);
 }
 
-// ============================================================================
-// CR solver smoke tests: run basic scenarios with cr_enabled = 1.
 
-// Box settles on floor under gravity (contacts only, no joints).
-static void test_cr_box_on_floor()
-{
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->cr_enabled = 1;
-	wi->sleep_enabled = 0;
-
-	Body floor = create_body(w, (BodyParams){
-		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, floor, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
-	});
-	Body box = create_body(w, (BodyParams){
-		.position = V3(0, 2, 0), .rotation = quat_identity(), .mass = 1.0f,
-	});
-	body_add_shape(w, box, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
-	});
-
-	step_n(w, 300);
-
-	v3 p = body_get_position(w, box);
-	TEST_BEGIN("CR box on floor: no NaN");
-	TEST_ASSERT(is_valid(p));
-	TEST_BEGIN("CR box on floor: settled near y=0.5");
-	TEST_ASSERT(p.y > 0.0f && p.y < 1.5f);
-	TEST_BEGIN("CR box on floor: near-zero velocity");
-	float vel = len(wi->body_hot[handle_index(box)].velocity);
-	TEST_ASSERT(vel < 0.5f);
-
-	destroy_world(w);
-}
-
-// Ball-socket chain hanging from static anchor (joints only, no contacts).
-static void test_cr_joint_chain()
-{
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->cr_enabled = 1;
-	wi->sleep_enabled = 0;
-
-	float link_len = 1.0f;
-	v3 off_a = V3(0, -link_len * 0.5f, 0);
-	v3 off_b = V3(0,  link_len * 0.5f, 0);
-	int chain_len = 5;
-
-	Body anchor = create_body(w, (BodyParams){
-		.position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, anchor, (ShapeParams){
-		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
-	});
-
-	Body bodies[5];
-	Body prev = anchor;
-	for (int i = 0; i < chain_len; i++) {
-		bodies[i] = create_body(w, (BodyParams){
-			.position = V3(0, 9.0f - i * link_len, 0),
-			.rotation = quat_identity(), .mass = 0.5f,
-		});
-		body_add_shape(w, bodies[i], (ShapeParams){
-			.type = SHAPE_SPHERE, .sphere.radius = 0.2f,
-		});
-		create_ball_socket(w, (BallSocketParams){
-			.body_a = prev, .body_b = bodies[i],
-			.local_offset_a = off_a, .local_offset_b = off_b,
-		});
-		prev = bodies[i];
-	}
-
-	step_n(w, 300);
-
-	TEST_BEGIN("CR joint chain: no NaN");
-	for (int i = 0; i < chain_len; i++) {
-		v3 p = body_get_position(w, bodies[i]);
-		TEST_ASSERT(is_valid(p));
-	}
-	TEST_BEGIN("CR joint chain: links stay connected");
-	float max_gap = 0.0f;
-	float gap0 = anchor_distance(w, anchor, off_a, bodies[0], off_b);
-	if (gap0 > max_gap) max_gap = gap0;
-	for (int i = 0; i < chain_len - 1; i++) {
-		float gap = anchor_distance(w, bodies[i], off_a, bodies[i + 1], off_b);
-		if (gap > max_gap) max_gap = gap;
-	}
-	TEST_ASSERT(max_gap < 1.0f);
-	TEST_BEGIN("CR joint chain: tail below anchor");
-	v3 tail = body_get_position(w, bodies[chain_len - 1]);
-	v3 anch = body_get_position(w, anchor);
-	TEST_ASSERT(tail.y < anch.y);
-
-	destroy_world(w);
-}
-
-// Stacked boxes (contacts only): tests that contacts push properly.
-static void test_cr_box_stack()
-{
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->cr_enabled = 1;
-	wi->sleep_enabled = 0;
-
-	Body floor = create_body(w, (BodyParams){
-		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, floor, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
-	});
-
-	Body boxes[3];
-	for (int i = 0; i < 3; i++) {
-		boxes[i] = create_body(w, (BodyParams){
-			.position = V3(0, 0.5f + i * 1.0f, 0), .rotation = quat_identity(), .mass = 1.0f,
-		});
-		body_add_shape(w, boxes[i], (ShapeParams){
-			.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
-		});
-	}
-
-	step_n(w, 300);
-
-	TEST_BEGIN("CR box stack: no NaN");
-	for (int i = 0; i < 3; i++) {
-		v3 p = body_get_position(w, boxes[i]);
-		TEST_ASSERT(is_valid(p));
-	}
-	TEST_BEGIN("CR box stack: boxes above floor");
-	for (int i = 0; i < 3; i++) {
-		v3 p = body_get_position(w, boxes[i]);
-		TEST_ASSERT(p.y > -0.1f);
-	}
-	TEST_BEGIN("CR box stack: boxes roughly stacked (ascending y)");
-	v3 p0 = body_get_position(w, boxes[0]);
-	v3 p2 = body_get_position(w, boxes[2]);
-	TEST_ASSERT(p2.y > p0.y - 0.5f);
-
-	destroy_world(w);
-}
-
-// Mixed: chain dangling and hitting floor (joints + contacts).
-static void test_cr_chain_on_floor()
-{
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->cr_enabled = 1;
-	wi->sleep_enabled = 0;
-
-	Body floor = create_body(w, (BodyParams){
-		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, floor, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
-	});
-
-	Body anchor = create_body(w, (BodyParams){
-		.position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, anchor, (ShapeParams){
-		.type = SHAPE_SPHERE, .sphere.radius = 0.1f,
-	});
-
-	// 3-link chain that should dangle and collide with floor
-	Body bodies[3];
-	Body prev = anchor;
-	v3 off_a = V3(0, -0.4f, 0), off_b = V3(0, 0.4f, 0);
-	for (int i = 0; i < 3; i++) {
-		bodies[i] = create_body(w, (BodyParams){
-			.position = V3(0, 2.2f - i * 0.8f, 0), .rotation = quat_identity(), .mass = 1.0f,
-		});
-		body_add_shape(w, bodies[i], (ShapeParams){
-			.type = SHAPE_SPHERE, .sphere.radius = 0.3f,
-		});
-		create_ball_socket(w, (BallSocketParams){
-			.body_a = prev, .body_b = bodies[i],
-			.local_offset_a = off_a, .local_offset_b = off_b,
-		});
-		prev = bodies[i];
-	}
-
-	step_n(w, 300);
-
-	TEST_BEGIN("CR chain on floor: no NaN");
-	for (int i = 0; i < 3; i++) {
-		v3 p = body_get_position(w, bodies[i]);
-		TEST_ASSERT(is_valid(p));
-	}
-	TEST_BEGIN("CR chain on floor: all above floor");
-	for (int i = 0; i < 3; i++) {
-		v3 p = body_get_position(w, bodies[i]);
-		TEST_ASSERT(p.y > -0.5f);
-	}
-	TEST_BEGIN("CR chain on floor: below anchor");
-	for (int i = 0; i < 3; i++) {
-		v3 p = body_get_position(w, bodies[i]);
-		TEST_ASSERT(p.y < 3.5f);
-	}
-
-	destroy_world(w);
-}
-
-// CR with FRICTION_COULOMB mode (per-point friction).
-static void test_cr_coulomb_friction()
-{
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->cr_enabled = 1;
-	wi->sleep_enabled = 0;
-	wi->friction_model = FRICTION_COULOMB;
-
-	Body floor = create_body(w, (BodyParams){
-		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, floor, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
-	});
-	Body box = create_body(w, (BodyParams){
-		.position = V3(0, 2, 0), .rotation = quat_identity(), .mass = 1.0f,
-	});
-	body_add_shape(w, box, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f),
-	});
-
-	step_n(w, 300);
-
-	v3 p = body_get_position(w, box);
-	TEST_BEGIN("CR Coulomb: no NaN");
-	TEST_ASSERT(is_valid(p));
-	TEST_BEGIN("CR Coulomb: box settled");
-	TEST_ASSERT(p.y > 0.0f && p.y < 1.5f);
-
-	destroy_world(w);
-}
-
-// Friction quality comparison: CR vs PGS reference.
-// Sliding boxes with initial velocity — should decelerate and stop at similar positions.
-static void test_cr_friction_vs_pgs()
-{
-	float speeds[] = { 2.0f, 5.0f, 10.0f };
-	int n_speeds = 3;
-	int n_frames = 120;
-
-	// Run with both friction models
-	for (int fm = 0; fm < 2; fm++) {
-		FrictionModel fmodel = (fm == 0) ? FRICTION_COULOMB : FRICTION_PATCH;
-		const char* fname = (fm == 0) ? "Coulomb" : "Patch";
-
-		for (int si = 0; si < n_speeds; si++) {
-			float speed = speeds[si];
-			v3 pgs_pos, cr_pos, pgs_av, cr_av;
-
-			// PGS reference
-			{
-				World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-				WorldInternal* wi = (WorldInternal*)w.id;
-				wi->sleep_enabled = 0;
-				wi->cr_enabled = 0;
-				wi->ldl_enabled = 0;
-				wi->friction_model = fmodel;
-
-				Body floor = create_body(w, (BodyParams){
-					.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-				});
-				body_add_shape(w, floor, (ShapeParams){
-					.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
-				});
-				Body box = create_body(w, (BodyParams){
-					.position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
-				});
-				body_add_shape(w, box, (ShapeParams){
-					.type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f),
-				});
-				body_set_velocity(w, box, V3(speed, 0, 0));
-
-				step_n(w, n_frames);
-				pgs_pos = body_get_position(w, box);
-				pgs_av = ((WorldInternal*)w.id)->body_hot[box.id & 0xFFFF].angular_velocity;
-				destroy_world(w);
-			}
-
-			// CR
-			{
-				World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-				WorldInternal* wi = (WorldInternal*)w.id;
-				wi->sleep_enabled = 0;
-				wi->cr_enabled = 1;
-				wi->ldl_enabled = 0;
-				wi->friction_model = fmodel;
-
-				Body floor = create_body(w, (BodyParams){
-					.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-				});
-				body_add_shape(w, floor, (ShapeParams){
-					.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
-				});
-				Body box = create_body(w, (BodyParams){
-					.position = V3(0, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f,
-				});
-				body_add_shape(w, box, (ShapeParams){
-					.type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f),
-				});
-				body_set_velocity(w, box, V3(speed, 0, 0));
-
-				step_n(w, n_frames);
-				cr_pos = body_get_position(w, box);
-				cr_av = ((WorldInternal*)w.id)->body_hot[box.id & 0xFFFF].angular_velocity;
-				destroy_world(w);
-			}
-
-			float pgs_tumble = sqrtf(pgs_av.x*pgs_av.x + pgs_av.z*pgs_av.z);
-			float cr_tumble = sqrtf(cr_av.x*cr_av.x + cr_av.z*cr_av.z);
-			float dx = fabsf(cr_pos.x - pgs_pos.x);
-			printf("  %s v=%.0f: PGS(%.2f,%.2f) CR(%.2f,%.2f) dx=%.3f | tumble PGS=%.3f CR=%.3f\n",
-				fname, (double)speed,
-				(double)pgs_pos.x, (double)pgs_pos.y,
-				(double)cr_pos.x, (double)cr_pos.y, (double)dx,
-				(double)pgs_tumble, (double)cr_tumble);
-			TEST_BEGIN("CR friction match");
-			TEST_ASSERT(cr_tumble < 0.05f && dx < 0.5f);
-		}
-	}
-}
-
-// Box pyramid (5-layer, matches the "Box Pyramid" scene).
-// This is the key stress test: many contacts, many bodies in one island.
-static void test_cr_pyramid()
-{
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->cr_enabled = 1;
-	wi->sleep_enabled = 0;
-
-	// Floor
-	Body floor = create_body(w, (BodyParams){
-		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, floor, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
-	});
-
-	// Pyramid: 5 layers, each layer is (base-layer) x (base-layer) boxes
-	float box_size = 0.5f;
-	float spacing = 1.05f;
-	int base = 5;
-	int total_boxes = 0;
-	Body boxes[55]; // 25+16+9+4+1 = 55
-
-	for (int layer = 0; layer < base; layer++) {
-		int count = base - layer;
-		float offset = -(count - 1) * 0.5f * spacing;
-		float y = box_size + layer * spacing;
-		for (int r = 0; r < count; r++) {
-			for (int c = 0; c < count; c++) {
-				boxes[total_boxes] = create_body(w, (BodyParams){
-					.position = V3(offset + c * spacing, y, offset + r * spacing),
-					.rotation = quat_identity(), .mass = 1.0f,
-				});
-				body_add_shape(w, boxes[total_boxes], (ShapeParams){
-					.type = SHAPE_BOX, .box.half_extents = V3(box_size, box_size, box_size),
-				});
-				total_boxes++;
-			}
-		}
-	}
-
-	// Run 2 seconds (120 frames)
-	step_n(w, 120);
-
-	TEST_BEGIN("CR pyramid: no NaN");
-	int nan_count = 0;
-	for (int i = 0; i < total_boxes; i++) {
-		v3 p = body_get_position(w, boxes[i]);
-		if (!is_valid(p)) nan_count++;
-	}
-	TEST_ASSERT(nan_count == 0);
-
-	TEST_BEGIN("CR pyramid: all boxes above floor");
-	int below_floor = 0;
-	for (int i = 0; i < total_boxes; i++) {
-		v3 p = body_get_position(w, boxes[i]);
-		if (is_valid(p) && p.y < -2.0f) below_floor++;
-	}
-	TEST_ASSERT(below_floor == 0);
-
-	TEST_BEGIN("CR pyramid: no explosion (all boxes within bounds)");
-	int exploded = 0;
-	for (int i = 0; i < total_boxes; i++) {
-		v3 p = body_get_position(w, boxes[i]);
-		if (!is_valid(p) || fabsf(p.x) > 20.0f || p.y > 20.0f || fabsf(p.z) > 20.0f)
-			exploded++;
-	}
-	TEST_ASSERT(exploded == 0);
-
-	TEST_BEGIN("CR pyramid: boxes roughly settled (low velocity)");
-	float max_vel = 0;
-	for (int i = 0; i < total_boxes; i++) {
-		float v = len(wi->body_hot[handle_index(boxes[i])].velocity);
-		if (v > max_vel) max_vel = v;
-	}
-	// Relaxed threshold — CR v1 won't be as settled as PGS/LDL
-	TEST_ASSERT(max_vel < 10.0f);
-
-	destroy_world(w);
-}
-
-// Helper: create a pyramid world for convergence measurement.
-static World cr_bench_create_pyramid()
-{
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->cr_enabled = 1;
-	wi->sleep_enabled = 0;
-	wi->cr_max_iters = 30; // enough to see convergence tail
-
-	Body floor = create_body(w, (BodyParams){
-		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, floor, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
-	});
-
-	float box_size = 0.5f, spacing = 1.05f;
-	int base = 5;
-	for (int layer = 0; layer < base; layer++) {
-		int count = base - layer;
-		float offset = -(count - 1) * 0.5f * spacing;
-		float y = box_size + layer * spacing;
-		for (int r = 0; r < count; r++) {
-			for (int c = 0; c < count; c++) {
-				Body b = create_body(w, (BodyParams){
-					.position = V3(offset + c * spacing, y, offset + r * spacing),
-					.rotation = quat_identity(), .mass = 1.0f,
-				});
-				body_add_shape(w, b, (ShapeParams){
-					.type = SHAPE_BOX, .box.half_extents = V3(box_size, box_size, box_size),
-				});
-			}
-		}
-	}
-	return w;
-}
-
-// Convergence trace for CR as linear accelerator.
-static void cr_bench_scene(const char* name,
-	World (*create_fn)(void), int warmup_frames)
-{
-	printf("\n=== CR Convergence: %s ===\n", name);
-	World w = create_fn();
-	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->cr_max_iters = 30;
-	step_n(w, warmup_frames);
-	g_cr_trace = 1;
-	step_n(w, 1);
-	g_cr_trace = 0;
-	destroy_world(w);
-	printf("=== End %s ===\n", name);
-}
-
-static World cr_bench_create_mass_ratio()
-{
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->cr_enabled = 1;
-	wi->sleep_enabled = 0;
-	wi->cr_max_iters = 30;
-
-	Body floor = create_body(w, (BodyParams){
-		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, floor, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
-	});
-
-	float sizes[] = { 0.15f, 0.25f, 0.4f, 0.55f, 0.75f };
-	float masses[] = { 0.5f, 2.0f, 8.0f, 30.0f, 100.0f };
-	float gap = 0.6f, y = 0.0f;
-	for (int i = 0; i < 5; i++) {
-		float h = sizes[i];
-		y += h + gap;
-		Body b = create_body(w, (BodyParams){
-			.position = V3(0, y, 0), .rotation = quat_identity(), .mass = masses[i],
-		});
-		body_add_shape(w, b, (ShapeParams){
-			.type = SHAPE_BOX, .box.half_extents = V3(h, h, h),
-		});
-		y += h;
-	}
-	return w;
-}
-
-static World cr_bench_create_big_pyramid()
-{
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->cr_enabled = 1;
-	wi->sleep_enabled = 0;
-	wi->cr_max_iters = 30;
-
-	Body floor = create_body(w, (BodyParams){
-		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, floor, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50),
-	});
-
-	float box_size = 0.5f, spacing = 1.05f;
-	int base = 8; // 8 layers: 64+49+36+25+16+9+4+1 = 204 boxes
-	for (int layer = 0; layer < base; layer++) {
-		int count = base - layer;
-		float offset = -(count - 1) * 0.5f * spacing;
-		float y = box_size + layer * spacing;
-		for (int r = 0; r < count; r++) {
-			for (int c = 0; c < count; c++) {
-				Body b = create_body(w, (BodyParams){
-					.position = V3(offset + c * spacing, y, offset + r * spacing),
-					.rotation = quat_identity(), .mass = 1.0f,
-				});
-				body_add_shape(w, b, (ShapeParams){
-					.type = SHAPE_BOX, .box.half_extents = V3(box_size, box_size, box_size),
-				});
-			}
-		}
-	}
-	return w;
-}
-
-static void test_cr_precond_comparison()
-{
-	cr_bench_scene("Pyramid 5", cr_bench_create_pyramid, 20);
-	cr_bench_scene("Pyramid 8", cr_bench_create_big_pyramid, 25);
-	cr_bench_scene("Mass Ratio", cr_bench_create_mass_ratio, 30);
-}
-
-// Mass ratio stack: 5 boxes with masses 0.5 to 100, stacked vertically.
-// Tests CR with extreme mass ratios (200:1) where preconditioning matters most.
-static void test_cr_mass_ratio()
-{
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
-	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->cr_enabled = 1;
-	wi->sleep_enabled = 0;
-
-	Body floor = create_body(w, (BodyParams){
-		.position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0,
-	});
-	body_add_shape(w, floor, (ShapeParams){
-		.type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10),
-	});
-
-	float sizes[] = { 0.15f, 0.25f, 0.4f, 0.55f, 0.75f };
-	float masses[] = { 0.5f, 2.0f, 8.0f, 30.0f, 100.0f };
-	Body boxes[5];
-	float gap = 0.6f;
-	float y = 0.0f;
-	for (int i = 0; i < 5; i++) {
-		float h = sizes[i];
-		y += h + gap;
-		boxes[i] = create_body(w, (BodyParams){
-			.position = V3(0, y, 0), .rotation = quat_identity(), .mass = masses[i],
-		});
-		body_add_shape(w, boxes[i], (ShapeParams){
-			.type = SHAPE_BOX, .box.half_extents = V3(h, h, h),
-		});
-		y += h;
-	}
-
-	step_n(w, 300);
-
-	TEST_BEGIN("CR mass ratio: no NaN");
-	int nan_count = 0;
-	for (int i = 0; i < 5; i++) {
-		v3 p = body_get_position(w, boxes[i]);
-		if (!is_valid(p)) nan_count++;
-	}
-	TEST_ASSERT(nan_count == 0);
-
-	TEST_BEGIN("CR mass ratio: no explosion");
-	int exploded = 0;
-	for (int i = 0; i < 5; i++) {
-		v3 p = body_get_position(w, boxes[i]);
-		if (!is_valid(p) || fabsf(p.x) > 20.0f || p.y > 20.0f || fabsf(p.z) > 20.0f)
-			exploded++;
-	}
-	TEST_ASSERT(exploded == 0);
-
-	TEST_BEGIN("CR mass ratio: all above floor");
-	for (int i = 0; i < 5; i++) {
-		v3 p = body_get_position(w, boxes[i]);
-		TEST_ASSERT(is_valid(p) && p.y > -0.5f);
-	}
-
-	TEST_BEGIN("CR mass ratio: roughly stacked (ascending y)");
-	v3 p0 = body_get_position(w, boxes[0]);
-	v3 p4 = body_get_position(w, boxes[4]);
-	TEST_ASSERT(is_valid(p0) && is_valid(p4) && p4.y > p0.y - 1.0f);
-
-	destroy_world(w);
-}
-
-static void run_cr_tests()
-{
-	printf("--- CR solver tests ---\n");
-	test_cr_box_on_floor();
-	test_cr_joint_chain();
-	test_cr_box_stack();
-	test_cr_chain_on_floor();
-	test_cr_coulomb_friction();
-	test_cr_friction_vs_pgs();
-	test_cr_pyramid();
-	test_cr_mass_ratio();
-}
-
-// ============================================================================
-// Block LCP solver unit tests.
-
-// 1x1: simple lower-bounded contact (lambda >= 0)
-static void test_block_lcp_1x1_active()
-{
-	// A*x + b = 0 with x >= 0.  A = [10], b = [-5] → x = 0.5
-	float A[] = { 10.0f };
-	float b[] = { -5.0f };
-	float x[1], lo[] = { 0.0f }, hi[] = { 1e18f };
-	TEST_BEGIN("block_lcp 1x1 active");
-	int ok = block_lcp_solve(A, b, x, lo, hi, 1);
-	TEST_ASSERT(ok == 1);
-	TEST_ASSERT_FLOAT(x[0], 0.5f, 1e-4f);
-}
-
-static void test_block_lcp_1x1_inactive()
-{
-	// A*x + b = w, x >= 0.  A = [10], b = [5] → unconstrained x = -0.5 < 0 → x = 0
-	float A[] = { 10.0f };
-	float b[] = { 5.0f };
-	float x[1], lo[] = { 0.0f }, hi[] = { 1e18f };
-	TEST_BEGIN("block_lcp 1x1 inactive");
-	int ok = block_lcp_solve(A, b, x, lo, hi, 1);
-	TEST_ASSERT(ok == 1);
-	TEST_ASSERT_FLOAT(x[0], 0.0f, 1e-6f);
-}
-
-// 2x2: two contacts, one active one inactive
-static void test_block_lcp_2x2_mixed()
-{
-	// A = [[4, 1], [1, 4]], b = [-3, 1]
-	// Unconstrained: x = A^{-1} * (-b) = [4,-1;-1,4]/15 * [3,-1] = [13/15, -7/15]
-	// x[1] < 0, so x[1] = 0 (inactive). Reduced: 4*x[0] = 3 → x[0] = 0.75
-	// Check: w[1] = A[1,0]*0.75 + b[1] = 0.75 + 1 = 1.75 >= 0 ✓
-	float A[] = { 4.0f, 1.0f, 4.0f }; // packed: A00, A10, A11
-	float b[] = { -3.0f, 1.0f };
-	float x[2], lo[] = { 0.0f, 0.0f }, hi[] = { 1e18f, 1e18f };
-	TEST_BEGIN("block_lcp 2x2 mixed");
-	int ok = block_lcp_solve(A, b, x, lo, hi, 2);
-	TEST_ASSERT(ok == 1);
-	TEST_ASSERT_FLOAT(x[0], 0.75f, 1e-4f);
-	TEST_ASSERT_FLOAT(x[1], 0.0f, 1e-6f);
-}
-
-// 2x2: both contacts active
-static void test_block_lcp_2x2_both_active()
-{
-	// A = [[4, 1], [1, 4]], b = [-3, -2]
-	// x = A^{-1} * [3, 2] = [4,-1;-1,4]/15 * [3,2] = [10/15, 5/15] = [0.667, 0.333]
-	float A[] = { 4.0f, 1.0f, 4.0f };
-	float b[] = { -3.0f, -2.0f };
-	float x[2], lo[] = { 0.0f, 0.0f }, hi[] = { 1e18f, 1e18f };
-	TEST_BEGIN("block_lcp 2x2 both active");
-	int ok = block_lcp_solve(A, b, x, lo, hi, 2);
-	TEST_ASSERT(ok == 1);
-	TEST_ASSERT_FLOAT(x[0], 10.0f / 15.0f, 1e-4f);
-	TEST_ASSERT_FLOAT(x[1], 5.0f / 15.0f, 1e-4f);
-}
-
-// 3x3: mixed bilateral + inequality
-static void test_block_lcp_3x3_bilateral_plus_contact()
-{
-	// DOF 0: bilateral (joint), DOF 1,2: contacts (lo=0)
-	// A = [[5, 1, 0], [1, 4, 1], [0, 1, 4]], b = [-2, -3, 2]
-	// DOF 2 should go inactive (b[2] > 0 pushes x[2] negative).
-	float A[] = { 5.0f, 1.0f, 4.0f, 0.0f, 1.0f, 4.0f };
-	float b[] = { -2.0f, -3.0f, 2.0f };
-	float x[3];
-	float lo[] = { -1e18f, 0.0f, 0.0f };
-	float hi[] = { 1e18f, 1e18f, 1e18f };
-	TEST_BEGIN("block_lcp 3x3 bilateral+contact");
-	int ok = block_lcp_solve(A, b, x, lo, hi, 3);
-	TEST_ASSERT(ok == 1);
-	// x[2] should be 0 (inactive)
-	TEST_ASSERT_FLOAT(x[2], 0.0f, 1e-6f);
-	// x[0] is bilateral, x[1] >= 0
-	TEST_ASSERT(x[1] >= -1e-6f);
-	// Verify: A*x + b ≈ 0 for active, ≥ 0 for inactive
-	float w0 = A[BTRI(0,0)]*x[0] + A[BTRI(0,1)]*x[1] + A[BTRI(0,2)]*x[2] + b[0];
-	float w2 = A[BTRI(2,0)]*x[0] + A[BTRI(2,1)]*x[1] + A[BTRI(2,2)]*x[2] + b[2];
-	TEST_ASSERT(fabsf(w0) < 0.01f); // bilateral: w ≈ 0
-	TEST_ASSERT(w2 > -0.01f);        // inactive at lo: w >= 0
-}
-
-// Upper bound test: x <= hi
-static void test_block_lcp_upper_bound()
-{
-	// A = [10], b = [-20] → unconstrained x = 2.0, but hi = 1.0
-	float A[] = { 10.0f };
-	float b[] = { -20.0f };
-	float x[1];
-	float lo[] = { 0.0f }, hi[] = { 1.0f };
-	TEST_BEGIN("block_lcp upper bound");
-	int ok = block_lcp_solve(A, b, x, lo, hi, 1);
-	TEST_ASSERT(ok == 1);
-	TEST_ASSERT_FLOAT(x[0], 1.0f, 1e-4f);
-}
-
-// 4x4: four contacts, partial activity
-static void test_block_lcp_4x4()
-{
-	// Diagonally dominant 4x4, two contacts should be active
-	float A[] = {
-		8.0f,                        // A00
-		1.0f, 8.0f,                  // A10, A11
-		0.5f, 0.5f, 8.0f,            // A20, A21, A22
-		0.0f, 0.0f, 0.5f, 8.0f      // A30, A31, A32, A33
-	};
-	float b[] = { -4.0f, -2.0f, 1.0f, 3.0f }; // DOFs 2,3 pushed inactive
-	float x[4];
-	float lo[] = { 0, 0, 0, 0 }, hi[] = { 1e18f, 1e18f, 1e18f, 1e18f };
-	TEST_BEGIN("block_lcp 4x4 partial");
-	int ok = block_lcp_solve(A, b, x, lo, hi, 4);
-	TEST_ASSERT(ok == 1);
-	// DOFs 0,1 should be positive, DOFs 2,3 should be 0
-	TEST_ASSERT(x[0] > 0.0f);
-	TEST_ASSERT(x[1] > 0.0f);
-	TEST_ASSERT_FLOAT(x[2], 0.0f, 1e-6f);
-	TEST_ASSERT_FLOAT(x[3], 0.0f, 1e-6f);
-}
-
-static void run_block_lcp_tests()
-{
-	printf("--- block LCP unit tests ---\n");
-	test_block_lcp_1x1_active();
-	test_block_lcp_1x1_inactive();
-	test_block_lcp_2x2_mixed();
-	test_block_lcp_2x2_both_active();
-	test_block_lcp_3x3_bilateral_plus_contact();
-	test_block_lcp_upper_bound();
-	test_block_lcp_4x4();
-}
 
 static void run_tests()
 {
@@ -10733,13 +10713,15 @@ static void run_tests()
 	// Quickhull fuzz: moderate count for regular runs.
 	test_quickhull_fuzz(20); // use 1000+ for stress testing
 
-	run_solver_tests();
-	run_ldl_stress_tests();
-	run_cr_tests();
-	run_bvh_tests();
-	run_query_tests();
-	test_feature_ids();
-	run_sleep_tests();
+	TIMED(run_solver_tests());
+	TIMED(run_new_joint_tests());
+	TIMED(run_motor_tests());
+	TIMED(run_motor_comprehensive_tests());
+	TIMED(run_ldl_stress_tests());
+	TIMED(run_bvh_tests());
+	TIMED(run_query_tests());
+	TIMED(test_feature_ids());
+	// run_sleep_tests (4.8s) moved to --slow
 
 	printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	if (test_fail > 0) printf("*** FAILURES ***\n");

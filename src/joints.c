@@ -209,6 +209,21 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 		s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
 
 		s->pos_error[0] = dist_val - j->distance.rest_length;
+
+		// Distance limits: override pos_error and set unilateral bounds
+		float dmin = j->distance.limit_min, dmax = j->distance.limit_max;
+		if (dmin > 0 || dmax > 0) {
+			if (dmin > 0 && dist_val < dmin) {
+				s->pos_error[0] = dist_val - dmin;
+				s->lo[0] = 0.0f; s->hi[0] = FLT_MAX;
+			} else if (dmax > 0 && dist_val > dmax) {
+				s->pos_error[0] = dist_val - dmax;
+				s->lo[0] = -FLT_MAX; s->hi[0] = 0.0f;
+			} else {
+				// Within bounds: constraint inactive
+				s->pos_error[0] = 0;
+			}
+		}
 	} else if (s->type == JOINT_HINGE) {
 		s->r_a = rotate(a->rotation, j->hinge.local_a);
 		s->r_b = rotate(b->rotation, j->hinge.local_b);
@@ -243,12 +258,170 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
 		s->pos_error[3] = dot(t1, axis_b);
 		s->pos_error[4] = dot(t2, axis_b);
+
+		// Hinge DOF 5: motor and/or limit along the hinge axis.
+		float hmin = j->hinge.limit_min, hmax = j->hinge.limit_max;
+		float motor_max = j->hinge.motor_max_impulse;
+		int has_limit = (hmin != 0.0f || hmax != 0.0f);
+		int has_motor = (motor_max > 0.0f);
+		if (has_limit || has_motor) {
+			s->dof = 6;
+			// Jacobian: relative angular velocity along hinge axis
+			s->rows[5].J_a[3] = axis_a.x; s->rows[5].J_a[4] = axis_a.y; s->rows[5].J_a[5] = axis_a.z;
+			s->rows[5].J_b[3] = -axis_a.x; s->rows[5].J_b[4] = -axis_a.y; s->rows[5].J_b[5] = -axis_a.z;
+			s->pos_error[5] = 0;
+			// Default bounds: bilateral (motor or limit will narrow)
+			s->lo[5] = -FLT_MAX;
+			s->hi[5] = FLT_MAX;
+
+			// Motor: bounded force, velocity target set after generic loop
+			if (has_motor) {
+				s->lo[5] = -motor_max;
+				s->hi[5] = motor_max;
+			}
+
+			// Limit: clamp bounds to prevent exceeding angle range.
+			if (has_limit) {
+				v3 ref_a_w = rotate(a->rotation, j->hinge.local_ref_a);
+				v3 ref_b_w = rotate(b->rotation, j->hinge.local_ref_b);
+				float angle = atan2f(dot(cross(ref_a_w, ref_b_w), axis_a), dot(ref_a_w, ref_b_w));
+				if (hmin != 0.0f && angle <= hmin) {
+					s->pos_error[5] = hmin - angle;
+					if (s->hi[5] > 0.0f) s->hi[5] = 0.0f;
+				} else if (hmax != 0.0f && angle >= hmax) {
+					s->pos_error[5] = hmax - angle;
+					if (s->lo[5] < 0.0f) s->lo[5] = 0.0f;
+				} else if (!has_motor) {
+					memset(s->rows[5].J_a, 0, 6 * sizeof(float));
+					memset(s->rows[5].J_b, 0, 6 * sizeof(float));
+				}
+			}
+		}
+	} else if (s->type == JOINT_FIXED) {
+		s->r_a = rotate(a->rotation, j->fixed.local_a);
+		s->r_b = rotate(b->rotation, j->fixed.local_b);
+		spring_compute(j->fixed.spring, dt, &ptv, &soft);
+		s->softness = soft;
+
+		v3 ra = s->r_a, rb = s->r_b;
+		// Linear rows 0-2: identical to ball socket
+		s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
+		s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
+		s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
+		s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
+		s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
+		s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
+
+		// Angular rows 3-5: lock all relative rotation
+		s->rows[3].J_a[3] = 1; s->rows[3].J_b[3] = -1;
+		s->rows[4].J_a[4] = 1; s->rows[4].J_b[4] = -1;
+		s->rows[5].J_a[5] = 1; s->rows[5].J_b[5] = -1;
+
+		// Linear position error
+		v3 anchor_a = add(a->position, s->r_a);
+		v3 anchor_b = add(b->position, s->r_b);
+		v3 err = sub(anchor_b, anchor_a);
+		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
+
+		// Angular error from relative quaternion
+		quat q_rel = mul(inv(a->rotation), b->rotation);
+		quat q_err = mul(inv(j->fixed.local_rel_quat), q_rel);
+		float sign_w = q_err.w >= 0.0f ? 1.0f : -1.0f;
+		s->pos_error[3] = 2.0f * q_err.x * sign_w;
+		s->pos_error[4] = 2.0f * q_err.y * sign_w;
+		s->pos_error[5] = 2.0f * q_err.z * sign_w;
+	} else if (s->type == JOINT_PRISMATIC) {
+		s->r_a = rotate(a->rotation, j->prismatic.local_a);
+		s->r_b = rotate(b->rotation, j->prismatic.local_b);
+		spring_compute(j->prismatic.spring, dt, &ptv, &soft);
+		s->softness = soft;
+
+		// Slide axis in world space, tangent plane perpendicular to it
+		v3 slide_axis = norm(rotate(a->rotation, j->prismatic.local_axis_a));
+		v3 t1, t2;
+		hinge_tangent_basis(slide_axis, &t1, &t2);
+
+		v3 ra = s->r_a, rb = s->r_b;
+		v3 rxa_t1 = cross(ra, t1), rxb_t1 = cross(rb, t1);
+		v3 rxa_t2 = cross(ra, t2), rxb_t2 = cross(rb, t2);
+
+		// Linear rows 0-1: lateral constraints (perpendicular to slide axis)
+		s->rows[0].J_a[0] = -t1.x; s->rows[0].J_a[1] = -t1.y; s->rows[0].J_a[2] = -t1.z;
+		s->rows[0].J_a[3] = -rxa_t1.x; s->rows[0].J_a[4] = -rxa_t1.y; s->rows[0].J_a[5] = -rxa_t1.z;
+		s->rows[0].J_b[0] =  t1.x; s->rows[0].J_b[1] =  t1.y; s->rows[0].J_b[2] =  t1.z;
+		s->rows[0].J_b[3] =  rxb_t1.x; s->rows[0].J_b[4] =  rxb_t1.y; s->rows[0].J_b[5] =  rxb_t1.z;
+
+		s->rows[1].J_a[0] = -t2.x; s->rows[1].J_a[1] = -t2.y; s->rows[1].J_a[2] = -t2.z;
+		s->rows[1].J_a[3] = -rxa_t2.x; s->rows[1].J_a[4] = -rxa_t2.y; s->rows[1].J_a[5] = -rxa_t2.z;
+		s->rows[1].J_b[0] =  t2.x; s->rows[1].J_b[1] =  t2.y; s->rows[1].J_b[2] =  t2.z;
+		s->rows[1].J_b[3] =  rxb_t2.x; s->rows[1].J_b[4] =  rxb_t2.y; s->rows[1].J_b[5] =  rxb_t2.z;
+
+		// Angular rows 2-4: lock all relative rotation
+		s->rows[2].J_a[3] = 1; s->rows[2].J_b[3] = -1;
+		s->rows[3].J_a[4] = 1; s->rows[3].J_b[4] = -1;
+		s->rows[4].J_a[5] = 1; s->rows[4].J_b[5] = -1;
+
+		// Lateral position error
+		v3 anchor_a = add(a->position, s->r_a);
+		v3 anchor_b = add(b->position, s->r_b);
+		v3 delta = sub(anchor_b, anchor_a);
+		s->pos_error[0] = dot(delta, t1);
+		s->pos_error[1] = dot(delta, t2);
+
+		// Angular error from relative quaternion
+		quat q_rel = mul(inv(a->rotation), b->rotation);
+		quat q_err = mul(inv(j->prismatic.local_rel_quat), q_rel);
+		float sign_w = q_err.w >= 0.0f ? 1.0f : -1.0f;
+		s->pos_error[2] = 2.0f * q_err.x * sign_w;
+		s->pos_error[3] = 2.0f * q_err.y * sign_w;
+		s->pos_error[4] = 2.0f * q_err.z * sign_w;
+
+		// Prismatic motor: DOF 5 along slide axis
+		if (j->prismatic.motor_max_impulse > 0.0f) {
+			s->dof = 6;
+			v3 rxa_s = cross(ra, slide_axis), rxb_s = cross(rb, slide_axis);
+			s->rows[5].J_a[0] = -slide_axis.x; s->rows[5].J_a[1] = -slide_axis.y; s->rows[5].J_a[2] = -slide_axis.z;
+			s->rows[5].J_a[3] = -rxa_s.x; s->rows[5].J_a[4] = -rxa_s.y; s->rows[5].J_a[5] = -rxa_s.z;
+			s->rows[5].J_b[0] = slide_axis.x; s->rows[5].J_b[1] = slide_axis.y; s->rows[5].J_b[2] = slide_axis.z;
+			s->rows[5].J_b[3] = rxb_s.x; s->rows[5].J_b[4] = rxb_s.y; s->rows[5].J_b[5] = rxb_s.z;
+			s->pos_error[5] = 0;
+			s->lo[5] = -j->prismatic.motor_max_impulse;
+			s->hi[5] = j->prismatic.motor_max_impulse;
+		}
 	}
 
 	// Generic: compute eff_mass and bias from pos_error for all DOFs
 	for (int d = 0; d < s->dof; d++) {
 		s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, soft);
 		s->bias[d] = ptv * s->pos_error[d];
+	}
+
+	// Motor/limit bias for DOF 5.
+	if (s->type == JOINT_HINGE && s->dof == 6) {
+		float hmin = j->hinge.limit_min, hmax = j->hinge.limit_max;
+		if (s->pos_error[5] != 0.0f) {
+			// Limit active: strong Baumgarte correction to push back.
+			s->bias[5] = (0.2f / dt) * s->pos_error[5];
+		} else if (j->hinge.motor_max_impulse > 0.0f) {
+			float speed = j->hinge.motor_speed;
+			// Clamp motor speed so it can't overshoot limits in one substep.
+			// Jv = omega_a.axis - omega_b.axis = -d(angle)/dt. Convergence: d(angle)/dt = bias.
+			// So bias = speed drives angle at +speed. Clamp to keep within [hmin, hmax].
+			if (hmin != 0.0f || hmax != 0.0f) {
+				v3 axis_a_w = norm(rotate(a->rotation, j->hinge.local_axis_a));
+				v3 ref_a_w = rotate(a->rotation, j->hinge.local_ref_a);
+				v3 ref_b_w = rotate(b->rotation, j->hinge.local_ref_b);
+				float angle = atan2f(dot(cross(ref_a_w, ref_b_w), axis_a_w), dot(ref_a_w, ref_b_w));
+				if (hmax != 0.0f) { float max_speed = (hmax - angle) / dt; if (speed > max_speed) speed = fmaxf(max_speed, 0.0f); }
+				if (hmin != 0.0f) { float min_speed = (hmin - angle) / dt; if (speed < min_speed) speed = fminf(min_speed, 0.0f); }
+			}
+			s->bias[5] = speed;
+		}
+	}
+	if (s->type == JOINT_PRISMATIC && j->prismatic.motor_max_impulse > 0.0f && s->dof == 6) {
+		// Prismatic Jv = (v_b - v_a).axis = d(disp)/dt. Convergence: Jv = -bias.
+		// Negate so positive motor_speed drives positive displacement.
+		if (s->pos_error[5] == 0.0f) s->bias[5] = -j->prismatic.motor_speed;
 	}
 }
 
@@ -271,7 +444,10 @@ static void joints_pre_solve(WorldInternal* w, float dt, SolverJoint** out_joint
 		s.body_b = j->body_b;
 		s.joint_idx = i;
 		s.type = j->type;
-		s.dof = j->type == JOINT_BALL_SOCKET ? 3 : j->type == JOINT_DISTANCE ? 1 : 5;
+		int base_dof = j->type == JOINT_BALL_SOCKET ? 3 : j->type == JOINT_DISTANCE ? 1 : j->type == JOINT_FIXED ? 6 : 5;
+		if (j->type == JOINT_HINGE && (j->hinge.limit_min != 0.0f || j->hinge.limit_max != 0.0f || j->hinge.motor_max_impulse > 0.0f)) base_dof = 6;
+		if (j->type == JOINT_PRISMATIC && j->prismatic.motor_max_impulse > 0.0f) base_dof = 6;
+		s.dof = base_dof;
 		solver_joint_init_bounds(&s);
 
 		joint_fill_rows(&s, a, b, w, dt);
@@ -283,6 +459,75 @@ static void joints_pre_solve(WorldInternal* w, float dt, SolverJoint** out_joint
 	}
 
 	*out_joints = joints;
+}
+
+// Refresh joint Jacobians, lever arms, limit activation, and biases from current
+// body state. Called at the start of each substep (after integrate_positions/velocities)
+// so that limit DOFs activate based on current rotations, not stale frame-start state.
+static void joints_refresh_substep(WorldInternal* w, SolverJoint* joints, int count, float dt)
+{
+	for (int i = 0; i < count; i++) {
+		SolverJoint* s = &joints[i];
+		JointInternal* j = &w->joints[s->joint_idx];
+		// Only refresh joints that go through PGS (not LDL).
+		// LDL joints have their own lever arm refresh in ldl_refresh_lever_arms.
+		// Also skip joints without limits -- they don't need per-substep refresh.
+		int has_dof5 = (j->type == JOINT_HINGE && (j->hinge.limit_min != 0.0f || j->hinge.limit_max != 0.0f || j->hinge.motor_max_impulse > 0.0f)) || (j->type == JOINT_DISTANCE && (j->distance.limit_min > 0 || j->distance.limit_max > 0)) || (j->type == JOINT_PRISMATIC && j->prismatic.motor_max_impulse > 0.0f);
+		if (!has_dof5) continue;
+		BodyHot* a = &w->body_hot[s->body_a];
+		BodyHot* b = &w->body_hot[s->body_b];
+		int old_dof = s->dof;
+		// Reset DOF to base (joint_fill_rows will set final dof including limits/motors)
+		s->dof = j->type == JOINT_DISTANCE ? 1 : 6; // hinge with limits or prismatic with motor = 6
+		memset(s->rows, 0, sizeof(s->rows));
+		solver_joint_init_bounds(s);
+		float saved_lambda[JOINT_MAX_DOF];
+		memcpy(saved_lambda, s->lambda, sizeof(saved_lambda));
+		joint_fill_rows(s, a, b, w, dt);
+		memcpy(s->lambda, saved_lambda, sizeof(saved_lambda));
+		if (s->dof < old_dof) {
+			for (int d = s->dof; d < old_dof; d++) s->lambda[d] = 0;
+		}
+		if (s->dof > old_dof) {
+			for (int d = old_dof; d < s->dof; d++) s->lambda[d] = 0;
+		}
+	}
+}
+
+// Solve motor/limit DOFs (DOF 5 for hinge/prismatic). Called each PGS iteration.
+// LDL handles bilateral DOFs; this handles the bounded motor/limit DOF.
+// Re-evaluates angle limits each call for real-time clamping.
+static void joints_solve_limits(WorldInternal* w, SolverJoint* joints, int count)
+{
+	for (int i = 0; i < count; i++) {
+		SolverJoint* s = &joints[i];
+		if (!solver_joint_has_limits(s)) continue;
+		BodyHot* a = &w->body_hot[s->body_a];
+		BodyHot* b = &w->body_hot[s->body_b];
+		JointInternal* j = &w->joints[s->joint_idx];
+
+		// Hinge DOF 5: motor and/or limit. Bounds are recomputed from the
+		// pre-computed angle (set by joint_fill_rows at substep start).
+		// No position recheck needed -- bounds were set correctly at refresh.
+		if (j->type == JOINT_HINGE && s->dof == 6) {
+			float motor_max = j->hinge.motor_max_impulse;
+			int has_motor = (motor_max > 0.0f);
+			if (s->rows[5].eff_mass == 0.0f && !has_motor) continue; // inactive limit, no motor
+		}
+
+		for (int d = 0; d < s->dof; d++) {
+			if (s->lo[d] <= -1e18f && s->hi[d] >= 1e18f) continue;
+			if (s->rows[d].eff_mass == 0.0f) continue;
+			float vel_err = jac_velocity_f(&s->rows[d], a, b);
+			float r = -vel_err - s->bias[d] - s->softness * s->lambda[d];
+			float dl = s->rows[d].eff_mass * r;
+			float old = s->lambda[d];
+			s->lambda[d] += dl;
+			if (s->lambda[d] < s->lo[d]) s->lambda[d] = s->lo[d];
+			if (s->lambda[d] > s->hi[d]) s->lambda[d] = s->hi[d];
+			jac_apply(&s->rows[d], s->lambda[d] - old, a, b);
+		}
+	}
 }
 
 // Generic warm start: iterate DOFs, apply each row's warm lambda.
@@ -299,48 +544,86 @@ static void joints_warm_start(WorldInternal* w, SolverJoint* joints, int count)
 	}
 }
 
+static int solver_joint_has_limits(SolverJoint* s)
+{
+	for (int d = 0; d < s->dof; d++)
+		if (s->lo[d] > -1e18f || s->hi[d] < 1e18f) return 1;
+	return 0;
+}
+
 // Generic PGS joint solve: no type switch.
 // Multi-DOF joints (ball-socket 3, hinge 5) use a coupled block solve
 // for the full K-matrix instead of the diagonal (eff_mass) approximation.
+// When limits are active, uses diagonal PGS with per-DOF clamping.
 static void solve_joint(WorldInternal* w, SolverJoint* s)
 {
 	BodyHot* a = &w->body_hot[s->body_a];
 	BodyHot* b = &w->body_hot[s->body_b];
 	if (s->dof == 1) {
-		// Scalar path (distance joints)
+		// Scalar path (distance joints, possibly with limits)
 		float vel_err = jac_velocity_f(&s->rows[0], a, b);
 		float rhs = -vel_err - s->bias[0] - s->softness * s->lambda[0];
 		float delta = s->rows[0].eff_mass * rhs;
+		float old = s->lambda[0];
 		s->lambda[0] += delta;
-		jac_apply(&s->rows[0], delta, a, b);
-	} else {
-		// Block path: build coupled K, factor, solve
-		float K[21] = {0}; // packed lower-tri, max 6x6
-		float D[6], rhs[6], delta[6];
-		block_K_body_f(s->rows, s->dof, 0, a, K);
-		block_K_body_f(s->rows, s->dof, 1, b, K);
-		for (int d = 0; d < s->dof; d++)
-			K[BTRI(d,d)] += s->softness;
-		if (block_ldl_f(K, D, s->dof) != 0) {
-			// Factorization failed — fall back to diagonal (scalar per-DOF)
-			for (int d = 0; d < s->dof; d++) {
+		if (s->lambda[0] < s->lo[0]) s->lambda[0] = s->lo[0];
+		if (s->lambda[0] > s->hi[0]) s->lambda[0] = s->hi[0];
+		jac_apply(&s->rows[0], s->lambda[0] - old, a, b);
+		return;
+	}
+
+	// Find how many trailing DOFs have bounds (limit DOFs are always at the end).
+	int base_dof = s->dof;
+	for (int d = s->dof - 1; d >= 0; d--) {
+		if (s->lo[d] > -1e18f || s->hi[d] < 1e18f) base_dof = d;
+		else break;
+	}
+
+	// Block solve for the bilateral (base) DOFs
+	if (base_dof > 1) {
+		float K[BLOCK_MAX_DOF * (BLOCK_MAX_DOF + 1) / 2];
+		memset(K, 0, sizeof(K));
+		block_K_body_f(s->rows, base_dof, 0, a, K);
+		block_K_body_f(s->rows, base_dof, 1, b, K);
+		for (int d = 0; d < base_dof; d++) K[BTRI(d,d)] += s->softness;
+		float D[JOINT_MAX_DOF], rhs[JOINT_MAX_DOF], delta[JOINT_MAX_DOF];
+		if (block_ldl_f(K, D, base_dof) == 0) {
+			for (int d = 0; d < base_dof; d++) {
+				float vel_err = jac_velocity_f(&s->rows[d], a, b);
+				rhs[d] = -vel_err - s->bias[d] - s->softness * s->lambda[d];
+			}
+			block_solve_f(K, D, rhs, delta, base_dof);
+			for (int d = 0; d < base_dof; d++) {
+				s->lambda[d] += delta[d];
+				jac_apply(&s->rows[d], delta[d], a, b);
+			}
+		} else {
+			for (int d = 0; d < base_dof; d++) {
 				float vel_err = jac_velocity_f(&s->rows[d], a, b);
 				float r = -vel_err - s->bias[d] - s->softness * s->lambda[d];
 				float dl = s->rows[d].eff_mass * r;
 				s->lambda[d] += dl;
 				jac_apply(&s->rows[d], dl, a, b);
 			}
-			return;
 		}
-		for (int d = 0; d < s->dof; d++) {
-			float vel_err = jac_velocity_f(&s->rows[d], a, b);
-			rhs[d] = -vel_err - s->bias[d] - s->softness * s->lambda[d];
-		}
-		block_solve_f(K, D, rhs, delta, s->dof);
-		for (int d = 0; d < s->dof; d++) {
-			s->lambda[d] += delta[d];
-			jac_apply(&s->rows[d], delta[d], a, b);
-		}
+	} else if (base_dof == 1) {
+		float vel_err = jac_velocity_f(&s->rows[0], a, b);
+		float r = -vel_err - s->bias[0] - s->softness * s->lambda[0];
+		float dl = s->rows[0].eff_mass * r;
+		s->lambda[0] += dl;
+		jac_apply(&s->rows[0], dl, a, b);
+	}
+
+	// Scalar clamped PGS for bounded (limit) DOFs
+	for (int d = base_dof; d < s->dof; d++) {
+		float vel_err = jac_velocity_f(&s->rows[d], a, b);
+		float r = -vel_err - s->bias[d] - s->softness * s->lambda[d];
+		float dl = s->rows[d].eff_mass * r;
+		float old = s->lambda[d];
+		s->lambda[d] += dl;
+		if (s->lambda[d] < s->lo[d]) s->lambda[d] = s->lo[d];
+		if (s->lambda[d] > s->hi[d]) s->lambda[d] = s->hi[d];
+		jac_apply(&s->rows[d], s->lambda[d] - old, a, b);
 	}
 }
 
@@ -433,10 +716,11 @@ static void joints_position_correct(WorldInternal* w, SolverJoint* joints, int j
 			if (s->softness != 0.0f) continue;
 			BodyHot* a = &w->body_hot[s->body_a];
 			BodyHot* b = &w->body_hot[s->body_b];
-			if (s->type == JOINT_BALL_SOCKET || s->type == JOINT_HINGE) {
+			if (s->type == JOINT_BALL_SOCKET || s->type == JOINT_HINGE || s->type == JOINT_FIXED) {
 				v3 local_a, local_b;
 				if (s->type == JOINT_BALL_SOCKET) { local_a = w->joints[s->joint_idx].ball_socket.local_a; local_b = w->joints[s->joint_idx].ball_socket.local_b; }
-				else { local_a = w->joints[s->joint_idx].hinge.local_a; local_b = w->joints[s->joint_idx].hinge.local_b; }
+				else if (s->type == JOINT_HINGE) { local_a = w->joints[s->joint_idx].hinge.local_a; local_b = w->joints[s->joint_idx].hinge.local_b; }
+				else { local_a = w->joints[s->joint_idx].fixed.local_a; local_b = w->joints[s->joint_idx].fixed.local_b; }
 				v3 r_a = rotate(a->rotation, local_a);
 				v3 r_b = rotate(b->rotation, local_b);
 				v3 error = sub(add(b->position, r_b), add(a->position, r_a));
@@ -447,6 +731,22 @@ static void joints_position_correct(WorldInternal* w, SolverJoint* joints, int j
 				float correction = SOLVER_POS_BAUMGARTE * err_len;
 				if (correction > SOLVER_POS_MAX_CORRECTION) correction = SOLVER_POS_MAX_CORRECTION;
 				v3 n = scale(error, 1.0f / err_len);
+				float P = correction / inv_mass_sum;
+				a->position = add(a->position, scale(n, P * a->inv_mass));
+				b->position = sub(b->position, scale(n, P * b->inv_mass));
+			} else if (s->type == JOINT_PRISMATIC) {
+				v3 r_a = rotate(a->rotation, w->joints[s->joint_idx].prismatic.local_a);
+				v3 r_b = rotate(b->rotation, w->joints[s->joint_idx].prismatic.local_b);
+				v3 delta = sub(add(b->position, r_b), add(a->position, r_a));
+				v3 slide_axis = norm(rotate(a->rotation, w->joints[s->joint_idx].prismatic.local_axis_a));
+				v3 lateral_error = sub(delta, scale(slide_axis, dot(delta, slide_axis)));
+				float err_len = len(lateral_error);
+				if (err_len < 1e-6f) continue;
+				float inv_mass_sum = a->inv_mass + b->inv_mass;
+				if (inv_mass_sum <= 0) continue;
+				float correction = SOLVER_POS_BAUMGARTE * err_len;
+				if (correction > SOLVER_POS_MAX_CORRECTION) correction = SOLVER_POS_MAX_CORRECTION;
+				v3 n = scale(lateral_error, 1.0f / err_len);
 				float P = correction / inv_mass_sum;
 				a->position = add(a->position, scale(n, P * a->inv_mass));
 				b->position = sub(b->position, scale(n, P * b->inv_mass));

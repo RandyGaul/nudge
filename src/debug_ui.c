@@ -12,6 +12,8 @@ static const char* ldl_constraint_type_name(int type)
 	if (type == JOINT_BALL_SOCKET) return "BS";
 	if (type == JOINT_DISTANCE) return "Dist";
 	if (type == JOINT_HINGE) return "Hinge";
+	if (type == JOINT_FIXED) return "Fixed";
+	if (type == JOINT_PRISMATIC) return "Prism";
 	return "Weld";
 }
 
@@ -554,10 +556,26 @@ static void bvh_debug_draw_cb(v3 mn, v3 mx, int depth, int is_leaf, void* user)
 	draw_aabb_wireframe(mn, mx, col);
 }
 
+// Draw an arc of debug lines around axis at center, from angle0 to angle1.
+// ref is the 0-angle direction (must be perpendicular to axis).
+static void draw_debug_arc(v3 center, v3 axis, v3 ref, float angle0, float angle1, float radius, v3 color, int segments)
+{
+	v3 perp = cross(axis, ref);
+	float step = (angle1 - angle0) / segments;
+	for (int i = 0; i < segments; i++) {
+		float a0 = angle0 + i * step, a1 = angle0 + (i + 1) * step;
+		v3 p0 = add(center, add(scale(ref, cosf(a0) * radius), scale(perp, sinf(a0) * radius)));
+		v3 p1 = add(center, add(scale(ref, cosf(a1) * radius), scale(perp, sinf(a1) * radius)));
+		render_debug_line(p0, p1, color);
+	}
+}
+
 static void draw_joint_debug(JointDebugInfo info, void* user)
 {
 	(void)user;
 	v3 a = info.anchor_a, b = info.anchor_b;
+	v3 mid = scale(add(a, b), 0.5f);
+
 	if (info.type == JOINT_BALL_SOCKET) {
 		v3 col = info.is_soft ? V3(0.2f, 0.8f, 1.0f) : V3(1.0f, 0.6f, 0.1f);
 		render_debug_line(a, b, col);
@@ -567,8 +585,81 @@ static void draw_joint_debug(JointDebugInfo info, void* user)
 	} else if (info.type == JOINT_HINGE) {
 		v3 col = V3(1.0f, 0.3f, 0.8f);
 		render_debug_line(a, b, col);
-		// Draw axis indicator
-		v3 mid = scale(add(a, b), 0.5f);
+		// Axis indicator
 		render_debug_line(mid, add(mid, scale(info.axis_a, 0.3f)), col);
+
+		// Limits: draw arc showing allowed range
+		if (info.limit_min != 0 || info.limit_max != 0) {
+			v3 ref = norm(info.ref_a);
+			float radius = 0.4f;
+			// Limit range arc (dim)
+			v3 limit_col = V3(0.5f, 0.5f, 0.3f);
+			draw_debug_arc(mid, info.axis_a, ref, info.limit_min, info.limit_max, radius, limit_col, 16);
+			// Limit boundary lines (bright)
+			v3 perp = cross(info.axis_a, ref);
+			v3 lo_dir = add(scale(ref, cosf(info.limit_min) * radius), scale(perp, sinf(info.limit_min) * radius));
+			v3 hi_dir = add(scale(ref, cosf(info.limit_max) * radius), scale(perp, sinf(info.limit_max) * radius));
+			v3 bound_col = info.limit_active ? V3(1.0f, 0.2f, 0.2f) : V3(0.8f, 0.8f, 0.3f);
+			render_debug_line(mid, add(mid, lo_dir), bound_col);
+			render_debug_line(mid, add(mid, hi_dir), bound_col);
+			// Current angle indicator (white)
+			v3 cur_dir = add(scale(ref, cosf(info.current_angle) * radius * 0.8f), scale(perp, sinf(info.current_angle) * radius * 0.8f));
+			render_debug_line(mid, add(mid, cur_dir), V3(1, 1, 1));
+		}
+
+		// Motor: direction arrow
+		if (info.motor_max_impulse > 0) {
+			v3 motor_col = V3(0.2f, 1.0f, 0.6f);
+			// Small arc arrow showing motor direction
+			float sign = info.motor_speed >= 0 ? 1.0f : -1.0f;
+			v3 ref = norm(info.ref_a);
+			float r = 0.25f;
+			draw_debug_arc(mid, info.axis_a, ref, info.current_angle, info.current_angle + sign * 0.5f, r, motor_col, 6);
+			// Arrowhead at end of arc
+			v3 perp = cross(info.axis_a, ref);
+			float end_angle = info.current_angle + sign * 0.5f;
+			v3 tip = add(mid, add(scale(ref, cosf(end_angle) * r), scale(perp, sinf(end_angle) * r)));
+			v3 tangent = add(scale(ref, -sinf(end_angle) * sign), scale(perp, cosf(end_angle) * sign));
+			render_debug_line(tip, add(tip, add(scale(tangent, -0.08f), scale(info.axis_a, 0.04f))), motor_col);
+			render_debug_line(tip, add(tip, add(scale(tangent, -0.08f), scale(info.axis_a, -0.04f))), motor_col);
+		}
+	} else if (info.type == JOINT_FIXED) {
+		// 6DOF weld: draw cross at anchor + line between anchors
+		v3 col = V3(0.6f, 0.6f, 0.9f);
+		render_debug_line(a, b, col);
+		float s = 0.15f;
+		render_debug_line(add(mid, V3(s, 0, 0)), add(mid, V3(-s, 0, 0)), col);
+		render_debug_line(add(mid, V3(0, s, 0)), add(mid, V3(0, -s, 0)), col);
+		render_debug_line(add(mid, V3(0, 0, s)), add(mid, V3(0, 0, -s)), col);
+	} else if (info.type == JOINT_PRISMATIC) {
+		// Slide axis rail + anchor line
+		v3 col = V3(0.3f, 0.8f, 1.0f);
+		render_debug_line(a, b, col);
+		// Rail indicator: line along axis through anchor
+		v3 rail_half = scale(info.axis_a, 0.5f);
+		v3 rail_col = V3(0.2f, 0.5f, 0.7f);
+		render_debug_line(sub(mid, rail_half), add(mid, rail_half), rail_col);
+		// Cross-hatches perpendicular to axis at ends
+		v3 t1, t2;
+		float ax = fabsf(info.axis_a.x);
+		v3 up = ax < 0.9f ? V3(1, 0, 0) : V3(0, 1, 0);
+		t1 = norm(cross(info.axis_a, up));
+		t2 = cross(info.axis_a, t1);
+		float hs = 0.08f;
+		v3 end1 = add(mid, rail_half), end2 = sub(mid, rail_half);
+		render_debug_line(add(end1, scale(t1, hs)), add(end1, scale(t1, -hs)), rail_col);
+		render_debug_line(add(end2, scale(t1, hs)), add(end2, scale(t1, -hs)), rail_col);
+
+		// Motor: arrow along axis
+		if (info.motor_max_impulse > 0) {
+			v3 motor_col = V3(0.2f, 1.0f, 0.6f);
+			float sign = info.motor_speed >= 0 ? 1.0f : -1.0f;
+			v3 arrow_end = add(mid, scale(info.axis_a, 0.35f * sign));
+			render_debug_line(mid, arrow_end, motor_col);
+			// Arrowhead
+			v3 head_back = scale(info.axis_a, -0.08f * sign);
+			render_debug_line(arrow_end, add(arrow_end, add(head_back, scale(t1, 0.04f))), motor_col);
+			render_debug_line(arrow_end, add(arrow_end, add(head_back, scale(t1, -0.04f))), motor_col);
+		}
 	}
 }

@@ -606,3 +606,235 @@ static void scene_hull_pile_setup()
 		apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(h, h, h), col }));
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Scene: Weld Bridge -- fixed joints create a rigid bridge that breaks under load
+// ---------------------------------------------------------------------------
+static void scene_weld_bridge_setup()
+{
+	add_floor();
+
+	// Bridge: chain of boxes connected by fixed joints, anchored at both ends
+	int n = 8;
+	float link_len = 1.0f;
+	float half = 0.4f;
+	float start_x = -(n - 1) * link_len * 0.5f;
+	Body prev = (Body){0};
+	for (int i = 0; i < n; i++) {
+		float x = start_x + i * link_len;
+		float mass = (i == 0 || i == n - 1) ? 0.0f : 2.0f; // endpoints static
+		Body b = create_body(g_world, (BodyParams){
+			.position = V3(x, 4, 0),
+			.rotation = quat_identity(),
+			.mass = mass,
+		});
+		body_add_shape(g_world, b, (ShapeParams){
+			.type = SHAPE_BOX,
+			.box.half_extents = V3(half, 0.15f, half),
+		});
+		v3 col = mass > 0 ? V3(0.8f, 0.6f, 0.3f) : V3(0.5f, 0.5f, 0.55f);
+		apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(half, 0.15f, half), col }));
+		if (i > 0) {
+			create_fixed(g_world, (FixedParams){
+				.body_a = prev, .body_b = b,
+				.local_offset_a = V3(link_len * 0.5f, 0, 0),
+				.local_offset_b = V3(-link_len * 0.5f, 0, 0),
+			});
+		}
+		prev = b;
+	}
+
+	// Drop some heavy spheres onto the bridge
+	for (int i = 0; i < 3; i++) {
+		float x = start_x + (2 + i * 2) * link_len;
+		Body s = create_body(g_world, (BodyParams){
+			.position = V3(x, 7 + i, 0),
+			.rotation = quat_identity(),
+			.mass = 5.0f,
+		});
+		body_add_shape(g_world, s, (ShapeParams){
+			.type = SHAPE_SPHERE,
+			.sphere.radius = 0.4f,
+		});
+		apush(g_draw_list, ((DrawEntry){ s, MESH_SPHERE, V3(0.4f, 0.4f, 0.4f), V3(0.9f, 0.2f, 0.2f) }));
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scene: Slider Crane -- prismatic joints create rails for sliding bodies
+// ---------------------------------------------------------------------------
+static void scene_slider_crane_setup()
+{
+	add_floor();
+
+	// Horizontal rail (static box)
+	Body rail = create_body(g_world, (BodyParams){
+		.position = V3(0, 6, 0),
+		.rotation = quat_identity(),
+		.mass = 0,
+	});
+	body_add_shape(g_world, rail, (ShapeParams){
+		.type = SHAPE_BOX,
+		.box.half_extents = V3(5, 0.1f, 0.1f),
+	});
+	apush(g_draw_list, ((DrawEntry){ rail, MESH_BOX, V3(5, 0.1f, 0.1f), V3(0.5f, 0.5f, 0.6f) }));
+
+	// Trolley slides along the rail
+	Body trolley = create_body(g_world, (BodyParams){
+		.position = V3(-3, 6, 0),
+		.rotation = quat_identity(),
+		.mass = 3.0f,
+	});
+	body_add_shape(g_world, trolley, (ShapeParams){
+		.type = SHAPE_BOX,
+		.box.half_extents = V3(0.4f, 0.3f, 0.3f),
+	});
+	apush(g_draw_list, ((DrawEntry){ trolley, MESH_BOX, V3(0.4f, 0.3f, 0.3f), V3(0.3f, 0.7f, 0.3f) }));
+	create_prismatic(g_world, (PrismaticParams){
+		.body_a = rail, .body_b = trolley,
+		.local_offset_a = V3(-3, 0, 0),
+		.local_offset_b = V3(0, 0, 0),
+		.local_axis_a = V3(1, 0, 0),
+		.local_axis_b = V3(1, 0, 0),
+	});
+
+	// Hang a payload from the trolley via distance joint (rope)
+	Body payload = create_body(g_world, (BodyParams){
+		.position = V3(-3, 3, 0),
+		.rotation = quat_identity(),
+		.mass = 2.0f,
+	});
+	body_add_shape(g_world, payload, (ShapeParams){
+		.type = SHAPE_BOX,
+		.box.half_extents = V3(0.5f, 0.5f, 0.5f),
+	});
+	apush(g_draw_list, ((DrawEntry){ payload, MESH_BOX, V3(0.5f, 0.5f, 0.5f), V3(0.8f, 0.5f, 0.2f) }));
+	create_distance(g_world, (DistanceParams){
+		.body_a = trolley, .body_b = payload,
+		.local_offset_a = V3(0, -0.3f, 0),
+		.local_offset_b = V3(0, 0.5f, 0),
+		.rest_length = 2.5f,
+	});
+
+	// Second vertical slider: an elevator platform
+	Body pole = create_body(g_world, (BodyParams){
+		.position = V3(4, 3, 0),
+		.rotation = quat_identity(),
+		.mass = 0,
+	});
+	body_add_shape(g_world, pole, (ShapeParams){
+		.type = SHAPE_BOX,
+		.box.half_extents = V3(0.08f, 3, 0.08f),
+	});
+	apush(g_draw_list, ((DrawEntry){ pole, MESH_BOX, V3(0.08f, 3, 0.08f), V3(0.4f, 0.4f, 0.45f) }));
+
+	Body platform = create_body(g_world, (BodyParams){
+		.position = V3(4, 5, 0),
+		.rotation = quat_identity(),
+		.mass = 1.0f,
+	});
+	body_add_shape(g_world, platform, (ShapeParams){
+		.type = SHAPE_BOX,
+		.box.half_extents = V3(0.8f, 0.1f, 0.8f),
+	});
+	apush(g_draw_list, ((DrawEntry){ platform, MESH_BOX, V3(0.8f, 0.1f, 0.8f), V3(0.3f, 0.5f, 0.8f) }));
+	Joint elev = create_prismatic(g_world, (PrismaticParams){
+		.body_a = pole, .body_b = platform,
+		.local_offset_a = V3(0, 2, 0),
+		.local_offset_b = V3(0, 0, 0),
+		.local_axis_a = V3(0, 1, 0),
+		.local_axis_b = V3(0, 1, 0),
+	});
+	// Motor holds the platform at the anchor with gentle upward push
+	joint_set_prismatic_motor(g_world, elev, 0.0f, 20.0f);
+
+	// Box sitting on the platform
+	Body cargo = create_body(g_world, (BodyParams){
+		.position = V3(4, 5.6f, 0),
+		.rotation = quat_identity(),
+		.mass = 0.5f,
+	});
+	body_add_shape(g_world, cargo, (ShapeParams){
+		.type = SHAPE_BOX,
+		.box.half_extents = V3(0.3f, 0.3f, 0.3f),
+	});
+	apush(g_draw_list, ((DrawEntry){ cargo, MESH_BOX, V3(0.3f, 0.3f, 0.3f), V3(0.9f, 0.8f, 0.2f) }));
+}
+
+// ---------------------------------------------------------------------------
+// Scene: Hinge Limits -- hinged doors and pendulums with angle limits
+// ---------------------------------------------------------------------------
+static void scene_hinge_limits_setup()
+{
+	add_floor();
+
+	// Row of pendulums with increasing angle limits
+	for (int i = 0; i < 5; i++) {
+		float x = -4.0f + i * 2.0f;
+		float limit = 0.3f + i * 0.3f; // 0.3 to 1.5 rad
+		Body anchor = create_body(g_world, (BodyParams){
+			.position = V3(x, 5, 0),
+			.rotation = quat_identity(),
+			.mass = 0,
+		});
+		body_add_shape(g_world, anchor, (ShapeParams){
+			.type = SHAPE_SPHERE,
+			.sphere.radius = 0.15f,
+		});
+		apush(g_draw_list, ((DrawEntry){ anchor, MESH_SPHERE, V3(0.15f, 0.15f, 0.15f), V3(0.5f, 0.5f, 0.55f) }));
+
+		Body arm = create_body(g_world, (BodyParams){
+			.position = V3(x, 4.3f, 0),  // anchor at y=5, arm top at y=5-0.7=4.3
+			.rotation = quat_identity(),
+			.mass = 1.0f,
+		});
+		body_add_shape(g_world, arm, (ShapeParams){
+			.type = SHAPE_BOX,
+			.box.half_extents = V3(0.1f, 0.7f, 0.1f),
+		});
+		float t = (float)i / 4.0f;
+		v3 col = V3(0.3f + t * 0.6f, 0.7f - t * 0.4f, 0.3f);
+		apush(g_draw_list, ((DrawEntry){ arm, MESH_BOX, V3(0.1f, 0.7f, 0.1f), col }));
+
+		Joint h = create_hinge(g_world, (HingeParams){
+			.body_a = anchor, .body_b = arm,
+			.local_offset_a = V3(0, 0, 0),
+			.local_offset_b = V3(0, 0.7f, 0),
+			.local_axis_a = V3(0, 0, 1),
+			.local_axis_b = V3(0, 0, 1),
+		});
+		joint_set_hinge_limits(g_world, h, -limit, limit);
+	}
+
+	// A door: hinge with limits on a heavy box
+	Body door_frame = create_body(g_world, (BodyParams){
+		.position = V3(0, 2, 3),
+		.rotation = quat_identity(),
+		.mass = 0,
+	});
+	body_add_shape(g_world, door_frame, (ShapeParams){
+		.type = SHAPE_BOX,
+		.box.half_extents = V3(0.1f, 1.5f, 0.1f),
+	});
+	apush(g_draw_list, ((DrawEntry){ door_frame, MESH_BOX, V3(0.1f, 1.5f, 0.1f), V3(0.5f, 0.5f, 0.55f) }));
+
+	Body door = create_body(g_world, (BodyParams){
+		.position = V3(1, 2, 3),
+		.rotation = quat_identity(),
+		.mass = 3.0f,
+	});
+	body_add_shape(g_world, door, (ShapeParams){
+		.type = SHAPE_BOX,
+		.box.half_extents = V3(1.0f, 1.5f, 0.08f),
+	});
+	apush(g_draw_list, ((DrawEntry){ door, MESH_BOX, V3(1.0f, 1.5f, 0.08f), V3(0.6f, 0.35f, 0.15f) }));
+
+	Joint door_hinge = create_hinge(g_world, (HingeParams){
+		.body_a = door_frame, .body_b = door,
+		.local_offset_a = V3(0, 0, 0),
+		.local_offset_b = V3(-1.0f, 0, 0),
+		.local_axis_a = V3(0, 1, 0),
+		.local_axis_b = V3(0, 1, 0),
+	});
+	joint_set_hinge_limits(g_world, door_hinge, -1.57f, 1.57f); // 90 degrees each way
+}
