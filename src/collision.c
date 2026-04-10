@@ -1113,11 +1113,18 @@ static AABB* bvh_build_lut(BVHTree* t)
 typedef struct SAPEntry { int body_idx; float min_x, max_x; } SAPEntry;
 static int sap_cmp(const void* a, const void* b) { float d = ((SAPEntry*)a)->min_x - ((SAPEntry*)b)->min_x; return (d > 0) - (d < 0); }
 
+// Broadphase sub-phase timing accumulators (seconds, summed across frames).
+double bp_refit_acc, bp_precomp_acc, bp_sweep_acc, bp_cross_acc;
+int bp_frame_count;
+
 static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 {
+	double t0 = perf_now();
 	bvh_refit(w->bvh_dynamic, w);
+	bp_refit_acc += perf_now() - t0;
 
 	// Build tight AABBs + sweep-and-prune entries for all dynamic bodies.
+	double t1 = perf_now();
 	int body_count = asize(w->body_hot);
 	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
 	CK_DYNA SAPEntry* sap = NULL;
@@ -1130,8 +1137,10 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	// Sort dynamic bodies by x-axis AABB min.
 	int sap_count = asize(sap);
 	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAPEntry), sap_cmp);
+	bp_precomp_acc += perf_now() - t1;
 
 	// Sweep: test overlapping pairs along x-axis, then full 3D AABB overlap (SIMD branchless).
+	double t2 = perf_now();
 	for (int i = 0; i < sap_count; i++) {
 		float max_x = sap[i].max_x;
 		int a = sap[i].body_idx;
@@ -1147,7 +1156,10 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		}
 	}
 
+	bp_sweep_acc += perf_now() - t2;
+
 	// Dynamic vs static: BVH cross-test with tight AABB pre-filter.
+	double t3 = perf_now();
 	CK_DYNA BroadPair* pairs = NULL;
 	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
 	for (int i = 0; i < asize(pairs); i++) {
@@ -1156,6 +1168,9 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		narrowphase_pair(w, a, b, manifolds);
 	}
 	afree(pairs);
+
+	bp_cross_acc += perf_now() - t3;
+	bp_frame_count++;
 
 	CK_FREE(tight);
 	afree(sap);

@@ -11008,6 +11008,19 @@ static void bench_box_pile(int grid_w, int height, int frames_count, WorldParams
 	printf("  pgs.pos_joints: %8.3f ms\n", pacc.pos_joints / n * 1000.0);
 	printf("  pgs.post_solve: %8.3f ms\n", pacc.post_solve / n * 1000.0);
 
+	extern double bp_refit_acc, bp_precomp_acc, bp_sweep_acc, bp_cross_acc;
+	extern int bp_frame_count;
+	double bn = (double)bp_frame_count;
+	if (bn > 0) {
+		printf("  --- broadphase breakdown ---\n");
+		printf("  bp.refit:       %8.3f ms\n", bp_refit_acc / bn * 1000.0);
+		printf("  bp.precomp:     %8.3f ms\n", bp_precomp_acc / bn * 1000.0);
+		printf("  bp.sweep(d-d):  %8.3f ms\n", bp_sweep_acc / bn * 1000.0);
+		printf("  bp.cross(d-s):  %8.3f ms\n", bp_cross_acc / bn * 1000.0);
+	}
+	bp_refit_acc = bp_precomp_acc = bp_sweep_acc = bp_cross_acc = 0;
+	bp_frame_count = 0;
+
 	destroy_world(w);
 }
 
