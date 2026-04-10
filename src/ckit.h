@@ -161,7 +161,7 @@
 // aalign: Set data alignment for array. Must be power of 2 (4, 8, 16, 32, 64...).
 // Call before first push. Data pointer will be aligned to N bytes on next grow.
 // Default is 16-byte alignment (from 32-byte header + 16-byte-aligned malloc).
-#define aalign(a, n)  do { afit((a), 0); CK_AHDR(a)->alignment = (n); } while (0)
+#define aalign(a, n)  do { afit((a), 1); CK_AHDR(a)->alignment = (n); } while (0)
 
 // afree: Free array memory and set pointer to NULL.
 #define afree(a)      do { CK_ACANARY(a); if (a && !CK_AHDR(a)->is_static) CK_FREE(CK_AHDR(a)->alloc_base); (a) = NULL; } while (0)
@@ -759,7 +759,7 @@ void* ck_agrow(const void* a, int new_size, size_t element_size)
 	int was_static = a ? CK_AHDR(a)->is_static : 0;
 
 	CK_ArrayHeader* hdr;
-	if (align > (int)sizeof(CK_ArrayHeader)) {
+	if (align > 16) {
 		// Over-allocate so we can place header such that (header+1) is aligned.
 		size_t alloc_size = total_size + (size_t)align;
 		char* base = (char*)CK_ALLOC(alloc_size);
