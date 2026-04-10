@@ -264,45 +264,101 @@ void world_step(World world, float dt)
 
 		double tp = perf_now();
 		if (use_body_vel) {
+#if SIMD_SSE
+			// Build persistent SoA batch array ONCE — reused across all iterations.
+			// Eliminates per-iteration manifold→SoA conversion (was 40x redundant).
+			int total_batches = 0;
+			for (int c = 0; c < color_count; c++) total_batches += (batch_starts[c+1] - batch_starts[c] + 3) / 4;
+			CK_DYNA PGS_Batch4* batches = NULL;
+			afit(batches, total_batches);
+			CK_DYNA int* color_batch_starts = NULL;
+			apush(color_batch_starts, 0);
+			for (int c = 0; c < color_count; c++) {
+				int start = batch_starts[c], end = batch_starts[c + 1];
+				for (int i = start; i + 3 < end; i += 4) {
+					int idx[4] = { crefs[i].index, crefs[i+1].index, crefs[i+2].index, crefs[i+3].index };
+					PGS_Batch4 bt;
+					pgs_batch4_prepare(&bt, sm, idx, 4, pc);
+					apush(batches, bt);
+				}
+				// Remainder manifolds: build partial batch
+				int rem_start = start + ((end - start) / 4) * 4;
+				if (rem_start < end) {
+					int idx[4] = {0};
+					int rem_count = end - rem_start;
+					for (int j = 0; j < rem_count; j++) idx[j] = crefs[rem_start + j].index;
+					PGS_Batch4 bt;
+					pgs_batch4_prepare(&bt, sm, idx, rem_count, pc);
+					apush(batches, bt);
+				}
+				apush(color_batch_starts, asize(batches));
+			}
+			int batch_count = asize(batches);
+
+			// Iteration loop: just gather velocities → solve → scatter velocities.
 			for (int iter = 0; iter < w->velocity_iters; iter++) {
 				for (int c = 0; c < color_count; c++) {
-#if SIMD_SSE
-					// Batch 4 manifolds at a time for SIMD solve.
-					int start = batch_starts[c], end = batch_starts[c + 1];
-					int i = start;
-					for (; i + 3 < end; i += 4) {
-						int idx[4] = { crefs[i].index, crefs[i+1].index, crefs[i+2].index, crefs[i+3].index };
-						// Prefetch next batch's manifolds + body states
-						if (i + 7 < end) {
-							_mm_prefetch((char*)&sm[crefs[i+4].index], _MM_HINT_T0);
-							_mm_prefetch((char*)&sm[crefs[i+5].index], _MM_HINT_T0);
-							_mm_prefetch((char*)&sm[crefs[i+6].index], _MM_HINT_T0);
-							_mm_prefetch((char*)&sm[crefs[i+7].index], _MM_HINT_T0);
-							_mm_prefetch((char*)&w->body_vel[sm[crefs[i+4].index].body_a], _MM_HINT_T0);
-							_mm_prefetch((char*)&w->body_vel[sm[crefs[i+4].index].body_b], _MM_HINT_T0);
-							_mm_prefetch((char*)&w->body_vel[sm[crefs[i+5].index].body_a], _MM_HINT_T0);
-							_mm_prefetch((char*)&w->body_vel[sm[crefs[i+5].index].body_b], _MM_HINT_T0);
+					int bs = color_batch_starts[c], be = color_batch_starts[c + 1];
+					for (int bi = bs; bi < be; bi++) {
+						if (bi + 1 < be) {
+							_mm_prefetch((char*)&batches[bi+1], _MM_HINT_T0);
+							_mm_prefetch((char*)&w->body_vel[batches[bi+1].body_a[0]], _MM_HINT_T0);
+							_mm_prefetch((char*)&w->body_vel[batches[bi+1].body_b[0]], _MM_HINT_T0);
 						}
-						PGS_Batch4 bt;
-						pgs_batch4_prepare(&bt, sm, idx, 4);
-						solve_contact_batch4_sv(w->body_vel, &bt, pc);
-						// Scatter manifold lambdas back
-						for (int j = 0; j < 4; j++) { sm[idx[j]].lambda_t1 = ((float*)&bt.lambda_t1)[j]; sm[idx[j]].lambda_t2 = ((float*)&bt.lambda_t2)[j]; sm[idx[j]].lambda_twist = ((float*)&bt.lambda_twist)[j]; }
+						solve_contact_batch4_sv(w->body_vel, &batches[bi]);
 					}
-					// Remainder: scalar path
-					for (; i < end; i++)
-						if (crefs[i].type == CTYPE_CONTACT)
-							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], pc);
-#else
-					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-						if (crefs[i].type == CTYPE_CONTACT)
-							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], pc);
-#endif
 				}
 				double tjl = perf_now();
 				joints_solve_limits(w, sol_joints, asize(sol_joints));
 				t_jlim += perf_now() - tjl;
 			}
+
+			// Scatter lambdas back from persistent batches to SolverManifold/PatchContact.
+			for (int bi = 0; bi < batch_count; bi++) {
+				PGS_Batch4* bt = &batches[bi];
+				// Manifold lambdas
+				for (int c2 = 0; c2 < color_count; c2++) {
+					if (bi >= color_batch_starts[c2] && bi < color_batch_starts[c2+1]) {
+						int base = batch_starts[c2] + (bi - color_batch_starts[c2]) * 4;
+						for (int j = 0; j < 4 && base + j < batch_starts[c2+1]; j++) {
+							int mi = crefs[base + j].index;
+							sm[mi].lambda_t1 = ((float*)&bt->lambda_t1)[j];
+							sm[mi].lambda_t2 = ((float*)&bt->lambda_t2)[j];
+							sm[mi].lambda_twist = ((float*)&bt->lambda_twist)[j];
+						}
+						break;
+					}
+				}
+				// Contact lambdas
+				for (int cp2 = 0; cp2 < bt->max_contacts; cp2++) {
+					float nl[4]; _mm_storeu_ps(nl, bt->cp[cp2].lambda_n);
+					for (int j = 0; j < 4; j++) {
+						if (bt->body_a[j] == 0 && bt->body_b[j] == 0 && j > 0) continue; // padding lane
+						// Find manifold index for this lane
+						for (int c2 = 0; c2 < color_count; c2++) {
+							if (bi >= color_batch_starts[c2] && bi < color_batch_starts[c2+1]) {
+								int base = batch_starts[c2] + (bi - color_batch_starts[c2]) * 4;
+								if (base + j < batch_starts[c2+1] && cp2 < sm[crefs[base+j].index].contact_count)
+									pc[sm[crefs[base+j].index].contact_start + cp2].lambda_n = nl[j];
+								break;
+							}
+						}
+					}
+				}
+			}
+			afree(batches);
+			afree(color_batch_starts);
+#else
+			for (int iter = 0; iter < w->velocity_iters; iter++) {
+				for (int c = 0; c < color_count; c++)
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+						if (crefs[i].type == CTYPE_CONTACT)
+							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], pc);
+				double tjl = perf_now();
+				joints_solve_limits(w, sol_joints, asize(sol_joints));
+				t_jlim += perf_now() - tjl;
+			}
+#endif
 		} else {
 			for (int iter = 0; iter < w->velocity_iters; iter++) {
 				for (int c = 0; c < color_count; c++)

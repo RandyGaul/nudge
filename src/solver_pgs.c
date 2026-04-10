@@ -746,10 +746,21 @@ static SIMD_FORCEINLINE void solve_contact_patch_sv(SolverBodyVel* bodies, Solve
 // Contacts processed in lockstep: contact[0] across all 4, then [1], etc.
 #if SIMD_SSE
 
+// Pre-built SoA contact layer: 4 contacts (one per manifold in batch) for a given contact index.
+typedef struct PGS_ContactLayer4
+{
+	__m128 rn_a_x, rn_a_y, rn_a_z, rn_b_x, rn_b_y, rn_b_z;
+	__m128 wn_a_x, wn_a_y, wn_a_z, wn_b_x, wn_b_y, wn_b_z;
+	__m128 eff_mass_n, bias, bounce, softness;
+	__m128 lambda_n; // read/write — persists between iterations
+} PGS_ContactLayer4;
+
+// Persistent SoA batch: built ONCE per frame, reused across all iterations + substeps.
+// Eliminates per-iteration manifold→SoA conversion (was 40x redundant).
 typedef struct PGS_Batch4
 {
 	int body_a[4], body_b[4];
-	int contact_start[4], contact_count[4];
+	int max_contacts;
 	__m128 inv_mass_a, inv_mass_b, inv_mass_sum, friction, patch_radius;
 	__m128 normal_x, normal_y, normal_z;
 	__m128 tangent1_x, tangent1_y, tangent1_z, tangent2_x, tangent2_y, tangent2_z;
@@ -760,16 +771,17 @@ typedef struct PGS_Batch4
 	__m128 w_t2_a_x, w_t2_a_y, w_t2_a_z, w_t2_b_x, w_t2_b_y, w_t2_b_z;
 	__m128 w_tw_a_x, w_tw_a_y, w_tw_a_z, w_tw_b_x, w_tw_b_y, w_tw_b_z;
 	__m128 lambda_t1, lambda_t2, lambda_twist;
+	PGS_ContactLayer4 cp[MAX_CONTACTS]; // pre-built contact layers
 } PGS_Batch4;
 
 #define SOA_DOT3(ax,ay,az,bx,by,bz) _mm_add_ps(_mm_add_ps(_mm_mul_ps(ax,bx), _mm_mul_ps(ay,by)), _mm_mul_ps(az,bz))
 
-static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices, int count)
+static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices, int count, PatchContact* pc)
 {
-	float buf[4]; // temp for scalar→SSE loads
+	float buf[4];
 	#define GATHER1(dst, field) for (int j = 0; j < 4; j++) buf[j] = (j < count) ? sm[indices[j]].field : 0; dst = _mm_loadu_ps(buf)
 	#define GATHER3(dx,dy,dz, field) for (int j = 0; j < 4; j++) { v3 v = (j < count) ? sm[indices[j]].field : V3(0,0,0); ((float*)&dx)[j]=v.x; ((float*)&dy)[j]=v.y; ((float*)&dz)[j]=v.z; }
-	for (int j = 0; j < 4; j++) { bt->body_a[j] = (j < count) ? sm[indices[j]].body_a : 0; bt->body_b[j] = (j < count) ? sm[indices[j]].body_b : 0; bt->contact_start[j] = (j < count) ? sm[indices[j]].contact_start : 0; bt->contact_count[j] = (j < count) ? sm[indices[j]].contact_count : 0; }
+	for (int j = 0; j < 4; j++) { bt->body_a[j] = (j < count) ? sm[indices[j]].body_a : 0; bt->body_b[j] = (j < count) ? sm[indices[j]].body_b : 0; }
 	GATHER1(bt->inv_mass_a, inv_mass_a); GATHER1(bt->inv_mass_b, inv_mass_b);
 	bt->inv_mass_sum = _mm_add_ps(bt->inv_mass_a, bt->inv_mass_b);
 	GATHER1(bt->friction, friction); GATHER1(bt->patch_radius, patch_radius);
@@ -785,15 +797,37 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 	GATHER3(bt->w_tw_a_x, bt->w_tw_a_y, bt->w_tw_a_z, w_tw_a); GATHER3(bt->w_tw_b_x, bt->w_tw_b_y, bt->w_tw_b_z, w_tw_b);
 	#undef GATHER1
 	#undef GATHER3
+
+	// Pre-build contact layers (constant data — reused across all iterations).
+	bt->max_contacts = 0;
+	for (int j = 0; j < count; j++) if (sm[indices[j]].contact_count > bt->max_contacts) bt->max_contacts = sm[indices[j]].contact_count;
+	for (int cp_idx = 0; cp_idx < bt->max_contacts; cp_idx++) {
+		PGS_ContactLayer4* cl = &bt->cp[cp_idx];
+		float rnax[4]={0},rnay[4]={0},rnaz[4]={0},rnbx[4]={0},rnby[4]={0},rnbz[4]={0};
+		float wnax[4]={0},wnay[4]={0},wnaz[4]={0},wnbx[4]={0},wnby[4]={0},wnbz[4]={0};
+		float emn[4]={0},bias[4]={0},bnc[4]={0},sft[4]={0},lam[4]={0};
+		for (int j = 0; j < count; j++) {
+			if (cp_idx >= sm[indices[j]].contact_count) continue;
+			PatchContact* s = &pc[sm[indices[j]].contact_start + cp_idx];
+			rnax[j]=s->rn_a.x;rnay[j]=s->rn_a.y;rnaz[j]=s->rn_a.z;
+			rnbx[j]=s->rn_b.x;rnby[j]=s->rn_b.y;rnbz[j]=s->rn_b.z;
+			wnax[j]=s->w_n_a.x;wnay[j]=s->w_n_a.y;wnaz[j]=s->w_n_a.z;
+			wnbx[j]=s->w_n_b.x;wnby[j]=s->w_n_b.y;wnbz[j]=s->w_n_b.z;
+			emn[j]=s->eff_mass_n;bias[j]=s->bias;bnc[j]=s->bounce;sft[j]=s->softness;lam[j]=s->lambda_n;
+		}
+		cl->rn_a_x=_mm_loadu_ps(rnax);cl->rn_a_y=_mm_loadu_ps(rnay);cl->rn_a_z=_mm_loadu_ps(rnaz);
+		cl->rn_b_x=_mm_loadu_ps(rnbx);cl->rn_b_y=_mm_loadu_ps(rnby);cl->rn_b_z=_mm_loadu_ps(rnbz);
+		cl->wn_a_x=_mm_loadu_ps(wnax);cl->wn_a_y=_mm_loadu_ps(wnay);cl->wn_a_z=_mm_loadu_ps(wnaz);
+		cl->wn_b_x=_mm_loadu_ps(wnbx);cl->wn_b_y=_mm_loadu_ps(wnby);cl->wn_b_z=_mm_loadu_ps(wnbz);
+		cl->eff_mass_n=_mm_loadu_ps(emn);cl->bias=_mm_loadu_ps(bias);cl->bounce=_mm_loadu_ps(bnc);cl->softness=_mm_loadu_ps(sft);cl->lambda_n=_mm_loadu_ps(lam);
+	}
 }
 
-static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b, PatchContact* pc)
+static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b)
 {
-	// Gather body velocities into SoA
+	// Gather body velocities into SoA (only thing that changes per iteration)
 	__m128 va_x, va_y, va_z, wa_x, wa_y, wa_z, vb_x, vb_y, vb_z, wb_x, wb_y, wb_z;
 	{ float t[4];
-	  #define GBODY(dst, idx_arr, field) for (int j=0;j<4;j++) t[j]=((float*)&bodies[b->idx_arr[j]].field)[0]; dst=_mm_loadu_ps(t)
-	  // Awkward but works for v3.x/.y/.z — offset manually
 	  for (int j=0;j<4;j++) t[j]=bodies[b->body_a[j]].velocity.x; va_x=_mm_loadu_ps(t);
 	  for (int j=0;j<4;j++) t[j]=bodies[b->body_a[j]].velocity.y; va_y=_mm_loadu_ps(t);
 	  for (int j=0;j<4;j++) t[j]=bodies[b->body_a[j]].velocity.z; va_z=_mm_loadu_ps(t);
@@ -806,38 +840,26 @@ static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b, PatchC
 	  for (int j=0;j<4;j++) t[j]=bodies[b->body_b[j]].angular_velocity.x; wb_x=_mm_loadu_ps(t);
 	  for (int j=0;j<4;j++) t[j]=bodies[b->body_b[j]].angular_velocity.y; wb_y=_mm_loadu_ps(t);
 	  for (int j=0;j<4;j++) t[j]=bodies[b->body_b[j]].angular_velocity.z; wb_z=_mm_loadu_ps(t);
-	  #undef GBODY
 	}
 	__m128 zero = _mm_setzero_ps();
 	__m128 linear_vn = SOA_DOT3(_mm_sub_ps(vb_x,va_x),_mm_sub_ps(vb_y,va_y),_mm_sub_ps(vb_z,va_z), b->normal_x,b->normal_y,b->normal_z);
 	__m128 total_lambda_n = zero;
 
-	// Normal contacts in lockstep
-	int max_cp = 0;
-	for (int j=0;j<4;j++) if (b->contact_count[j]>max_cp) max_cp=b->contact_count[j];
-	for (int cp = 0; cp < max_cp; cp++) {
-		float rnax[4]={0},rnay[4]={0},rnaz[4]={0},rnbx[4]={0},rnby[4]={0},rnbz[4]={0};
-		float wnax[4]={0},wnay[4]={0},wnaz[4]={0},wnbx[4]={0},wnby[4]={0},wnbz[4]={0};
-		float emn[4]={0},bias[4]={0},bnc[4]={0},sft[4]={0},lam[4]={0};
-		for (int j=0;j<4;j++) { if (cp>=b->contact_count[j]) continue; PatchContact* s=&pc[b->contact_start[j]+cp]; rnax[j]=s->rn_a.x;rnay[j]=s->rn_a.y;rnaz[j]=s->rn_a.z; rnbx[j]=s->rn_b.x;rnby[j]=s->rn_b.y;rnbz[j]=s->rn_b.z; wnax[j]=s->w_n_a.x;wnay[j]=s->w_n_a.y;wnaz[j]=s->w_n_a.z; wnbx[j]=s->w_n_b.x;wnby[j]=s->w_n_b.y;wnbz[j]=s->w_n_b.z; emn[j]=s->eff_mass_n;bias[j]=s->bias;bnc[j]=s->bounce;sft[j]=s->softness;lam[j]=s->lambda_n; }
-		__m128 rn_ax=_mm_loadu_ps(rnax),rn_ay=_mm_loadu_ps(rnay),rn_az=_mm_loadu_ps(rnaz);
-		__m128 rn_bx=_mm_loadu_ps(rnbx),rn_by=_mm_loadu_ps(rnby),rn_bz=_mm_loadu_ps(rnbz);
-		__m128 wn_ax=_mm_loadu_ps(wnax),wn_ay=_mm_loadu_ps(wnay),wn_az=_mm_loadu_ps(wnaz);
-		__m128 wn_bx=_mm_loadu_ps(wnbx),wn_by=_mm_loadu_ps(wnby),wn_bz=_mm_loadu_ps(wnbz);
-		__m128 em=_mm_loadu_ps(emn),sb=_mm_loadu_ps(bias),sbn=_mm_loadu_ps(bnc),ss=_mm_loadu_ps(sft),sl=_mm_loadu_ps(lam);
-		__m128 vn = _mm_add_ps(linear_vn, _mm_sub_ps(SOA_DOT3(wb_x,wb_y,wb_z,rn_bx,rn_by,rn_bz), SOA_DOT3(wa_x,wa_y,wa_z,rn_ax,rn_ay,rn_az)));
-		__m128 lambda_n = _mm_mul_ps(em, _mm_sub_ps(_mm_sub_ps(zero, _mm_add_ps(vn, _mm_add_ps(sb, sbn))), _mm_mul_ps(ss, sl)));
-		__m128 new_lam = _mm_max_ps(_mm_add_ps(sl, lambda_n), zero);
-		__m128 delta = _mm_sub_ps(new_lam, sl);
+	// Normal contacts: read directly from pre-built contact layers (zero per-iteration gather).
+	for (int cp = 0; cp < b->max_contacts; cp++) {
+		PGS_ContactLayer4* cl = &b->cp[cp];
+		__m128 vn = _mm_add_ps(linear_vn, _mm_sub_ps(SOA_DOT3(wb_x,wb_y,wb_z,cl->rn_b_x,cl->rn_b_y,cl->rn_b_z), SOA_DOT3(wa_x,wa_y,wa_z,cl->rn_a_x,cl->rn_a_y,cl->rn_a_z)));
+		__m128 lambda_n = _mm_mul_ps(cl->eff_mass_n, _mm_sub_ps(_mm_sub_ps(zero, _mm_add_ps(vn, _mm_add_ps(cl->bias, cl->bounce))), _mm_mul_ps(cl->softness, cl->lambda_n)));
+		__m128 new_lam = _mm_max_ps(_mm_add_ps(cl->lambda_n, lambda_n), zero);
+		__m128 delta = _mm_sub_ps(new_lam, cl->lambda_n);
+		cl->lambda_n = new_lam; // persists for next iteration
 		__m128 da=_mm_mul_ps(delta,b->inv_mass_a), db=_mm_mul_ps(delta,b->inv_mass_b);
 		va_x=_mm_sub_ps(va_x,_mm_mul_ps(b->normal_x,da)); va_y=_mm_sub_ps(va_y,_mm_mul_ps(b->normal_y,da)); va_z=_mm_sub_ps(va_z,_mm_mul_ps(b->normal_z,da));
 		vb_x=_mm_add_ps(vb_x,_mm_mul_ps(b->normal_x,db)); vb_y=_mm_add_ps(vb_y,_mm_mul_ps(b->normal_y,db)); vb_z=_mm_add_ps(vb_z,_mm_mul_ps(b->normal_z,db));
-		wa_x=_mm_sub_ps(wa_x,_mm_mul_ps(wn_ax,delta)); wa_y=_mm_sub_ps(wa_y,_mm_mul_ps(wn_ay,delta)); wa_z=_mm_sub_ps(wa_z,_mm_mul_ps(wn_az,delta));
-		wb_x=_mm_add_ps(wb_x,_mm_mul_ps(wn_bx,delta)); wb_y=_mm_add_ps(wb_y,_mm_mul_ps(wn_by,delta)); wb_z=_mm_add_ps(wb_z,_mm_mul_ps(wn_bz,delta));
+		wa_x=_mm_sub_ps(wa_x,_mm_mul_ps(cl->wn_a_x,delta)); wa_y=_mm_sub_ps(wa_y,_mm_mul_ps(cl->wn_a_y,delta)); wa_z=_mm_sub_ps(wa_z,_mm_mul_ps(cl->wn_a_z,delta));
+		wb_x=_mm_add_ps(wb_x,_mm_mul_ps(cl->wn_b_x,delta)); wb_y=_mm_add_ps(wb_y,_mm_mul_ps(cl->wn_b_y,delta)); wb_z=_mm_add_ps(wb_z,_mm_mul_ps(cl->wn_b_z,delta));
 		linear_vn = _mm_add_ps(linear_vn, _mm_mul_ps(delta, b->inv_mass_sum));
 		total_lambda_n = _mm_add_ps(total_lambda_n, new_lam);
-		float nl[4]; _mm_storeu_ps(nl, new_lam);
-		for (int j=0;j<4;j++) if (cp<b->contact_count[j]) pc[b->contact_start[j]+cp].lambda_n=nl[j];
 	}
 
 	// Jacobi friction: compute all three rows from same velocity snapshot, apply once.
