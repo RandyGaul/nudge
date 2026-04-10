@@ -68,13 +68,15 @@ static int warm_match(WarmManifold* wm, uint32_t feature_id)
 	return -1;
 }
 
-static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, float dt)
+static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, CK_DYNA PatchContact** out_pc, float dt)
 {
 	CK_DYNA SolverManifold* sm = NULL;
 	CK_DYNA SolverContact*  sc = NULL;
+	CK_DYNA PatchContact*   pc = NULL;
 	// Pre-allocate: each manifold has up to MAX_CONTACTS contacts.
 	afit(sm, manifold_count);
 	afit(sc, manifold_count * MAX_CONTACTS);
+	afit(pc, manifold_count * MAX_CONTACTS);
 	float inv_dt = dt > 0.0f ? 1.0f / dt : 0.0f;
 
 	for (int i = 0; i < manifold_count; i++) {
@@ -167,6 +169,7 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 			if (s.bounce != 0.0f) s.bias = 0.0f;
 
 			apush(sc, s);
+			apush(pc, ((PatchContact){ .rn_a = s.rn_a, .rn_b = s.rn_b, .w_n_a = s.w_n_a, .w_n_b = s.w_n_b, .eff_mass_n = s.eff_mass_n, .bias = s.bias, .bounce = s.bounce, .softness = s.softness, .lambda_n = s.lambda_n }));
 		}
 
 		// Patch friction: compute centroid, patch area, tangent basis at manifold level.
@@ -328,6 +331,7 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 
 	*out_sm = sm;
 	*out_sc = sc;
+	if (out_pc) *out_pc = pc; else afree(pc);
 }
 
 static void solver_iterate(WorldInternal* w, SolverManifold* sm, int sm_count, SolverContact* sc)
@@ -677,7 +681,7 @@ static void apply_impulse_row_sv(SolverBodyVel* a, SolverBodyVel* b, float ima, 
 // BEPU-style: recompute cross+inertia inline instead of reading precomputed data.
 // Trades ALU (cheap in Release) for bandwidth (expensive at 10K+ bodies).
 // SolverContact only needs: r_a, r_b, eff_mass_n, bias, bounce, softness, lambda_n.
-static SIMD_FORCEINLINE void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, SolverContact* sc)
+static SIMD_FORCEINLINE void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, PatchContact* pc)
 {
 	SolverBodyVel* a = &bodies[m->body_a];
 	SolverBodyVel* b = &bodies[m->body_b];
@@ -688,8 +692,7 @@ static SIMD_FORCEINLINE void solve_contact_patch_sv(SolverBodyVel* bodies, Solve
 	float linear_vn = dot(sub(b->velocity, a->velocity), normal);
 	float total_lambda_n = 0.0f;
 	for (int ci = 0; ci < m->contact_count; ci++) {
-		SolverContact* s = &sc[m->contact_start + ci];
-		// Use precomputed cross(r, normal) from pre_solve.
+		PatchContact* s = &pc[m->contact_start + ci];
 		v3 rn_a = s->rn_a;
 		v3 rn_b = s->rn_b;
 		float vn = linear_vn + dot(b->angular_velocity, rn_b) - dot(a->angular_velocity, rn_a);
@@ -784,7 +787,7 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 	#undef GATHER3
 }
 
-static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b, SolverContact* sc)
+static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b, PatchContact* pc)
 {
 	// Gather body velocities into SoA
 	__m128 va_x, va_y, va_z, wa_x, wa_y, wa_z, vb_x, vb_y, vb_z, wb_x, wb_y, wb_z;
@@ -816,7 +819,7 @@ static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b, Solver
 		float rnax[4]={0},rnay[4]={0},rnaz[4]={0},rnbx[4]={0},rnby[4]={0},rnbz[4]={0};
 		float wnax[4]={0},wnay[4]={0},wnaz[4]={0},wnbx[4]={0},wnby[4]={0},wnbz[4]={0};
 		float emn[4]={0},bias[4]={0},bnc[4]={0},sft[4]={0},lam[4]={0};
-		for (int j=0;j<4;j++) { if (cp>=b->contact_count[j]) continue; SolverContact* s=&sc[b->contact_start[j]+cp]; rnax[j]=s->rn_a.x;rnay[j]=s->rn_a.y;rnaz[j]=s->rn_a.z; rnbx[j]=s->rn_b.x;rnby[j]=s->rn_b.y;rnbz[j]=s->rn_b.z; wnax[j]=s->w_n_a.x;wnay[j]=s->w_n_a.y;wnaz[j]=s->w_n_a.z; wnbx[j]=s->w_n_b.x;wnby[j]=s->w_n_b.y;wnbz[j]=s->w_n_b.z; emn[j]=s->eff_mass_n;bias[j]=s->bias;bnc[j]=s->bounce;sft[j]=s->softness;lam[j]=s->lambda_n; }
+		for (int j=0;j<4;j++) { if (cp>=b->contact_count[j]) continue; PatchContact* s=&pc[b->contact_start[j]+cp]; rnax[j]=s->rn_a.x;rnay[j]=s->rn_a.y;rnaz[j]=s->rn_a.z; rnbx[j]=s->rn_b.x;rnby[j]=s->rn_b.y;rnbz[j]=s->rn_b.z; wnax[j]=s->w_n_a.x;wnay[j]=s->w_n_a.y;wnaz[j]=s->w_n_a.z; wnbx[j]=s->w_n_b.x;wnby[j]=s->w_n_b.y;wnbz[j]=s->w_n_b.z; emn[j]=s->eff_mass_n;bias[j]=s->bias;bnc[j]=s->bounce;sft[j]=s->softness;lam[j]=s->lambda_n; }
 		__m128 rn_ax=_mm_loadu_ps(rnax),rn_ay=_mm_loadu_ps(rnay),rn_az=_mm_loadu_ps(rnaz);
 		__m128 rn_bx=_mm_loadu_ps(rnbx),rn_by=_mm_loadu_ps(rnby),rn_bz=_mm_loadu_ps(rnbz);
 		__m128 wn_ax=_mm_loadu_ps(wnax),wn_ay=_mm_loadu_ps(wnay),wn_az=_mm_loadu_ps(wnaz);
@@ -834,7 +837,7 @@ static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b, Solver
 		linear_vn = _mm_add_ps(linear_vn, _mm_mul_ps(delta, b->inv_mass_sum));
 		total_lambda_n = _mm_add_ps(total_lambda_n, new_lam);
 		float nl[4]; _mm_storeu_ps(nl, new_lam);
-		for (int j=0;j<4;j++) if (cp<b->contact_count[j]) sc[b->contact_start[j]+cp].lambda_n=nl[j];
+		for (int j=0;j<4;j++) if (cp<b->contact_count[j]) pc[b->contact_start[j]+cp].lambda_n=nl[j];
 	}
 
 	// Jacobi friction: compute all three rows from same velocity snapshot, apply once.

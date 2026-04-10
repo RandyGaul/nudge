@@ -160,7 +160,8 @@ void world_step(World world, float dt)
 	double t2 = perf_now();
 	SolverManifold* sm = NULL;
 	SolverContact*  sc = NULL;
-	solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, sub_dt);
+	CK_DYNA PatchContact* pc = NULL;
+	solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, &pc, sub_dt);
 
 	SolverJoint* sol_joints = NULL;
 	joints_pre_solve(w, sub_dt, &sol_joints);
@@ -284,18 +285,18 @@ void world_step(World world, float dt)
 						}
 						PGS_Batch4 bt;
 						pgs_batch4_prepare(&bt, sm, idx, 4);
-						solve_contact_batch4_sv(w->body_vel, &bt, sc);
+						solve_contact_batch4_sv(w->body_vel, &bt, pc);
 						// Scatter manifold lambdas back
 						for (int j = 0; j < 4; j++) { sm[idx[j]].lambda_t1 = ((float*)&bt.lambda_t1)[j]; sm[idx[j]].lambda_t2 = ((float*)&bt.lambda_t2)[j]; sm[idx[j]].lambda_twist = ((float*)&bt.lambda_twist)[j]; }
 					}
 					// Remainder: scalar path
 					for (; i < end; i++)
 						if (crefs[i].type == CTYPE_CONTACT)
-							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], sc);
+							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], pc);
 #else
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
 						if (crefs[i].type == CTYPE_CONTACT)
-							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], sc);
+							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], pc);
 #endif
 				}
 				double tjl = perf_now();
@@ -314,7 +315,11 @@ void world_step(World world, float dt)
 		}
 		t_pgs += perf_now() - tp;
 
-		if (use_body_vel) solver_sync_vel_out(w);
+		if (use_body_vel) {
+			solver_sync_vel_out(w);
+			// Sync lambda_n from compact PatchContact back to SolverContact
+			for (int ci2 = 0; ci2 < asize(pc); ci2++) sc[ci2].lambda_n = pc[ci2].lambda_n;
+		}
 
 		double ti2 = perf_now();
 		integrate_positions(w, sub_dt);
@@ -371,6 +376,7 @@ void world_step(World world, float dt)
 	w->perf.islands = perf_now() - t4;
 
 	afree(manifolds);
+	afree(pc);
 	w->perf.total = perf_now() - t_total;
 }
 
