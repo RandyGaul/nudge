@@ -1109,6 +1109,10 @@ static AABB* bvh_build_lut(BVHTree* t)
 	return lut;
 }
 
+// Sweep-and-prune entry for axis-sorted broadphase.
+typedef struct SAPEntry { int body_idx; float min_x, max_x; } SAPEntry;
+static int sap_cmp(const void* a, const void* b) { float d = ((SAPEntry*)a)->min_x - ((SAPEntry*)b)->min_x; return (d > 0) - (d < 0); }
+
 static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 {
 	bvh_refit(w->bvh_dynamic, w);
@@ -1117,30 +1121,48 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	AABB* lut = bvh_build_lut(w->bvh_dynamic);
 	if (lut) { bvh_incremental_refine(w->bvh_dynamic, lut); CK_FREE(lut); }
 
-	CK_DYNA BroadPair* pairs = NULL;
-	bvh_self_test(w->bvh_dynamic, &pairs);
-	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
-
-	// Precompute tight AABBs (no fat margin) for overlap pre-filter.
+	// Build tight AABBs + sweep-and-prune entries for all dynamic bodies.
 	int body_count = asize(w->body_hot);
 	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
+	CK_DYNA SAPEntry* sap = NULL;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
 		tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]);
+		if (w->body_hot[i].inv_mass > 0.0f) apush(sap, ((SAPEntry){ i, tight[i].min.x, tight[i].max.x }));
 	}
 
+	// Sort dynamic bodies by x-axis AABB min.
+	int sap_count = asize(sap);
+	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAPEntry), sap_cmp);
+
+	// Sweep: test overlapping pairs along x-axis, then full 3D AABB check.
+	for (int i = 0; i < sap_count; i++) {
+		float max_x = sap[i].max_x;
+		int a = sap[i].body_idx;
+		for (int j = i + 1; j < sap_count && sap[j].min_x <= max_x; j++) {
+			int b = sap[j].body_idx;
+			// y and z overlap (x already confirmed by sweep).
+			if (tight[a].min.y > tight[b].max.y || tight[a].max.y < tight[b].min.y) continue;
+			if (tight[a].min.z > tight[b].max.z || tight[a].max.z < tight[b].min.z) continue;
+			int isl_a = w->body_cold[a].island_id, isl_b = w->body_cold[b].island_id;
+			if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
+			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
+			narrowphase_pair(w, a, b, manifolds);
+		}
+	}
+
+	// Dynamic vs static: BVH cross-test with tight AABB pre-filter.
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
 	for (int i = 0; i < asize(pairs); i++) {
 		int a = pairs[i].a, b = pairs[i].b;
-		if (w->body_hot[a].inv_mass == 0.0f && w->body_hot[b].inv_mass == 0.0f) continue;
-		int isl_a = w->body_cold[a].island_id, isl_b = w->body_cold[b].island_id;
-		if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
-		if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
 		if (!aabb_overlaps(tight[a], tight[b])) continue;
 		narrowphase_pair(w, a, b, manifolds);
 	}
+	afree(pairs);
 
 	CK_FREE(tight);
-	afree(pairs);
+	afree(sap);
 }
 
 // Rebuild joint_pairs map when joint topology changes (create/destroy joint).
