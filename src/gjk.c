@@ -11,12 +11,12 @@
 // Simplex types.
 typedef struct GJK_Vertex
 {
-	v3 point1;  // support point on shape A (world space)
-	v3 point2;  // support point on shape B (world space)
-	v3 point;   // Minkowski difference: point2 - point1
-	float u;    // barycentric coordinate
-	int feat1;  // feature ID on shape A
-	int feat2;  // feature ID on shape B
+	v3 point1;        // support point on shape A (world space)
+	v3 point2;        // support point on shape B (world space)
+	v3 point;         // Minkowski difference: point2 - point1
+	float u;          // barycentric coordinate
+	uint16_t feat1;   // feature ID on shape A (packed for smaller vertex)
+	uint16_t feat2;   // feature ID on shape B
 } GJK_Vertex;
 typedef struct GJK_Simplex
 {
