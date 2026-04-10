@@ -577,26 +577,27 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 			a->angular_velocity = sub(a->angular_velocity, inv_inertia_world_mul(a, twist_impulse));
 			b->angular_velocity = add(b->angular_velocity, inv_inertia_world_mul(b, twist_impulse));
 		} else {
-			// Per-point Coulomb friction
+			// Per-point Coulomb: solve normal + friction per contact in one pass.
 			for (int ci = 0; ci < m->contact_count; ci++) {
 				SolverContact* s = &sc[m->contact_start + ci];
+
+				// Normal
 				v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
 				float vn = dot(dv, s->normal);
 				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
 				float old_n = s->lambda_n;
 				s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
 				apply_impulse_row(a, b, s->normal, s->w_n_a, s->w_n_b, s->lambda_n - old_n);
-			}
-			// Per-contact friction (uses normal impulse from above)
-			for (int ci = 0; ci < m->contact_count; ci++) {
-				SolverContact* s = &sc[m->contact_start + ci];
-				v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
+
+				// Tangent 1
 				float max_f = m->friction * s->lambda_n;
+				dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
 				float vt1 = dot(dv, s->tangent1);
 				float old_t1 = s->lambda_t1;
 				s->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + s->eff_mass_t1*(-vt1), max_f));
 				apply_impulse_row(a, b, s->tangent1, s->w_t1_a, s->w_t1_b, s->lambda_t1 - old_t1);
 
+				// Tangent 2
 				dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
 				float vt2 = dot(dv, s->tangent2);
 				float old_t2 = s->lambda_t2;
