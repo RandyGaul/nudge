@@ -115,6 +115,15 @@ static void integrate_positions(WorldInternal* w, float dt)
 	}
 }
 
+static void precompute_world_inertia(WorldInternal* w)
+{
+	int count = asize(w->body_hot);
+	for (int i = 0; i < count; i++) {
+		if (!split_alive(w->body_gen, i)) continue;
+		body_compute_inv_inertia_world(&w->body_hot[i]);
+	}
+}
+
 static int perf_initialized;
 
 void world_step(World world, float dt)
@@ -130,6 +139,7 @@ void world_step(World world, float dt)
 	double t0 = perf_now();
 	warm_cache_age_and_evict(w);
 	integrate_velocities(w, sub_dt);
+	precompute_world_inertia(w);
 	w->perf.integrate = perf_now() - t0;
 
 	double t1 = perf_now();
@@ -216,6 +226,7 @@ void world_step(World world, float dt)
 		if (sub > 0) {
 			double ti = perf_now();
 			integrate_velocities(w, sub_dt);
+			precompute_world_inertia(w);
 			t_int_sub += perf_now() - ti;
 			// Refresh joint Jacobians/limits from current body state (positions
 			// changed by integrate_positions last substep, velocities just updated).

@@ -40,12 +40,13 @@ static float compute_effective_mass(BodyHot* a, BodyHot* b, float inv_mass_sum, 
 }
 
 // Apply an impulse (linear + angular) to a body pair.
+// Uses precomputed world-space inverse inertia (iw_diag/iw_off) for speed.
 static void apply_impulse(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, v3 impulse)
 {
 	a->velocity = sub(a->velocity, scale(impulse, a->inv_mass));
 	b->velocity = add(b->velocity, scale(impulse, b->inv_mass));
-	a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, cross(r_a, impulse)));
-	b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, cross(r_b, impulse)));
+	a->angular_velocity = sub(a->angular_velocity, inv_inertia_world_mul(a, cross(r_a, impulse)));
+	b->angular_velocity = add(b->angular_velocity, inv_inertia_world_mul(b, cross(r_b, impulse)));
 }
 
 // Match a new contact to a cached contact by feature ID. Returns index or -1.
@@ -554,8 +555,8 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 			m->lambda_twist = fmaxf(-max_twist, fminf(old_tw + lambda_tw, max_twist));
 			float delta_tw = m->lambda_twist - old_tw;
 			v3 twist_impulse = scale(m->normal, delta_tw);
-			a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, twist_impulse));
-			b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, twist_impulse));
+			a->angular_velocity = sub(a->angular_velocity, inv_inertia_world_mul(a, twist_impulse));
+			b->angular_velocity = add(b->angular_velocity, inv_inertia_world_mul(b, twist_impulse));
 		} else {
 			// Per-point Coulomb friction
 			for (int ci = 0; ci < m->contact_count; ci++) {

@@ -8,6 +8,28 @@ static v3 inv_inertia_mul(quat rot, v3 inv_i, v3 v)
 	return rotate(rot, V3(local.x * inv_i.x, local.y * inv_i.y, local.z * inv_i.z));
 }
 
+// Precompute world-space inverse inertia as symmetric 3x3 matrix: I_w = R * diag(inv_i) * R^T.
+// Stored as diagonal (xx,yy,zz) + off-diagonal (xy,xz,yz) in BodyHot.
+static void body_compute_inv_inertia_world(BodyHot* h)
+{
+	quat q = h->rotation;
+	float a = h->inv_inertia_local.x, b = h->inv_inertia_local.y, c = h->inv_inertia_local.z;
+	float xx = q.x*q.x, yy = q.y*q.y, zz = q.z*q.z;
+	float xy = q.x*q.y, xz = q.x*q.z, yz = q.y*q.z;
+	float wx = q.w*q.x, wy = q.w*q.y, wz = q.w*q.z;
+	float r00 = 1-2*(yy+zz), r01 = 2*(xy-wz), r02 = 2*(xz+wy);
+	float r10 = 2*(xy+wz), r11 = 1-2*(xx+zz), r12 = 2*(yz-wx);
+	float r20 = 2*(xz-wy), r21 = 2*(yz+wx), r22 = 1-2*(xx+yy);
+	h->iw_diag = V3(a*r00*r00 + b*r01*r01 + c*r02*r02, a*r10*r10 + b*r11*r11 + c*r12*r12, a*r20*r20 + b*r21*r21 + c*r22*r22);
+	h->iw_off = V3(a*r00*r10 + b*r01*r11 + c*r02*r12, a*r00*r20 + b*r01*r21 + c*r02*r22, a*r10*r20 + b*r11*r21 + c*r12*r22);
+}
+
+// Multiply precomputed world-space inverse inertia by a vector.
+static inline v3 inv_inertia_world_mul(BodyHot* h, v3 v)
+{
+	return V3(h->iw_diag.x*v.x + h->iw_off.x*v.y + h->iw_off.y*v.z, h->iw_off.x*v.x + h->iw_diag.y*v.y + h->iw_off.z*v.z, h->iw_off.y*v.x + h->iw_off.z*v.y + h->iw_diag.z*v.z);
+}
+
 // Compute diagonal inertia tensor for a shape (in local principal axes).
 static v3 shape_inertia(ShapeInternal* s, float mass)
 {
