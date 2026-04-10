@@ -65,28 +65,30 @@ typedef struct GJK_Shape
 static GJK_Shape gjk_sphere(v3 center, float radius) { return (GJK_Shape){ .type = GJK_POINT, .radius = radius, .point.center = center }; }
 static GJK_Shape gjk_capsule(v3 p, v3 q, float radius) { return (GJK_Shape){ .type = GJK_SEGMENT, .radius = radius, .segment.p = p, .segment.q = q }; }
 static GJK_Shape gjk_triangle(v3 a, v3 b, v3 c) { return (GJK_Shape){ .type = GJK_TRIANGLE, .tri.a = a, .tri.b = b, .tri.c = c }; }
-// Mat3x3 transpose rotate: R^T * v (column-wise multiply-add). Used for inverse rotation.
-// 3 broadcasts + 3 muls + 2 adds = 8 SSE ops (vs 18 for row-dot version).
-static inline v3 gjk_mat_rotate_t(v3 r0, v3 r1, v3 r2, v3 v) {
-	return (v3){ .m = _mm_add_ps(_mm_add_ps(
-		_mm_mul_ps(r0.m, _mm_shuffle_ps(v.m, v.m, 0x00)),
-		_mm_mul_ps(r1.m, _mm_shuffle_ps(v.m, v.m, 0x55))),
-		_mm_mul_ps(r2.m, _mm_shuffle_ps(v.m, v.m, 0xAA))) };
+// Mat3x3 transpose rotate: R^T * v (column-wise multiply-add).
+// 3 broadcasts + 3 muls + 2 adds = 8 SIMD ops.
+static inline v3 gjk_mat_rotate_t(v3 r0, v3 r1, v3 r2, v3 v)
+{
+	return (v3){ .m = simd_add(simd_add(
+		simd_mul(r0.m, simd_splat(v.m, 0)),
+		simd_mul(r1.m, simd_splat(v.m, 1))),
+		simd_mul(r2.m, simd_splat(v.m, 2))) };
 }
 
 // Mat3x3 forward rotate: R * v. Transpose rows to columns, then broadcast-mul.
-static inline v3 gjk_mat_rotate(v3 r0, v3 r1, v3 r2, v3 v) {
-	__m128 t01lo = _mm_unpacklo_ps(r0.m, r1.m);
-	__m128 t01hi = _mm_unpackhi_ps(r0.m, r1.m);
-	__m128 t2lo  = _mm_unpacklo_ps(r2.m, _mm_setzero_ps());
-	__m128 t2hi  = _mm_unpackhi_ps(r2.m, _mm_setzero_ps());
-	__m128 col0 = _mm_movelh_ps(t01lo, t2lo);
-	__m128 col1 = _mm_movehl_ps(t2lo, t01lo);
-	__m128 col2 = _mm_movelh_ps(t01hi, t2hi);
-	return (v3){ .m = _mm_add_ps(_mm_add_ps(
-		_mm_mul_ps(col0, _mm_shuffle_ps(v.m, v.m, 0x00)),
-		_mm_mul_ps(col1, _mm_shuffle_ps(v.m, v.m, 0x55))),
-		_mm_mul_ps(col2, _mm_shuffle_ps(v.m, v.m, 0xAA))) };
+static inline v3 gjk_mat_rotate(v3 r0, v3 r1, v3 r2, v3 v)
+{
+	simd4f t01lo = simd_unpacklo(r0.m, r1.m);
+	simd4f t01hi = simd_unpackhi(r0.m, r1.m);
+	simd4f t2lo  = simd_unpacklo(r2.m, simd_zero());
+	simd4f t2hi  = simd_unpackhi(r2.m, simd_zero());
+	simd4f col0 = simd_movelh(t01lo, t2lo);
+	simd4f col1 = simd_movehl(t2lo, t01lo);
+	simd4f col2 = simd_movelh(t01hi, t2hi);
+	return (v3){ .m = simd_add(simd_add(
+		simd_mul(col0, simd_splat(v.m, 0)),
+		simd_mul(col1, simd_splat(v.m, 1))),
+		simd_mul(col2, simd_splat(v.m, 2))) };
 }
 static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) {
 	// Columns of rotation matrix = rotated basis vectors
@@ -171,52 +173,54 @@ static int gjk_hull_support_climb(const v3* __restrict verts, const HalfEdge* __
 
 static int gjk_hull_support_scan(const v3* __restrict verts, int count, const float* __restrict soa, v3 ld)
 {
-	__m128 ldx = _mm_shuffle_ps(ld.m, ld.m, 0x00);
-	__m128 ldy = _mm_shuffle_ps(ld.m, ld.m, 0x55);
-	__m128 ldz = _mm_shuffle_ps(ld.m, ld.m, 0xAA);
-	__m128 vbest = _mm_set1_ps(-1e18f);
-	__m128i ibest = _mm_setzero_si128();
+	simd4f ldx = simd_splat(ld.m, 0);
+	simd4f ldy = simd_splat(ld.m, 1);
+	simd4f ldz = simd_splat(ld.m, 2);
+	simd4f vbest = simd_set1(-1e18f);
+	simd4i ibest = simd_set1_i(0);
 	int hi = 0;
+
 	if (soa) {
 		const float* sx = soa, *sy = sx + count, *sz = sy + count;
-		__m128 vbest2 = _mm_set1_ps(-1e18f);
-		__m128i ibest2 = _mm_setzero_si128();
-		__m128i idx0 = _mm_set_epi32(3,2,1,0), idx1 = _mm_set_epi32(7,6,5,4);
-		__m128i eight = _mm_set1_epi32(8);
+		simd4f vbest2 = simd_set1(-1e18f);
+		simd4i ibest2 = simd_set1_i(0);
+		simd4i idx0 = { 0, 1, 2, 3 }, idx1 = { 4, 5, 6, 7 };
+		simd4i eight = simd_set1_i(8);
 		for (; hi + 7 < count; hi += 8) {
-			__m128 d0 = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi), ldx), _mm_mul_ps(_mm_loadu_ps(sy+hi), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi), ldz));
-			__m128 d1 = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi+4), ldx), _mm_mul_ps(_mm_loadu_ps(sy+hi+4), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi+4), ldz));
-			__m128 m0 = _mm_cmpgt_ps(d0, vbest), m1 = _mm_cmpgt_ps(d1, vbest2);
-			vbest = _mm_blendv_ps(vbest, d0, m0);
-			ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx0), m0));
-			vbest2 = _mm_blendv_ps(vbest2, d1, m1);
-			ibest2 = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest2), _mm_castsi128_ps(idx1), m1));
-			idx0 = _mm_add_epi32(idx0, eight); idx1 = _mm_add_epi32(idx1, eight);
+			simd4f d0 = simd_add(simd_add(simd_mul(simd_load(sx+hi), ldx), simd_mul(simd_load(sy+hi), ldy)), simd_mul(simd_load(sz+hi), ldz));
+			simd4f d1 = simd_add(simd_add(simd_mul(simd_load(sx+hi+4), ldx), simd_mul(simd_load(sy+hi+4), ldy)), simd_mul(simd_load(sz+hi+4), ldz));
+			simd4f m0 = simd_cmpgt(d0, vbest), m1 = simd_cmpgt(d1, vbest2);
+			vbest = simd_blendv(vbest, d0, m0);
+			ibest = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest), simd_cast_itof(idx0), m0));
+			vbest2 = simd_blendv(vbest2, d1, m1);
+			ibest2 = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest2), simd_cast_itof(idx1), m1));
+			idx0 = simd_add_i(idx0, eight); idx1 = simd_add_i(idx1, eight);
 		}
-		__m128 mg = _mm_cmpgt_ps(vbest2, vbest);
-		vbest = _mm_blendv_ps(vbest, vbest2, mg);
-		ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(ibest2), mg));
+		simd4f mg = simd_cmpgt(vbest2, vbest);
+		vbest = simd_blendv(vbest, vbest2, mg);
+		ibest = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest), simd_cast_itof(ibest2), mg));
 		for (; hi + 3 < count; hi += 4) {
-			__m128 dots = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi), ldx), _mm_mul_ps(_mm_loadu_ps(sy+hi), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi), ldz));
-			__m128i idx = _mm_set_epi32(hi+3,hi+2,hi+1,hi);
-			__m128 mask = _mm_cmpgt_ps(dots, vbest);
-			vbest = _mm_blendv_ps(vbest, dots, mask);
-			ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));
+			simd4f dots = simd_add(simd_add(simd_mul(simd_load(sx+hi), ldx), simd_mul(simd_load(sy+hi), ldy)), simd_mul(simd_load(sz+hi), ldz));
+			simd4i idx = { hi, hi+1, hi+2, hi+3 };
+			simd4f mask = simd_cmpgt(dots, vbest);
+			vbest = simd_blendv(vbest, dots, mask);
+			ibest = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest), simd_cast_itof(idx), mask));
 		}
 	} else {
 		for (; hi + 3 < count; hi += 4) {
-			__m128 v0 = verts[hi].m, v1 = verts[hi+1].m, v2 = verts[hi+2].m, v3r = verts[hi+3].m;
-			__m128 t0 = _mm_unpacklo_ps(v0, v1), t1 = _mm_unpacklo_ps(v2, v3r);
-			__m128 t2 = _mm_unpackhi_ps(v0, v1), t3 = _mm_unpackhi_ps(v2, v3r);
-			__m128 dots = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_movelh_ps(t0, t1), ldx), _mm_mul_ps(_mm_movehl_ps(t1, t0), ldy)), _mm_mul_ps(_mm_movelh_ps(t2, t3), ldz));
-			__m128i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);
-			__m128 mask = _mm_cmpgt_ps(dots, vbest);
-			vbest = _mm_blendv_ps(vbest, dots, mask);
-			ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));
+			simd4f v0 = verts[hi].m, v1 = verts[hi+1].m, v2 = verts[hi+2].m, v3r = verts[hi+3].m;
+			simd4f t0 = simd_unpacklo(v0, v1), t1 = simd_unpacklo(v2, v3r);
+			simd4f t2 = simd_unpackhi(v0, v1), t3 = simd_unpackhi(v2, v3r);
+			simd4f dots = simd_add(simd_add(simd_mul(simd_movelh(t0, t1), ldx), simd_mul(simd_movehl(t1, t0), ldy)), simd_mul(simd_movelh(t2, t3), ldz));
+			simd4i idx = { hi, hi+1, hi+2, hi+3 };
+			simd4f mask = simd_cmpgt(dots, vbest);
+			vbest = simd_blendv(vbest, dots, mask);
+			ibest = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest), simd_cast_itof(idx), mask));
 		}
 	}
+
 	float hbests[4]; int hbidxs[4];
-	_mm_storeu_ps(hbests, vbest); _mm_storeu_si128((__m128i*)hbidxs, ibest);
+	simd_store(hbests, vbest); simd_store_i(hbidxs, ibest);
 	float hbest = hbests[0]; int hbi = hbidxs[0];
 	for (int k = 1; k < 4; k++) { if (hbests[k] > hbest) { hbest = hbests[k]; hbi = hbidxs[k]; } }
 	for (; hi < count; hi++) { float hd = dot(verts[hi], ld); if (hd > hbest) { hbest = hd; hbi = hi; } }
@@ -226,10 +230,9 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 static v3 gjk_box_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict feat)
 {
 	v3 ld = gjk_mat_rotate(sp->box.col0, sp->box.col1, sp->box.col2, sd);
-	// SSE sign select: copysign(he, ld) — flip he components where ld < 0
-	__m128 sign_bits = _mm_and_ps(ld.m, _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000)));
-	v3 lc = { .m = _mm_xor_ps(sp->box.half_extents.m, sign_bits) };
-	*feat = _mm_movemask_ps(_mm_cmpge_ps(ld.m, _mm_setzero_ps())) & 7;
+	simd4f sign_bits = simd_and(ld.m, simd_sign_mask());
+	v3 lc = { .m = simd_xor(sp->box.half_extents.m, sign_bits) };
+	*feat = simd_movemask(simd_cmpge(ld.m, simd_zero())) & 7;
 	return add(sp->box.center, gjk_mat_rotate_t(sp->box.col0, sp->box.col1, sp->box.col2, lc));
 }
 static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict feat)
@@ -239,23 +242,23 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	float cda = dot(sd, cu);
 	int cap = cda >= 0.0f;
 	// Branchless base: mid + copysign(half_axis, da)
-	__m128 sign = _mm_and_ps(_mm_set1_ps(cda), _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000)));
-	v3 cbase = add(sp->cylinder.mid, (v3){ .m = _mm_xor_ps(sp->cylinder.half_axis.m, sign) });
+	simd4f sign = simd_and(simd_set1(cda), simd_sign_mask());
+	v3 cbase = add(sp->cylinder.mid, (v3){ .m = simd_xor(sp->cylinder.half_axis.m, sign) });
 	v3 cdp = sub(sd, scale(cu, cda));
-	__m128 cdp2 = v3_dot_m(cdp, cdp);
-	__m128 cpl = _mm_sqrt_ss(cdp2);
-	float cplf = _mm_cvtss_f32(cpl);
+	simd4f cdp2 = v3_dot_m(cdp, cdp);
+	simd4f cpl = simd_sqrt_ss(cdp2);
+	float cplf = simd_get_x(cpl);
 	if (cplf <= FLT_EPSILON) { *feat = cap; return cbase; }
 	float inv_cpl = 1.0f / cplf;
 	// Pack normalized perp direction as 3x10-bit signed + 1 cap bit = 31 bits
 	int ix = (int)(cdp.x * inv_cpl * 511.0f), iy = (int)(cdp.y * inv_cpl * 511.0f), iz = (int)(cdp.z * inv_cpl * 511.0f);
 	*feat = cap | ((ix & 0x3FF) << 1) | ((iy & 0x3FF) << 11) | ((iz & 0x3FF) << 21);
-	return add(cbase, v3_scale_m(cdp, _mm_div_ss(_mm_set_ss(sp->cylinder.radius), cpl)));
+	return add(cbase, v3_scale_m(cdp, simd_div_ss(simd_set_ss(sp->cylinder.radius), cpl)));
 }
 // Support macro: dispatches per shape type. Box/cylinder/hull-scan are functions to reduce code size.
 #define gjk_support(shape, dir, out_feat, out_point) do {                                                                 \
 	GJK_Shape* sp = (shape); v3 sd = (dir);                                                                               \
-	__assume(sp->type >= GJK_POINT && sp->type <= GJK_TRIANGLE);                                                          \
+	SIMD_ASSUME(sp->type >= GJK_POINT && sp->type <= GJK_TRIANGLE);                                                          \
 	switch (sp->type) {                                                                                                   \
 	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                               \
 	case GJK_SEGMENT: {                                                                                                   \
@@ -278,16 +281,14 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	case GJK_CYLINDER: (out_point) = gjk_cylinder_support(sp, sd, (out_feat)); break;                                      \
 	case GJK_TRIANGLE: {                                                                                                  \
 		/* 3 dots in parallel via AoS→SoA transpose */                                                                     \
-		__m128 v0 = sp->tri.a.m, v1 = sp->tri.b.m, v2 = sp->tri.c.m;                                                     \
-		__m128 t01lo = _mm_unpacklo_ps(v0, v1), t01hi = _mm_unpackhi_ps(v0, v1);                                          \
-		__m128 t2lo = _mm_unpacklo_ps(v2, _mm_setzero_ps());                                                              \
-		__m128 t2hi = _mm_unpackhi_ps(v2, _mm_setzero_ps());                                                              \
-		__m128 xs = _mm_movelh_ps(t01lo, t2lo), ys = _mm_movehl_ps(t2lo, t01lo), zs = _mm_movelh_ps(t01hi, t2hi);         \
-		__m128 dx = _mm_shuffle_ps(sd.m, sd.m, 0x00), dy = _mm_shuffle_ps(sd.m, sd.m, 0x55);                              \
-		__m128 dz = _mm_shuffle_ps(sd.m, sd.m, 0xAA);                                                                     \
-		__m128 dots = _mm_add_ps(_mm_add_ps(_mm_mul_ps(xs, dx), _mm_mul_ps(ys, dy)), _mm_mul_ps(zs, dz));                 \
-		/* dots = {da, db, dc, 0} — find max */                                                                            \
-		float td[4]; _mm_storeu_ps(td, dots);                                                                              \
+		/* 3 dots in parallel via AoS->SoA transpose */                                                                   \
+		simd4f v0 = sp->tri.a.m, v1 = sp->tri.b.m, v2 = sp->tri.c.m;                                                     \
+		simd4f t01lo = simd_unpacklo(v0, v1), t01hi = simd_unpackhi(v0, v1);                                              \
+		simd4f t2lo = simd_unpacklo(v2, simd_zero()), t2hi = simd_unpackhi(v2, simd_zero());                              \
+		simd4f xs = simd_movelh(t01lo, t2lo), ys = simd_movehl(t2lo, t01lo), zs = simd_movelh(t01hi, t2hi);              \
+		simd4f dx = simd_splat(sd.m, 0), dy = simd_splat(sd.m, 1), dz = simd_splat(sd.m, 2);                             \
+		simd4f dots = simd_add(simd_add(simd_mul(xs, dx), simd_mul(ys, dy)), simd_mul(zs, dz));                           \
+		float td[4]; simd_store(td, dots);                                                                                 \
 		if (td[0] >= td[1] && td[0] >= td[2]) { *(out_feat) = 0; (out_point) = sp->tri.a; }                               \
 		else if (td[1] >= td[2]) { *(out_feat) = 1; (out_point) = sp->tri.b; }                                            \
 		else { *(out_feat) = 2; (out_point) = sp->tri.c; }                                                                \
@@ -312,8 +313,8 @@ static inline v3 gjk_support_feature(const GJK_Shape* sp, int feat)
 		return add(sp->hull.center, gjk_mat_rotate_t(sp->hull.col0, sp->hull.col1, sp->hull.col2, hmul(sp->hull.verts[feat], sp->hull.scale)));
 	case GJK_CYLINDER: {
 		int cap = feat & 1;
-		__m128 sign = cap ? _mm_setzero_ps() : _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000));
-		v3 cbase = add(sp->cylinder.mid, (v3){ .m = _mm_xor_ps(sp->cylinder.half_axis.m, sign) });
+		simd4f sign = cap ? simd_zero() : simd_sign_mask();
+		v3 cbase = add(sp->cylinder.mid, (v3){ .m = simd_xor(sp->cylinder.half_axis.m, sign) });
 		// Decode 3x10-bit signed perpendicular direction
 		int ix = (feat >> 1) & 0x3FF, iy = (feat >> 11) & 0x3FF, iz = (feat >> 21) & 0x3FF;
 		if (ix >= 0x200) ix -= 0x400; // sign extend 10-bit
@@ -344,7 +345,7 @@ static v3 gjk_center(const GJK_Shape* s)
 #define gjk_closest_point(simplex, out) do {                                                                        \
 	const GJK_Simplex* cs = (simplex);                                                                              \
 	float cinv = 1.0f / cs->divisor;                                                                                \
-	__assume(cs->count >= 1 && cs->count <= 3);                                                                     \
+	SIMD_ASSUME(cs->count >= 1 && cs->count <= 3);                                                                     \
 	switch (cs->count) {                                                                                            \
 	case 1: (out) = cs->v[0].point; break;                                                                          \
 	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break; \
@@ -356,7 +357,7 @@ static v3 gjk_center(const GJK_Shape* s)
 #define gjk_witness_points(simplex, out_p1, out_p2, out_f1, out_f2) do {                                              \
 	const GJK_Simplex* ws = (simplex);                                                                                \
 	float winv = 1.0f / ws->divisor;                                                                                  \
-	__assume(ws->count >= 1 && ws->count <= 3);                                                                       \
+	SIMD_ASSUME(ws->count >= 1 && ws->count <= 3);                                                                       \
 	switch (ws->count) {                                                                                              \
 	case 1:                                                                                                           \
 		(out_p1) = ws->v[0].point1; (out_p2) = ws->v[0].point2;                                                       \
@@ -380,7 +381,7 @@ static v3 gjk_center(const GJK_Shape* s)
 } while(0)
 // -----------------------------------------------------------------------------
 // Simplex solvers: find closest point on simplex to origin.
-static __declspec(noinline) int gjk_solve2(GJK_Simplex* s)
+static SIMD_NOINLINE int gjk_solve2(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point;
 	v3 ba = sub(b, a);
@@ -399,7 +400,7 @@ static __declspec(noinline) int gjk_solve2(GJK_Simplex* s)
 	s->v[0].u = u; s->v[1].u = v; s->divisor = div; s->count = 2;
 	return 1;
 }
-static __declspec(noinline) int gjk_solve3(GJK_Simplex* s)
+static SIMD_NOINLINE int gjk_solve3(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point;
 	v3 ba = sub(b, a), cb = sub(c, b), ac = sub(a, c);
@@ -430,7 +431,7 @@ static __declspec(noinline) int gjk_solve3(GJK_Simplex* s)
 	return 1;
 }
 #define stp(a, b, c) dot(a, cross(b, c))
-static __declspec(noinline) int gjk_solve4(GJK_Simplex* s)
+static SIMD_NOINLINE int gjk_solve4(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point, d = s->v[3].point;
 	float uAB = dot(b, sub(b, a)), vAB = dot(a, sub(a, b));
@@ -533,14 +534,14 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	int use_index_term = shapeA->type != GJK_CYLINDER && shapeB->type != GJK_CYLINDER;
 	int iter = 0;
 	while (iter < GJK_MAX_ITERS) {
-		__assume(simplex.count >= 1 && simplex.count <= 4);
+		SIMD_ASSUME(simplex.count >= 1 && simplex.count <= 4);
 		if (simplex.count > 1) {
 			int solved;
 			switch (simplex.count) {
 			case 2: solved = gjk_solve2(&simplex); break;
 			case 3: solved = gjk_solve3(&simplex); break;
 			case 4: solved = gjk_solve4(&simplex); break;
-			default: __assume(0);
+			default: SIMD_ASSUME(0);
 			}
 			if (!solved) break;
 		}
