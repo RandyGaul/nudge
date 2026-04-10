@@ -52,8 +52,22 @@ typedef struct GJK_Shape
 } GJK_Shape;
 static GJK_Shape gjk_sphere(v3 center, float radius) { return (GJK_Shape){ .type = GJK_POINT, .radius = radius, .point.center = center }; }
 static GJK_Shape gjk_capsule(v3 p, v3 q, float radius) { return (GJK_Shape){ .type = GJK_SEGMENT, .radius = radius, .segment.p = p, .segment.q = q }; }
-// Inline mat3x3 rotate using 3 dot products (faster than quat_rotate).
-#define gjk_mat_rotate(r0, r1, r2, v) V3(dot(r0, v), dot(r1, v), dot(r2, v))
+// Mat3x3 rotate using SSE: multiply-add across 3 rows without scalar extraction.
+static inline v3 gjk_mat_rotate(v3 r0, v3 r1, v3 r2, v3 v) {
+	__m128 m0 = _mm_mul_ps(r0.m, v.m);
+	__m128 m1 = _mm_mul_ps(r1.m, v.m);
+	__m128 m2 = _mm_mul_ps(r2.m, v.m);
+	// Horizontal sum each row: [x0+y0+z0, x1+y1+z1, x2+y2+z2, 0]
+	// Transpose pairs then add
+	__m128 t01lo = _mm_unpacklo_ps(m0, m1);  // x0 x1 y0 y1
+	__m128 t01hi = _mm_unpackhi_ps(m0, m1);  // z0 z1 w0 w1
+	__m128 t2lo  = _mm_unpacklo_ps(m2, _mm_setzero_ps()); // x2 0 y2 0
+	__m128 t2hi  = _mm_unpackhi_ps(m2, _mm_setzero_ps()); // z2 0 w2 0
+	__m128 xy = _mm_movelh_ps(t01lo, t2lo);  // x0 x1 x2 0
+	__m128 yz = _mm_movehl_ps(t2lo, t01lo);  // y0 y1 y2 0
+	__m128 zw = _mm_movelh_ps(t01hi, t2hi);  // z0 z1 z2 0
+	return (v3){ .m = _mm_add_ps(_mm_add_ps(xy, yz), zw) };
+}
 static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) {
 	// Build rotation matrix rows from quat
 	v3 r0 = quat_rotate(rot, V3(1,0,0)), r1 = quat_rotate(rot, V3(0,1,0)), r2 = quat_rotate(rot, V3(0,0,1));
