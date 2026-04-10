@@ -105,6 +105,8 @@ typedef struct BVHTree
 	CK_DYNA BVHMeta* meta;
 	CK_DYNA BVHLeaf* leaves;
 	CK_DYNA int* node_free;
+	CK_DYNA BVHNode* refit_nodes; // double-buffer for refit (avoids malloc/free per frame)
+	CK_DYNA BVHMeta* refit_meta;
 	int root; // -1 = empty
 	int refine_cursor; // leaf-space position for incremental refinement
 } BVHTree;
@@ -119,7 +121,7 @@ typedef struct BroadPair { int a, b; } BroadPair;
 
 static void bvh_init(BVHTree* t) { memset(t, 0, sizeof(*t)); t->root = -1; }
 
-static void bvh_free(BVHTree* t) { afree(t->nodes); afree(t->meta); afree(t->leaves); afree(t->node_free); }
+static void bvh_free(BVHTree* t) { afree(t->nodes); afree(t->meta); afree(t->leaves); afree(t->node_free); afree(t->refit_nodes); afree(t->refit_meta); }
 
 // Alloc/free with freelist.
 static int bvh_alloc_node(BVHTree* t)
@@ -804,25 +806,23 @@ static void bvh_refit(BVHTree* t, WorldInternal* w)
 	if (t->root == -1) return;
 
 	int cap = asize(t->nodes);
-	BVHNode* new_nodes = CK_ALLOC(sizeof(BVHNode) * cap);
-	BVHMeta* new_meta = CK_ALLOC(sizeof(BVHMeta) * cap);
+	afit(t->refit_nodes, cap);
+	afit(t->refit_meta, cap);
 
-	BVHRefit r = { t->nodes, t->meta, new_nodes, new_meta, t, w };
+	BVHRefit r = { t->nodes, t->meta, t->refit_nodes, t->refit_meta, t, w };
 	int changed = 0;
 	bvh_fused_recurse(&r, t->root, 0, -1, 0, &changed);
 
-	// Swap new arrays into the tree.
-	aclear(t->nodes); aclear(t->meta);
-	int total = t->nodes[t->root].a.leaf_count + t->nodes[t->root].b.leaf_count;
-	// Compute live count from the root's leaf_count (internal nodes = leaves - 1, plus root = leaves - 1).
-	int live_count = new_nodes[0].a.leaf_count + new_nodes[0].b.leaf_count - 1;
+	// Swap double-buffer into the tree (pointer swap, no copy).
+	CK_DYNA BVHNode* tmp_n = t->nodes; t->nodes = t->refit_nodes; t->refit_nodes = tmp_n;
+	CK_DYNA BVHMeta* tmp_m = t->meta; t->meta = t->refit_meta; t->refit_meta = tmp_m;
+
+	int live_count = t->nodes[0].a.leaf_count + t->nodes[0].b.leaf_count - 1;
 	if (live_count < 1) live_count = 1;
-	for (int i = 0; i < live_count; i++) { apush(t->nodes, new_nodes[i]); apush(t->meta, new_meta[i]); }
+	asetlen(t->nodes, live_count);
+	asetlen(t->meta, live_count);
 	aclear(t->node_free);
 	t->root = 0;
-
-	CK_FREE(new_nodes);
-	CK_FREE(new_meta);
 }
 
 // -----------------------------------------------------------------------------
