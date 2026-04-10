@@ -107,7 +107,9 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 // allowing the compiler to inline quat_rotate in the caller.
 static int gjk_hull_support_scan(const v3* verts, int count, const float* soa, v3 ld)
 {
-	__m128 ldx = _mm_set1_ps(ld.x), ldy = _mm_set1_ps(ld.y), ldz = _mm_set1_ps(ld.z);
+	__m128 ldx = _mm_shuffle_ps(ld.m, ld.m, 0x00);
+	__m128 ldy = _mm_shuffle_ps(ld.m, ld.m, 0x55);
+	__m128 ldz = _mm_shuffle_ps(ld.m, ld.m, 0xAA);
 	__m128 vbest = _mm_set1_ps(-1e18f);
 	__m128i ibest = _mm_setzero_si128();
 	int hi = 0;
