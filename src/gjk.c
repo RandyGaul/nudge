@@ -54,7 +54,7 @@ typedef struct GJK_Shape
 		struct { v3 center; } point;
 		struct { v3 p, q; } segment;
 		struct { v3 center; quat rot; quat inv_rot; v3 half_extents; } box;
-		struct { v3 center; quat rot; quat inv_rot; const v3* verts; const float* soa_x; const float* soa_y; const float* soa_z; int count; } hull;
+		struct { v3 center; quat rot; quat inv_rot; const v3* verts; int count; } hull;
 		struct { v3 p, q; float radius; v3 axis; float inv_axis_len; } cylinder;
 	};
 } GJK_Shape;
@@ -62,7 +62,7 @@ typedef struct GJK_Shape
 static GJK_Shape gjk_sphere(v3 center, float radius) { return (GJK_Shape){ .type = GJK_POINT, .radius = radius, .point.center = center }; }
 static GJK_Shape gjk_capsule(v3 p, v3 q, float radius) { return (GJK_Shape){ .type = GJK_SEGMENT, .radius = radius, .segment.p = p, .segment.q = q }; }
 static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) { return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.rot = rot, .box.inv_rot = inv(rot), .box.half_extents = half_extents }; }
-static GJK_Shape gjk_hull(v3 center, quat rot, const v3* verts, int count, const float* soa_x, const float* soa_y, const float* soa_z) { return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.rot = rot, .hull.inv_rot = inv(rot), .hull.verts = verts, .hull.soa_x = soa_x, .hull.soa_y = soa_y, .hull.soa_z = soa_z, .hull.count = count }; }
+static GJK_Shape gjk_hull(v3 center, quat rot, const v3* verts, int count) { return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.rot = rot, .hull.inv_rot = inv(rot), .hull.verts = verts, .hull.count = count }; }
 static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
 	v3 axis = sub(q, p);
 	float al = len(axis);
@@ -72,20 +72,11 @@ static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
 
 // Hull convenience: pre-scale vertices and build shape.
 // Caller must keep scaled_verts alive for the duration of the GJK call.
-// scaled_verts: AoS buffer (hull->vert_count v3s).
-// soa_buf: SoA buffer (hull->vert_count * 3 floats, laid out as [xxx...][yyy...][zzz...]).
-static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts, float* soa_buf)
+static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts)
 {
-	int n = hull->vert_count;
-	float* sx = soa_buf;
-	float* sy = soa_buf + n;
-	float* sz = soa_buf + n * 2;
-	for (int i = 0; i < n; i++) {
-		v3 v = hmul(hull->verts[i], sc);
-		scaled_verts[i] = v;
-		sx[i] = v.x; sy[i] = v.y; sz[i] = v.z;
-	}
-	return gjk_hull(pos, rot, scaled_verts, n, sx, sy, sz);
+	for (int i = 0; i < hull->vert_count; i++)
+		scaled_verts[i] = hmul(hull->verts[i], sc);
+	return gjk_hull(pos, rot, scaled_verts, hull->vert_count);
 }
 
 // Support function: returns world-space support point + feature ID.
@@ -105,13 +96,9 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 	}                                                                                                            \
 	case GJK_HULL: {                                                                                             \
 		v3 ld = rotate(sp->hull.inv_rot, sd);                                                                    \
-		const float* hx = sp->hull.soa_x;                                                                       \
-		const float* hy = sp->hull.soa_y;                                                                        \
-		const float* hz = sp->hull.soa_z;                                                                        \
 		float hbest = -1e18f; int hbi = 0;                                                                       \
 		for (int hi = 0; hi < sp->hull.count; hi++) {                                                            \
-			float hd = hx[hi]*ld.x + hy[hi]*ld.y + hz[hi]*ld.z;                                                 \
-			if (hd > hbest) { hbest = hd; hbi = hi; }                                                           \
+			float hd = dot(sp->hull.verts[hi], ld); if (hd > hbest) { hbest = hd; hbi = hi; }                    \
 		}                                                                                                        \
 		*(out_feat) = hbi; (out_point) = add(sp->hull.center, rotate(sp->hull.rot, sp->hull.verts[hbi])); break; \
 	}                                                                                                            \
