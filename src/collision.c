@@ -834,38 +834,84 @@ static int reduce_contacts(Contact* contacts, int count)
 // flip=1 means ref is actually hull B (so normal is negated for A->B convention).
 static int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot, v3 ref_sc, const Hull* inc_hull, v3 inc_pos, quat inc_rot, v3 inc_sc, int ref_face, int flip, Manifold* manifold)
 {
-	HullPlane ref_plane = plane_transform(ref_hull->planes[ref_face], ref_pos, ref_rot, ref_sc);
-	int inc_face = find_incident_face(inc_hull, inc_pos, inc_rot, inc_sc, ref_plane.normal);
+	HullPlane ref_plane;
 	v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
 	uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
-	int clip_count = hull_face_verts_world(inc_hull, inc_face, inc_pos, inc_rot, inc_sc, buf1);
-	for (int i = 0; i < clip_count; i++) fid1[i] = 0x80 | (uint8_t)i;
-
 	v3* in_buf = buf1; v3* out_buf = buf2;
 	uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
-	int start_e = ref_hull->faces[ref_face].edge;
-	int ei = start_e;
-	int guard = 0;
-	uint8_t clip_edge_idx = 0;
-	do {
-		const HalfEdge* edge = &ref_hull->edges[ei];
-		v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, edge->origin, ref_sc)));
-		v3 head = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[edge->twin].origin, ref_sc)));
-		v3 side_n = norm(cross(sub(head, tail), ref_plane.normal));
-		float side_d = dot(side_n, tail);
-		clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n, side_d, clip_edge_idx, out_buf, out_fid);
-		v3* swap = in_buf; in_buf = out_buf; out_buf = swap;
-		uint8_t* fswap = in_fid; in_fid = out_fid; out_fid = fswap;
-		clip_edge_idx++;
-		ei = edge->next;
-		assert(++guard < MAX_CLIP_VERTS && "generate_face_contact: face edge loop didn't close");
-	} while (ei != start_e);
+	int clip_count;
 
+	// Box fast path: derive reference plane, side planes, and corners from rotation columns.
+	// Avoids per-edge vertex transforms + norm(cross()) in the clipping loop.
+	int is_box_ref = (ref_hull->verts == s_box_verts);
+	v3 box_cols[3];
+	if (is_box_ref) {
+		box_cols[0] = rotate(ref_rot, V3(1, 0, 0)); box_cols[1] = rotate(ref_rot, V3(0, 1, 0)); box_cols[2] = rotate(ref_rot, V3(0, 0, 1));
+		HullPlane lp = ref_hull->planes[ref_face];
+		int axis = lp.normal.x != 0.0f ? 0 : (lp.normal.y != 0.0f ? 1 : 2);
+		float sign = (&lp.normal.x)[axis];
+		v3 n = sign > 0 ? box_cols[axis] : neg(box_cols[axis]);
+		ref_plane = (HullPlane){ .normal = n, .offset = dot(n, ref_pos) + (&ref_sc.x)[axis] };
+	} else {
+		ref_plane = plane_transform(ref_hull->planes[ref_face], ref_pos, ref_rot, ref_sc);
+	}
+
+	int inc_face = find_incident_face(inc_hull, inc_pos, inc_rot, inc_sc, ref_plane.normal);
+	clip_count = hull_face_verts_world(inc_hull, inc_face, inc_pos, inc_rot, inc_sc, buf1);
+	for (int i = 0; i < clip_count; i++) fid1[i] = 0x80 | (uint8_t)i;
+
+	if (is_box_ref) {
+		// Box side planes from rotation columns. A box face has 4 edges; side normals are
+		// the 2 perpendicular rotation columns (positive and negative).
+		HullPlane lp = ref_hull->planes[ref_face];
+		int axis = lp.normal.x != 0.0f ? 0 : (lp.normal.y != 0.0f ? 1 : 2);
+		int u = (axis + 1) % 3, v = (axis + 2) % 3;
+		v3 side_normals[4] = { box_cols[u], neg(box_cols[u]), box_cols[v], neg(box_cols[v]) };
+		float side_offsets[4] = { dot(box_cols[u], ref_pos) + (&ref_sc.x)[u], dot(neg(box_cols[u]), ref_pos) + (&ref_sc.x)[u], dot(box_cols[v], ref_pos) + (&ref_sc.x)[v], dot(neg(box_cols[v]), ref_pos) + (&ref_sc.x)[v] };
+		for (int i = 0; i < 4; i++) {
+			clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_normals[i], side_offsets[i], (uint8_t)i, out_buf, out_fid);
+			v3* swap = in_buf; in_buf = out_buf; out_buf = swap;
+			uint8_t* fswap = in_fid; in_fid = out_fid; out_fid = fswap;
+		}
+	} else {
+		int start_e = ref_hull->faces[ref_face].edge;
+		int ei = start_e;
+		int guard = 0;
+		uint8_t clip_edge_idx = 0;
+		do {
+			const HalfEdge* edge = &ref_hull->edges[ei];
+			v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, edge->origin, ref_sc)));
+			v3 head = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[edge->twin].origin, ref_sc)));
+			v3 side_n = norm(cross(sub(head, tail), ref_plane.normal));
+			float side_d = dot(side_n, tail);
+			clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n, side_d, clip_edge_idx, out_buf, out_fid);
+			v3* swap = in_buf; in_buf = out_buf; out_buf = swap;
+			uint8_t* fswap = in_fid; in_fid = out_fid; out_fid = fswap;
+			clip_edge_idx++;
+			ei = edge->next;
+			assert(++guard < MAX_CLIP_VERTS && "generate_face_contact: face edge loop didn't close");
+		} while (ei != start_e);
+	}
+
+	// Corner snapping.
 	{
 		v3 corners[MAX_CLIP_VERTS];
 		int ncorners = 0;
-		int ce = start_e;
-		do { corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[ce].origin, ref_sc))); ce = ref_hull->edges[ce].next; } while (ce != start_e);
+		if (is_box_ref) {
+			// Box corners for this face: 4 vertices computed from rotation columns.
+			HullPlane lp = ref_hull->planes[ref_face];
+			int axis = lp.normal.x != 0.0f ? 0 : (lp.normal.y != 0.0f ? 1 : 2);
+			float sign = (&lp.normal.x)[axis];
+			int u = (axis + 1) % 3, v = (axis + 2) % 3;
+			float eu = (&ref_sc.x)[u], ev = (&ref_sc.x)[v], ea = (&ref_sc.x)[axis];
+			for (int su = -1; su <= 1; su += 2) for (int sv = -1; sv <= 1; sv += 2) {
+				corners[ncorners++] = add(ref_pos, add(add(scale(box_cols[axis], sign * ea), scale(box_cols[u], su * eu)), scale(box_cols[v], sv * ev)));
+			}
+		} else {
+			int start_e = ref_hull->faces[ref_face].edge;
+			int ce = start_e;
+			do { corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[ce].origin, ref_sc))); ce = ref_hull->edges[ce].next; } while (ce != start_e);
+		}
 		float snap_tol2 = 1e-6f;
 		for (int i = 0; i < clip_count; i++)
 			for (int c = 0; c < ncorners; c++)
