@@ -668,15 +668,21 @@ static void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, Sol
 	float ima = m->inv_mass_a, imb = m->inv_mass_b;
 
 	// All contacts in a manifold share the same normal — use manifold normal.
+	// Linear velocity dot is incrementally updated: after applying delta,
+	// dot(dv_linear, n) changes by delta * (ima + imb) since n is unit-length.
 	v3 normal = m->normal;
+	float inv_mass_sum = ima + imb;
+	float linear_vn = dot(sub(b->velocity, a->velocity), normal);
 	float total_lambda_n = 0.0f;
 	for (int ci = 0; ci < m->contact_count; ci++) {
 		SolverContact* s = &sc[m->contact_start + ci];
-		float vn = dot(sub(b->velocity, a->velocity), normal) + dot(b->angular_velocity, s->rn_b) - dot(a->angular_velocity, s->rn_a);
+		float vn = linear_vn + dot(b->angular_velocity, s->rn_b) - dot(a->angular_velocity, s->rn_a);
 		float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
 		float old_n = s->lambda_n;
 		s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
-		apply_impulse_row_sv(a, b, ima, imb, normal, s->w_n_a, s->w_n_b, s->lambda_n - old_n);
+		float delta = s->lambda_n - old_n;
+		apply_impulse_row_sv(a, b, ima, imb, normal, s->w_n_a, s->w_n_b, delta);
+		linear_vn += delta * inv_mass_sum;
 		total_lambda_n += s->lambda_n;
 	}
 
