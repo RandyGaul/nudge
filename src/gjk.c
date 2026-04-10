@@ -88,38 +88,38 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 //   Cylinder: 0 = endpoint p, 1 = endpoint q
 
 // Macro-inlined support function. Assigns result to out_point, feature ID to *out_feat.
-#define GJK_SUPPORT(shape, dir, out_feat, out_point) do {                                                                       \
-	const GJK_Shape* sp = (shape); v3 sd = (dir);                                                                              \
-	switch (sp->type) {                                                                                                         \
-	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                                    \
-	case GJK_SEGMENT: {                                                                                                         \
-		int sf = dot(sd, sub(sp->segment.q, sp->segment.p)) >= 0.0f;                                                           \
-		*(out_feat) = sf; (out_point) = sf ? sp->segment.q : sp->segment.p; break;                                              \
-	}                                                                                                                           \
-	case GJK_BOX: {                                                                                                             \
-		v3 ld = rotate(sp->box.inv_rot, sd); v3 he = sp->box.half_extents;                                                     \
-		v3 lc = V3(ld.x >= 0 ? he.x : -he.x, ld.y >= 0 ? he.y : -he.y, ld.z >= 0 ? he.z : -he.z);                            \
-		*(out_feat) = (ld.x >= 0.0f) | ((ld.y >= 0.0f) << 1) | ((ld.z >= 0.0f) << 2);                                         \
-		(out_point) = add(sp->box.center, rotate(sp->box.rot, lc)); break;                                                     \
-	}                                                                                                                           \
-	case GJK_HULL: {                                                                                                            \
-		v3 ld = rotate(sp->hull.inv_rot, sd);                                                                                   \
-		float hbest = -1e18f; int hbi = 0;                                                                                      \
-		for (int hi = 0; hi < sp->hull.count; hi++) {                                                                           \
-			float hd = dot(sp->hull.verts[hi], ld); if (hd > hbest) { hbest = hd; hbi = hi; }                                  \
-		}                                                                                                                       \
-		*(out_feat) = hbi; (out_point) = add(sp->hull.center, rotate(sp->hull.rot, sp->hull.verts[hbi])); break;                \
-	}                                                                                                                           \
-	case GJK_CYLINDER: {                                                                                                        \
-		v3 cu = sp->cylinder.axis;                                                                                              \
-		if (sp->cylinder.inv_axis_len == 0.0f) { *(out_feat) = 0; (out_point) = sp->cylinder.p; break; }                       \
-		float cda = dot(sd, cu); int cf = cda >= 0.0f; *(out_feat) = cf;                                                       \
-		v3 cbase = cf ? sp->cylinder.q : sp->cylinder.p;                                                                        \
-		v3 cdp = sub(sd, scale(cu, cda)); float cpl = len(cdp);                                                                 \
-		(out_point) = (cpl > FLT_EPSILON) ? add(cbase, scale(cdp, sp->cylinder.radius / cpl)) : cbase; break;                  \
-	}                                                                                                                           \
-	default: *(out_feat) = 0; (out_point) = V3(0,0,0); break;                                                                  \
-	}                                                                                                                           \
+#define GJK_SUPPORT(shape, dir, out_feat, out_point) do {                                                        \
+	const GJK_Shape* sp = (shape); v3 sd = (dir);                                                                \
+	switch (sp->type) {                                                                                          \
+	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                      \
+	case GJK_SEGMENT: {                                                                                          \
+		int sf = dot(sd, sub(sp->segment.q, sp->segment.p)) >= 0.0f;                                             \
+		*(out_feat) = sf; (out_point) = sf ? sp->segment.q : sp->segment.p; break;                               \
+	}                                                                                                            \
+	case GJK_BOX: {                                                                                              \
+		v3 ld = rotate(sp->box.inv_rot, sd); v3 he = sp->box.half_extents;                                       \
+		v3 lc = V3(ld.x >= 0 ? he.x : -he.x, ld.y >= 0 ? he.y : -he.y, ld.z >= 0 ? he.z : -he.z);                \
+		*(out_feat) = (ld.x >= 0.0f) | ((ld.y >= 0.0f) << 1) | ((ld.z >= 0.0f) << 2);                            \
+		(out_point) = add(sp->box.center, rotate(sp->box.rot, lc)); break;                                       \
+	}                                                                                                            \
+	case GJK_HULL: {                                                                                             \
+		v3 ld = rotate(sp->hull.inv_rot, sd);                                                                    \
+		float hbest = -1e18f; int hbi = 0;                                                                       \
+		for (int hi = 0; hi < sp->hull.count; hi++) {                                                            \
+			float hd = dot(sp->hull.verts[hi], ld); if (hd > hbest) { hbest = hd; hbi = hi; }                    \
+		}                                                                                                        \
+		*(out_feat) = hbi; (out_point) = add(sp->hull.center, rotate(sp->hull.rot, sp->hull.verts[hbi])); break; \
+	}                                                                                                            \
+	case GJK_CYLINDER: {                                                                                         \
+		v3 cu = sp->cylinder.axis;                                                                               \
+		if (sp->cylinder.inv_axis_len == 0.0f) { *(out_feat) = 0; (out_point) = sp->cylinder.p; break; }         \
+		float cda = dot(sd, cu); int cf = cda >= 0.0f; *(out_feat) = cf;                                         \
+		v3 cbase = cf ? sp->cylinder.q : sp->cylinder.p;                                                         \
+		v3 cdp = sub(sd, scale(cu, cda)); float cpl = len(cdp);                                                  \
+		(out_point) = (cpl > FLT_EPSILON) ? add(cbase, scale(cdp, sp->cylinder.radius / cpl)) : cbase; break;    \
+	}                                                                                                            \
+	default: *(out_feat) = 0; (out_point) = V3(0,0,0); break;                                                    \
+	}                                                                                                            \
 } while(0)
 
 static v3 gjk_center(const GJK_Shape* s)
@@ -225,17 +225,17 @@ static int gjk_solve4(GJK_Simplex* s)
 // -----------------------------------------------------------------------------
 // Closest point and witness points.
 
-static v3 gjk_closest_point(const GJK_Simplex* s)
-{
-	float inv = 1.0f / s->divisor;
-	switch (s->count) {
-	case 1: return s->v[0].point;
-	case 2: return add(scale(s->v[0].point, s->v[0].u * inv), scale(s->v[1].point, s->v[1].u * inv));
-	case 3: return add(add(scale(s->v[0].point, s->v[0].u * inv), scale(s->v[1].point, s->v[1].u * inv)), scale(s->v[2].point, s->v[2].u * inv));
-	case 4: return V3(0,0,0);
-	}
-	return V3(0,0,0);
-}
+#define GJK_CLOSEST_POINT(simplex, out) do {                                                                                    \
+	const GJK_Simplex* cs = (simplex);                                                                                         \
+	float cinv = 1.0f / cs->divisor;                                                                                           \
+	switch (cs->count) {                                                                                                       \
+	case 1: (out) = cs->v[0].point; break;                                                                                     \
+	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break;            \
+	case 3: (out) = add(add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)),               \
+	                     scale(cs->v[2].point, cs->v[2].u * cinv)); break;                                                     \
+	default: (out) = V3(0,0,0); break;                                                                                        \
+	}                                                                                                                          \
+} while(0)
 
 static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, int* f2)
 {
@@ -294,7 +294,7 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 		if (!solved) { simplex = backup; break; }
 		if (simplex.count == 4) break;
 
-		v3 closest = gjk_closest_point(&simplex);
+		v3 closest; GJK_CLOSEST_POINT(&simplex, closest);
 		float dsq = len2(closest);
 
 		if (dsq <= GJK_CONTAINMENT_EPS2) break;
