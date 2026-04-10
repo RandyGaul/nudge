@@ -288,6 +288,7 @@ typedef struct WorldInternal
 	int joint_pairs_version;           // ldl_topo_version when joint_pairs was last built
 	int sleep_enabled;       // 1 = island sleep active (default)
 	int thread_count;        // 0 or 1 = single-threaded, >1 = parallel PGS solver
+	void* np_pairs_out; // CK_DYNA BroadPair** — when set, broadphase outputs pairs here instead of running narrowphase
 	int ldl_enabled;         // 1 = LDL direct correction for joints (dual solvers only)
 	int ldl_topo_version;    // incremented on joint create/destroy
 	int ldl_correction_iter; // which PGS iter triggers LDL correction (-1 = after all PGS iters)

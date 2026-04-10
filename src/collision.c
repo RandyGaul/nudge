@@ -1533,7 +1533,9 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	bp_precomp_acc += perf_now() - t1;
 
 	// Sweep: test overlapping pairs along x-axis, then full 3D AABB overlap (SIMD branchless).
+	// Phase 1: collect broadphase pairs (no narrowphase yet — just AABB overlap test).
 	double t2 = perf_now();
+	CK_DYNA BroadPair* dd_pairs = NULL;
 	for (int i = 0; i < sap_count; i++) {
 		float max_x = sap[i].max_x;
 		int a = sap[i].body_idx;
@@ -1545,24 +1547,36 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 			int isl_b = w->body_cold[b].island_id;
 			if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
 			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
-			narrowphase_pair(w, a, b, manifolds);
+			apush(dd_pairs, ((BroadPair){ a, b }));
 		}
 	}
 
+	// Collect d-s pairs too.
 	bp_sweep_acc += perf_now() - t2;
-
-	// Dynamic vs static: BVH cross-test with tight AABB pre-filter.
 	double t3 = perf_now();
 	CK_DYNA BroadPair* pairs = NULL;
 	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
 	for (int i = 0; i < asize(pairs); i++) {
 		int a = pairs[i].a, b = pairs[i].b;
 		if (!aabb_overlaps(tight[a], tight[b])) continue;
-		narrowphase_pair(w, a, b, manifolds);
+		apush(dd_pairs, ((BroadPair){ a, b }));
 	}
 	afree(pairs);
-
 	bp_cross_acc += perf_now() - t3;
+
+	// Narrowphase on all collected pairs.
+	// If parallel dispatch is available (thread_count > 1), output pairs for external dispatch.
+	// Otherwise run narrowphase inline.
+	if (w->thread_count > 1 && w->np_pairs_out) {
+		// Output pairs for parallel narrowphase in nudge.c
+		CK_DYNA BroadPair** out = (CK_DYNA BroadPair**)w->np_pairs_out;
+		for (int i = 0; i < asize(dd_pairs); i++) apush(*out, dd_pairs[i]);
+	} else {
+		int dd_count = asize(dd_pairs);
+		for (int i = 0; i < dd_count; i++)
+			narrowphase_pair(w, dd_pairs[i].a, dd_pairs[i].b, manifolds);
+	}
+	afree(dd_pairs);
 	bp_frame_count++;
 
 	CK_FREE(tight);

@@ -128,123 +128,153 @@ static int perf_initialized;
 #include <intrin.h>
 
 #define SOLVER_MAX_THREADS 16
-#define SOLVER_BLOCK_SIZE  8  // batches per block
+#define SOLVER_BLOCK_SIZE  8
 
-typedef struct SolverBlock
-{
-	int start, count;         // range into batch array
-	volatile long sync_index; // atomic CAS claim counter
-} SolverBlock;
+typedef struct WorkBlock { int start, count; volatile long sync_index; } WorkBlock;
+typedef struct WorkStage { WorkBlock* blocks; int block_count; volatile long completion_count; } WorkStage;
 
-typedef struct SolverStage
-{
-	SolverBlock* blocks;
-	int block_count;
-	volatile long completion_count;
-	char _pad[52]; // pad to avoid false sharing (64 - 12 = 52)
-} SolverStage;
+// Generic work function: called per block with user context + block range.
+typedef void (*WorkFn)(void* ctx, int start, int count);
 
-typedef struct SolverThreadCtx
+typedef struct ThreadPoolCtx
 {
-	// Shared state (read by all workers)
-	SolverBodyVel* bodies;
-	PGS_Batch4* batches;
-	SolverStage* stages;
-	int stage_count;
 	volatile long sync_bits;  // (stage_index << 16) | sync_counter. UINT_MAX = exit.
+	WorkStage* stage;         // current stage
+	WorkFn fn;                // work function for current dispatch
+	void* fn_ctx;             // user context passed to fn
 	int worker_count;
-} SolverThreadCtx;
+	char _pad[40];
+} ThreadPoolCtx;
 
-// Execute blocks within a stage. Workers claim blocks via atomic CAS.
-static void solver_execute_stage(SolverStage* stage, SolverBodyVel* bodies, PGS_Batch4* batches, int prev_sync, int cur_sync)
+// Execute blocks: claim via CAS, call work function.
+static void pool_execute(ThreadPoolCtx* ctx, int prev_sync, int cur_sync)
 {
+	WorkStage* stage = ctx->stage;
 	int completed = 0;
-	// Forward sweep: claim blocks from start
 	for (int bi = 0; bi < stage->block_count; bi++) {
-		SolverBlock* blk = &stage->blocks[bi];
+		WorkBlock* blk = &stage->blocks[bi];
 		if (_InterlockedCompareExchange(&blk->sync_index, cur_sync, prev_sync) != prev_sync) continue;
-		for (int i = blk->start; i < blk->start + blk->count; i++)
-			solve_contact_batch4_sv(bodies, &batches[i]);
+		ctx->fn(ctx->fn_ctx, blk->start, blk->count);
 		completed++;
 	}
-	// Backward sweep: steal remaining blocks
 	for (int bi = stage->block_count - 1; bi >= 0; bi--) {
-		SolverBlock* blk = &stage->blocks[bi];
+		WorkBlock* blk = &stage->blocks[bi];
 		if (_InterlockedCompareExchange(&blk->sync_index, cur_sync, prev_sync) != prev_sync) continue;
-		for (int i = blk->start; i < blk->start + blk->count; i++)
-			solve_contact_batch4_sv(bodies, &batches[i]);
+		ctx->fn(ctx->fn_ctx, blk->start, blk->count);
 		completed++;
 	}
 	if (completed > 0) _InterlockedExchangeAdd(&stage->completion_count, completed);
 }
 
-// Worker thread function.
-static DWORD WINAPI solver_worker_thread(LPVOID param)
+static DWORD WINAPI pool_worker_thread(LPVOID param)
 {
-	SolverThreadCtx* ctx = (SolverThreadCtx*)param;
+	ThreadPoolCtx* ctx = (ThreadPoolCtx*)param;
 	long last_sync = 0;
 	for (;;) {
 		long sync = ctx->sync_bits;
-		if (sync == (long)0xFFFFFFFF) break; // exit signal
+		if (sync == (long)0xFFFFFFFF) break;
 		if (sync == last_sync) { _mm_pause(); continue; }
-		int stage_idx = sync & 0xFFFF;
 		int cur_sync = (sync >> 16) & 0xFFFF;
-		solver_execute_stage(&ctx->stages[stage_idx], ctx->bodies, ctx->batches, cur_sync - 1, cur_sync);
+		pool_execute(ctx, cur_sync - 1, cur_sync);
 		last_sync = sync;
 	}
 	return 0;
 }
 
-// Global thread pool (lazy-initialized).
-static HANDLE solver_threads[SOLVER_MAX_THREADS];
-static SolverThreadCtx solver_ctx;
-static int solver_thread_count;
+static HANDLE pool_threads[SOLVER_MAX_THREADS];
+static ThreadPoolCtx pool_ctx;
+static int pool_thread_count;
 
-static void solver_pool_ensure(int n_workers)
+static void pool_ensure(int n_workers)
 {
-	if (n_workers <= 1) return; // single-threaded, no pool needed
+	if (n_workers <= 1) return;
 	if (n_workers > SOLVER_MAX_THREADS) n_workers = SOLVER_MAX_THREADS;
-	int needed = n_workers - 1; // main thread is worker 0
-	if (solver_thread_count >= needed) return;
-	solver_ctx.worker_count = n_workers;
-	solver_ctx.sync_bits = 0;
-	for (int i = solver_thread_count; i < needed; i++)
-		solver_threads[i] = CreateThread(NULL, 0, solver_worker_thread, &solver_ctx, 0, NULL);
-	solver_thread_count = needed;
+	int needed = n_workers - 1;
+	if (pool_thread_count >= needed) return;
+	pool_ctx.worker_count = n_workers;
+	pool_ctx.sync_bits = 0;
+	for (int i = pool_thread_count; i < needed; i++)
+		pool_threads[i] = CreateThread(NULL, 0, pool_worker_thread, &pool_ctx, 0, NULL);
+	pool_thread_count = needed;
 }
 
-// Run one color's batches in parallel across the thread pool.
-static void solver_run_parallel(SolverBodyVel* bodies, PGS_Batch4* batches, int batch_start, int batch_end, int sync_counter)
+// Dispatch work in parallel: fn(ctx, start, count) called for each block.
+static int pool_sync_counter;
+static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size, int n_workers)
 {
-	int n_batches = batch_end - batch_start;
-	if (n_batches <= 0) return;
-
-	// Build blocks
-	int n_blocks = (n_batches + SOLVER_BLOCK_SIZE - 1) / SOLVER_BLOCK_SIZE;
-	SolverBlock blocks[256]; // max blocks per color
-	if (n_blocks > 256) n_blocks = 256;
-	for (int i = 0; i < n_blocks; i++) {
-		blocks[i].start = batch_start + i * SOLVER_BLOCK_SIZE;
-		int remaining = batch_end - blocks[i].start;
-		blocks[i].count = remaining < SOLVER_BLOCK_SIZE ? remaining : SOLVER_BLOCK_SIZE;
-		blocks[i].sync_index = sync_counter - 1;
-	}
-
-	SolverStage stage = { .blocks = blocks, .block_count = n_blocks, .completion_count = 0 };
-	solver_ctx.bodies = bodies;
-	solver_ctx.batches = batches;
-	solver_ctx.stages = &stage;
-	solver_ctx.stage_count = 1;
-
-	// Signal workers
-	long sync_bits = (long)((sync_counter << 16) | 0);
-	_InterlockedExchange(&solver_ctx.sync_bits, sync_bits);
-
-	// Main thread participates as worker
-	solver_execute_stage(&stage, bodies, batches, sync_counter - 1, sync_counter);
-
-	// Wait for all blocks to complete
+	if (total_items <= 0) return;
+	int n_blocks = (total_items + block_size - 1) / block_size;
+	if (n_blocks > 512) n_blocks = 512;
+	WorkBlock blocks[512];
+	for (int i = 0; i < n_blocks; i++) { blocks[i].start = i * block_size; int rem = total_items - blocks[i].start; blocks[i].count = rem < block_size ? rem : block_size; blocks[i].sync_index = pool_sync_counter; }
+	WorkStage stage = { .blocks = blocks, .block_count = n_blocks, .completion_count = 0 };
+	pool_ctx.stage = &stage;
+	pool_ctx.fn = fn;
+	pool_ctx.fn_ctx = ctx;
+	pool_sync_counter++;
+	long sync_bits = (long)((pool_sync_counter << 16) | 0);
+	_InterlockedExchange(&pool_ctx.sync_bits, sync_bits);
+	pool_execute(&pool_ctx, pool_sync_counter - 1, pool_sync_counter);
 	while (stage.completion_count < n_blocks) _mm_pause();
+}
+
+// --- PGS solver work function ---
+typedef struct PGS_WorkCtx { SolverBodyVel* bodies; PGS_Batch4* batches; } PGS_WorkCtx;
+static void pgs_work_fn(void* ctx, int start, int count)
+{
+	PGS_WorkCtx* p = (PGS_WorkCtx*)ctx;
+	for (int i = start; i < start + count; i++)
+		solve_contact_batch4_sv(p->bodies, &p->batches[i]);
+}
+
+// --- Narrowphase work function ---
+typedef struct NP_WorkCtx
+{
+	WorldInternal* w;
+	BroadPair* pairs;
+	CK_DYNA InternalManifold** per_thread_manifolds; // array of per-thread dyn arrays
+} NP_WorkCtx;
+
+// Thread-local narrowphase: each block writes to its own manifold array.
+// We use the block start as a pseudo-thread-id for output routing.
+static void np_work_fn(void* ctx, int start, int count)
+{
+	NP_WorkCtx* np = (NP_WorkCtx*)ctx;
+	// Use a simple thread-local manifold list keyed by block index.
+	// Each block appends to a shared per-thread array using the current thread.
+	// Since blocks are claimed atomically, we use thread-local storage.
+	CK_DYNA InternalManifold* local = NULL;
+	for (int i = start; i < start + count; i++) {
+		BroadPair* p = &np->pairs[i];
+		ShapeInternal* s0 = &np->w->body_cold[p->a].shapes[0];
+		ShapeInternal* s1 = &np->w->body_cold[p->b].shapes[0];
+		int ia = p->a, ib = p->b;
+		if (s0->type > s1->type || (s0->type == s1->type && ia > ib)) { int tmp = ia; ia = ib; ib = tmp; s0 = &np->w->body_cold[ia].shapes[0]; s1 = &np->w->body_cold[ib].shapes[0]; }
+		BodyHot* h0 = &np->w->body_hot[ia];
+		BodyHot* h1 = &np->w->body_hot[ib];
+		InternalManifold im = { .body_a = ia, .body_b = ib };
+		int hit = 0;
+		if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE) hit = collide_sphere_sphere(make_sphere(h0, s0), make_sphere(h1, s1), &im.m);
+		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CAPSULE) hit = collide_sphere_capsule(make_sphere(h0, s0), make_capsule(h1, s1), &im.m);
+		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_BOX) hit = collide_sphere_box(make_sphere(h0, s0), make_box(h1, s1), &im.m);
+		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CAPSULE) hit = collide_capsule_capsule(make_capsule(h0, s0), make_capsule(h1, s1), &im.m);
+		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX) hit = collide_capsule_box(make_capsule(h0, s0), make_box(h1, s1), &im.m);
+		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, &(int){-1});
+		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL) hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m);
+		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL) hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
+		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL) hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
+		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL) hit = collide_hull_hull(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m);
+		if (hit) apush(local, im);
+	}
+	// Merge local manifolds into per-thread output (we just push to the global array with a lock).
+	// Simple: use a global lock for the merge since blocks are large and merges are infrequent.
+	if (asize(local) > 0) {
+		static volatile long np_merge_lock;
+		while (_InterlockedCompareExchange(&np_merge_lock, 1, 0) != 0) _mm_pause();
+		for (int k = 0; k < asize(local); k++) apush(*np->per_thread_manifolds, local[k]);
+		_InterlockedExchange(&np_merge_lock, 0);
+	}
+	afree(local);
 }
 
 #endif // _WIN32
@@ -266,7 +296,33 @@ void world_step(World world, float dt)
 
 	double t1 = perf_now();
 	CK_DYNA InternalManifold* manifolds = NULL;
+	// Parallel narrowphase: broadphase outputs pair list, we dispatch narrowphase here.
+	CK_DYNA BroadPair* np_pairs = NULL;
+	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
+#ifdef _WIN32
+	if (n_workers > 1) {
+		pool_ensure(n_workers);
+		w->np_pairs_out = &np_pairs;
+	} else
+#endif
+		w->np_pairs_out = NULL;
+
 	broadphase_and_collide(w, &manifolds);
+	w->np_pairs_out = NULL;
+
+#ifdef _WIN32
+	// Parallel narrowphase on collected pairs.
+	if (n_workers > 1 && asize(np_pairs) >= 32) {
+		CK_DYNA InternalManifold* merged = manifolds;
+		NP_WorkCtx np_ctx = { .w = w, .pairs = np_pairs, .per_thread_manifolds = &merged };
+		pool_dispatch(np_work_fn, &np_ctx, asize(np_pairs), 32, n_workers);
+		manifolds = merged;
+	} else if (asize(np_pairs) > 0) {
+		for (int i = 0; i < asize(np_pairs); i++)
+			narrowphase_pair(w, np_pairs[i].a, np_pairs[i].b, &manifolds);
+	}
+	afree(np_pairs);
+#endif
 	islands_update_contacts(w, manifolds, asize(manifolds));
 	w->perf.broadphase = perf_now() - t1;
 
@@ -420,7 +476,7 @@ void world_step(World world, float dt)
 			// Sequential: colors are processed one at a time (graph coloring guarantees).
 			int n_workers = w->thread_count > 0 ? w->thread_count : 1;
 #ifdef _WIN32
-			if (n_workers > 1) solver_pool_ensure(n_workers);
+			if (n_workers > 1) pool_ensure(n_workers);
 #endif
 			static int sync_counter;
 			for (int iter = 0; iter < w->velocity_iters; iter++) {
@@ -429,8 +485,8 @@ void world_step(World world, float dt)
 					int n_color_batches = be - bs;
 #ifdef _WIN32
 					if (n_workers > 1 && n_color_batches >= n_workers * 2) {
-						sync_counter++;
-						solver_run_parallel(w->body_vel, batches, bs, be, sync_counter);
+						PGS_WorkCtx pgs_ctx = { .bodies = w->body_vel, .batches = batches + bs };
+						pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
 					} else
 #endif
 					{
