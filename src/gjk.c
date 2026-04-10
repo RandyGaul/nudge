@@ -28,6 +28,9 @@ typedef struct GJK_Simplex
 	int count;
 } GJK_Simplex;
 
+// Byte size of a simplex with n active vertices (vertices + divisor + count).
+#define gjk_simplex_size(n) (sizeof(GJK_Vertex) * (n) + sizeof(float) + sizeof(int))
+
 typedef struct GJK_Result
 {
 	v3 point1;  // closest point on shape A
@@ -272,13 +275,13 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 		int solved = 1;
 		if (simplex.count > 1) {
 			GJK_Simplex backup;
-			memcpy(&backup, &simplex, sizeof(GJK_Vertex) * simplex.count + sizeof(float) + sizeof(int));
+			memcpy(&backup, &simplex, gjk_simplex_size(simplex.count));
 			switch (simplex.count) {
 			case 2: solved = gjk_solve2(&simplex); break;
 			case 3: solved = gjk_solve3(&simplex); break;
 			case 4: solved = gjk_solve4(&simplex); break;
 			}
-			if (!solved) { memcpy(&simplex, &backup, sizeof(GJK_Vertex) * backup.count + sizeof(float) + sizeof(int)); break; }
+			if (!solved) { memcpy(&simplex, &backup, gjk_simplex_size(backup.count)); break; }
 		}
 		if (simplex.count == 4) break;
 
