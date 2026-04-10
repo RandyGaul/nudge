@@ -16,7 +16,7 @@ static AABB aabb_expand(AABB a, float margin) { v3 m = V3(margin, margin, margin
 
 static float aabb_surface_area(AABB a) { v3 d = sub(a.max, a.min); return d.x*d.y + d.y*d.z + d.z*d.x; }
 
-static int aabb_overlaps(AABB a, AABB b) { return a.min.x <= b.max.x && a.max.x >= b.min.x && a.min.y <= b.max.y && a.max.y >= b.min.y && a.min.z <= b.max.z && a.max.z >= b.min.z; }
+static int aabb_overlaps(AABB a, AABB b) { int no = simd_movemask(simd_or(simd_cmpgt(a.min.m, b.max.m), simd_cmpgt(b.min.m, a.max.m))); return (no & 0x7) == 0; }
 
 // Compute world-space AABB for a single shape on a body.
 static AABB shape_aabb(BodyHot* h, ShapeInternal* s)
