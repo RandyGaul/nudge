@@ -155,8 +155,9 @@ static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, in
 static int gjk_solve2(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point;
-	float u = dot(b, sub(b, a));
-	float v = dot(a, sub(a, b));
+	v3 ab = sub(b, a);
+	float u = dot(b, ab);
+	float v = -dot(a, ab);
 	if (v <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
 	if (u <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
 	s->divisor = u + v;
