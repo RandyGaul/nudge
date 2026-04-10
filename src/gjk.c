@@ -45,41 +45,43 @@ typedef struct GJK_Shape
 	union {
 		struct { v3 center; } point;
 		struct { v3 p, q; } segment;
-		struct { v3 center; v3 rot_row0, rot_row1, rot_row2; v3 inv_row0, inv_row1, inv_row2; v3 half_extents; } box;
-		struct { v3 center; v3 rot_row0, rot_row1, rot_row2; v3 inv_row0, inv_row1, inv_row2; const v3* verts; const float* soa; const HalfEdge* edges; const int* vert_edge; int count; int hint; } hull;
+		struct { v3 center; v3 rot_row0, rot_row1, rot_row2; v3 half_extents; } box;
+		struct { v3 center; v3 rot_row0, rot_row1, rot_row2; const v3* verts; const float* soa; const HalfEdge* edges; const int* vert_edge; int count; int hint; } hull;
 		struct { v3 p, q; float radius; v3 axis; float inv_axis_len; } cylinder;
 	};
 } GJK_Shape;
 static GJK_Shape gjk_sphere(v3 center, float radius) { return (GJK_Shape){ .type = GJK_POINT, .radius = radius, .point.center = center }; }
 static GJK_Shape gjk_capsule(v3 p, v3 q, float radius) { return (GJK_Shape){ .type = GJK_SEGMENT, .radius = radius, .segment.p = p, .segment.q = q }; }
-// Mat3x3 rotate using SSE: multiply-add across 3 rows without scalar extraction.
+// Mat3x3 transpose rotate: R^T * v (column-wise multiply-add). Used for inverse rotation.
+// 3 broadcasts + 3 muls + 2 adds = 8 SSE ops (vs 18 for row-dot version).
+static inline v3 gjk_mat_rotate_t(v3 r0, v3 r1, v3 r2, v3 v) {
+	return (v3){ .m = _mm_add_ps(_mm_add_ps(
+		_mm_mul_ps(r0.m, _mm_shuffle_ps(v.m, v.m, 0x00)),
+		_mm_mul_ps(r1.m, _mm_shuffle_ps(v.m, v.m, 0x55))),
+		_mm_mul_ps(r2.m, _mm_shuffle_ps(v.m, v.m, 0xAA))) };
+}
+
+// Mat3x3 forward rotate: R * v using row dot products.
 static inline v3 gjk_mat_rotate(v3 r0, v3 r1, v3 r2, v3 v) {
 	__m128 m0 = _mm_mul_ps(r0.m, v.m);
 	__m128 m1 = _mm_mul_ps(r1.m, v.m);
 	__m128 m2 = _mm_mul_ps(r2.m, v.m);
-	// Horizontal sum each row: [x0+y0+z0, x1+y1+z1, x2+y2+z2, 0]
-	// Transpose pairs then add
-	__m128 t01lo = _mm_unpacklo_ps(m0, m1);  // x0 x1 y0 y1
-	__m128 t01hi = _mm_unpackhi_ps(m0, m1);  // z0 z1 w0 w1
-	__m128 t2lo  = _mm_unpacklo_ps(m2, _mm_setzero_ps()); // x2 0 y2 0
-	__m128 t2hi  = _mm_unpackhi_ps(m2, _mm_setzero_ps()); // z2 0 w2 0
-	__m128 xy = _mm_movelh_ps(t01lo, t2lo);  // x0 x1 x2 0
-	__m128 yz = _mm_movehl_ps(t2lo, t01lo);  // y0 y1 y2 0
-	__m128 zw = _mm_movelh_ps(t01hi, t2hi);  // z0 z1 z2 0
+	__m128 t01lo = _mm_unpacklo_ps(m0, m1);
+	__m128 t01hi = _mm_unpackhi_ps(m0, m1);
+	__m128 t2lo  = _mm_unpacklo_ps(m2, _mm_setzero_ps());
+	__m128 t2hi  = _mm_unpackhi_ps(m2, _mm_setzero_ps());
+	__m128 xy = _mm_movelh_ps(t01lo, t2lo);
+	__m128 yz = _mm_movehl_ps(t2lo, t01lo);
+	__m128 zw = _mm_movelh_ps(t01hi, t2hi);
 	return (v3){ .m = _mm_add_ps(_mm_add_ps(xy, yz), zw) };
 }
 static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) {
-	// Build rotation matrix rows from quat
 	v3 r0 = quat_rotate(rot, V3(1,0,0)), r1 = quat_rotate(rot, V3(0,1,0)), r2 = quat_rotate(rot, V3(0,0,1));
-	quat ir = inv(rot);
-	v3 i0 = quat_rotate(ir, V3(1,0,0)), i1 = quat_rotate(ir, V3(0,1,0)), i2 = quat_rotate(ir, V3(0,0,1));
-	return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.rot_row0 = r0, .box.rot_row1 = r1, .box.rot_row2 = r2, .box.inv_row0 = i0, .box.inv_row1 = i1, .box.inv_row2 = i2, .box.half_extents = half_extents };
+	return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.rot_row0 = r0, .box.rot_row1 = r1, .box.rot_row2 = r2, .box.half_extents = half_extents };
 }
 static GJK_Shape gjk_hull(v3 center, quat rot, const v3* verts, int count, const float* soa, const HalfEdge* edges, const int* vert_edge) {
 	v3 r0 = quat_rotate(rot, V3(1,0,0)), r1 = quat_rotate(rot, V3(0,1,0)), r2 = quat_rotate(rot, V3(0,0,1));
-	quat ir = inv(rot);
-	v3 i0 = quat_rotate(ir, V3(1,0,0)), i1 = quat_rotate(ir, V3(0,1,0)), i2 = quat_rotate(ir, V3(0,0,1));
-	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.rot_row0 = r0, .hull.rot_row1 = r1, .hull.rot_row2 = r2, .hull.inv_row0 = i0, .hull.inv_row1 = i1, .hull.inv_row2 = i2, .hull.verts = verts, .hull.soa = soa, .hull.edges = edges, .hull.vert_edge = vert_edge, .hull.count = count };
+	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.rot_row0 = r0, .hull.rot_row1 = r1, .hull.rot_row2 = r2, .hull.verts = verts, .hull.soa = soa, .hull.edges = edges, .hull.vert_edge = vert_edge, .hull.count = count };
 }
 static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
 	v3 axis = sub(q, p);
@@ -195,7 +197,7 @@ static int gjk_hull_support_scan(const v3* verts, int count, const float* soa, v
 // Box/cylinder support: separate functions to keep gjk_support macro small for inlining budget.
 static v3 gjk_box_support(const GJK_Shape* sp, v3 sd, int* feat)
 {
-	v3 ld = gjk_mat_rotate(sp->box.inv_row0, sp->box.inv_row1, sp->box.inv_row2, sd);
+	v3 ld = gjk_mat_rotate_t(sp->box.rot_row0, sp->box.rot_row1, sp->box.rot_row2, sd);
 	v3 he = sp->box.half_extents;
 	v3 lc = V3(ld.x >= 0 ? he.x : -he.x, ld.y >= 0 ? he.y : -he.y, ld.z >= 0 ? he.z : -he.z);
 	*feat = (ld.x >= 0.0f) | ((ld.y >= 0.0f) << 1) | ((ld.z >= 0.0f) << 2);
@@ -221,7 +223,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
 	}                                                                                                                     \
 	case GJK_BOX: (out_point) = gjk_box_support(sp, sd, (out_feat)); break;                                                \
 	case GJK_HULL: {                                                                                                      \
-		v3 ld = gjk_mat_rotate(sp->hull.inv_row0, sp->hull.inv_row1, sp->hull.inv_row2, sd);                               \
+		v3 ld = gjk_mat_rotate_t(sp->hull.rot_row0, sp->hull.rot_row1, sp->hull.rot_row2, sd);                               \
 		int hbi = (sp->hull.vert_edge && sp->hull.count > 0)                                                              \
 			? gjk_hull_support_climb(sp->hull.verts, sp->hull.edges, sp->hull.vert_edge, ld, sp->hull.hint)                 \
 			: gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, ld);                                     \
