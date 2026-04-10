@@ -82,3 +82,6 @@ clean_motion	1040	baseline	Clean motion baseline: constructor + gjk_distance + i
 77	2325	discard	max_vert2 init from v[0]: noise, no clear gain
 78_fail	4700	discard	wrapper+inner restrict: killed inlining, doubled all times
 78	1976.1	keep	pointer API + GJK_Cache struct with hull vertex hints (-14.8%!!)
+79	1973.9	keep	skip len2 check on cached path (cleaner code)
+80	1957.4	keep	noinline simplex solvers (reduce icache pressure)
+81	1941.4	keep	__restrict on support function pointer params

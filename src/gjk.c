@@ -37,9 +37,12 @@ typedef struct GJK_Result
 } GJK_Result;
 typedef struct GJK_Cache
 {
-	v3 dir;     // separating direction from previous call
-	int hintA;  // hull vertex hint for shape A
-	int hintB;  // hull vertex hint for shape B
+	v3 dir;       // separating direction from previous call
+	int hintA;    // hull vertex hint for shape A
+	int hintB;    // hull vertex hint for shape B
+	int count;    // cached simplex vertex count (0 = direction-only warm start)
+	int feat1[3]; // feature IDs on shape A
+	int feat2[3]; // feature IDs on shape B
 } GJK_Cache;
 // -----------------------------------------------------------------------------
 // Shape types and constructors.
@@ -268,6 +271,27 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	}                                                                                                                     \
 } while(0)
 
+// Reconstruct a support point from a cached feature index (no direction search needed).
+static v3 gjk_support_feature(const GJK_Shape* sp, int feat)
+{
+	switch (sp->type) {
+	case GJK_POINT: return sp->point.center;
+	case GJK_SEGMENT: return feat ? sp->segment.q : sp->segment.p;
+	case GJK_BOX: {
+		v3 he = sp->box.half_extents;
+		v3 lc = V3((feat & 1) ? he.x : -he.x, (feat & 2) ? he.y : -he.y, (feat & 4) ? he.z : -he.z);
+		return add(sp->box.center, gjk_mat_rotate_t(sp->box.col0, sp->box.col1, sp->box.col2, lc));
+	}
+	case GJK_HULL:
+		return add(sp->hull.center, gjk_mat_rotate_t(sp->hull.col0, sp->hull.col1, sp->hull.col2, hmul(sp->hull.verts[feat], sp->hull.scale)));
+	case GJK_CYLINDER: {
+		__m128 sign = feat ? _mm_setzero_ps() : _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000));
+		return add(sp->cylinder.mid, (v3){ .m = _mm_xor_ps(sp->cylinder.half_axis.m, sign) });
+	}
+	}
+	return V3(0,0,0);
+}
+
 static v3 gjk_center(const GJK_Shape* s)
 {
 	switch (s->type) {
@@ -422,24 +446,43 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		if (shapeA->type == GJK_HULL) shapeA->hull.hint = cache->hintA;
 		if (shapeB->type == GJK_HULL) shapeB->hull.hint = cache->hintB;
 	}
-	v3 init_d;
-	if (cache && len2(cache->dir) > FLT_EPSILON) {
-		init_d = cache->dir;
-	} else {
-		init_d = sub(gjk_center(shapeB), gjk_center(shapeA));
-		if (len2(init_d) < FLT_EPSILON) init_d = V3(1, 0, 0);
-	}
 	int fA, fB;
-	v3 sA; gjk_support(shapeA, init_d, &fA, sA);
-	v3 sB; gjk_support(shapeB, neg(init_d), &fB, sB);
-	simplex.v[0].point1 = sA;
-	simplex.v[0].point2 = sB;
-	simplex.v[0].point = sub(sB, sA);
-	simplex.v[0].feat1 = fA;
-	simplex.v[0].feat2 = fB;
-	simplex.v[0].u = 1.0f;
-	simplex.divisor = 1.0f;
-	simplex.count = 1;
+	v3 sA, sB;
+	// Reconstruct simplex from cached features if available.
+	// Skip for cylinders: feature ID only encodes cap index, not radial position.
+	int use_simplex_cache = cache && cache->count >= 1 && cache->count <= 3 && shapeA->type != GJK_CYLINDER && shapeB->type != GJK_CYLINDER;
+	if (use_simplex_cache) {
+		for (int i = 0; i < cache->count; i++) {
+			v3 p1 = gjk_support_feature(shapeA, cache->feat1[i]);
+			v3 p2 = gjk_support_feature(shapeB, cache->feat2[i]);
+			simplex.v[i].point1 = p1;
+			simplex.v[i].point2 = p2;
+			simplex.v[i].point = sub(p2, p1);
+			simplex.v[i].feat1 = cache->feat1[i];
+			simplex.v[i].feat2 = cache->feat2[i];
+			simplex.v[i].u = 1.0f;
+		}
+		simplex.divisor = (float)cache->count;
+		simplex.count = cache->count;
+	} else {
+		v3 init_d;
+		if (cache && len2(cache->dir) > FLT_EPSILON) {
+			init_d = cache->dir;
+		} else {
+			init_d = sub(gjk_center(shapeB), gjk_center(shapeA));
+			if (len2(init_d) < FLT_EPSILON) init_d = V3(1, 0, 0);
+		}
+		gjk_support(shapeA, init_d, &fA, sA);
+		gjk_support(shapeB, neg(init_d), &fB, sB);
+		simplex.v[0].point1 = sA;
+		simplex.v[0].point2 = sB;
+		simplex.v[0].point = sub(sB, sA);
+		simplex.v[0].feat1 = fA;
+		simplex.v[0].feat2 = fB;
+		simplex.v[0].u = 1.0f;
+		simplex.divisor = 1.0f;
+		simplex.count = 1;
+	}
 	float dsq_prev = FLT_MAX;
 	int iter = 0;
 	while (iter < GJK_MAX_ITERS) {
@@ -486,6 +529,14 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		cache->dir = sep;
 		if (shapeA->type == GJK_HULL) cache->hintA = shapeA->hull.hint;
 		if (shapeB->type == GJK_HULL) cache->hintB = shapeB->hull.hint;
+		// Cache simplex features for next frame warm-start (skip for cylinders)
+		if (shapeA->type != GJK_CYLINDER && shapeB->type != GJK_CYLINDER) {
+			int cn = simplex.count < 3 ? simplex.count : 3;
+			cache->count = cn;
+			for (int i = 0; i < cn; i++) { cache->feat1[i] = simplex.v[i].feat1; cache->feat2[i] = simplex.v[i].feat2; }
+		} else {
+			cache->count = 0;
+		}
 	}
 	// Post-hoc radius for sphere/capsule core shapes.
 	float rA = shapeA->radius;
