@@ -12,6 +12,8 @@ int g_hull_trace;
 // Support function: furthest vertex along a direction.
 static v3 hull_support(const Hull* hull, v3 dir)
 {
+	// Box fast path: sign selection (3 comparisons vs 8 dot products).
+	if (hull->vert_count == 8 && hull->face_count == 6) return V3(dir.x >= 0.0f ? 1.0f : -1.0f, dir.y >= 0.0f ? 1.0f : -1.0f, dir.z >= 0.0f ? 1.0f : -1.0f);
 	float best = -1e18f;
 	int best_i = 0;
 	for (int i = 0; i < hull->vert_count; i++) {
@@ -398,9 +400,51 @@ int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold)
 	return 1;
 }
 
+// Analytical sphere-box: project sphere center to box local space, clamp to extents, compute distance.
+// Much faster than sphere_hull (which uses GJK + plane search).
 int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 {
-	return collide_sphere_hull(a, (ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents }, manifold);
+	// Transform sphere center to box local space.
+	quat inv_rot = inv(b.rotation);
+	v3 local_center = rotate(inv_rot, sub(a.center, b.center));
+
+	// Clamp to box extents = closest point on box surface.
+	v3 he = b.half_extents;
+	v3 clamped = V3(local_center.x < -he.x ? -he.x : (local_center.x > he.x ? he.x : local_center.x), local_center.y < -he.y ? -he.y : (local_center.y > he.y ? he.y : local_center.y), local_center.z < -he.z ? -he.z : (local_center.z > he.z ? he.z : local_center.z));
+
+	v3 diff = sub(local_center, clamped);
+	float dist2 = len2(diff);
+
+	if (dist2 > a.radius * a.radius && dist2 > 1e-12f) return 0;
+
+	if (dist2 > 1e-12f) {
+		// Sphere center outside box — contact on box surface.
+		float dist = sqrtf(dist2);
+		v3 local_n = scale(diff, 1.0f / dist);
+		v3 world_n = rotate(b.rotation, local_n);
+		v3 world_pt = add(b.center, rotate(b.rotation, clamped));
+		manifold->count = 1;
+		manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius - dist, .feature_id = 0 };
+		return 1;
+	}
+
+	// Sphere center inside box — find closest face.
+	float best_depth = he.x - fabsf(local_center.x);
+	int best_face = local_center.x > 0 ? 3 : 2; // +X:3, -X:2
+	float dy = he.y - fabsf(local_center.y);
+	if (dy < best_depth) { best_depth = dy; best_face = local_center.y > 0 ? 5 : 4; }
+	float dz = he.z - fabsf(local_center.z);
+	if (dz < best_depth) { best_depth = dz; best_face = local_center.z > 0 ? 1 : 0; }
+
+	v3 local_n = V3(0, 0, 0);
+	static const int face_axis[6] = {2, 2, 0, 0, 1, 1};
+	static const float face_sign[6] = {-1, 1, -1, 1, -1, 1};
+	(&local_n.x)[face_axis[best_face]] = face_sign[best_face];
+	v3 world_n = rotate(b.rotation, local_n);
+	v3 world_pt = sub(a.center, scale(world_n, a.radius));
+	manifold->count = 1;
+	manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius + best_depth, .feature_id = 0 };
+	return 1;
 }
 
 // Capsule-hull: GJK shallow path, face/edge-search deep path.
@@ -534,21 +578,72 @@ typedef struct FaceQuery
 	float separation;
 } FaceQuery;
 
-static FaceQuery sat_query_faces(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
+// Evaluate a single face of hull1 against hull2. Returns separation.
+static float sat_eval_face(const Hull* hull1, int face_idx, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
 {
-	// Transform from world to hull2 local: p_local = rot2^-1 * (p_world - pos2)
+	HullPlane pw = plane_transform(hull1->planes[face_idx], pos1, rot1, scale1);
 	quat inv2 = inv(rot2);
+	v3 sup_dir_local = rotate(inv2, neg(pw.normal));
+	v3 sup_local = hull_support(hull2, sup_dir_local);
+	v3 sup_scaled = V3(sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z);
+	v3 sup_world = add(pos2, rotate(rot2, sup_scaled));
+	return dot(pw.normal, sup_world) - pw.offset;
+}
 
+// face_hint: if >= 0, hill-climb from this face (for temporal coherence). -1 = full scan.
+static FaceQuery sat_query_faces_hint(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2, int face_hint)
+{
 	FaceQuery best = { .index = -1, .separation = -1e18f };
 
+	// Fast path: box vs any hull. Box has 6 faces with axis-aligned normals.
+	if (hull1 == &s_unit_box_hull) {
+		v3 cols[3] = { rotate(rot1, V3(1, 0, 0)), rotate(rot1, V3(0, 1, 0)), rotate(rot1, V3(0, 0, 1)) };
+		quat inv2 = inv(rot2);
+		for (int i = 0; i < 6; i++) {
+			HullPlane lp = hull1->planes[i];
+			int axis = lp.normal.x != 0.0f ? 0 : (lp.normal.y != 0.0f ? 1 : 2);
+			float sign = (&lp.normal.x)[axis];
+			v3 face_n = sign > 0 ? cols[axis] : neg(cols[axis]);
+			float face_off = dot(face_n, pos1) + (&scale1.x)[axis];
+			v3 sup_dir_local = rotate(inv2, neg(face_n));
+			v3 sup_local = hull_support(hull2, sup_dir_local);
+			v3 sup_scaled = V3(sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z);
+			v3 sup_world = add(pos2, rotate(rot2, sup_scaled));
+			float sep = dot(face_n, sup_world) - face_off;
+			if (sep > best.separation) { best.separation = sep; best.index = i; }
+		}
+		return best;
+	}
+
+	// Hill-climb from cached face: walk to topological neighbors with better separation.
+	// For large hulls (20+ faces), this is O(sqrt(F)) vs O(F) for full scan.
+	if (face_hint >= 0 && face_hint < hull1->face_count && hull1->face_count > 8) {
+		int cur = face_hint;
+		float cur_sep = sat_eval_face(hull1, cur, pos1, rot1, scale1, hull2, pos2, rot2, scale2);
+		best.index = cur; best.separation = cur_sep;
+		for (int iter = 0; iter < hull1->face_count; iter++) {
+			int improved = 0;
+			// Walk adjacent faces via shared edges.
+			int start_e = hull1->faces[cur].edge;
+			int ei = start_e;
+			do {
+				int twin = hull1->edges[ei].twin;
+				int adj_face = hull1->edges[twin].face;
+				if (adj_face != cur) {
+					float adj_sep = sat_eval_face(hull1, adj_face, pos1, rot1, scale1, hull2, pos2, rot2, scale2);
+					if (adj_sep > best.separation) { best.separation = adj_sep; best.index = adj_face; improved = 1; }
+				}
+				ei = hull1->edges[ei].next;
+			} while (ei != start_e);
+			if (!improved) return best;
+			cur = best.index;
+		}
+		return best;
+	}
+
 	for (int i = 0; i < hull1->face_count; i++) {
-		// Transform hull1's plane into hull2's local space
 		HullPlane pw = plane_transform(hull1->planes[i], pos1, rot1, scale1);
-		// Bring plane normal into hull2 local
-		v3 local_n = rotate(inv2, pw.normal);
-		v3 local_pt = rotate(inv2, sub(scale(pw.normal, pw.offset), pos2));
-		// Actually, let's just use world space and project hull2's support
-		// Support of hull2 in direction -pw.normal (world space)
+		quat inv2 = inv(rot2);
 		v3 sup_dir_local = rotate(inv2, neg(pw.normal));
 		v3 sup_local = hull_support(hull2, sup_dir_local);
 		v3 sup_scaled = { sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z };
@@ -562,6 +657,8 @@ static FaceQuery sat_query_faces(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 	}
 	return best;
 }
+
+static FaceQuery sat_query_faces(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2) { return sat_query_faces_hint(hull1, pos1, rot1, scale1, hull2, pos2, rot2, scale2, -1); }
 
 // -----------------------------------------------------------------------------
 // SAT: Gauss map Minkowski face test.
@@ -577,6 +674,7 @@ static int is_minkowski_face(v3 a, v3 b, v3 b_x_a, v3 c, v3 d, v3 d_x_c)
 }
 
 // Project edge pair: signed distance along cross(e1,e2) from p1 to p2.
+// Uses support functions instead of full vertex scan — O(1) for boxes.
 static float sat_edge_project_full(v3 e1, v3 e2, v3 c1,
 	const Hull* hull1, quat rel_rot, v3 scale1,
 	const Hull* hull2, v3 scale2)
@@ -590,8 +688,18 @@ static float sat_edge_project_full(v3 e1, v3 e2, v3 c1,
 		return -1e18f;
 
 	v3 n = scale(e1_x_e2, 1.0f / l);
-	// Orient n from hull1 toward hull2 by projecting ALL vertices of both hulls.
-	// This is O(V) per edge pair but robust for any scale/aspect ratio.
+
+	// For box hulls, use O(1) support function. For general hulls, keep O(V) vertex scan
+	// (avoids extra inv_rot overhead per edge pair).
+	if (hull1->vert_count == 8 && hull1->face_count == 6 && hull2->vert_count == 8 && hull2->face_count == 6) {
+		quat inv_rel = inv(rel_rot);
+		v3 sup1 = hull_support(hull1, rotate(inv_rel, n));
+		float max1 = dot(n, add(c1, rotate(rel_rot, V3(sup1.x*scale1.x, sup1.y*scale1.y, sup1.z*scale1.z))));
+		v3 sup2 = hull_support(hull2, neg(n));
+		float min2 = dot(n, V3(sup2.x*scale2.x, sup2.y*scale2.y, sup2.z*scale2.z));
+		return min2 - max1;
+	}
+
 	float max1 = -1e18f, min2 = 1e18f;
 	for (int i = 0; i < hull1->vert_count; i++) {
 		v3 v = add(c1, rotate(rel_rot, hull_vert_scaled(hull1, i, scale1)));
@@ -671,6 +779,20 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 // Collect face vertices in world space by walking the half-edge loop.
 static int hull_face_verts_world(const Hull* hull, int face_idx, v3 pos, quat rot, v3 sc, v3* out)
 {
+	// Fast path: box face vertices from rotation columns (avoids 4 quaternion rotations).
+	if (hull->verts == s_box_verts) {
+		v3 cx = scale(rotate(rot, V3(1, 0, 0)), sc.x), cy = scale(rotate(rot, V3(0, 1, 0)), sc.y), cz = scale(rotate(rot, V3(0, 0, 1)), sc.z);
+		// Walk the face winding to get vertices in correct order.
+		int start = hull->faces[face_idx].edge;
+		int e = start;
+		int count = 0;
+		do {
+			v3 lv = hull->verts[hull->edges[e].origin];
+			out[count++] = add(pos, add(add(scale(cx, lv.x), scale(cy, lv.y)), scale(cz, lv.z)));
+			e = hull->edges[e].next;
+		} while (e != start);
+		return count;
+	}
 	int start = hull->faces[face_idx].edge;
 	int e = start;
 	int count = 0;
@@ -684,6 +806,20 @@ static int hull_face_verts_world(const Hull* hull, int face_idx, v3 pos, quat ro
 // Find face on hull most anti-parallel to a world-space normal.
 static int find_incident_face(const Hull* hull, v3 pos, quat rot, v3 sc, v3 ref_normal)
 {
+	// Fast path: box faces are rotation columns. 3 dot products vs 6 plane_transforms.
+	if (hull->verts == s_box_verts) {
+		v3 cols[3] = { rotate(rot, V3(1, 0, 0)), rotate(rot, V3(0, 1, 0)), rotate(rot, V3(0, 0, 1)) };
+		// Box faces: -Z=0,+Z=1, -X=2,+X=3, -Y=4,+Y=5. Normals: +-col[2], +-col[0], +-col[1].
+		static const int axis_to_neg_face[3] = {2, 4, 0}; // -X=2, -Y=4, -Z=0
+		int best = 0; float best_dot = 1e18f;
+		for (int i = 0; i < 3; i++) {
+			float d = dot(cols[i], ref_normal);
+			// Positive face: d itself. Negative face: -d.
+			if (d < best_dot) { best_dot = d; best = axis_to_neg_face[i] + 1; } // positive face
+			if (-d < best_dot) { best_dot = -d; best = axis_to_neg_face[i]; }   // negative face
+		}
+		return best;
+	}
 	int best = 0;
 	float best_dot = 1e18f;
 	for (int i = 0; i < hull->face_count; i++) {
@@ -797,6 +933,68 @@ static int reduce_contacts(Contact* contacts, int count)
 	for (int i = 0; i < MAX_CONTACTS; i++) tmp[i] = contacts[sel[i]];
 	for (int i = 0; i < MAX_CONTACTS; i++) contacts[i] = tmp[i];
 	return MAX_CONTACTS;
+}
+
+// Generate face-face contact between two convex hulls using Sutherland-Hodgman clipping.
+// ref_face is the separating face on (ref_hull, ref_pos, ref_rot, ref_sc).
+// flip=1 means ref is actually hull B (so normal is negated for A->B convention).
+static int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot, v3 ref_sc, const Hull* inc_hull, v3 inc_pos, quat inc_rot, v3 inc_sc, int ref_face, int flip, Manifold* manifold)
+{
+	HullPlane ref_plane = plane_transform(ref_hull->planes[ref_face], ref_pos, ref_rot, ref_sc);
+	int inc_face = find_incident_face(inc_hull, inc_pos, inc_rot, inc_sc, ref_plane.normal);
+	v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
+	uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
+	int clip_count = hull_face_verts_world(inc_hull, inc_face, inc_pos, inc_rot, inc_sc, buf1);
+	for (int i = 0; i < clip_count; i++) fid1[i] = 0x80 | (uint8_t)i;
+
+	v3* in_buf = buf1; v3* out_buf = buf2;
+	uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
+	int start_e = ref_hull->faces[ref_face].edge;
+	int ei = start_e;
+	int guard = 0;
+	uint8_t clip_edge_idx = 0;
+	do {
+		const HalfEdge* edge = &ref_hull->edges[ei];
+		v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, edge->origin, ref_sc)));
+		v3 head = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[edge->twin].origin, ref_sc)));
+		v3 side_n = norm(cross(sub(head, tail), ref_plane.normal));
+		float side_d = dot(side_n, tail);
+		clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n, side_d, clip_edge_idx, out_buf, out_fid);
+		v3* swap = in_buf; in_buf = out_buf; out_buf = swap;
+		uint8_t* fswap = in_fid; in_fid = out_fid; out_fid = fswap;
+		clip_edge_idx++;
+		ei = edge->next;
+		assert(++guard < MAX_CLIP_VERTS && "generate_face_contact: face edge loop didn't close");
+	} while (ei != start_e);
+
+	{
+		v3 corners[MAX_CLIP_VERTS];
+		int ncorners = 0;
+		int ce = start_e;
+		do { corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[ce].origin, ref_sc))); ce = ref_hull->edges[ce].next; } while (ce != start_e);
+		float snap_tol2 = 1e-6f;
+		for (int i = 0; i < clip_count; i++)
+			for (int c = 0; c < ncorners; c++)
+				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
+	}
+
+	v3 contact_n = flip ? neg(ref_plane.normal) : ref_plane.normal;
+	Contact tmp_contacts[MAX_CLIP_VERTS];
+	int cp = 0;
+	for (int i = 0; i < clip_count; i++) {
+		float depth = ref_plane.offset - dot(ref_plane.normal, in_buf[i]);
+		if (depth >= -LINEAR_SLOP) {
+			uint32_t fid;
+			if (!flip) fid = (uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16);
+			else fid = (uint32_t)inc_face | ((uint32_t)ref_face << 8) | ((uint32_t)in_fid[i] << 16);
+			tmp_contacts[cp++] = (Contact){ .point = in_buf[i], .normal = contact_n, .penetration = depth, .feature_id = fid };
+		}
+	}
+	if (cp == 0) return 0;
+	cp = reduce_contacts(tmp_contacts, cp);
+	manifold->count = cp;
+	for (int i = 0; i < cp; i++) manifold->contacts[i] = tmp_contacts[i];
+	return 1;
 }
 
 // -----------------------------------------------------------------------------
@@ -972,13 +1170,164 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 }
 
 // -----------------------------------------------------------------------------
-int collide_box_box(Box a, Box b, Manifold* manifold)
+// Dedicated box-box SAT: Gottschalk OBB test with direct rotation column arithmetic.
+// Tests all 15 separating axes without generic hull machinery (plane_transform, hull_support loops, Gauss map).
+// Falls through to collide_hull_hull for contact generation when penetrating.
+// sat_hint: if non-NULL, *sat_hint is the cached axis from last frame (-1 = no cache).
+// On return, *sat_hint is updated to the winning axis for next frame.
+static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint)
 {
+	// Rotation columns for each box.
+	v3 ax = rotate(a.rotation, V3(1, 0, 0)), ay = rotate(a.rotation, V3(0, 1, 0)), az = rotate(a.rotation, V3(0, 0, 1));
+	v3 bx = rotate(b.rotation, V3(1, 0, 0)), by = rotate(b.rotation, V3(0, 1, 0)), bz = rotate(b.rotation, V3(0, 0, 1));
+
+	v3 d = sub(b.center, a.center);
+	float ea = a.half_extents.x, eb = a.half_extents.y, ec = a.half_extents.z;
+	float fa = b.half_extents.x, fb = b.half_extents.y, fc = b.half_extents.z;
+
+	// R[i][j] = dot(a_axis_i, b_axis_j), absR = |R| + epsilon for parallel edge robustness.
+	float R00 = dot(ax, bx), R01 = dot(ax, by), R02 = dot(ax, bz);
+	float R10 = dot(ay, bx), R11 = dot(ay, by), R12 = dot(ay, bz);
+	float R20 = dot(az, bx), R21 = dot(az, by), R22 = dot(az, bz);
+	float eps = 1e-6f;
+	float A00 = fabsf(R00)+eps, A01 = fabsf(R01)+eps, A02 = fabsf(R02)+eps;
+	float A10 = fabsf(R10)+eps, A11 = fabsf(R11)+eps, A12 = fabsf(R12)+eps;
+	float A20 = fabsf(R20)+eps, A21 = fabsf(R21)+eps, A22 = fabsf(R22)+eps;
+
+	// Translation in A's frame.
+	float ta = dot(d, ax), tb = dot(d, ay), tc = dot(d, az);
+
+	// Test 15 separating axes. Track minimum penetration.
+	float ra, rb, sep, pen, best_pen = 1e18f;
+	int best_axis = -1;
+
+	// A's face normals (axes 0-2).
+	ra = ea; rb = fa*A00 + fb*A01 + fc*A02; sep = fabsf(ta); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 0; }
+	ra = eb; rb = fa*A10 + fb*A11 + fc*A12; sep = fabsf(tb); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 1; }
+	ra = ec; rb = fa*A20 + fb*A21 + fc*A22; sep = fabsf(tc); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 2; }
+
+	// B's face normals (axes 3-5).
+	ra = ea*A00 + eb*A10 + ec*A20; rb = fa; sep = fabsf(ta*R00 + tb*R10 + tc*R20); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 3; }
+	ra = ea*A01 + eb*A11 + ec*A21; rb = fb; sep = fabsf(ta*R01 + tb*R11 + tc*R21); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 4; }
+	ra = ea*A02 + eb*A12 + ec*A22; rb = fc; sep = fabsf(ta*R02 + tb*R12 + tc*R22); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 5; }
+
+	// Edge cross products (axes 6-14). Skip near-parallel edges (cross product near zero).
+	// ax x bx
+	ra = eb*A20 + ec*A10; rb = fb*A02 + fc*A01; sep = fabsf(tc*R10 - tb*R20); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 6; }
+	// ax x by
+	ra = eb*A21 + ec*A11; rb = fa*A02 + fc*A00; sep = fabsf(tc*R11 - tb*R21); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 7; }
+	// ax x bz
+	ra = eb*A22 + ec*A12; rb = fa*A01 + fb*A00; sep = fabsf(tc*R12 - tb*R22); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 8; }
+	// ay x bx
+	ra = ea*A20 + ec*A00; rb = fb*A12 + fc*A11; sep = fabsf(ta*R20 - tc*R00); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 9; }
+	// ay x by
+	ra = ea*A21 + ec*A01; rb = fa*A12 + fc*A10; sep = fabsf(ta*R21 - tc*R01); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 10; }
+	// ay x bz
+	ra = ea*A22 + ec*A02; rb = fa*A11 + fb*A10; sep = fabsf(ta*R22 - tc*R02); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 11; }
+	// az x bx
+	ra = ea*A10 + eb*A00; rb = fb*A22 + fc*A21; sep = fabsf(tb*R00 - ta*R10); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 12; }
+	// az x by
+	ra = ea*A11 + eb*A01; rb = fa*A22 + fc*A20; sep = fabsf(tb*R01 - ta*R11); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 13; }
+	// az x bz
+	ra = ea*A12 + eb*A02; rb = fa*A21 + fb*A20; sep = fabsf(tb*R02 - ta*R12); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 14; }
+
+	if (!manifold) return 1;
+
+	// Face contact: fully inlined box-box contact gen using rotation columns.
+	// No hull infrastructure (plane_transform, half-edge walk, hull_support).
+	if (best_axis < 6) {
+		v3 ref_cols[3], inc_cols[3], ref_pos, inc_pos, ref_he, inc_he;
+		int flip;
+		if (best_axis < 3) {
+			ref_cols[0] = ax; ref_cols[1] = ay; ref_cols[2] = az; ref_pos = a.center; ref_he = a.half_extents;
+			inc_cols[0] = bx; inc_cols[1] = by; inc_cols[2] = bz; inc_pos = b.center; inc_he = b.half_extents;
+			flip = 0;
+		} else {
+			ref_cols[0] = bx; ref_cols[1] = by; ref_cols[2] = bz; ref_pos = b.center; ref_he = b.half_extents;
+			inc_cols[0] = ax; inc_cols[1] = ay; inc_cols[2] = az; inc_pos = a.center; inc_he = a.half_extents;
+			flip = 1;
+		}
+		int la = best_axis < 3 ? best_axis : best_axis - 3;
+		float proj_sign = best_axis < 3 ? (&((v3){ta, tb, tc}).x)[la] : (&((v3){ta*R00+tb*R10+tc*R20, ta*R01+tb*R11+tc*R21, ta*R02+tb*R12+tc*R22}).x)[la];
+		float nsign = proj_sign >= 0.0f ? 1.0f : -1.0f;
+		v3 ref_n = scale(ref_cols[la], nsign);
+		float ref_off = dot(ref_n, ref_pos) + (&ref_he.x)[la];
+		int u = (la + 1) % 3, v_ax = (la + 2) % 3;
+
+		// Incident face: find which inc column is most anti-parallel to ref_n.
+		int inc_la = 0; float inc_best = 1e18f;
+		for (int i = 0; i < 3; i++) { float d = dot(inc_cols[i], ref_n); if (d < inc_best) { inc_best = d; inc_la = i; } if (-d < inc_best) { inc_best = -d; inc_la = i; } }
+		// Determine sign of incident face normal.
+		float inc_nsign = dot(inc_cols[inc_la], ref_n) > 0 ? -1.0f : 1.0f;
+		int inc_u = (inc_la + 1) % 3, inc_v = (inc_la + 2) % 3;
+
+		// Incident face vertices (4 corners of the incident face).
+		v3 inc_center = add(inc_pos, scale(inc_cols[inc_la], inc_nsign * (&inc_he.x)[inc_la]));
+		v3 inc_eu = scale(inc_cols[inc_u], (&inc_he.x)[inc_u]), inc_ev = scale(inc_cols[inc_v], (&inc_he.x)[inc_v]);
+		v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
+		uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
+		buf1[0] = add(inc_center, add(inc_eu, inc_ev));
+		buf1[1] = add(inc_center, sub(neg(inc_eu), neg(inc_ev)));
+		buf1[2] = add(inc_center, sub(neg(inc_eu), inc_ev));
+		buf1[3] = add(inc_center, sub(inc_eu, inc_ev));
+		// Fix winding: ensure CCW when viewed from ref_n direction.
+		if (dot(cross(sub(buf1[1], buf1[0]), sub(buf1[2], buf1[0])), ref_n) > 0) { v3 tmp = buf1[1]; buf1[1] = buf1[3]; buf1[3] = tmp; }
+		for (int i = 0; i < 4; i++) fid1[i] = 0x80 | (uint8_t)i;
+		int clip_count = 4;
+
+		// 4 side planes from rotation columns (no cross product, no normalize).
+		v3 side_n[4] = { ref_cols[u], neg(ref_cols[u]), ref_cols[v_ax], neg(ref_cols[v_ax]) };
+		float side_d[4] = { dot(ref_cols[u], ref_pos) + (&ref_he.x)[u], dot(neg(ref_cols[u]), ref_pos) + (&ref_he.x)[u], dot(ref_cols[v_ax], ref_pos) + (&ref_he.x)[v_ax], dot(neg(ref_cols[v_ax]), ref_pos) + (&ref_he.x)[v_ax] };
+
+		v3* in_buf = buf1; v3* out_buf = buf2;
+		uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
+		for (int i = 0; i < 4; i++) {
+			clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n[i], side_d[i], (uint8_t)i, out_buf, out_fid);
+			v3* sw = in_buf; in_buf = out_buf; out_buf = sw;
+			uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
+		}
+
+		// Corner snap: 4 reference face corners from rotation columns.
+		v3 ref_center = add(ref_pos, scale(ref_cols[la], nsign * (&ref_he.x)[la]));
+		v3 ref_eu = scale(ref_cols[u], (&ref_he.x)[u]), ref_ev = scale(ref_cols[v_ax], (&ref_he.x)[v_ax]);
+		v3 corners[4] = { add(ref_center, add(ref_eu, ref_ev)), add(ref_center, sub(ref_eu, ref_ev)), add(ref_center, sub(neg(ref_eu), neg(ref_ev))), add(ref_center, sub(neg(ref_eu), ref_ev)) };
+		float snap_tol2 = 1e-6f;
+		for (int i = 0; i < clip_count; i++)
+			for (int c = 0; c < 4; c++)
+				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
+
+		// Build face indices for feature IDs. Map (la, nsign) to hull face index.
+		static const int face_map[3][2] = { {2, 3}, {4, 5}, {0, 1} };
+		int ref_face = face_map[la][nsign > 0 ? 1 : 0];
+		int inc_face = face_map[inc_la][inc_nsign > 0 ? 1 : 0];
+
+		v3 contact_n = flip ? neg(ref_n) : ref_n;
+		Contact tmp_contacts[MAX_CLIP_VERTS];
+		int cp = 0;
+		for (int i = 0; i < clip_count; i++) {
+			float depth = ref_off - dot(ref_n, in_buf[i]);
+			if (depth >= -LINEAR_SLOP) {
+				uint32_t fid = flip ? ((uint32_t)inc_face | ((uint32_t)ref_face << 8) | ((uint32_t)in_fid[i] << 16)) : ((uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16));
+				tmp_contacts[cp++] = (Contact){ .point = in_buf[i], .normal = contact_n, .penetration = depth, .feature_id = fid };
+			}
+		}
+		if (cp == 0) return 0;
+		cp = reduce_contacts(tmp_contacts, cp);
+		manifold->count = cp;
+		for (int i = 0; i < cp; i++) manifold->contacts[i] = tmp_contacts[i];
+		if (sat_hint) *sat_hint = best_axis;
+		return 1;
+	}
+
+	// Edge-edge contact: fall through to hull-hull (edge contacts are rare in box piles).
+	if (sat_hint) *sat_hint = best_axis;
 	return collide_hull_hull(
 		(ConvexHull){ &s_unit_box_hull, a.center, a.rotation, a.half_extents },
 		(ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents },
 		manifold);
 }
+
+int collide_box_box(Box a, Box b, Manifold* manifold) { return collide_box_box_ex(a, b, manifold, NULL); }
 
 const Hull* hull_unit_box() { return &s_unit_box_hull; }
 
@@ -1022,6 +1371,39 @@ static ConvexHull make_convex_hull(BodyHot* h, ShapeInternal* s)
 }
 
 // Narrowphase dispatch for a single body pair.
+// Narrowphase timing accumulators (indexed by shape pair type).
+// Pair encoding: type_a * 5 + type_b (upper triangle, type_a <= type_b).
+#define NP_PAIR_COUNT 25
+static double np_time_acc[NP_PAIR_COUNT];
+static int np_call_acc[NP_PAIR_COUNT];
+static int np_frame_count;
+
+static int np_pair_idx(int ta, int tb) { return ta * 5 + tb; }
+
+void narrowphase_reset_timers() { memset(np_time_acc, 0, sizeof(np_time_acc)); memset(np_call_acc, 0, sizeof(np_call_acc)); np_frame_count = 0; }
+void narrowphase_end_frame() { np_frame_count++; }
+void narrowphase_print_timers()
+{
+	if (np_frame_count == 0) return;
+	double n = (double)np_frame_count;
+	const char* names[] = {"sphere", "capsule", "box", "hull", "?"};
+	printf("  --- narrowphase breakdown ---\n");
+	double total = 0;
+	int total_calls = 0;
+	for (int a = 0; a < 4; a++) for (int b = a; b < 4; b++) {
+		int idx = np_pair_idx(a, b);
+		if (np_call_acc[idx] == 0) continue;
+		double avg_us = np_time_acc[idx] / n * 1e6;
+		int avg_calls = (int)((double)np_call_acc[idx] / n + 0.5);
+		printf("  np.%-8s-%-8s %7.1f us  (%d calls, %.2f us/call)\n", names[a], names[b], avg_us, avg_calls, avg_us / avg_calls);
+		total += np_time_acc[idx] / n * 1000.0;
+		total_calls += avg_calls;
+	}
+	printf("  np.total:          %7.3f ms  (%d calls)\n", total, total_calls);
+}
+
+static uint64_t body_pair_key(int a, int b);
+
 static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** manifolds)
 {
 	// Canonical ordering: lower type first for upper-triangle dispatch,
@@ -1037,6 +1419,7 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	InternalManifold im = { .body_a = i, .body_b = j };
 
 	int hit = 0;
+	double t0 = perf_now();
 
 	if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE)
 		hit = collide_sphere_sphere(make_sphere(h0, s0), make_sphere(h1, s1), &im.m);
@@ -1048,8 +1431,13 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		hit = collide_capsule_capsule(make_capsule(h0, s0), make_capsule(h1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX)
 		hit = collide_capsule_box(make_capsule(h0, s0), make_box(h1, s1), &im.m);
-	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX)
-		hit = collide_box_box(make_box(h0, s0), make_box(h1, s1), &im.m);
+	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) {
+		uint64_t pkey = body_pair_key(i, j);
+		WarmManifold* wm = map_get_ptr(w->warm_cache, pkey);
+		int hint = wm ? wm->sat_axis : -1;
+		hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, &hint);
+		if (wm) wm->sat_axis = hint;
+	}
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL)
 		hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL)
@@ -1058,6 +1446,11 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL)
 		hit = collide_hull_hull(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m);
+
+	double dt = perf_now() - t0;
+	int idx = np_pair_idx(s0->type, s1->type);
+	np_time_acc[idx] += dt;
+	np_call_acc[idx]++;
 
 	if (hit) apush(*manifolds, im);
 }

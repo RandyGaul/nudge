@@ -400,6 +400,8 @@ struct WarmManifold
 	float manifold_lambda_t1;
 	float manifold_lambda_t2;
 	float manifold_lambda_twist;
+	// Cached SAT axis for hill-climb warm-start (-1 = no cache).
+	int sat_axis;
 };
 
 // -----------------------------------------------------------------------------
