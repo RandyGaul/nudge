@@ -243,9 +243,9 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	float cplf = _mm_cvtss_f32(cpl);
 	if (cplf <= FLT_EPSILON) { *feat = cap; return cbase; }
 	float inv_cpl = 1.0f / cplf;
-	// Pack normalized perp direction as 2 half-floats (15-bit signed each) + cap bit
-	int hx = (int)(cdp.x * inv_cpl * 16383.0f), hy = (int)(cdp.y * inv_cpl * 16383.0f);
-	*feat = cap | ((hx & 0x7FFF) << 1) | ((hy & 0x7FFF) << 16);
+	// Pack normalized perp direction as 3x10-bit signed + 1 cap bit = 31 bits
+	int ix = (int)(cdp.x * inv_cpl * 511.0f), iy = (int)(cdp.y * inv_cpl * 511.0f), iz = (int)(cdp.z * inv_cpl * 511.0f);
+	*feat = cap | ((ix & 0x3FF) << 1) | ((iy & 0x3FF) << 11) | ((iz & 0x3FF) << 21);
 	return add(cbase, v3_scale_m(cdp, _mm_div_ss(_mm_set_ss(sp->cylinder.radius), cpl)));
 }
 // Support macro: dispatches per shape type. Box/cylinder/hull-scan are functions to reduce code size.
@@ -292,16 +292,14 @@ static v3 gjk_support_feature(const GJK_Shape* sp, int feat)
 		int cap = feat & 1;
 		__m128 sign = cap ? _mm_setzero_ps() : _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000));
 		v3 cbase = add(sp->cylinder.mid, (v3){ .m = _mm_xor_ps(sp->cylinder.half_axis.m, sign) });
-		// Decode packed perpendicular direction (half-float nx, ny)
-		int hx = (feat >> 1) & 0x7FFF, hy = (feat >> 16) & 0x7FFF;
-		if (hx >= 0x4000) hx -= 0x8000; // sign extend 15-bit
-		if (hy >= 0x4000) hy -= 0x8000;
-		float nx = (float)hx / 16383.0f, ny = (float)hy / 16383.0f;
-		// Derive nz from perpendicularity: dot(n, axis) = 0 => nz = -(ax*nx + ay*ny) / az
-		v3 ax = sp->cylinder.axis;
-		float nz = (fabsf(ax.z) > 0.01f) ? -(ax.x * nx + ax.y * ny) / ax.z : 0.0f;
-		float nl = sqrtf(nx*nx + ny*ny + nz*nz);
-		if (nl > FLT_EPSILON) return add(cbase, scale(V3(nx, ny, nz), sp->cylinder.radius / nl));
+		// Decode 3x10-bit signed perpendicular direction
+		int ix = (feat >> 1) & 0x3FF, iy = (feat >> 11) & 0x3FF, iz = (feat >> 21) & 0x3FF;
+		if (ix >= 0x200) ix -= 0x400; // sign extend 10-bit
+		if (iy >= 0x200) iy -= 0x400;
+		if (iz >= 0x200) iz -= 0x400;
+		float nx = (float)ix / 511.0f, ny = (float)iy / 511.0f, nz = (float)iz / 511.0f;
+		float nl2 = nx*nx + ny*ny + nz*nz;
+		if (nl2 > FLT_EPSILON) return add(cbase, scale(V3(nx, ny, nz), sp->cylinder.radius / sqrtf(nl2)));
 		return cbase;
 	}
 	}
