@@ -1109,9 +1109,9 @@ static AABB* bvh_build_lut(BVHTree* t)
 	return lut;
 }
 
-// Sweep-and-prune entry for axis-sorted broadphase.
-typedef struct SAPEntry { int body_idx; float min_x, max_x; } SAPEntry;
-static int sap_cmp(const void* a, const void* b) { float d = ((SAPEntry*)a)->min_x - ((SAPEntry*)b)->min_x; return (d > 0) - (d < 0); }
+// Sweep-and-prune entry: stores body index + sweep axis min/max.
+typedef struct SAPEntry { int body_idx; float smin, smax; } SAPEntry;
+static int sap_cmp(const void* a, const void* b) { float d = ((SAPEntry*)a)->smin - ((SAPEntry*)b)->smin; return (d > 0) - (d < 0); }
 
 static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 {
@@ -1121,29 +1121,47 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	AABB* lut = bvh_build_lut(w->bvh_dynamic);
 	if (lut) { bvh_incremental_refine(w->bvh_dynamic, lut); CK_FREE(lut); }
 
-	// Build tight AABBs + sweep-and-prune entries for all dynamic bodies.
+	// Build tight AABBs for all bodies + find best sweep axis (widest spread).
 	int body_count = asize(w->body_hot);
 	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
+	AABB world_box = aabb_empty();
 	CK_DYNA SAPEntry* sap = NULL;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
 		tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]);
-		if (w->body_hot[i].inv_mass > 0.0f) apush(sap, ((SAPEntry){ i, tight[i].min.x, tight[i].max.x }));
+		if (w->body_hot[i].inv_mass > 0.0f) {
+			apush(sap, ((SAPEntry){ i, 0.0f, 0.0f }));
+			world_box = aabb_merge(world_box, tight[i]);
+		}
 	}
 
-	// Sort dynamic bodies by x-axis AABB min.
+	// Pick axis with widest extent for sweep.
+	v3 extent = sub(world_box.max, world_box.min);
+	int axis = 0;
+	if (extent.y > extent.x && extent.y > extent.z) axis = 1;
+	else if (extent.z > extent.x) axis = 2;
+	int ax1 = (axis + 1) % 3, ax2 = (axis + 2) % 3;
+
+	// Fill sweep min/max for chosen axis.
 	int sap_count = asize(sap);
+	for (int i = 0; i < sap_count; i++) {
+		int bi = sap[i].body_idx;
+		sap[i].smin = (&tight[bi].min.x)[axis];
+		sap[i].smax = (&tight[bi].max.x)[axis];
+	}
+
 	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAPEntry), sap_cmp);
 
-	// Sweep: test overlapping pairs along x-axis, then full 3D AABB check.
+	// Sweep along chosen axis, check remaining 2 axes inline.
 	for (int i = 0; i < sap_count; i++) {
-		float max_x = sap[i].max_x;
+		float smax = sap[i].smax;
 		int a = sap[i].body_idx;
-		for (int j = i + 1; j < sap_count && sap[j].min_x <= max_x; j++) {
+		float a_min1 = (&tight[a].min.x)[ax1], a_max1 = (&tight[a].max.x)[ax1];
+		float a_min2 = (&tight[a].min.x)[ax2], a_max2 = (&tight[a].max.x)[ax2];
+		for (int j = i + 1; j < sap_count && sap[j].smin <= smax; j++) {
 			int b = sap[j].body_idx;
-			// y and z overlap (x already confirmed by sweep).
-			if (tight[a].min.y > tight[b].max.y || tight[a].max.y < tight[b].min.y) continue;
-			if (tight[a].min.z > tight[b].max.z || tight[a].max.z < tight[b].min.z) continue;
+			if (a_min1 > (&tight[b].max.x)[ax1] || a_max1 < (&tight[b].min.x)[ax1]) continue;
+			if (a_min2 > (&tight[b].max.x)[ax2] || a_max2 < (&tight[b].min.x)[ax2]) continue;
 			int isl_a = w->body_cold[a].island_id, isl_b = w->body_cold[b].island_id;
 			if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
 			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
