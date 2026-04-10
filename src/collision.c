@@ -815,6 +815,68 @@ static int reduce_contacts(Contact* contacts, int count)
 	return MAX_CONTACTS;
 }
 
+// Generate face-face contact between two convex hulls using Sutherland-Hodgman clipping.
+// ref_face is the separating face on (ref_hull, ref_pos, ref_rot, ref_sc).
+// flip=1 means ref is actually hull B (so normal is negated for A->B convention).
+static int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot, v3 ref_sc, const Hull* inc_hull, v3 inc_pos, quat inc_rot, v3 inc_sc, int ref_face, int flip, Manifold* manifold)
+{
+	HullPlane ref_plane = plane_transform(ref_hull->planes[ref_face], ref_pos, ref_rot, ref_sc);
+	int inc_face = find_incident_face(inc_hull, inc_pos, inc_rot, inc_sc, ref_plane.normal);
+	v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
+	uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
+	int clip_count = hull_face_verts_world(inc_hull, inc_face, inc_pos, inc_rot, inc_sc, buf1);
+	for (int i = 0; i < clip_count; i++) fid1[i] = 0x80 | (uint8_t)i;
+
+	v3* in_buf = buf1; v3* out_buf = buf2;
+	uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
+	int start_e = ref_hull->faces[ref_face].edge;
+	int ei = start_e;
+	int guard = 0;
+	uint8_t clip_edge_idx = 0;
+	do {
+		const HalfEdge* edge = &ref_hull->edges[ei];
+		v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, edge->origin, ref_sc)));
+		v3 head = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[edge->twin].origin, ref_sc)));
+		v3 side_n = norm(cross(sub(head, tail), ref_plane.normal));
+		float side_d = dot(side_n, tail);
+		clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n, side_d, clip_edge_idx, out_buf, out_fid);
+		v3* swap = in_buf; in_buf = out_buf; out_buf = swap;
+		uint8_t* fswap = in_fid; in_fid = out_fid; out_fid = fswap;
+		clip_edge_idx++;
+		ei = edge->next;
+		assert(++guard < MAX_CLIP_VERTS && "generate_face_contact: face edge loop didn't close");
+	} while (ei != start_e);
+
+	{
+		v3 corners[MAX_CLIP_VERTS];
+		int ncorners = 0;
+		int ce = start_e;
+		do { corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[ce].origin, ref_sc))); ce = ref_hull->edges[ce].next; } while (ce != start_e);
+		float snap_tol2 = 1e-6f;
+		for (int i = 0; i < clip_count; i++)
+			for (int c = 0; c < ncorners; c++)
+				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
+	}
+
+	v3 contact_n = flip ? neg(ref_plane.normal) : ref_plane.normal;
+	Contact tmp_contacts[MAX_CLIP_VERTS];
+	int cp = 0;
+	for (int i = 0; i < clip_count; i++) {
+		float depth = ref_plane.offset - dot(ref_plane.normal, in_buf[i]);
+		if (depth >= -LINEAR_SLOP) {
+			uint32_t fid;
+			if (!flip) fid = (uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16);
+			else fid = (uint32_t)inc_face | ((uint32_t)ref_face << 8) | ((uint32_t)in_fid[i] << 16);
+			tmp_contacts[cp++] = (Contact){ .point = in_buf[i], .normal = contact_n, .penetration = depth, .feature_id = fid };
+		}
+	}
+	if (cp == 0) return 0;
+	cp = reduce_contacts(tmp_contacts, cp);
+	manifold->count = cp;
+	for (int i = 0; i < cp; i++) manifold->contacts[i] = tmp_contacts[i];
+	return 1;
+}
+
 // -----------------------------------------------------------------------------
 // Full SAT hull vs hull with Sutherland-Hodgman face clipping.
 
@@ -1047,8 +1109,31 @@ int collide_box_box(Box a, Box b, Manifold* manifold)
 	// az x bz
 	ra = ea*A12 + eb*A02; rb = fa*A21 + fb*A20; sep = fabsf(tb*R02 - ta*R12); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 14; }
 
-	// Penetrating on all 15 axes. Fall through to hull-hull for contact generation.
-	// The SAT phase above is ~3x faster than generic hull-hull SAT for boxes.
+	if (!manifold) return 1;
+
+	// Map Gottschalk axis to face contact or edge contact.
+	// Axes 0-2: A face normals, axes 3-5: B face normals, axes 6-14: edge-edge.
+	const float k_tol = 0.05f;
+	if (best_axis < 6) {
+		// Face contact. Map axis to box hull face index.
+		// Box faces: -Z=0,+Z=1,-X=2,+X=3,-Y=4,+Y=5.
+		// Gottschalk axis 0=X, 1=Y, 2=Z for A; 3=X, 4=Y, 5=Z for B.
+		// Face is positive or negative depending on projection sign.
+		static const int face_map[3][2] = { {2, 3}, {4, 5}, {0, 1} }; // [axis][positive]
+		if (best_axis < 3) {
+			int local_axis = best_axis;
+			float proj = (&((v3){ta, tb, tc}).x)[local_axis];
+			int face_idx = face_map[local_axis][proj >= 0.0f ? 1 : 0];
+			return generate_face_contact(&s_unit_box_hull, a.center, a.rotation, a.half_extents, &s_unit_box_hull, b.center, b.rotation, b.half_extents, face_idx, 0, manifold);
+		} else {
+			int local_axis = best_axis - 3;
+			float projs[3] = { ta*R00 + tb*R10 + tc*R20, ta*R01 + tb*R11 + tc*R21, ta*R02 + tb*R12 + tc*R22 };
+			int face_idx = face_map[local_axis][projs[local_axis] >= 0.0f ? 1 : 0];
+			return generate_face_contact(&s_unit_box_hull, b.center, b.rotation, b.half_extents, &s_unit_box_hull, a.center, a.rotation, a.half_extents, face_idx, 1, manifold);
+		}
+	}
+
+	// Edge-edge contact: fall through to hull-hull for now (edge contacts are rare in box piles).
 	return collide_hull_hull(
 		(ConvexHull){ &s_unit_box_hull, a.center, a.rotation, a.half_extents },
 		(ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents },
