@@ -374,13 +374,14 @@ static int qh_build_simplex(QH_State* s, int nv)
 	s->interior = scale(add(add(s->verts[vtx[0]].pos, s->verts[vtx[1]].pos), add(s->verts[vtx[2]].pos, s->verts[vtx[3]].pos)), 0.25f);
 
 	// Assign conflict vertices: each point goes to the face it's furthest outside of.
+	HullPlane tp[4]; for (int k = 0; k < 4; k++) tp[k] = s->faces[tris[k]].plane;
+	float eps = s->epsilon;
 	for (int i = 0; i < nv; i++) {
-		if (i==vtx[0]||i==vtx[1]||i==vtx[2]||i==vtx[3]) {
-			continue;
-		}
-		float bd = s->epsilon; int bf = -1;
+		if (i==vtx[0]||i==vtx[1]||i==vtx[2]||i==vtx[3]) continue;
+		v3 p = s->verts[i].pos;
+		float bd = eps; int bf = -1;
 		for (int k = 0; k < 4; k++) {
-			float d = qh_face_dist(s, tris[k], s->verts[i].pos);
+			float d = dot(tp[k].normal, p) - tp[k].offset;
 			if (d > bd) { bd = d; bf = tris[k]; }
 		}
 		if (bf >= 0) qh_conflict_add(s, bf, i);
