@@ -87,6 +87,9 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 	return gjk_hull(pos, rot, scaled_verts, n, NULL);
 }
 
+// Branchless select: a where mask=0, b where mask=all-1s. 3 instructions, no SSE4.1 needed.
+#define sel_ps(a, b, mask) _mm_xor_ps(a, _mm_and_ps(_mm_xor_ps(a, b), mask))
+
 // Support function: returns world-space support point + feature ID.
 #define gjk_support(shape, dir, out_feat, out_point) do {                                                        \
 	const GJK_Shape* sp = (shape); v3 sd = (dir);                                                                \
@@ -94,12 +97,15 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                      \
 	case GJK_SEGMENT: {                                                                                          \
 		int sf = dot(sd, sub(sp->segment.q, sp->segment.p)) >= 0.0f;                                             \
-		*(out_feat) = sf; (out_point) = sf ? sp->segment.q : sp->segment.p; break;                               \
+		__m128 smask = _mm_castsi128_ps(_mm_set1_epi32(sf ? -1 : 0));                                            \
+		*(out_feat) = sf; (out_point) = (v3){ .m = sel_ps(sp->segment.p.m, sp->segment.q.m, smask) }; break;     \
 	}                                                                                                            \
 	case GJK_BOX: {                                                                                              \
 		v3 ld = rotate(sp->box.inv_rot, sd); v3 he = sp->box.half_extents;                                       \
-		v3 lc = V3(ld.x >= 0 ? he.x : -he.x, ld.y >= 0 ? he.y : -he.y, ld.z >= 0 ? he.z : -he.z);                \
-		*(out_feat) = (ld.x >= 0.0f) | ((ld.y >= 0.0f) << 1) | ((ld.z >= 0.0f) << 2);                            \
+		/* Branchless sign selection: lc = sign(ld) * he */                                                       \
+		__m128 sign_mask = _mm_cmpge_ps(ld.m, _mm_setzero_ps());                                                 \
+		v3 lc = { .m = sel_ps(neg(he).m, he.m, sign_mask) };                                                     \
+		*(out_feat) = _mm_movemask_ps(sign_mask) & 0x7;                                                          \
 		(out_point) = add(sp->box.center, rotate(sp->box.rot, lc)); break;                                       \
 	}                                                                                                            \
 	case GJK_HULL: {                                                                                             \
@@ -166,8 +172,10 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 	case GJK_CYLINDER: {                                                                                         \
 		v3 cu = sp->cylinder.axis;                                                                               \
 		if (sp->cylinder.inv_axis_len == 0.0f) { *(out_feat) = 0; (out_point) = sp->cylinder.p; break; }         \
-		float cda = dot(sd, cu); int cf = cda >= 0.0f; *(out_feat) = cf;                                         \
-		v3 cbase = cf ? sp->cylinder.q : sp->cylinder.p;                                                         \
+		float cda = dot(sd, cu);                                                                                  \
+		__m128 cmask = _mm_castsi128_ps(_mm_set1_epi32(cda >= 0.0f ? -1 : 0));                                   \
+		*(out_feat) = cda >= 0.0f;                                                                               \
+		v3 cbase = { .m = sel_ps(sp->cylinder.p.m, sp->cylinder.q.m, cmask) };                                   \
 		v3 cdp = sub(sd, scale(cu, cda)); float cpl = len(cdp);                                                  \
 		(out_point) = (cpl > FLT_EPSILON) ? add(cbase, scale(cdp, sp->cylinder.radius / cpl)) : cbase; break;    \
 	}                                                                                                            \
