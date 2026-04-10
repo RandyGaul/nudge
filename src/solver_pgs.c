@@ -538,19 +538,6 @@ static void color_constraints(ConstraintRef* refs, int count, int body_count, in
 		sorted[offsets[refs[i].color]++] = refs[i];
 	memcpy(refs, sorted, count * sizeof(ConstraintRef));
 
-	// Sort within each color batch by min(body_a, body_b) for cache locality.
-	// Bodies accessed in ascending index order → sequential body_vel[] cache lines.
-	for (int c = 0; c < color_count; c++) {
-		int lo = out_batch_starts[c], hi = out_batch_starts[c+1];
-		for (int i = lo + 1; i < hi; i++) {
-			ConstraintRef key = refs[i];
-			int kv = key.body_a < key.body_b ? key.body_a : key.body_b;
-			int j = i - 1;
-			while (j >= lo && (refs[j].body_a < refs[j].body_b ? refs[j].body_a : refs[j].body_b) > kv) { refs[j + 1] = refs[j]; j--; }
-			refs[j + 1] = key;
-		}
-	}
-
 	CK_FREE(sorted);
 	CK_FREE(body_colors);
 	*out_color_count = color_count;
