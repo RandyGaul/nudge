@@ -72,6 +72,9 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 {
 	CK_DYNA SolverManifold* sm = NULL;
 	CK_DYNA SolverContact*  sc = NULL;
+	// Pre-allocate: each manifold has up to MAX_CONTACTS contacts.
+	afit(sm, manifold_count);
+	afit(sc, manifold_count * MAX_CONTACTS);
 	float inv_dt = dt > 0.0f ? 1.0f / dt : 0.0f;
 
 	for (int i = 0; i < manifold_count; i++) {
@@ -100,6 +103,19 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 
 		int patch_mode = (w->friction_model == FRICTION_PATCH);
 
+		// Precompute softness params once per manifold (same bodies, same dt).
+		float soft_val = 0.0f, bias_rate_val = 0.0f;
+		if (w->solver_type != SOLVER_SI) {
+			float hertz = w->contact_hertz;
+			if (a->inv_mass == 0.0f || b->inv_mass == 0.0f) hertz *= 2.0f;
+			float omega = 2.0f * 3.14159265f * hertz;
+			float d = 2.0f * w->contact_damping_ratio * omega;
+			float kk = omega * omega;
+			float hd = dt * d, hhk = dt * dt * kk;
+			float denom = hd + hhk;
+			if (denom > 1e-12f) { soft_val = 1.0f / denom; bias_rate_val = dt * kk * soft_val; }
+		}
+
 		for (int c = 0; c < im->m.count; c++) {
 			Contact* ct = &im->m.contacts[c];
 			SolverContact s = {0};
@@ -110,33 +126,24 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 			s.penetration = ct->penetration;
 			s.feature_id = ct->feature_id;
 
-			s.eff_mass_n = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.normal);
-
-			// Soft contact constraint (skip for hard SI — uses NGS position correction instead)
-			if (w->solver_type != SOLVER_SI) {
-				float hertz = w->contact_hertz;
-				if (a->inv_mass == 0.0f || b->inv_mass == 0.0f) hertz *= 2.0f;
-				float omega = 2.0f * 3.14159265f * hertz;
-				float d = 2.0f * w->contact_damping_ratio * omega;
-				float k = omega * omega;
-				float hd = dt * d, hhk = dt * dt * k;
-				float denom = hd + hhk;
-				if (denom > 1e-12f) {
-					s.softness = 1.0f / denom;
-					float bias_rate = dt * k * s.softness;
-					float K = s.eff_mass_n > 0.0f ? 1.0f / s.eff_mass_n : 0.0f;
-					s.eff_mass_n = (K + s.softness) > 1e-12f ? 1.0f / (K + s.softness) : 0.0f;
-					float pen = ct->penetration - SOLVER_SLOP;
-					s.bias = pen > 0.0f ? -bias_rate * pen : 0.0f;
-					if (s.bias < -w->max_push_velocity) s.bias = -w->max_push_velocity;
-				}
-			}
-
-			// Precompute cross(r, normal) and I_w * cross(r, normal) — used by both modes.
+			// Precompute cross(r, normal) and I_w * cross(r, normal) first,
+			// then derive effective mass from them (avoids duplicate cross+inertia in compute_effective_mass).
 			s.rn_a = cross(s.r_a, s.normal);
 			s.rn_b = cross(s.r_b, s.normal);
 			s.w_n_a = inv_inertia_world_mul(a, s.rn_a);
 			s.w_n_b = inv_inertia_world_mul(b, s.rn_b);
+			float K_n = inv_mass_sum + dot(cross(s.w_n_a, s.r_a), s.normal) + dot(cross(s.w_n_b, s.r_b), s.normal);
+			s.eff_mass_n = K_n > 1e-12f ? 1.0f / K_n : 0.0f;
+
+			// Apply precomputed softness (same for all contacts in this manifold).
+			if (soft_val > 0.0f) {
+				float K = s.eff_mass_n > 0.0f ? 1.0f / s.eff_mass_n : 0.0f;
+				s.softness = soft_val;
+				s.eff_mass_n = (K + soft_val) > 1e-12f ? 1.0f / (K + soft_val) : 0.0f;
+				float pen = ct->penetration - SOLVER_SLOP;
+				s.bias = pen > 0.0f ? -bias_rate_val * pen : 0.0f;
+				if (s.bias < -w->max_push_velocity) s.bias = -w->max_push_velocity;
+			}
 
 			if (!patch_mode) {
 				// Coulomb mode: precompute additional tangent angular data
