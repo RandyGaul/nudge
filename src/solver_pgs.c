@@ -132,14 +132,14 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 				}
 			}
 
-			// Always precompute cross(r, normal) — used by both Coulomb and patch modes.
+			// Precompute cross(r, normal) and I_w * cross(r, normal) — used by both modes.
 			s.rn_a = cross(s.r_a, s.normal);
 			s.rn_b = cross(s.r_b, s.normal);
+			s.w_n_a = inv_inertia_world_mul(a, s.rn_a);
+			s.w_n_b = inv_inertia_world_mul(b, s.rn_b);
 
 			if (!patch_mode) {
-				// Coulomb mode: precompute additional angular data (rn_a/rn_b already set above)
-				s.w_n_a = inv_inertia_world_mul(a, s.rn_a);
-				s.w_n_b = inv_inertia_world_mul(b, s.rn_b);
+				// Coulomb mode: precompute additional tangent angular data
 				contact_tangent_basis(ct->normal, &s.tangent1, &s.tangent2);
 				s.eff_mass_t1 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent1);
 				s.eff_mass_t2 = compute_effective_mass(a, b, inv_mass_sum, s.r_a, s.r_b, s.tangent2);
@@ -690,12 +690,12 @@ static void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, Sol
 		float old_n = s->lambda_n;
 		s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
 		float delta = s->lambda_n - old_n;
-		// Apply: recompute angular impulse inline.
+		// Apply: use precomputed angular impulse direction.
 		v3 P = scale(normal, delta);
 		a->velocity = sub(a->velocity, scale(P, ima));
 		b->velocity = add(b->velocity, scale(P, imb));
-		a->angular_velocity = sub(a->angular_velocity, scale(sv_inertia_mul(a, rn_a), delta));
-		b->angular_velocity = add(b->angular_velocity, scale(sv_inertia_mul(b, rn_b), delta));
+		a->angular_velocity = sub(a->angular_velocity, scale(s->w_n_a, delta));
+		b->angular_velocity = add(b->angular_velocity, scale(s->w_n_b, delta));
 		linear_vn += delta * inv_mass_sum;
 		total_lambda_n += s->lambda_n;
 	}
