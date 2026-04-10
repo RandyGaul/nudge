@@ -651,11 +651,8 @@ static void solver_sync_vel_out(WorldInternal* w)
 	}
 }
 
-// World-space inverse inertia multiply for SolverBodyVel.
-static inline v3 sv_inertia_mul(SolverBodyVel* h, v3 v)
-{
-	return V3(h->iw_diag.x*v.x + h->iw_off.x*v.y + h->iw_off.y*v.z, h->iw_off.x*v.x + h->iw_diag.y*v.y + h->iw_off.z*v.z, h->iw_off.y*v.x + h->iw_off.z*v.y + h->iw_diag.z*v.z);
-}
+// World-space inverse inertia multiply for SolverBodyVel (macro to guarantee inlining).
+#define sv_inertia_mul(h, v) V3((h)->iw_diag.x*(v).x + (h)->iw_off.x*(v).y + (h)->iw_off.y*(v).z, (h)->iw_off.x*(v).x + (h)->iw_diag.y*(v).y + (h)->iw_off.z*(v).z, (h)->iw_off.y*(v).x + (h)->iw_off.z*(v).y + (h)->iw_diag.z*(v).z)
 
 // Apply impulse row to velocity-only body state. inv_mass comes from the manifold (cached).
 static void apply_impulse_row_sv(SolverBodyVel* a, SolverBodyVel* b, float ima, float imb, v3 direction, v3 w_a, v3 w_b, float delta)
