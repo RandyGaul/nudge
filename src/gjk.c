@@ -162,9 +162,11 @@ static int gjk_hull_support_scan(const v3* verts, int count, const float* soa, v
 static v3 gjk_box_support(const GJK_Shape* sp, v3 sd, int* feat)
 {
 	v3 ld = gjk_mat_rotate(sp->box.inv_row0, sp->box.inv_row1, sp->box.inv_row2, sd);
-	v3 he = sp->box.half_extents;
-	v3 lc = V3(ld.x >= 0 ? he.x : -he.x, ld.y >= 0 ? he.y : -he.y, ld.z >= 0 ? he.z : -he.z);
-	*feat = (ld.x >= 0.0f) | ((ld.y >= 0.0f) << 1) | ((ld.z >= 0.0f) << 2);
+	// Branchless: flip sign of he[i] to match sign of ld[i] via XOR of sign bits
+	__m128 sign_bits = _mm_and_ps(ld.m, _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000)));
+	v3 lc = { .m = _mm_xor_ps(sp->box.half_extents.m, sign_bits) };
+	// Feature: which axes are positive (same sign flip info)
+	*feat = (~_mm_movemask_ps(sign_bits)) & 0x7;
 	return add(sp->box.center, gjk_mat_rotate(sp->box.rot_row0, sp->box.rot_row1, sp->box.rot_row2, lc));
 }
 static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
