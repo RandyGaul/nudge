@@ -222,12 +222,16 @@ static int gjk_solve2(GJK_Simplex* s)
 	v3 ba = sub(b, a);
 	float u = dot(b, ba);
 	float v = -dot(a, ba);
+	// Branchless: compute edge case always, then conditionally override for vertex cases
 	float div = u + v;
 	if (div == 0.0f) return 0;
-	// Vertex B region: u<=0 → copy v[1] to v[0]
-	// Use branchless blend: always prepare, conditionally write
-	if (u <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
-	if (v <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	int va = v <= 0.0f, vb = u <= 0.0f;
+	if (va | vb) {
+		// One of the vertex regions. If vb, swap v[0]=v[1] first.
+		if (vb) s->v[0] = s->v[1];
+		s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1;
+		return 1;
+	}
 	s->v[0].u = u; s->v[1].u = v; s->divisor = div; s->count = 2;
 	return 1;
 }
@@ -240,9 +244,7 @@ static int gjk_solve3(GJK_Simplex* s)
 	float uBC = dot(c, cb), vBC = -dot(b, cb);
 	float uCA = dot(a, ac), vCA = -dot(c, ac);
 	v3 n = cross(ba, sub(c, a));
-	v3 bc = cross(b, c), ca = cross(c, a);
-	float uABC = dot(bc, n), vABC = dot(ca, n);
-	float wABC = -(uABC + vABC); // cross(a,b) . n = -(cross(b,c) + cross(c,a)) . n
+	float uABC = dot(cross(b, c), n), vABC = dot(cross(c, a), n), wABC = dot(cross(a, b), n);
 
 	// Pack sign bits: bit=1 means value > 0
 	int signs = (uAB > 0) | ((vAB > 0) << 1) | ((uBC > 0) << 2) | ((vBC > 0) << 3) |
