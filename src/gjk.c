@@ -106,58 +106,38 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 		v3 ld = rotate(sp->hull.inv_rot, sd);                                                                    \
 		const v3* hv = sp->hull.verts; int hn = sp->hull.count;                                                  \
 		__m128 ldx = _mm_set1_ps(ld.x), ldy = _mm_set1_ps(ld.y), ldz = _mm_set1_ps(ld.z);                      \
-		__m128 vbest = _mm_set1_ps(-1e18f);                                                                      \
-		__m128i ibest = _mm_setzero_si128();                                                                     \
-		int hi = 0;                                                                                              \
+		float hbest = -1e18f; int hbi = 0, hi = 0;                                                               \
 		if (sp->hull.soa) {                                                                                      \
-			/* SoA path for large hulls: 8-wide (2x SSE4) */                                                     \
+			/* SoA path: max-only pass (no index tracking), then index recovery */                                \
 			const float* sx = sp->hull.soa, *sy = sx + hn, *sz = sy + hn;                                       \
-			__m128 vbest2 = _mm_set1_ps(-1e18f);                                                                 \
-			__m128i ibest2 = _mm_setzero_si128();                                                                \
+			__m128 vmax = _mm_set1_ps(-1e18f), vmax2 = _mm_set1_ps(-1e18f);                                      \
 			for (; hi + 7 < hn; hi += 8) {                                                                       \
 				__m128 d0 = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi), ldx),                          \
 					_mm_mul_ps(_mm_loadu_ps(sy+hi), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi), ldz));                \
 				__m128 d1 = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi+4), ldx),                        \
 					_mm_mul_ps(_mm_loadu_ps(sy+hi+4), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi+4), ldz));            \
-				__m128i i0 = _mm_set_epi32(hi+3,hi+2,hi+1,hi), i1 = _mm_set_epi32(hi+7,hi+6,hi+5,hi+4);        \
-				__m128 m0 = _mm_cmpgt_ps(d0, vbest), m1 = _mm_cmpgt_ps(d1, vbest2);                              \
-				vbest = _mm_blendv_ps(vbest, d0, m0);                                                            \
-				ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(i0), m0));       \
-				vbest2 = _mm_blendv_ps(vbest2, d1, m1);                                                          \
-				ibest2 = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest2), _mm_castsi128_ps(i1), m1));     \
+				vmax = _mm_max_ps(vmax, d0); vmax2 = _mm_max_ps(vmax2, d1);                                      \
 			}                                                                                                    \
-			/* Merge the two 4-wide accumulators */                                                               \
-			__m128 mg = _mm_cmpgt_ps(vbest2, vbest);                                                              \
-			vbest = _mm_blendv_ps(vbest, vbest2, mg);                                                             \
-			ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(ibest2), mg));       \
+			vmax = _mm_max_ps(vmax, vmax2);                                                                       \
 			for (; hi + 3 < hn; hi += 4) {                                                                       \
 				__m128 dots = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi), ldx),                         \
 					_mm_mul_ps(_mm_loadu_ps(sy+hi), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi), ldz));                \
-				__m128i idx = _mm_set_epi32(hi+3,hi+2,hi+1,hi);                                                  \
-				__m128 mask = _mm_cmpgt_ps(dots, vbest);                                                          \
-				vbest = _mm_blendv_ps(vbest, dots, mask);                                                         \
-				ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));     \
+				vmax = _mm_max_ps(vmax, dots);                                                                    \
+			}                                                                                                    \
+			/* Horizontal max of 4 lanes */                                                                      \
+			vmax = _mm_max_ps(vmax, _mm_shuffle_ps(vmax, vmax, _MM_SHUFFLE(1,0,3,2)));                            \
+			vmax = _mm_max_ps(vmax, _mm_shuffle_ps(vmax, vmax, _MM_SHUFFLE(2,3,0,1)));                            \
+			hbest = _mm_cvtss_f32(vmax);                                                                          \
+			/* Index recovery: scan once for matching dot product */                                              \
+			for (hi = 0; hi < hn; hi++) {                                                                        \
+				if (sx[hi]*ld.x + sy[hi]*ld.y + sz[hi]*ld.z >= hbest) { hbi = hi; break; }                       \
 			}                                                                                                    \
 		} else {                                                                                                 \
-			/* AoS path for small hulls: transpose 4 v3s per iteration */                                        \
-			for (; hi + 3 < hn; hi += 4) {                                                                       \
-				__m128 v0 = hv[hi].m, v1 = hv[hi+1].m, v2 = hv[hi+2].m, v3r = hv[hi+3].m;                      \
-				__m128 t0 = _mm_unpacklo_ps(v0, v1), t1 = _mm_unpacklo_ps(v2, v3r);                             \
-				__m128 t2 = _mm_unpackhi_ps(v0, v1), t3 = _mm_unpackhi_ps(v2, v3r);                             \
-				__m128 dots = _mm_add_ps(_mm_add_ps(                                                             \
-					_mm_mul_ps(_mm_movelh_ps(t0, t1), ldx),                                                     \
-					_mm_mul_ps(_mm_movehl_ps(t1, t0), ldy)),                                                    \
-					_mm_mul_ps(_mm_movelh_ps(t2, t3), ldz));                                                    \
-				__m128i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);                                               \
-				__m128 mask = _mm_cmpgt_ps(dots, vbest);                                                         \
-				vbest = _mm_blendv_ps(vbest, dots, mask);                                                        \
-				ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));    \
+			/* AoS path for small hulls: scalar scan */                                                          \
+			for (; hi < hn; hi++) {                                                                               \
+				float hd = dot(hv[hi], ld); if (hd > hbest) { hbest = hd; hbi = hi; }                           \
 			}                                                                                                    \
 		}                                                                                                        \
-		float hbests[4]; int hbidxs[4];                                                                          \
-		_mm_storeu_ps(hbests, vbest); _mm_storeu_si128((__m128i*)hbidxs, ibest);                                 \
-		float hbest = hbests[0]; int hbi = hbidxs[0];                                                            \
-		for (int k = 1; k < 4; k++) { if (hbests[k] > hbest) { hbest = hbests[k]; hbi = hbidxs[k]; } }         \
 		for (; hi < hn; hi++) { float hd = dot(hv[hi], ld); if (hd > hbest) { hbest = hd; hbi = hi; } }         \
 		*(out_feat) = hbi; (out_point) = add(sp->hull.center, rotate(sp->hull.rot, hv[hbi])); break;             \
 	}                                                                                                            \
