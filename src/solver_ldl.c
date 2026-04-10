@@ -1466,11 +1466,13 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 	// Compress masses for K conditioning: sqrt compression (100:1 -> 10:1).
 	// Save inv_mass, inv_inertia_local, and precomputed world inertia (iw_diag/iw_off)
 	// so we can restore all of them without an expensive world inertia recompute.
+	// Single contiguous alloc for all 4 save arrays (40 bytes/body).
 	int body_count = asize(w->body_hot);
-	float* save_inv_mass = CK_ALLOC(body_count * sizeof(float));
-	v3* save_inv_inertia = CK_ALLOC(body_count * sizeof(v3));
-	v3* save_iw_diag = CK_ALLOC(body_count * sizeof(v3));
-	v3* save_iw_off = CK_ALLOC(body_count * sizeof(v3));
+	char* save_buf = CK_ALLOC(body_count * (sizeof(float) + sizeof(v3) * 3));
+	float* save_inv_mass = (float*)save_buf;
+	v3* save_inv_inertia = (v3*)(save_buf + body_count * sizeof(float));
+	v3* save_iw_diag = save_inv_inertia + body_count;
+	v3* save_iw_off = save_iw_diag + body_count;
 	for (int i = 0; i < body_count; i++) {
 		save_inv_mass[i] = w->body_hot[i].inv_mass;
 		save_inv_inertia[i] = w->body_hot[i].inv_inertia_local;
@@ -1532,10 +1534,7 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 		w->body_hot[i].iw_diag = save_iw_diag[i];
 		w->body_hot[i].iw_off = save_iw_off[i];
 	}
-	CK_FREE(save_inv_mass);
-	CK_FREE(save_inv_inertia);
-	CK_FREE(save_iw_diag);
-	CK_FREE(save_iw_off);
+	CK_FREE(save_buf);
 }
 
 // Velocity correction using already-factored K. Solves and applies impulses.
