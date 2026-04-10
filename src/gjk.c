@@ -169,25 +169,16 @@ static v3 gjk_center(const GJK_Shape* s)
 	return V3(0,0,0);
 }
 
-#define gjk_closest_point(simplex, out) do {                                                                             \
-	const GJK_Simplex* cs = (simplex);                                                                                   \
-	__m128 cinv = _mm_set1_ps(1.0f / cs->divisor);                                                                       \
-	switch (cs->count) {                                                                                                 \
-	case 1: (out) = cs->v[0].point; break;                                                                               \
-	case 2: {                                                                                                            \
-		__m128 w0 = _mm_mul_ps(_mm_set1_ps(cs->v[0].u), cinv);                                                          \
-		__m128 w1 = _mm_mul_ps(_mm_set1_ps(cs->v[1].u), cinv);                                                          \
-		(out).m = _mm_add_ps(_mm_mul_ps(cs->v[0].point.m, w0), _mm_mul_ps(cs->v[1].point.m, w1)); break;                \
-	}                                                                                                                    \
-	case 3: {                                                                                                            \
-		__m128 w0 = _mm_mul_ps(_mm_set1_ps(cs->v[0].u), cinv);                                                          \
-		__m128 w1 = _mm_mul_ps(_mm_set1_ps(cs->v[1].u), cinv);                                                          \
-		__m128 w2 = _mm_mul_ps(_mm_set1_ps(cs->v[2].u), cinv);                                                          \
-		(out).m = _mm_add_ps(_mm_add_ps(_mm_mul_ps(cs->v[0].point.m, w0), _mm_mul_ps(cs->v[1].point.m, w1)),            \
-		                     _mm_mul_ps(cs->v[2].point.m, w2)); break;                                                  \
-	}                                                                                                                    \
-	default: (out) = V3(0,0,0); break;                                                                                   \
-	}                                                                                                                    \
+#define gjk_closest_point(simplex, out) do {                                                                        \
+	const GJK_Simplex* cs = (simplex);                                                                              \
+	float cinv = 1.0f / cs->divisor;                                                                                \
+	switch (cs->count) {                                                                                            \
+	case 1: (out) = cs->v[0].point; break;                                                                          \
+	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break; \
+	case 3: (out) = add(add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)),    \
+	                     scale(cs->v[2].point, cs->v[2].u * cinv)); break;                                          \
+	default: (out) = V3(0,0,0); break;                                                                              \
+	}                                                                                                               \
 } while(0)
 
 static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, int* f2)
