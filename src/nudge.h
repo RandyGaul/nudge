@@ -100,6 +100,7 @@ typedef struct Hull
 	const HalfEdge*  edges;
 	const HullFace*  faces;
 	const HullPlane* planes;
+	const int*       vert_edge; // per-vertex: one emanating half-edge index (for adjacency walk). NULL if not built.
 	int vert_count;
 	int edge_count;  // total half-edges (2x undirected edges)
 	int face_count;
