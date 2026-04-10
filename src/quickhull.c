@@ -89,8 +89,7 @@ static int qh_alloc_edge(QH_State* s)
 	if (s->edge_free != QH_INVALID) {
 		int idx = s->edge_free;
 		s->edge_free = s->edges[idx].next;
-		s->edges[idx] = (QH_Edge){0};
-		return idx;
+		return idx; // caller writes all fields
 	}
 	QH_Edge e = {0};
 	apush(s->edges, e);
@@ -102,12 +101,11 @@ static int qh_alloc_face(QH_State* s)
 	if (s->face_free != QH_INVALID) {
 		int idx = s->face_free;
 		s->face_free = s->faces[idx].next;
-		s->faces[idx] = (QH_Face){0};
 		s->faces[idx].conflict_head = QH_INVALID;
 		s->faces[idx].conflict_slot = -1;
 		s->faces[idx].mark = QH_VISIBLE;
 		s->faces[idx].maxoutside = s->epsilon;
-		return idx;
+		return idx; // caller sets edge, next, prev, plane, centroid, num_verts, area
 	}
 	QH_Face f = {0};
 	f.conflict_head = QH_INVALID;
@@ -422,10 +420,20 @@ static void qh_delete_face_points(QH_State* s, int fi, int absorb, int* unclaime
 {
 	int vlist = qh_conflict_remove_all(s, fi);
 	if (vlist == QH_INVALID) return;
+	if (absorb == QH_INVALID) {
+		// Fast path: push all vertices to unclaimed (no distance check).
+		int v = vlist;
+		while (s->verts[v].conflict_next != QH_INVALID) v = s->verts[v].conflict_next;
+		s->verts[v].conflict_next = *unclaimed;
+		*unclaimed = vlist;
+		return;
+	}
+	float eps = s->epsilon;
+	HullPlane ap = s->faces[absorb].plane;
 	int v = vlist;
 	while (v != QH_INVALID) {
 		int nxt = s->verts[v].conflict_next;
-		if (absorb != QH_INVALID && qh_face_dist(s, absorb, s->verts[v].pos) > s->epsilon) {
+		if (dot(ap.normal, s->verts[v].pos) - ap.offset > eps) {
 			qh_conflict_add(s, absorb, v);
 		} else {
 			s->verts[v].conflict_next = *unclaimed;
