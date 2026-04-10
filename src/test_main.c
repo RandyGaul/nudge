@@ -32,6 +32,7 @@ int main(int argc, char* argv[])
 	int bench_pile = 0;
 	int bench_suite_flag = 0;
 	int bench_chaos = 0;
+	int bench_qh = 0;
 	int bench_ldl = 0;
 	int ldl_chains = 10;
 	int ldl_chain_len = 20;
@@ -79,6 +80,8 @@ int main(int argc, char* argv[])
 			hertz = (float)atof(argv[++i]);
 		else if (strcmp(argv[i], "--damping") == 0 && i + 1 < argc)
 			damping = (float)atof(argv[++i]);
+		else if (strcmp(argv[i], "--bench-qh") == 0)
+			bench_qh = 1;
 		else if (strcmp(argv[i], "--bench-ldl") == 0)
 			bench_ldl = 1;
 		else if (strcmp(argv[i], "--ldl-chains") == 0 && i + 1 < argc)
@@ -87,6 +90,11 @@ int main(int argc, char* argv[])
 			ldl_chain_len = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--ldl-frames") == 0 && i + 1 < argc)
 			ldl_frames = atoi(argv[++i]);
+	}
+
+	if (bench_qh) {
+		bench_quickhull();
+		return 0;
 	}
 
 	if (bench_ldl) {

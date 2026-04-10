@@ -10755,6 +10755,61 @@ static void test_aalign()
 	afree(ve);
 }
 
+// Quickhull benchmark: deterministic workload, QPC timing.
+static void bench_quickhull()
+{
+	perf_init();
+	fuzz_rng_state = 12345;
+	enum { N_SPHERE = 200, N_ICO = 200, N_CYL = 100 };
+	CK_DYNA v3* sphere_sets[N_SPHERE];
+	int sphere_counts[N_SPHERE];
+	CK_DYNA v3* ico_sets[N_ICO];
+	int ico_counts[N_ICO];
+	CK_DYNA v3* cyl_sets[N_CYL];
+	int cyl_counts[N_CYL];
+	for (int i = 0; i < N_SPHERE; i++) {
+		int n = 20 + (int)(fuzz_rand() * 180);
+		CK_DYNA v3* pts = NULL;
+		for (int j = 0; j < n; j++) apush(pts, fuzz_rand_dir());
+		sphere_sets[i] = pts;
+		sphere_counts[i] = n;
+	}
+	for (int i = 0; i < N_ICO; i++) {
+		CK_DYNA v3* pts = NULL;
+		float jitter = fuzz_rand_range(0.0f, 0.01f);
+		for (int j = 0; j < 12; j++) apush(pts, add(s_ico_pts[j], scale(fuzz_rand_dir(), jitter)));
+		int extras = 10 + (int)(fuzz_rand() * 40);
+		for (int j = 0; j < extras; j++) {
+			if (fuzz_rand() < 0.5f) apush(pts, scale(fuzz_rand_dir(), fuzz_rand_range(0.1f, 0.9f)));
+			else apush(pts, fuzz_rand_dir());
+		}
+		ico_sets[i] = pts;
+		ico_counts[i] = asize(pts);
+	}
+	int segs[] = { 16, 32, 64 };
+	for (int i = 0; i < N_CYL; i++) {
+		int n = segs[i % 3];
+		CK_DYNA v3* pts = NULL;
+		for (int j = 0; j < n; j++) {
+			float theta = 2.0f * 3.14159265f * (float)j / (float)n;
+			apush(pts, V3(cosf(theta), 1.0f, sinf(theta)));
+			apush(pts, V3(cosf(theta), -1.0f, sinf(theta)));
+		}
+		cyl_sets[i] = pts;
+		cyl_counts[i] = asize(pts);
+	}
+	for (int i = 0; i < 10; i++) { Hull* h = quickhull(sphere_sets[i], sphere_counts[i]); if (h) hull_free(h); }
+	double t0 = perf_now();
+	for (int i = 0; i < N_SPHERE; i++) { Hull* h = quickhull(sphere_sets[i], sphere_counts[i]); if (h) hull_free(h); }
+	for (int i = 0; i < N_ICO; i++) { Hull* h = quickhull(ico_sets[i], ico_counts[i]); if (h) hull_free(h); }
+	for (int i = 0; i < N_CYL; i++) { Hull* h = quickhull(cyl_sets[i], cyl_counts[i]); if (h) hull_free(h); }
+	double t1 = perf_now();
+	printf("quickhull_ms\t%.3f\n", (t1 - t0) * 1000.0);
+	for (int i = 0; i < N_SPHERE; i++) afree(sphere_sets[i]);
+	for (int i = 0; i < N_ICO; i++) afree(ico_sets[i]);
+	for (int i = 0; i < N_CYL; i++) afree(cyl_sets[i]);
+}
+
 static void run_tests()
 {
 	test_pass = 0;
