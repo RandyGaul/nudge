@@ -6,9 +6,12 @@
 //   - Box: analytical sign-based corner selection
 //   - Hull: local-space vertex scan with rotation
 //   - Cylinder: implicit surface support (no tessellation)
-// Termination: 3-condition (containment, monotonic progress, support progress).
+//   - Triangle: 3-vertex max-dot
+// Termination: containment, monotonic progress, support progress, duplicate vertex.
+
 // -----------------------------------------------------------------------------
 // Simplex types.
+
 typedef struct GJK_Vertex
 {
 	v3 point1;  // support point on shape A (world space)
@@ -18,14 +21,17 @@ typedef struct GJK_Vertex
 	int feat1;  // feature ID on shape A
 	int feat2;  // feature ID on shape B
 } GJK_Vertex;
+
 typedef struct GJK_Simplex
 {
 	GJK_Vertex v[4];
 	float divisor;
 	int count;
 } GJK_Simplex;
+
 // Byte size of a simplex with n active vertices (vertices + divisor + count).
 #define gjk_simplex_size(n) (sizeof(GJK_Vertex) * (n) + sizeof(float) + sizeof(int))
+
 typedef struct GJK_Result
 {
 	v3 point1;  // closest point on shape A
@@ -35,6 +41,7 @@ typedef struct GJK_Result
 	int feat1;  // feature ID on shape A (from contributing simplex vertex)
 	int feat2;  // feature ID on shape B
 } GJK_Result;
+
 typedef struct GJK_Cache
 {
 	v3 dir;       // separating direction from previous call
@@ -46,9 +53,12 @@ typedef struct GJK_Cache
 	v3 point1[2]; // cached world-space support points on A
 	v3 point2[2]; // cached world-space support points on B
 } GJK_Cache;
+
 // -----------------------------------------------------------------------------
 // Shape types and constructors.
+
 enum { GJK_POINT, GJK_SEGMENT, GJK_BOX, GJK_HULL, GJK_CYLINDER, GJK_TRIANGLE };
+
 typedef struct GJK_Shape
 {
 	int type;
@@ -62,9 +72,46 @@ typedef struct GJK_Shape
 		struct { v3 a, b, c; } tri;
 	};
 } GJK_Shape;
+
 static GJK_Shape gjk_sphere(v3 center, float radius) { return (GJK_Shape){ .type = GJK_POINT, .radius = radius, .point.center = center }; }
 static GJK_Shape gjk_capsule(v3 p, v3 q, float radius) { return (GJK_Shape){ .type = GJK_SEGMENT, .radius = radius, .segment.p = p, .segment.q = q }; }
 static GJK_Shape gjk_triangle(v3 a, v3 b, v3 c) { return (GJK_Shape){ .type = GJK_TRIANGLE, .tri.a = a, .tri.b = b, .tri.c = c }; }
+
+static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents)
+{
+	v3 c0 = quat_rotate(rot, V3(1,0,0)), c1 = quat_rotate(rot, V3(0,1,0)), c2 = quat_rotate(rot, V3(0,0,1));
+	return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.col0 = c0, .box.col1 = c1, .box.col2 = c2, .box.half_extents = half_extents };
+}
+
+static GJK_Shape gjk_box_m(v3 center, v3 col0, v3 col1, v3 col2, v3 half_extents)
+{
+	return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.col0 = col0, .box.col1 = col1, .box.col2 = col2, .box.half_extents = half_extents };
+}
+
+static GJK_Shape gjk_hull(v3 center, quat rot, v3 sc, const v3* verts, int count, const float* soa, const HalfEdge* edges, const int* vert_edge)
+{
+	v3 c0 = quat_rotate(rot, V3(1,0,0)), c1 = quat_rotate(rot, V3(0,1,0)), c2 = quat_rotate(rot, V3(0,0,1));
+	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = c0, .hull.col1 = c1, .hull.col2 = c2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edges = edges, .hull.vert_edge = vert_edge, .hull.count = count };
+}
+
+static GJK_Shape gjk_hull_m(v3 center, v3 col0, v3 col1, v3 col2, v3 sc, const v3* verts, int count, const float* soa, const HalfEdge* edges, const int* vert_edge)
+{
+	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = col0, .hull.col1 = col1, .hull.col2 = col2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edges = edges, .hull.vert_edge = vert_edge, .hull.count = count };
+}
+
+static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius)
+{
+	v3 axis = sub(q, p);
+	float al = len(axis);
+	float inv_al = al > FLT_EPSILON ? 1.0f / al : 0.0f;
+	v3 mid = scale(add(p, q), 0.5f);
+	v3 half_axis = scale(axis, 0.5f);
+	return (GJK_Shape){ .type = GJK_CYLINDER, .cylinder.mid = mid, .cylinder.half_axis = half_axis, .cylinder.radius = radius, .cylinder.axis = scale(axis, inv_al), .cylinder.inv_axis_len = inv_al };
+}
+
+// -----------------------------------------------------------------------------
+// Rotation helpers.
+
 // Mat3x3 transpose rotate: R^T * v (column-wise multiply-add).
 // 3 broadcasts + 3 muls + 2 adds = 8 SIMD ops.
 static inline v3 gjk_mat_rotate_t(v3 r0, v3 r1, v3 r2, v3 v)
@@ -90,41 +137,17 @@ static inline v3 gjk_mat_rotate(v3 r0, v3 r1, v3 r2, v3 v)
 		simd_mul(col1, simd_splat(v.m, 1))),
 		simd_mul(col2, simd_splat(v.m, 2))) };
 }
-static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) {
-	// Columns of rotation matrix = rotated basis vectors
-	v3 c0 = quat_rotate(rot, V3(1,0,0)), c1 = quat_rotate(rot, V3(0,1,0)), c2 = quat_rotate(rot, V3(0,0,1));
-	return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.col0 = c0, .box.col1 = c1, .box.col2 = c2, .box.half_extents = half_extents };
-}
-static GJK_Shape gjk_box_m(v3 center, v3 col0, v3 col1, v3 col2, v3 half_extents) {
-	return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.col0 = col0, .box.col1 = col1, .box.col2 = col2, .box.half_extents = half_extents };
-}
-static GJK_Shape gjk_hull(v3 center, quat rot, v3 sc, const v3* verts, int count, const float* soa, const HalfEdge* edges, const int* vert_edge) {
-	v3 c0 = quat_rotate(rot, V3(1,0,0)), c1 = quat_rotate(rot, V3(0,1,0)), c2 = quat_rotate(rot, V3(0,0,1));
-	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = c0, .hull.col1 = c1, .hull.col2 = c2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edges = edges, .hull.vert_edge = vert_edge, .hull.count = count };
-}
-static GJK_Shape gjk_hull_m(v3 center, v3 col0, v3 col1, v3 col2, v3 sc, const v3* verts, int count, const float* soa, const HalfEdge* edges, const int* vert_edge) {
-	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = col0, .hull.col1 = col1, .hull.col2 = col2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edges = edges, .hull.vert_edge = vert_edge, .hull.count = count };
-}
-static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
-	v3 axis = sub(q, p);
-	float al = len(axis);
-	float inv_al = al > FLT_EPSILON ? 1.0f / al : 0.0f;
-	v3 mid = scale(add(p, q), 0.5f);
-	v3 half_axis = scale(axis, 0.5f);
-	return (GJK_Shape){ .type = GJK_CYLINDER, .cylinder.mid = mid, .cylinder.half_axis = half_axis, .cylinder.radius = radius, .cylinder.axis = scale(axis, inv_al), .cylinder.inv_axis_len = inv_al };
-}
-// Hull convenience: pre-scale vertices and build shape.
-// Caller must keep scaled_verts alive for the duration of the GJK call.
-// For hulls > 32 verts, also builds SoA layout in soa_buf for fast SIMD scan.
-// soa_buf must hold 3*count floats (or NULL for small hulls).
-// vert_edge_buf must hold hull->vert_count ints. Builds per-vertex first-edge lookup.
+
+// -----------------------------------------------------------------------------
+// Hull convenience constructor with vert-edge table caching.
+
 static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts, float* soa_buf)
 {
 	int n = hull->vert_count;
-	// Store raw vertices (not scaled) — scale applied in support function via dot(v*sc, ld) = dot(v, sc*ld)
 	const v3* raw_verts = hull->verts;
-	(void)scaled_verts; // unused now — keeping parameter for API compat
+	(void)scaled_verts;
 	const float* soa = NULL;
+
 	// Cache per-vertex first-edge lookup: topology-only, rebuild when hull pointer changes.
 	#define VE_CACHE_SLOTS 4
 	static const Hull* ve_cache_hull[VE_CACHE_SLOTS] = {0};
@@ -133,7 +156,6 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 		int slot = -1;
 		for (int s = 0; s < VE_CACHE_SLOTS; s++) if (ve_cache_hull[s] == hull) { slot = s; break; }
 		if (slot < 0) {
-			// Evict oldest (round-robin)
 			static int ve_next_slot = 0;
 			slot = ve_next_slot; ve_next_slot = (ve_next_slot + 1) % VE_CACHE_SLOTS;
 			for (int i = 0; i < n; i++) ve_cache_buf[slot][i] = -1;
@@ -145,12 +167,12 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 	}
 	return gjk_hull(pos, rot, sc, raw_verts, n, soa, hull->edges, NULL);
 }
-// Hull support scan: extracted to a function to reduce macro expansion size,
-// allowing the compiler to inline quat_rotate in the caller.
+
+// -----------------------------------------------------------------------------
+// Hull support functions.
+
 // Hill-climbing support: walk vertex adjacency graph from a start vertex.
 // O(sqrt(n)) expected for convex hulls vs O(n) for linear scan.
-// Hill-climbing support: walk vertex adjacency graph from vertex 0.
-// Ring walk: next outgoing edge from v = edges[current ^ 1].next
 static int gjk_hull_support_climb(const v3* __restrict verts, const HalfEdge* __restrict edges, const int* __restrict vert_edge, v3 ld, int start)
 {
 	int best = start;
@@ -164,13 +186,14 @@ static int gjk_hull_support_climb(const v3* __restrict verts, const HalfEdge* __
 			int neighbor = edges[e ^ 1].origin;
 			float nd = dot(verts[neighbor], ld);
 			if (nd > best_d) { best_d = nd; best = neighbor; improved = 1; }
-			e = edges[e ^ 1].next; // walk ring: twin's next gives next outgoing from same vertex
+			e = edges[e ^ 1].next;
 		} while (e != start);
 		if (!improved) break;
 	}
 	return best;
 }
 
+// Linear scan with 4/8-wide SIMD dot products.
 static int gjk_hull_support_scan(const v3* __restrict verts, int count, const float* __restrict soa, v3 ld)
 {
 	simd4f ldx = simd_splat(ld.m, 0);
@@ -181,6 +204,7 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 	int hi = 0;
 
 	if (soa) {
+		// SoA path: 8-wide with dual accumulators for ILP.
 		const float* sx = soa, *sy = sx + count, *sz = sy + count;
 		simd4f vbest2 = simd_set1(-1e18f);
 		simd4i ibest2 = simd_set1_i(0);
@@ -207,6 +231,7 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 			ibest = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest), simd_cast_itof(idx), mask));
 		}
 	} else {
+		// AoS path: transpose 4 vertices to SoA per iteration.
 		for (; hi + 3 < count; hi += 4) {
 			simd4f v0 = verts[hi].m, v1 = verts[hi+1].m, v2 = verts[hi+2].m, v3r = verts[hi+3].m;
 			simd4f t0 = simd_unpacklo(v0, v1), t1 = simd_unpacklo(v2, v3r);
@@ -219,6 +244,7 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 		}
 	}
 
+	// Horizontal reduction.
 	float hbests[4]; int hbidxs[4];
 	simd_store(hbests, vbest); simd_store_i(hbidxs, ibest);
 	float hbest = hbests[0]; int hbi = hbidxs[0];
@@ -226,7 +252,10 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 	for (; hi < count; hi++) { float hd = dot(verts[hi], ld); if (hd > hbest) { hbest = hd; hbi = hi; } }
 	return hbi;
 }
-// Box/cylinder support: separate functions to keep gjk_support macro small for inlining budget.
+
+// -----------------------------------------------------------------------------
+// Support functions (per-shape-type).
+
 static v3 gjk_box_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict feat)
 {
 	v3 ld = gjk_mat_rotate(sp->box.col0, sp->box.col1, sp->box.col2, sd);
@@ -235,12 +264,14 @@ static v3 gjk_box_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict
 	*feat = simd_movemask(simd_cmpge(ld.m, simd_zero())) & 7;
 	return add(sp->box.center, gjk_mat_rotate_t(sp->box.col0, sp->box.col1, sp->box.col2, lc));
 }
+
 static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict feat)
 {
 	v3 cu = sp->cylinder.axis;
 	if (sp->cylinder.inv_axis_len == 0.0f) { *feat = 0; return sp->cylinder.mid; }
 	float cda = dot(sd, cu);
 	int cap = cda >= 0.0f;
+
 	// Branchless base: mid + copysign(half_axis, da)
 	simd4f sign = simd_and(simd_set1(cda), simd_sign_mask());
 	v3 cbase = add(sp->cylinder.mid, (v3){ .m = simd_xor(sp->cylinder.half_axis.m, sign) });
@@ -249,16 +280,18 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	simd4f cpl = simd_sqrt_ss(cdp2);
 	float cplf = simd_get_x(cpl);
 	if (cplf <= FLT_EPSILON) { *feat = cap; return cbase; }
+
+	// Pack normalized perp direction as 3x10-bit signed + 1 cap bit = 31 bits.
 	float inv_cpl = 1.0f / cplf;
-	// Pack normalized perp direction as 3x10-bit signed + 1 cap bit = 31 bits
 	int ix = (int)(cdp.x * inv_cpl * 511.0f), iy = (int)(cdp.y * inv_cpl * 511.0f), iz = (int)(cdp.z * inv_cpl * 511.0f);
 	*feat = cap | ((ix & 0x3FF) << 1) | ((iy & 0x3FF) << 11) | ((iz & 0x3FF) << 21);
 	return add(cbase, v3_scale_m(cdp, simd_div_ss(simd_set_ss(sp->cylinder.radius), cpl)));
 }
-// Support macro: dispatches per shape type. Box/cylinder/hull-scan are functions to reduce code size.
+
+// Support dispatch macro. Box/cylinder/hull use separate functions to control inlining.
 #define gjk_support(shape, dir, out_feat, out_point) do {                                                                 \
 	GJK_Shape* sp = (shape); v3 sd = (dir);                                                                               \
-	SIMD_ASSUME(sp->type >= GJK_POINT && sp->type <= GJK_TRIANGLE);                                                          \
+	SIMD_ASSUME(sp->type >= GJK_POINT && sp->type <= GJK_TRIANGLE);                                                       \
 	switch (sp->type) {                                                                                                   \
 	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                               \
 	case GJK_SEGMENT: {                                                                                                   \
@@ -268,7 +301,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	case GJK_BOX: (out_point) = gjk_box_support(sp, sd, (out_feat)); break;                                                \
 	case GJK_HULL: {                                                                                                      \
 		v3 ld = gjk_mat_rotate(sp->hull.col0, sp->hull.col1, sp->hull.col2, sd);                                          \
-		v3 sld = hmul(ld, sp->hull.scale); /* scale-weighted direction for dot(v, sld) = dot(v*sc, ld) */                  \
+		v3 sld = hmul(ld, sp->hull.scale);                                                                                \
 		int hbi = (sp->hull.vert_edge && sp->hull.count > 0)                                                              \
 			? gjk_hull_support_climb(sp->hull.verts, sp->hull.edges, sp->hull.vert_edge, sld, sp->hull.hint)               \
 			: gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, sld);                                   \
@@ -280,8 +313,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	}                                                                                                                     \
 	case GJK_CYLINDER: (out_point) = gjk_cylinder_support(sp, sd, (out_feat)); break;                                      \
 	case GJK_TRIANGLE: {                                                                                                  \
-		/* 3 dots in parallel via AoS→SoA transpose */                                                                     \
-		/* 3 dots in parallel via AoS->SoA transpose */                                                                   \
+		/* 3 dots in parallel via AoS->SoA transpose */                                                                    \
 		simd4f v0 = sp->tri.a.m, v1 = sp->tri.b.m, v2 = sp->tri.c.m;                                                     \
 		simd4f t01lo = simd_unpacklo(v0, v1), t01hi = simd_unpackhi(v0, v1);                                              \
 		simd4f t2lo = simd_unpacklo(v2, simd_zero()), t2hi = simd_unpackhi(v2, simd_zero());                              \
@@ -315,13 +347,11 @@ static inline v3 gjk_support_feature(const GJK_Shape* sp, int feat)
 		int cap = feat & 1;
 		simd4f sign = cap ? simd_zero() : simd_sign_mask();
 		v3 cbase = add(sp->cylinder.mid, (v3){ .m = simd_xor(sp->cylinder.half_axis.m, sign) });
-		// Decode 3x10-bit signed perpendicular direction
 		int ix = (feat >> 1) & 0x3FF, iy = (feat >> 11) & 0x3FF, iz = (feat >> 21) & 0x3FF;
-		if (ix >= 0x200) ix -= 0x400; // sign extend 10-bit
+		if (ix >= 0x200) ix -= 0x400;
 		if (iy >= 0x200) iy -= 0x400;
 		if (iz >= 0x200) iz -= 0x400;
 		if ((ix | iy | iz) == 0) return cbase;
-		// Direction is approximately unit-length after quantization; skip renormalization.
 		return add(cbase, scale(V3((float)ix, (float)iy, (float)iz), sp->cylinder.radius / 511.0f));
 	}
 	case GJK_TRIANGLE:
@@ -330,6 +360,7 @@ static inline v3 gjk_support_feature(const GJK_Shape* sp, int feat)
 	return V3(0,0,0);
 }
 
+// Shape centroid (used for initial search direction when no cache is available).
 static v3 gjk_center(const GJK_Shape* s)
 {
 	switch (s->type) {
@@ -342,10 +373,14 @@ static v3 gjk_center(const GJK_Shape* s)
 	}
 	return V3(0,0,0);
 }
+
+// -----------------------------------------------------------------------------
+// Closest point and witness point extraction macros.
+
 #define gjk_closest_point(simplex, out) do {                                                                        \
 	const GJK_Simplex* cs = (simplex);                                                                              \
 	float cinv = 1.0f / cs->divisor;                                                                                \
-	SIMD_ASSUME(cs->count >= 1 && cs->count <= 3);                                                                     \
+	SIMD_ASSUME(cs->count >= 1 && cs->count <= 3);                                                                  \
 	switch (cs->count) {                                                                                            \
 	case 1: (out) = cs->v[0].point; break;                                                                          \
 	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break; \
@@ -354,10 +389,11 @@ static v3 gjk_center(const GJK_Shape* s)
 	default: (out) = V3(0,0,0); break;                                                                              \
 	}                                                                                                               \
 } while(0)
+
 #define gjk_witness_points(simplex, out_p1, out_p2, out_f1, out_f2) do {                                              \
 	const GJK_Simplex* ws = (simplex);                                                                                \
 	float winv = 1.0f / ws->divisor;                                                                                  \
-	SIMD_ASSUME(ws->count >= 1 && ws->count <= 3);                                                                       \
+	SIMD_ASSUME(ws->count >= 1 && ws->count <= 3);                                                                    \
 	switch (ws->count) {                                                                                              \
 	case 1:                                                                                                           \
 		(out_p1) = ws->v[0].point1; (out_p2) = ws->v[0].point2;                                                       \
@@ -379,20 +415,21 @@ static v3 gjk_center(const GJK_Shape* s)
 	default: (out_p1) = V3(0,0,0); (out_p2) = V3(0,0,0); *(out_f1) = 0; *(out_f2) = 0; break;                        \
 	}                                                                                                                 \
 } while(0)
+
 // -----------------------------------------------------------------------------
 // Simplex solvers: find closest point on simplex to origin.
+
 static SIMD_NOINLINE int gjk_solve2(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point;
 	v3 ba = sub(b, a);
 	float u = dot(b, ba);
 	float v = -dot(a, ba);
-	// Branchless: compute edge case always, then conditionally override for vertex cases
 	float div = u + v;
 	if (div == 0.0f) return 0;
+
 	int va = v <= 0.0f, vb = u <= 0.0f;
 	if (va | vb) {
-		// One of the vertex regions. If vb, swap v[0]=v[1] first.
 		if (vb) s->v[0] = s->v[1];
 		s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1;
 		return 1;
@@ -400,6 +437,7 @@ static SIMD_NOINLINE int gjk_solve2(GJK_Simplex* s)
 	s->v[0].u = u; s->v[1].u = v; s->divisor = div; s->count = 2;
 	return 1;
 }
+
 static SIMD_NOINLINE int gjk_solve3(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point;
@@ -409,28 +447,26 @@ static SIMD_NOINLINE int gjk_solve3(GJK_Simplex* s)
 	float uCA = dot(a, ac), vCA = -dot(c, ac);
 	v3 n = cross(ba, sub(c, a));
 	float uABC = dot(cross(b, c), n), vABC = dot(cross(c, a), n), wABC = dot(cross(a, b), n);
+
 	// Pack sign bits: bit=1 means value > 0
 	int signs = (uAB > 0) | ((vAB > 0) << 1) | ((uBC > 0) << 2) | ((vBC > 0) << 3) |
 	            ((uCA > 0) << 4) | ((vCA > 0) << 5) | ((uABC > 0) << 6) | ((vABC > 0) << 7) | ((wABC > 0) << 8);
-	// Vertex A: vAB<=0 && uCA<=0 → bits 1,4 both 0
+
 	if ((signs & 0x12) == 0) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
-	// Vertex B: uAB<=0 && vBC<=0 → bits 0,3 both 0
 	if ((signs & 0x09) == 0) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
-	// Vertex C: uBC<=0 && vCA<=0 → bits 2,5 both 0
 	if ((signs & 0x24) == 0) { s->v[0] = s->v[2]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
-	// Edge AB: uAB>0 && vAB>0 && wABC<=0 → bits 0,1 set, bit 8 clear
 	if ((signs & 0x103) == 0x03) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
-	// Edge BC: uBC>0 && vBC>0 && uABC<=0 → bits 2,3 set, bit 6 clear
 	if ((signs & 0x4C) == 0x0C) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
-	// Edge CA: uCA>0 && vCA>0 && vABC<=0 → bits 4,5 set, bit 7 clear
 	if ((signs & 0xB0) == 0x30) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
-	// Face ABC
+
 	float divABC = uABC + vABC + wABC;
 	if (divABC == 0.0f) return 0;
 	s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = divABC; s->count = 3;
 	return 1;
 }
+
 #define stp(a, b, c) dot(a, cross(b, c))
+
 static SIMD_NOINLINE int gjk_solve4(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point, d = s->v[3].point;
@@ -440,6 +476,7 @@ static SIMD_NOINLINE int gjk_solve4(GJK_Simplex* s)
 	float uBD = dot(d, sub(d, b)), vBD = dot(b, sub(b, d));
 	float uDC = dot(c, sub(c, d)), vDC = dot(d, sub(d, c));
 	float uAD = dot(d, sub(d, a)), vAD = dot(a, sub(a, d));
+
 	v3 n;
 	n = cross(sub(d, a), sub(b, a));
 	float uADB = dot(cross(d, b), n), vADB = dot(cross(b, a), n), wADB = dot(cross(a, d), n);
@@ -449,47 +486,62 @@ static SIMD_NOINLINE int gjk_solve4(GJK_Simplex* s)
 	float uCBD = dot(cross(b, d), n), vCBD = dot(cross(d, c), n), wCBD = dot(cross(c, b), n);
 	n = cross(sub(b, a), sub(c, a));
 	float uABC = dot(cross(b, c), n), vABC = dot(cross(c, a), n), wABC = dot(cross(a, b), n);
+
 	float denom = stp(sub(c, b), sub(a, b), sub(d, b));
 	if (denom == 0.0f) return 0;
 	float vol = 1.0f / denom;
 	float uABCD = stp(c, d, b) * vol, vABCD = stp(c, a, d) * vol;
 	float wABCD = stp(d, a, b) * vol, xABCD = stp(b, a, c) * vol;
+
+	// Vertex regions
 	if (vAB <= 0 && uCA <= 0 && vAD <= 0) { s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
 	if (uAB <= 0 && vBC <= 0 && vBD <= 0) { s->v[0] = s->v[1]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
 	if (uBC <= 0 && vCA <= 0 && uDC <= 0) { s->v[0] = s->v[2]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
 	if (uBD <= 0 && vDC <= 0 && uAD <= 0) { s->v[0] = s->v[3]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+
+	// Edge regions
 	if (wABC <= 0 && vADB <= 0 && uAB > 0 && vAB > 0) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
 	if (uABC <= 0 && wCBD <= 0 && uBC > 0 && vBC > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
 	if (vABC <= 0 && wACD <= 0 && uCA > 0 && vCA > 0) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
 	if (vCBD <= 0 && uACD <= 0 && uDC > 0 && vDC > 0) { s->v[0] = s->v[3]; s->v[1] = s->v[2]; s->v[0].u = uDC; s->v[1].u = vDC; s->divisor = uDC + vDC; s->count = 2; return 1; }
 	if (vACD <= 0 && wADB <= 0 && uAD > 0 && vAD > 0) { s->v[1] = s->v[3]; s->v[0].u = uAD; s->v[1].u = vAD; s->divisor = uAD + vAD; s->count = 2; return 1; }
 	if (uCBD <= 0 && uADB <= 0 && uBD > 0 && vBD > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uBD; s->v[1].u = vBD; s->divisor = uBD + vBD; s->count = 2; return 1; }
+
+	// Face regions
 	if (xABCD <= 0 && uABC > 0 && vABC > 0 && wABC > 0) { s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = uABC + vABC + wABC; s->count = 3; return 1; }
 	if (uABCD <= 0 && uCBD > 0 && vCBD > 0 && wCBD > 0) { s->v[0] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uCBD; s->v[1].u = vCBD; s->v[2].u = wCBD; s->divisor = uCBD + vCBD + wCBD; s->count = 3; return 1; }
 	if (vABCD <= 0 && uACD > 0 && vACD > 0 && wACD > 0) { s->v[1] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uACD; s->v[1].u = vACD; s->v[2].u = wACD; s->divisor = uACD + vACD + wACD; s->count = 3; return 1; }
 	if (wABCD <= 0 && uADB > 0 && vADB > 0 && wADB > 0) { s->v[2] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uADB; s->v[1].u = vADB; s->v[2].u = wADB; s->divisor = uADB + vADB + wADB; s->count = 3; return 1; }
+
+	// Interior
 	s->v[0].u = uABCD; s->v[1].u = vABCD; s->v[2].u = wABCD; s->v[3].u = xABCD;
 	s->divisor = 1.0f; s->count = 4;
 	return 1;
 }
+
 // -----------------------------------------------------------------------------
 // Main GJK distance function.
-// 3-condition termination + post-hoc radius for sphere/capsule.
+// Termination: containment + monotonic progress + support progress + duplicate vertex.
+// Simplex caching: world-space points for non-cylinders, feature replay for cylinders.
+
 #define GJK_MAX_ITERS         64
 #define GJK_CONTAINMENT_EPS2  1e-8f
 #define GJK_PROGRESS_EPS      1e-4f
-// cache: optional warm-start from previous frame (separating direction + hull hints).
+
 static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restrict shapeB, GJK_Cache* cache)
 {
 	GJK_Result result;
+
+	// Restore hull hints from cache.
 	GJK_Simplex simplex;
 	if (cache) {
 		if (shapeA->type == GJK_HULL) shapeA->hull.hint = cache->hintA;
 		if (shapeB->type == GJK_HULL) shapeB->hull.hint = cache->hintB;
 	}
+
+	// Simplex initialization: reconstruct from cache or cold-start.
 	int fA, fB;
 	v3 sA, sB;
-	// Reconstruct simplex from cache: use world-space points (fast) or feature replay (accurate for cylinders).
 	int use_simplex_cache = cache && cache->count >= 1 && cache->count <= 2;
 	if (use_simplex_cache) {
 		int has_cyl = shapeA->type == GJK_CYLINDER || shapeB->type == GJK_CYLINDER;
@@ -530,6 +582,8 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		simplex.divisor = 1.0f;
 		simplex.count = 1;
 	}
+
+	// Main loop.
 	float dsq_prev = FLT_MAX;
 	int use_index_term = shapeA->type != GJK_CYLINDER && shapeB->type != GJK_CYLINDER;
 	int iter = 0;
@@ -546,18 +600,24 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 			if (!solved) break;
 		}
 		if (simplex.count == 4) break;
+
 		v3 closest; gjk_closest_point(&simplex, closest);
 		float dsq = len2(closest);
 		if (dsq <= GJK_CONTAINMENT_EPS2 || dsq >= dsq_prev) break;
 		dsq_prev = dsq;
+
 		gjk_support(shapeA, closest, &fA, sA);
 		gjk_support(shapeB, neg(closest), &fB, sB);
 		v3 w = sub(sB, sA);
+
+		// Duplicate vertex termination (non-cylinder shapes only).
 		if (use_index_term) {
 			int dup = 0;
 			for (int i = 0; i < simplex.count; i++) if (simplex.v[i].feat1 == fA && simplex.v[i].feat2 == fB) { dup = 1; break; }
 			if (dup) break;
 		}
+
+		// Relative progress termination.
 		float max_vert2 = 0.0f;
 		for (int i = 0; i < simplex.count; i++) {
 			float v2 = len2(simplex.v[i].point);
@@ -565,6 +625,7 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		}
 		float progress = dsq - dot(w, closest);
 		if (progress <= max_vert2 * GJK_PROGRESS_EPS) break;
+
 		iter++;
 		GJK_Vertex* vert = &simplex.v[simplex.count];
 		vert->point1 = sA;
@@ -574,19 +635,23 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		vert->feat2 = fB;
 		simplex.count++;
 	}
+
+	// Extract witness points and distance.
 	gjk_witness_points(&simplex, result.point1, result.point2, &result.feat1, &result.feat2);
 	v3 sep = sub(result.point2, result.point1);
 	result.distance = len(sep);
 	result.iterations = iter;
+
+	// Save cache for next frame.
 	if (cache) {
 		cache->dir = sep;
 		if (shapeA->type == GJK_HULL) cache->hintA = shapeA->hull.hint;
 		if (shapeB->type == GJK_HULL) cache->hintB = shapeB->hull.hint;
-		// Cache simplex features for next frame warm-start
 		int cn = simplex.count < 2 ? simplex.count : 2;
 		cache->count = cn;
 		for (int i = 0; i < cn; i++) { cache->feat1[i] = simplex.v[i].feat1; cache->feat2[i] = simplex.v[i].feat2; cache->point1[i] = simplex.v[i].point1; cache->point2[i] = simplex.v[i].point2; }
 	}
+
 	// Post-hoc radius for sphere/capsule core shapes.
 	float rA = shapeA->radius;
 	float rB = shapeB->radius;
@@ -607,8 +672,8 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	}
 	return result;
 }
+
 // By-value convenience wrapper for callers that construct shapes inline.
-// The v3* cache variant is for callers that don't need hull hint caching.
 static GJK_Result gjk_distance_v(GJK_Shape a, GJK_Shape b, v3* dir_cache)
 {
 	GJK_Cache c = {0};
