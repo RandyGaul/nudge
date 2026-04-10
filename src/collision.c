@@ -14,22 +14,6 @@ static v3 hull_support(const Hull* hull, v3 dir)
 {
 	// Box fast path: sign selection (3 comparisons vs 8 dot products).
 	if (hull->vert_count == 8 && hull->face_count == 6) return V3(dir.x >= 0.0f ? 1.0f : -1.0f, dir.y >= 0.0f ? 1.0f : -1.0f, dir.z >= 0.0f ? 1.0f : -1.0f);
-	// Hill-climbing support via vert-edge adjacency: O(sqrt(V)) expected vs O(V) linear scan.
-	if (hull->vert_edge) {
-		int cur = 0;
-		float best = dot(hull->verts[0], dir);
-		for (;;) {
-			int improved = 0;
-			int e = hull->vert_edge[cur], start = e;
-			do {
-				int nb = hull->edges[hull->edges[e].twin].origin;
-				float d = dot(hull->verts[nb], dir);
-				if (d > best) { best = d; cur = nb; improved = 1; }
-				e = hull->edges[hull->edges[e].twin].next;
-			} while (e != start);
-			if (!improved) return hull->verts[cur];
-		}
-	}
 	float best = -1e18f;
 	int best_i = 0;
 	for (int i = 0; i < hull->vert_count; i++) {
@@ -1434,7 +1418,6 @@ void hull_free(Hull* hull)
 	CK_FREE((void*)hull->edges);
 	CK_FREE((void*)hull->faces);
 	CK_FREE((void*)hull->planes);
-	CK_FREE((void*)hull->vert_edge);
 	CK_FREE(hull);
 }
 

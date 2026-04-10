@@ -1116,12 +1116,6 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	HullFace* fcp = CK_ALLOC(sizeof(HullFace)*asize(live)); memcpy(fcp, of, sizeof(HullFace)*asize(live)); h->faces = fcp;
 	HullPlane* pcp = CK_ALLOC(sizeof(HullPlane)*asize(live)); memcpy(pcp, op, sizeof(HullPlane)*asize(live)); h->planes = pcp;
 
-	// Build vert-edge adjacency table: for each vertex, one emanating half-edge.
-	int* ve = CK_ALLOC(sizeof(int)*vc);
-	memset(ve, -1, sizeof(int)*vc);
-	for (int i = 0; i < ec; i++) if (ve[ecp[i].origin] < 0) ve[ecp[i].origin] = i;
-	h->vert_edge = ve;
-
 	// Fix inward-facing normals: degenerate merges can produce Newell normals
 	// that point toward the hull interior. Flip them before widening.
 	for (int i = 0; i < h->face_count; i++) {
