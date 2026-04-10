@@ -1139,29 +1139,92 @@ int collide_box_box(Box a, Box b, Manifold* manifold)
 
 	if (!manifold) return 1;
 
-	// Map Gottschalk axis to face contact or edge contact.
-	// Axes 0-2: A face normals, axes 3-5: B face normals, axes 6-14: edge-edge.
-	const float k_tol = 0.05f;
+	// Face contact: fully inlined box-box contact gen using rotation columns.
+	// No hull infrastructure (plane_transform, half-edge walk, hull_support).
 	if (best_axis < 6) {
-		// Face contact. Map axis to box hull face index.
-		// Box faces: -Z=0,+Z=1,-X=2,+X=3,-Y=4,+Y=5.
-		// Gottschalk axis 0=X, 1=Y, 2=Z for A; 3=X, 4=Y, 5=Z for B.
-		// Face is positive or negative depending on projection sign.
-		static const int face_map[3][2] = { {2, 3}, {4, 5}, {0, 1} }; // [axis][positive]
+		v3 ref_cols[3], inc_cols[3], ref_pos, inc_pos, ref_he, inc_he;
+		int flip;
 		if (best_axis < 3) {
-			int local_axis = best_axis;
-			float proj = (&((v3){ta, tb, tc}).x)[local_axis];
-			int face_idx = face_map[local_axis][proj >= 0.0f ? 1 : 0];
-			return generate_face_contact(&s_unit_box_hull, a.center, a.rotation, a.half_extents, &s_unit_box_hull, b.center, b.rotation, b.half_extents, face_idx, 0, manifold);
+			ref_cols[0] = ax; ref_cols[1] = ay; ref_cols[2] = az; ref_pos = a.center; ref_he = a.half_extents;
+			inc_cols[0] = bx; inc_cols[1] = by; inc_cols[2] = bz; inc_pos = b.center; inc_he = b.half_extents;
+			flip = 0;
 		} else {
-			int local_axis = best_axis - 3;
-			float projs[3] = { ta*R00 + tb*R10 + tc*R20, ta*R01 + tb*R11 + tc*R21, ta*R02 + tb*R12 + tc*R22 };
-			int face_idx = face_map[local_axis][projs[local_axis] >= 0.0f ? 1 : 0];
-			return generate_face_contact(&s_unit_box_hull, b.center, b.rotation, b.half_extents, &s_unit_box_hull, a.center, a.rotation, a.half_extents, face_idx, 1, manifold);
+			ref_cols[0] = bx; ref_cols[1] = by; ref_cols[2] = bz; ref_pos = b.center; ref_he = b.half_extents;
+			inc_cols[0] = ax; inc_cols[1] = ay; inc_cols[2] = az; inc_pos = a.center; inc_he = a.half_extents;
+			flip = 1;
 		}
+		int la = best_axis < 3 ? best_axis : best_axis - 3;
+		float proj_sign = best_axis < 3 ? (&((v3){ta, tb, tc}).x)[la] : (&((v3){ta*R00+tb*R10+tc*R20, ta*R01+tb*R11+tc*R21, ta*R02+tb*R12+tc*R22}).x)[la];
+		float nsign = proj_sign >= 0.0f ? 1.0f : -1.0f;
+		v3 ref_n = scale(ref_cols[la], nsign);
+		float ref_off = dot(ref_n, ref_pos) + (&ref_he.x)[la];
+		int u = (la + 1) % 3, v_ax = (la + 2) % 3;
+
+		// Incident face: find which inc column is most anti-parallel to ref_n.
+		int inc_la = 0; float inc_best = 1e18f;
+		for (int i = 0; i < 3; i++) { float d = dot(inc_cols[i], ref_n); if (d < inc_best) { inc_best = d; inc_la = i; } if (-d < inc_best) { inc_best = -d; inc_la = i; } }
+		// Determine sign of incident face normal.
+		float inc_nsign = dot(inc_cols[inc_la], ref_n) > 0 ? -1.0f : 1.0f;
+		int inc_u = (inc_la + 1) % 3, inc_v = (inc_la + 2) % 3;
+
+		// Incident face vertices (4 corners of the incident face).
+		v3 inc_center = add(inc_pos, scale(inc_cols[inc_la], inc_nsign * (&inc_he.x)[inc_la]));
+		v3 inc_eu = scale(inc_cols[inc_u], (&inc_he.x)[inc_u]), inc_ev = scale(inc_cols[inc_v], (&inc_he.x)[inc_v]);
+		v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
+		uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
+		buf1[0] = add(inc_center, add(inc_eu, inc_ev));
+		buf1[1] = add(inc_center, sub(neg(inc_eu), neg(inc_ev)));
+		buf1[2] = add(inc_center, sub(neg(inc_eu), inc_ev));
+		buf1[3] = add(inc_center, sub(inc_eu, inc_ev));
+		// Fix winding: ensure CCW when viewed from ref_n direction.
+		if (dot(cross(sub(buf1[1], buf1[0]), sub(buf1[2], buf1[0])), ref_n) > 0) { v3 tmp = buf1[1]; buf1[1] = buf1[3]; buf1[3] = tmp; }
+		for (int i = 0; i < 4; i++) fid1[i] = 0x80 | (uint8_t)i;
+		int clip_count = 4;
+
+		// 4 side planes from rotation columns (no cross product, no normalize).
+		v3 side_n[4] = { ref_cols[u], neg(ref_cols[u]), ref_cols[v_ax], neg(ref_cols[v_ax]) };
+		float side_d[4] = { dot(ref_cols[u], ref_pos) + (&ref_he.x)[u], dot(neg(ref_cols[u]), ref_pos) + (&ref_he.x)[u], dot(ref_cols[v_ax], ref_pos) + (&ref_he.x)[v_ax], dot(neg(ref_cols[v_ax]), ref_pos) + (&ref_he.x)[v_ax] };
+
+		v3* in_buf = buf1; v3* out_buf = buf2;
+		uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
+		for (int i = 0; i < 4; i++) {
+			clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n[i], side_d[i], (uint8_t)i, out_buf, out_fid);
+			v3* sw = in_buf; in_buf = out_buf; out_buf = sw;
+			uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
+		}
+
+		// Corner snap: 4 reference face corners from rotation columns.
+		v3 ref_center = add(ref_pos, scale(ref_cols[la], nsign * (&ref_he.x)[la]));
+		v3 ref_eu = scale(ref_cols[u], (&ref_he.x)[u]), ref_ev = scale(ref_cols[v_ax], (&ref_he.x)[v_ax]);
+		v3 corners[4] = { add(ref_center, add(ref_eu, ref_ev)), add(ref_center, sub(ref_eu, ref_ev)), add(ref_center, sub(neg(ref_eu), neg(ref_ev))), add(ref_center, sub(neg(ref_eu), ref_ev)) };
+		float snap_tol2 = 1e-6f;
+		for (int i = 0; i < clip_count; i++)
+			for (int c = 0; c < 4; c++)
+				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
+
+		// Build face indices for feature IDs. Map (la, nsign) to hull face index.
+		static const int face_map[3][2] = { {2, 3}, {4, 5}, {0, 1} };
+		int ref_face = face_map[la][nsign > 0 ? 1 : 0];
+		int inc_face = face_map[inc_la][inc_nsign > 0 ? 1 : 0];
+
+		v3 contact_n = flip ? neg(ref_n) : ref_n;
+		Contact tmp_contacts[MAX_CLIP_VERTS];
+		int cp = 0;
+		for (int i = 0; i < clip_count; i++) {
+			float depth = ref_off - dot(ref_n, in_buf[i]);
+			if (depth >= -LINEAR_SLOP) {
+				uint32_t fid = flip ? ((uint32_t)inc_face | ((uint32_t)ref_face << 8) | ((uint32_t)in_fid[i] << 16)) : ((uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16));
+				tmp_contacts[cp++] = (Contact){ .point = in_buf[i], .normal = contact_n, .penetration = depth, .feature_id = fid };
+			}
+		}
+		if (cp == 0) return 0;
+		cp = reduce_contacts(tmp_contacts, cp);
+		manifold->count = cp;
+		for (int i = 0; i < cp; i++) manifold->contacts[i] = tmp_contacts[i];
+		return 1;
 	}
 
-	// Edge-edge contact: fall through to hull-hull for now (edge contacts are rare in box piles).
+	// Edge-edge contact: fall through to hull-hull (edge contacts are rare in box piles).
 	return collide_hull_hull(
 		(ConvexHull){ &s_unit_box_hull, a.center, a.rotation, a.half_extents },
 		(ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents },
