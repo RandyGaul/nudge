@@ -102,8 +102,9 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 	int n = hull->vert_count;
 	for (int i = 0; i < n; i++)
 		scaled_verts[i] = hmul(hull->verts[i], sc);
+	// Skip SoA build when hill climbing is available (SoA only needed for linear scan fallback)
 	const float* soa = NULL;
-	if (soa_buf && n > 32) {
+	if (soa_buf && n > 32 && !hull->edges) {
 		float* sx = soa_buf, *sy = soa_buf + n, *sz = soa_buf + n * 2;
 		for (int i = 0; i < n; i++) { sx[i] = scaled_verts[i].x; sy[i] = scaled_verts[i].y; sz[i] = scaled_verts[i].z; }
 		soa = soa_buf;
