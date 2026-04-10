@@ -43,6 +43,8 @@ typedef struct GJK_Cache
 	int count;    // cached simplex vertex count (0 = direction-only warm start)
 	int feat1[3]; // feature IDs on shape A
 	int feat2[3]; // feature IDs on shape B
+	v3 point1[3]; // cached world-space support points on A
+	v3 point2[3]; // cached world-space support points on B
 } GJK_Cache;
 // -----------------------------------------------------------------------------
 // Shape types and constructors.
@@ -461,15 +463,13 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	}
 	int fA, fB;
 	v3 sA, sB;
-	// Reconstruct simplex from cached features (all shape types).
+	// Use cached world-space support points directly (skip feature reconstruction).
 	int use_simplex_cache = cache && cache->count >= 1 && cache->count <= 3;
 	if (use_simplex_cache) {
 		for (int i = 0; i < cache->count; i++) {
-			v3 p1 = gjk_support_feature(shapeA, cache->feat1[i]);
-			v3 p2 = gjk_support_feature(shapeB, cache->feat2[i]);
-			simplex.v[i].point1 = p1;
-			simplex.v[i].point2 = p2;
-			simplex.v[i].point = sub(p2, p1);
+			simplex.v[i].point1 = cache->point1[i];
+			simplex.v[i].point2 = cache->point2[i];
+			simplex.v[i].point = sub(cache->point2[i], cache->point1[i]);
 			simplex.v[i].feat1 = cache->feat1[i];
 			simplex.v[i].feat2 = cache->feat2[i];
 			simplex.v[i].u = 1.0f;
@@ -544,7 +544,7 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		// Cache simplex features for next frame warm-start
 		int cn = simplex.count < 3 ? simplex.count : 3;
 		cache->count = cn;
-		for (int i = 0; i < cn; i++) { cache->feat1[i] = simplex.v[i].feat1; cache->feat2[i] = simplex.v[i].feat2; }
+		for (int i = 0; i < cn; i++) { cache->feat1[i] = simplex.v[i].feat1; cache->feat2[i] = simplex.v[i].feat2; cache->point1[i] = simplex.v[i].point1; cache->point2[i] = simplex.v[i].point2; }
 	}
 	// Post-hoc radius for sphere/capsule core shapes.
 	float rA = shapeA->radius;
