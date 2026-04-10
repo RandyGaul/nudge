@@ -380,16 +380,39 @@ int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold)
 		return 1;
 	}
 
-	// Deep: center is inside hull. Find face with least penetration in world space.
-	// Transform each hull plane to world space (accounts for non-uniform scale).
+	// Deep: center is inside hull. Find face with least penetration via hill-climb.
+	// For large hulls (>12 faces), hill-climb from face 0 using topological adjacency.
 	float best_sep = -1e18f;
 	int best_face = -1;
 	HullPlane best_plane = {0};
-	for (int i = 0; i < b.hull->face_count; i++) {
-		HullPlane wp = plane_transform(b.hull->planes[i], b.center, b.rotation, b.scale);
-		float s = dot(a.center, wp.normal) - wp.offset;
-		if (s > a.radius) return 0;
-		if (s > best_sep) { best_sep = s; best_face = i; best_plane = wp; }
+	if (b.hull->face_count > 12) {
+		int cur = 0;
+		HullPlane wp = plane_transform(b.hull->planes[0], b.center, b.rotation, b.scale);
+		best_sep = dot(a.center, wp.normal) - wp.offset;
+		best_face = 0; best_plane = wp;
+		for (int iter = 0; iter < b.hull->face_count; iter++) {
+			int improved = 0;
+			int start_e = b.hull->faces[cur].edge, ei = start_e;
+			do {
+				int adj = b.hull->edges[b.hull->edges[ei].twin].face;
+				if (adj != cur) {
+					HullPlane awp = plane_transform(b.hull->planes[adj], b.center, b.rotation, b.scale);
+					float s = dot(a.center, awp.normal) - awp.offset;
+					if (s > a.radius) return 0;
+					if (s > best_sep) { best_sep = s; best_face = adj; best_plane = awp; improved = 1; }
+				}
+				ei = b.hull->edges[ei].next;
+			} while (ei != start_e);
+			if (!improved) break;
+			cur = best_face;
+		}
+	} else {
+		for (int i = 0; i < b.hull->face_count; i++) {
+			HullPlane wp = plane_transform(b.hull->planes[i], b.center, b.rotation, b.scale);
+			float s = dot(a.center, wp.normal) - wp.offset;
+			if (s > a.radius) return 0;
+			if (s > best_sep) { best_sep = s; best_face = i; best_plane = wp; }
+		}
 	}
 	if (!manifold) return 1;
 
@@ -478,15 +501,39 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 	float cap_len2 = len2(cap_dir);
 
 	// --- Axis family 1: hull face normals (world space) ---
+	// Hill-climb for large hulls, full scan for small.
 	float face_sep = -1e18f;
 	int face_idx = -1;
 	HullPlane face_plane = {0};
-	for (int i = 0; i < hull->face_count; i++) {
-		HullPlane wp = plane_transform(hull->planes[i], b.center, b.rotation, b.scale);
-		float dp = dot(a.p, wp.normal) - wp.offset;
-		float dq = dot(a.q, wp.normal) - wp.offset;
-		float sup = dp < dq ? dp : dq;
-		if (sup > face_sep) { face_sep = sup; face_idx = i; face_plane = wp; }
+	if (hull->face_count > 12) {
+		int cur = 0;
+		HullPlane wp = plane_transform(hull->planes[0], b.center, b.rotation, b.scale);
+		float dp = dot(a.p, wp.normal) - wp.offset, dq = dot(a.q, wp.normal) - wp.offset;
+		face_sep = dp < dq ? dp : dq; face_idx = 0; face_plane = wp;
+		for (int iter = 0; iter < hull->face_count; iter++) {
+			int improved = 0;
+			int start_e = hull->faces[cur].edge, ei = start_e;
+			do {
+				int adj = hull->edges[hull->edges[ei].twin].face;
+				if (adj != cur) {
+					HullPlane awp = plane_transform(hull->planes[adj], b.center, b.rotation, b.scale);
+					float adp = dot(a.p, awp.normal) - awp.offset, adq = dot(a.q, awp.normal) - awp.offset;
+					float asup = adp < adq ? adp : adq;
+					if (asup > face_sep) { face_sep = asup; face_idx = adj; face_plane = awp; improved = 1; }
+				}
+				ei = hull->edges[ei].next;
+			} while (ei != start_e);
+			if (!improved) break;
+			cur = face_idx;
+		}
+	} else {
+		for (int i = 0; i < hull->face_count; i++) {
+			HullPlane wp = plane_transform(hull->planes[i], b.center, b.rotation, b.scale);
+			float dp = dot(a.p, wp.normal) - wp.offset;
+			float dq = dot(a.q, wp.normal) - wp.offset;
+			float sup = dp < dq ? dp : dq;
+			if (sup > face_sep) { face_sep = sup; face_idx = i; face_plane = wp; }
+		}
 	}
 
 	// --- Axis family 2: capsule dir x hull edge dirs (world space) ---
