@@ -63,7 +63,7 @@ int main(int argc, char* argv[])
 	}
 
 	if (bench_pile) {
-		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
+		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .friction_model = FRICTION_PATCH, .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
 		bench_box_pile(bench_pile_grid, bench_pile_height, bench_pile_frames, wp);
 		return 0;
 	}
