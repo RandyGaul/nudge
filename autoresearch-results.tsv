@@ -97,3 +97,5 @@ clean_motion	1040	baseline	Clean motion baseline: constructor + gjk_distance + i
 90	1486.3	discard	analytical fast paths: dispatch overhead + formula cost > cached GJK
 91	1479.9	discard	max iters 64->20: no measurable change
 95	1374.1	keep	cache world-space support points directly (skip feature reconstruction) -6.7%
+96	1447.5	discard	single-vertex cache: more iterations outweigh smaller cache
+97	1390.7	keep	hybrid cache: world-space points for non-cylinders, feature replay for cylinders
