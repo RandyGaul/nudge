@@ -65,8 +65,10 @@ typedef struct SolverBodyVel
 {
 	v3 velocity;
 	v3 angular_velocity;
+	v3 iw_diag;           // cached world-space inverse inertia (diagonal)
+	v3 iw_off;            // cached world-space inverse inertia (off-diagonal)
 	float inv_mass;
-	float _pad;
+	float _pad[3];
 } SolverBodyVel;
 
 typedef struct WarmManifold WarmManifold; // forward decl for warm cache
@@ -186,19 +188,19 @@ typedef struct LDL_Column
 // Per-pivot precomputed index ranges.
 typedef struct LDL_Pivot
 {
-	int node, dk, ok;                      // node index, DOF, row_offset
-	int fwd_start, fwd_count;             // forward-sub neighbors (eliminated before)
-	int back_start, back_count;           // back-sub neighbors (eliminated after)
-	int col_start, col_count;             // L-column entries for factorization
-	int schur_start, schur_count;         // Schur complement updates for this pivot
+	int node, dk, ok;             // node index, DOF, row_offset
+	int fwd_start, fwd_count;     // forward-sub neighbors (eliminated before)
+	int back_start, back_count;   // back-sub neighbors (eliminated after)
+	int col_start, col_count;     // L-column entries for factorization
+	int schur_start, schur_count; // Schur complement updates for this pivot
 } LDL_Pivot;
 
 // K-edge fill instruction: maps shared body to off-diagonal L_factors offsets.
 typedef struct LDL_Coupling
 {
-	int body;                              // shared body index (real or virtual)
-	int block_i, block_j;                 // constraint node indices
-	int L_offset_ij, L_offset_ji;         // L_factors offsets for both directions
+	int body;                     // shared body index (real or virtual)
+	int block_i, block_j;         // constraint node indices
+	int L_offset_ij, L_offset_ji; // L_factors offsets for both directions
 } LDL_Coupling;
 
 // Cached constraint system topology: computed once per topology change,
@@ -229,9 +231,9 @@ typedef struct LDL_Cache
 	int n;              // total DOFs
 	LDL_Topology* topo; // cached topology (NULL until built)
 	CK_DYNA double* L_factors; // contiguous off-diagonal L-factor blocks (double precision)
-	CK_DYNA LDL_JacobianRow* jacobians; // per-DOF Jacobian rows (filled each substep)
+	CK_DYNA LDL_JacobianRow* jacobians;  // per-DOF Jacobian rows (filled each substep)
 	double diag_data[LDL_MAX_NODES][78]; // diagonal blocks: packed lower-triangular (max 12x12 = 78)
-	double diag_D[LDL_MAX_NODES][12];   // D pivots (max 12 per block)
+	double diag_D[LDL_MAX_NODES][12];    // D pivots (max 12 per block)
 	int topo_version;   // world topo version when blocks were built
 
 	// Shattering state (weight-based: no virtual body copies)
@@ -279,7 +281,7 @@ typedef struct WorldInternal
 	CK_DYNA int*        island_free;
 	CK_MAP(uint8_t)     prev_touching; // body_pair_key -> 1 for pairs touching last frame
 	CK_MAP(uint8_t)     joint_pairs;   // body_pair_key -> 1 for bodies connected by joints (skip collisions)
-	int joint_pairs_version;             // ldl_topo_version when joint_pairs was last built
+	int joint_pairs_version;           // ldl_topo_version when joint_pairs was last built
 	int sleep_enabled;       // 1 = island sleep active (default)
 	int ldl_enabled;         // 1 = LDL direct correction for joints (dual solvers only)
 	int ldl_topo_version;    // incremented on joint create/destroy

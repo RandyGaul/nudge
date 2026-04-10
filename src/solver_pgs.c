@@ -636,6 +636,8 @@ static void solver_sync_vel_in(WorldInternal* w)
 		w->body_vel[i].velocity = w->body_hot[i].velocity;
 		w->body_vel[i].angular_velocity = w->body_hot[i].angular_velocity;
 		w->body_vel[i].inv_mass = w->body_hot[i].inv_mass;
+		w->body_vel[i].iw_diag = w->body_hot[i].iw_diag;
+		w->body_vel[i].iw_off = w->body_hot[i].iw_off;
 	}
 }
 
@@ -647,6 +649,12 @@ static void solver_sync_vel_out(WorldInternal* w)
 		w->body_hot[i].velocity = w->body_vel[i].velocity;
 		w->body_hot[i].angular_velocity = w->body_vel[i].angular_velocity;
 	}
+}
+
+// World-space inverse inertia multiply for SolverBodyVel.
+static inline v3 sv_inertia_mul(SolverBodyVel* h, v3 v)
+{
+	return V3(h->iw_diag.x*v.x + h->iw_off.x*v.y + h->iw_off.y*v.z, h->iw_off.x*v.x + h->iw_diag.y*v.y + h->iw_off.z*v.z, h->iw_off.y*v.x + h->iw_off.z*v.y + h->iw_diag.z*v.z);
 }
 
 // Apply impulse row to velocity-only body state. inv_mass comes from the manifold (cached).
@@ -661,48 +669,74 @@ static void apply_impulse_row_sv(SolverBodyVel* a, SolverBodyVel* b, float ima, 
 
 // Solve one patch-friction manifold using compact SolverBodyVel arrays.
 // Body inv_mass is read from the manifold (cached in pre_solve), never from body arrays.
+// BEPU-style: recompute cross+inertia inline instead of reading precomputed data.
+// Trades ALU (cheap in Release) for bandwidth (expensive at 10K+ bodies).
+// SolverContact only needs: r_a, r_b, eff_mass_n, bias, bounce, softness, lambda_n.
 static void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, SolverContact* sc)
 {
 	SolverBodyVel* a = &bodies[m->body_a];
 	SolverBodyVel* b = &bodies[m->body_b];
 	float ima = m->inv_mass_a, imb = m->inv_mass_b;
 
-	// All contacts in a manifold share the same normal — use manifold normal.
-	// Linear velocity dot is incrementally updated: after applying delta,
-	// dot(dv_linear, n) changes by delta * (ima + imb) since n is unit-length.
 	v3 normal = m->normal;
 	float inv_mass_sum = ima + imb;
 	float linear_vn = dot(sub(b->velocity, a->velocity), normal);
 	float total_lambda_n = 0.0f;
 	for (int ci = 0; ci < m->contact_count; ci++) {
 		SolverContact* s = &sc[m->contact_start + ci];
-		float vn = linear_vn + dot(b->angular_velocity, s->rn_b) - dot(a->angular_velocity, s->rn_a);
+		// Recompute cross(r, normal) and I_w * cross(r, normal) each iteration.
+		v3 rn_a = cross(s->r_a, normal);
+		v3 rn_b = cross(s->r_b, normal);
+		float vn = linear_vn + dot(b->angular_velocity, rn_b) - dot(a->angular_velocity, rn_a);
 		float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
 		float old_n = s->lambda_n;
 		s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
 		float delta = s->lambda_n - old_n;
-		apply_impulse_row_sv(a, b, ima, imb, normal, s->w_n_a, s->w_n_b, delta);
+		// Apply: recompute angular impulse inline.
+		v3 P = scale(normal, delta);
+		a->velocity = sub(a->velocity, scale(P, ima));
+		b->velocity = add(b->velocity, scale(P, imb));
+		a->angular_velocity = sub(a->angular_velocity, scale(sv_inertia_mul(a, rn_a), delta));
+		b->angular_velocity = add(b->angular_velocity, scale(sv_inertia_mul(b, rn_b), delta));
 		linear_vn += delta * inv_mass_sum;
 		total_lambda_n += s->lambda_n;
 	}
 
 	float max_f = m->friction * total_lambda_n;
 
-	float vt1 = dot(sub(b->velocity, a->velocity), m->tangent1) + dot(b->angular_velocity, m->rct1_b) - dot(a->angular_velocity, m->rct1_a);
+	// Manifold-level tangent friction: recompute cross(centroid_r, tangent) inline.
+	v3 rct1_a = cross(m->centroid_r_a, m->tangent1);
+	v3 rct1_b = cross(m->centroid_r_b, m->tangent1);
+	v3 dv = sub(b->velocity, a->velocity);
+	float vt1 = dot(dv, m->tangent1) + dot(b->angular_velocity, rct1_b) - dot(a->angular_velocity, rct1_a);
 	float old_t1 = m->lambda_t1;
 	m->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + m->eff_mass_t1 * (-vt1), max_f));
-	apply_impulse_row_sv(a, b, ima, imb, m->tangent1, m->w_t1_a, m->w_t1_b, m->lambda_t1 - old_t1);
+	float dt1 = m->lambda_t1 - old_t1;
+	v3 P1 = scale(m->tangent1, dt1);
+	a->velocity = sub(a->velocity, scale(P1, ima));
+	b->velocity = add(b->velocity, scale(P1, imb));
+	a->angular_velocity = sub(a->angular_velocity, scale(sv_inertia_mul(a, rct1_a), dt1));
+	b->angular_velocity = add(b->angular_velocity, scale(sv_inertia_mul(b, rct1_b), dt1));
 
-	float vt2 = dot(sub(b->velocity, a->velocity), m->tangent2) + dot(b->angular_velocity, m->rct2_b) - dot(a->angular_velocity, m->rct2_a);
+	v3 rct2_a = cross(m->centroid_r_a, m->tangent2);
+	v3 rct2_b = cross(m->centroid_r_b, m->tangent2);
+	dv = sub(b->velocity, a->velocity);
+	float vt2 = dot(dv, m->tangent2) + dot(b->angular_velocity, rct2_b) - dot(a->angular_velocity, rct2_a);
 	float old_t2 = m->lambda_t2;
 	m->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + m->eff_mass_t2 * (-vt2), max_f));
-	apply_impulse_row_sv(a, b, ima, imb, m->tangent2, m->w_t2_a, m->w_t2_b, m->lambda_t2 - old_t2);
+	float dt2 = m->lambda_t2 - old_t2;
+	v3 P2 = scale(m->tangent2, dt2);
+	a->velocity = sub(a->velocity, scale(P2, ima));
+	b->velocity = add(b->velocity, scale(P2, imb));
+	a->angular_velocity = sub(a->angular_velocity, scale(sv_inertia_mul(a, rct2_a), dt2));
+	b->angular_velocity = add(b->angular_velocity, scale(sv_inertia_mul(b, rct2_b), dt2));
 
+	// Torsional friction: recompute inline.
 	float max_twist = m->friction * total_lambda_n * m->patch_radius;
 	float w_rel = dot(sub(b->angular_velocity, a->angular_velocity), m->normal);
 	float old_tw = m->lambda_twist;
 	m->lambda_twist = fmaxf(-max_twist, fminf(old_tw + m->eff_mass_twist * (-w_rel), max_twist));
 	float dtw = m->lambda_twist - old_tw;
-	a->angular_velocity = sub(a->angular_velocity, scale(m->w_tw_a, dtw));
-	b->angular_velocity = add(b->angular_velocity, scale(m->w_tw_b, dtw));
+	a->angular_velocity = sub(a->angular_velocity, scale(sv_inertia_mul(a, normal), dtw));
+	b->angular_velocity = add(b->angular_velocity, scale(sv_inertia_mul(b, normal), dtw));
 }
