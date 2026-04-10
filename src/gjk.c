@@ -276,7 +276,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 } while(0)
 
 // Reconstruct a support point from a cached feature index (no direction search needed).
-static v3 gjk_support_feature(const GJK_Shape* sp, int feat)
+static inline v3 gjk_support_feature(const GJK_Shape* sp, int feat)
 {
 	switch (sp->type) {
 	case GJK_POINT: return sp->point.center;
