@@ -100,16 +100,12 @@ static v3 gjk_support(const GJK_Shape* s, v3 d, int* feat)
 	}
 	case GJK_HULL: {
 		v3 ld = rotate(inv(s->hull.rot), d);
-		int n = s->hull.count;
-		// Pass 1: find max dot product value (branch-free, SIMD-friendly)
-		float best = dot(s->hull.verts[0], ld);
-		for (int i = 1; i < n; i++) {
-			float dd = dot(s->hull.verts[i], ld);
-			best = dd > best ? dd : best;
-		}
-		// Pass 2: find the index (short scan, stops at first match)
+		float best = -1e18f;
 		int bi = 0;
-		for (int i = 0; i < n; i++) { if (dot(s->hull.verts[i], ld) == best) { bi = i; break; } }
+		for (int i = 0; i < s->hull.count; i++) {
+			float dd = dot(s->hull.verts[i], ld);
+			if (dd > best) { best = dd; bi = i; }
+		}
 		*feat = bi;
 		return add(s->hull.center, rotate(s->hull.rot, s->hull.verts[bi]));
 	}
