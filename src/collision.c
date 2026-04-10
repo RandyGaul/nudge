@@ -858,27 +858,6 @@ static int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot,
 	v3* in_buf = buf1; v3* out_buf = buf2;
 	uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
 	int start_e = ref_hull->faces[ref_face].edge;
-
-	// Fast path: check if ALL incident vertices are inside ALL side planes.
-	// For aligned box-box contacts (majority in piles), this skips the entire clip loop.
-	{
-		int all_inside = 1;
-		int ei = start_e;
-		do {
-			const HalfEdge* edge = &ref_hull->edges[ei];
-			v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, edge->origin, ref_sc)));
-			v3 head = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[edge->twin].origin, ref_sc)));
-			v3 side_n = norm(cross(sub(head, tail), ref_plane.normal));
-			float side_d = dot(side_n, tail);
-			for (int v = 0; v < clip_count; v++) {
-				if (dot(side_n, in_buf[v]) - side_d > 0.0f) { all_inside = 0; break; }
-			}
-			if (!all_inside) break;
-			ei = ref_hull->edges[ei].next;
-		} while (ei != start_e);
-		if (all_inside) goto skip_clip;
-	}
-
 	int ei = start_e;
 	int guard = 0;
 	uint8_t clip_edge_idx = 0;
@@ -896,7 +875,6 @@ static int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot,
 		assert(++guard < MAX_CLIP_VERTS && "generate_face_contact: face edge loop didn't close");
 	} while (ei != start_e);
 
-skip_clip:
 	{
 		v3 corners[MAX_CLIP_VERTS];
 		int ncorners = 0;
