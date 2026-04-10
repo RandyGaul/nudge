@@ -461,7 +461,7 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB, v3* cache)
 	float rB = shapeB.radius;
 	if (rA != 0.0f || rB != 0.0f) {
 		if (result.distance > FLT_EPSILON) {
-			v3 normal = scale(sub(result.point2, result.point1), 1.0f / result.distance);
+			v3 normal = scale(sep, 1.0f / result.distance);
 			result.point1 = add(result.point1, scale(normal, rA));
 			result.point2 = sub(result.point2, scale(normal, rB));
 			result.distance = fmaxf(0.0f, result.distance - rA - rB);
