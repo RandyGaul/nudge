@@ -1,6 +1,7 @@
 // See LICENSE for licensing info.
 // nudge.c -- physics world implementation
 
+#include "perf.h"
 #include "nudge_internal.h"
 #include "gjk.c"
 #include "gjk_batch.c"
@@ -114,19 +115,28 @@ static void integrate_positions(WorldInternal* w, float dt)
 	}
 }
 
+static int perf_initialized;
+
 void world_step(World world, float dt)
 {
+	if (!perf_initialized) { perf_init(); perf_initialized = 1; }
+	double t_total = perf_now();
+
 	WorldInternal* w = (WorldInternal*)world.id;
 	w->frame++;
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
 
+	double t0 = perf_now();
 	warm_cache_age_and_evict(w);
 	integrate_velocities(w, sub_dt);
+	w->perf.integrate = perf_now() - t0;
 
+	double t1 = perf_now();
 	CK_DYNA InternalManifold* manifolds = NULL;
 	broadphase_and_collide(w, &manifolds);
 	islands_update_contacts(w, manifolds, asize(manifolds));
+	w->perf.broadphase = perf_now() - t1;
 
 	aclear(w->debug_contacts);
 	for (int i = 0; i < asize(manifolds); i++)
@@ -136,6 +146,7 @@ void world_step(World world, float dt)
 	int manifold_count = asize(manifolds);
 
 	// --- Pre-solve (once per frame, using sub_dt for softness/bias) ---
+	double t2 = perf_now();
 	SolverManifold* sm = NULL;
 	SolverContact*  sc = NULL;
 	solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, sub_dt);
@@ -187,13 +198,18 @@ void world_step(World world, float dt)
 	if (cref_count > 0)
 		color_constraints(crefs, cref_count, count, batch_starts, &color_count);
 
+	w->perf.pre_solve = perf_now() - t2;
+
 	// --- Sub-step loop ---
 	// Unified path: PGS iterates all constraints (contacts + joints).
 	// When LDL enabled, K is factored once at substep start, and a mid-loop
 	// K^-1 residual correction is applied at the configured iteration.
+	double t_pgs = 0, t_pos = 0, t_int_sub = 0;
 	for (int sub = 0; sub < n_sub; sub++) {
 		if (sub > 0) {
+			double ti = perf_now();
 			integrate_velocities(w, sub_dt);
+			t_int_sub += perf_now() - ti;
 			// Refresh joint Jacobians/limits from current body state (positions
 			// changed by integrate_positions last substep, velocities just updated).
 			joints_refresh_substep(w, sol_joints, asize(sol_joints), sub_dt);
@@ -219,6 +235,7 @@ void world_step(World world, float dt)
 		}
 
 		// PGS: iterate all constraints (contacts, and joints when LDL is off).
+		double tp = perf_now();
 		for (int iter = 0; iter < w->velocity_iters; iter++) {
 			for (int c = 0; c < color_count; c++)
 				for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
@@ -227,10 +244,14 @@ void world_step(World world, float dt)
 			// LDL handles the bilateral DOFs; this handles the unilateral limit.
 			joints_solve_limits(w, sol_joints, asize(sol_joints));
 		}
+		t_pgs += perf_now() - tp;
 
+		double ti2 = perf_now();
 		integrate_positions(w, sub_dt);
+		t_int_sub += perf_now() - ti2;
 
 		// Relax contacts: refresh separation/bias from updated positions
+		double tpc = perf_now();
 		if (w->solver_type == SOLVER_SOFT_STEP)
 			solver_relax_contacts(w, sm, asize(sm), sc, sub_dt);
 
@@ -239,23 +260,39 @@ void world_step(World world, float dt)
 		if (has_ldl)
 			ldl_position_correct(w, sol_joints, asize(sol_joints), sub_dt);
 		joints_position_correct(w, sol_joints, asize(sol_joints), w->position_iters);
+		t_pos += perf_now() - tpc;
 	}
+
+	w->perf.pgs_solve = t_pgs;
+	w->perf.integrate += t_int_sub;
+	w->perf.position_correct = t_pos;
 
 	afree(crefs);
 
 	// Position correction: NGS for hard SI; also for soft modes when contact_hertz is off
+	double t3 = perf_now();
 	if (w->solver_type == SOLVER_SI)
 		solver_position_correct(w, sm, asize(sm), sc);
 	else if (w->contact_hertz <= 0.0f)
 		solver_position_correct(w, sm, asize(sm), sc);
+	w->perf.position_correct += perf_now() - t3;
 
 	// Post-solve (once per frame)
 	solver_post_solve(w, sm, asize(sm), sc, manifolds, manifold_count);
 	joints_post_solve(w, sol_joints, asize(sol_joints));
 
+	double t4 = perf_now();
 	if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
+	w->perf.islands = perf_now() - t4;
 
 	afree(manifolds);
+	w->perf.total = perf_now() - t_total;
+}
+
+PerfTimers world_get_perf(World world)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	return w->perf;
 }
 
 void world_set_friction_model(World world, FrictionModel model)

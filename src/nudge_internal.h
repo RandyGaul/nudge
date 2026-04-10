@@ -277,6 +277,7 @@ typedef struct WorldInternal
 	float contact_damping_ratio;
 	float max_push_velocity;
 	int sub_steps;
+	PerfTimers perf;
 } WorldInternal;
 
 // -----------------------------------------------------------------------------

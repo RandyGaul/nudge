@@ -14,6 +14,20 @@
 #include "split_store.h"
 
 // -----------------------------------------------------------------------------
+// Performance timers (seconds per phase from last world_step).
+
+typedef struct PerfTimers
+{
+	double broadphase;
+	double pre_solve;
+	double pgs_solve;
+	double position_correct;
+	double integrate;
+	double islands;
+	double total;
+} PerfTimers;
+
+// -----------------------------------------------------------------------------
 // Opaque handles.
 
 typedef struct World { uint64_t id; } World;
@@ -319,6 +333,9 @@ void joint_set_distance_limits(World world, Joint joint, float min_distance, flo
 void joint_clear_limits(World world, Joint joint);
 void joint_set_hinge_motor(World world, Joint joint, float speed, float max_impulse);
 void joint_set_prismatic_motor(World world, Joint joint, float speed, float max_impulse);
+
+// Performance: phase timings from the last world_step call.
+PerfTimers world_get_perf(World world);
 
 // Debug: iterate BVH nodes. Calls fn(min, max, depth, is_leaf, user) for each node child.
 typedef void (*BVHDebugFn)(v3 min, v3 max, int depth, int is_leaf, void* user);
