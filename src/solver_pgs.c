@@ -179,8 +179,16 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 			smf.patch_radius = 0.6667f * sqrtf(smf.patch_area * (1.0f / 3.14159265f));
 
 			// Torsional friction effective mass: 1 / (n^T * I_a_inv * n + n^T * I_b_inv * n)
-			float k_twist = dot(inv_inertia_mul(a->rotation, a->inv_inertia_local, n), n) + dot(inv_inertia_mul(b->rotation, b->inv_inertia_local, n), n);
+			float k_twist = dot(inv_inertia_world_mul(a, n), n) + dot(inv_inertia_world_mul(b, n), n);
 			smf.eff_mass_twist = k_twist > 1e-12f ? 1.0f / k_twist : 0.0f;
+
+			// Precompute angular impulse vectors for manifold-level friction
+			smf.w_t1_a = inv_inertia_world_mul(a, cross(smf.centroid_r_a, smf.tangent1));
+			smf.w_t1_b = inv_inertia_world_mul(b, cross(smf.centroid_r_b, smf.tangent1));
+			smf.w_t2_a = inv_inertia_world_mul(a, cross(smf.centroid_r_a, smf.tangent2));
+			smf.w_t2_b = inv_inertia_world_mul(b, cross(smf.centroid_r_b, smf.tangent2));
+			smf.w_tw_a = inv_inertia_world_mul(a, n);
+			smf.w_tw_b = inv_inertia_world_mul(b, n);
 		}
 
 		// Warm start: match new contacts to cached contacts.
@@ -558,13 +566,13 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 			float vt1 = dot(dv, m->tangent1);
 			float old_t1 = m->lambda_t1;
 			m->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + m->eff_mass_t1 * (-vt1), max_f));
-			apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, scale(m->tangent1, m->lambda_t1 - old_t1));
+			apply_impulse_row(a, b, m->tangent1, m->w_t1_a, m->w_t1_b, m->lambda_t1 - old_t1);
 
 			dv = sub(add(b->velocity, cross(b->angular_velocity, m->centroid_r_b)), add(a->velocity, cross(a->angular_velocity, m->centroid_r_a)));
 			float vt2 = dot(dv, m->tangent2);
 			float old_t2 = m->lambda_t2;
 			m->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + m->eff_mass_t2 * (-vt2), max_f));
-			apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, scale(m->tangent2, m->lambda_t2 - old_t2));
+			apply_impulse_row(a, b, m->tangent2, m->w_t2_a, m->w_t2_b, m->lambda_t2 - old_t2);
 
 			// Torsional friction: resist spin around contact normal
 			float max_twist = m->friction * total_lambda_n * m->patch_radius;
@@ -573,9 +581,8 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 			float old_tw = m->lambda_twist;
 			m->lambda_twist = fmaxf(-max_twist, fminf(old_tw + lambda_tw, max_twist));
 			float delta_tw = m->lambda_twist - old_tw;
-			v3 twist_impulse = scale(m->normal, delta_tw);
-			a->angular_velocity = sub(a->angular_velocity, inv_inertia_world_mul(a, twist_impulse));
-			b->angular_velocity = add(b->angular_velocity, inv_inertia_world_mul(b, twist_impulse));
+			a->angular_velocity = sub(a->angular_velocity, scale(m->w_tw_a, delta_tw));
+			b->angular_velocity = add(b->angular_velocity, scale(m->w_tw_b, delta_tw));
 		} else {
 			// Per-point Coulomb friction
 			for (int ci = 0; ci < m->contact_count; ci++) {

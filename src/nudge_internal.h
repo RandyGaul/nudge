@@ -337,6 +337,10 @@ typedef struct SolverManifold
 	float lambda_twist;
 	float patch_area;
 	float patch_radius;
+	// Precomputed angular impulse for manifold-level friction (patch mode)
+	v3 w_t1_a, w_t1_b;   // tangent1 at centroid
+	v3 w_t2_a, w_t2_b;   // tangent2 at centroid
+	v3 w_tw_a, w_tw_b;   // torsional (normal direction)
 } SolverManifold;
 
 // Warm starting: cached impulses from previous frame, keyed by body pair.
