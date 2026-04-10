@@ -1,0 +1,2 @@
+iteration	quickhull_ms	result	description
+0	137.0	baseline	500 hulls (200 sphere + 200 ico + 100 cylinder), Release build
