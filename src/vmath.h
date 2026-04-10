@@ -34,16 +34,20 @@ typedef struct Transform
 static inline v3 v3_add(v3 a, v3 b) { return (v3){ .m = _mm_add_ps(a.m, b.m) }; }
 static inline v3 v3_sub(v3 a, v3 b) { return (v3){ .m = _mm_sub_ps(a.m, b.m) }; }
 static inline v3 v3_scale(v3 a, float s) { return (v3){ .m = _mm_mul_ps(a.m, _mm_set1_ps(s)) }; }
-static inline float v3_dot(v3 a, v3 b) {
+// Dot product returning broadcast __m128 (stays in register for downstream SIMD ops).
+static inline __m128 v3_dot_m(v3 a, v3 b) {
 	__m128 m = _mm_mul_ps(a.m, b.m);
-	__m128 s = _mm_add_ss(m, _mm_shuffle_ps(m, m, 1));
-	return _mm_cvtss_f32(_mm_add_ss(s, _mm_shuffle_ps(m, m, 2)));
+	__m128 s = _mm_add_ps(m, _mm_shuffle_ps(m, m, _MM_SHUFFLE(3,0,2,1)));
+	return _mm_add_ps(s, _mm_shuffle_ps(m, m, _MM_SHUFFLE(3,1,0,2)));
 }
+static inline float v3_dot(v3 a, v3 b) { return _mm_cvtss_f32(v3_dot_m(a, b)); }
+// Scale by __m128 broadcast (avoids scalar→broadcast when scale comes from v3_dot_m).
+static inline v3 v3_scale_m(v3 a, __m128 s) { return (v3){ .m = _mm_mul_ps(a.m, s) }; }
 static inline v3 v3_cross(v3 a, v3 b) {
-	__m128 a1 = _mm_shuffle_ps(a.m, a.m, _MM_SHUFFLE(3,0,2,1));
-	__m128 b1 = _mm_shuffle_ps(b.m, b.m, _MM_SHUFFLE(3,0,2,1));
-	__m128 r = _mm_sub_ps(_mm_mul_ps(a.m, b1), _mm_mul_ps(a1, b.m));
-	return (v3){ .m = _mm_shuffle_ps(r, r, _MM_SHUFFLE(3,0,2,1)) };
+	__m128 a_yzx = _mm_shuffle_ps(a.m, a.m, _MM_SHUFFLE(3,0,2,1));
+	__m128 b_yzx = _mm_shuffle_ps(b.m, b.m, _MM_SHUFFLE(3,0,2,1));
+	__m128 c = _mm_sub_ps(_mm_mul_ps(a.m, b_yzx), _mm_mul_ps(a_yzx, b.m));
+	return (v3){ .m = _mm_shuffle_ps(c, c, _MM_SHUFFLE(3,0,2,1)) };
 }
 static inline float v3_len2(v3 a) { return v3_dot(a, a); }
 static inline float v3_len(v3 a) { return sqrtf(v3_len2(a)); }
@@ -69,8 +73,11 @@ static inline quat quat_mul(quat a, quat b)
 static __forceinline v3 quat_rotate(quat q, v3 v)
 {
 	v3 u = V3(q.x, q.y, q.z);
-	float s = q.w;
-	return v3_add(v3_add(v3_scale(u, 2.0f * v3_dot(u, v)), v3_scale(v, s*s - v3_dot(u, u))), v3_scale(v3_cross(u, v), 2.0f * s));
+	__m128 two = _mm_set1_ps(2.0f);
+	__m128 uv2 = _mm_mul_ps(two, v3_dot_m(u, v));
+	__m128 ss_uu = _mm_sub_ps(_mm_set1_ps(q.w * q.w), v3_dot_m(u, u));
+	__m128 s2 = _mm_mul_ps(two, _mm_set1_ps(q.w));
+	return v3_add(v3_add(v3_scale_m(u, uv2), v3_scale_m(v, ss_uu)), v3_scale_m(v3_cross(u, v), s2));
 }
 
 // -----------------------------------------------------------------------------
