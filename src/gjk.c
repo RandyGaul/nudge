@@ -344,6 +344,7 @@ static v3 gjk_center(const GJK_Shape* s)
 #define gjk_closest_point(simplex, out) do {                                                                        \
 	const GJK_Simplex* cs = (simplex);                                                                              \
 	float cinv = 1.0f / cs->divisor;                                                                                \
+	__assume(cs->count >= 1 && cs->count <= 3);                                                                     \
 	switch (cs->count) {                                                                                            \
 	case 1: (out) = cs->v[0].point; break;                                                                          \
 	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break; \
