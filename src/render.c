@@ -494,10 +494,10 @@ static void mesh_generate_hull(Mesh* mesh, const Hull* hull, v3 sc)
 		int start = hull->faces[f].edge;
 		int e = start;
 		do {
-			v3 v = hull->verts[hull->edges[e].origin];
+			v3 v = hull->verts[hull->edge_origin[e]];
 			apush(verts, ((MeshVertex){ V3(v.x*sc.x, v.y*sc.y, v.z*sc.z), sn }));
 			fan_count++;
-			e = hull->edges[e].next;
+			e = hull->edge_next[e];
 			assert(fan_count <= hull->edge_count && "mesh_generate_hull: face edge loop didn't close");
 		} while (e != start);
 

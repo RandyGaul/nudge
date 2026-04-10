@@ -892,9 +892,9 @@ static int hull_check_euler(const Hull* h)
 static int hull_check_twins(const Hull* h)
 {
 	for (int i = 0; i < h->edge_count; i++) {
-		int twin = h->edges[i].twin;
+		int twin = h->edge_twin[i];
 		if (twin >= h->edge_count) return 0;
-		if (h->edges[twin].twin != i) return 0;
+		if (h->edge_twin[twin] != i) return 0;
 	}
 	return 1;
 }
@@ -907,8 +907,8 @@ static int hull_check_face_loops(const Hull* h)
 		int e = start;
 		int count = 0;
 		do {
-			if (h->edges[e].face != fi) return 0;
-			e = h->edges[e].next;
+			if (h->edge_face[e] != fi) return 0;
+			e = h->edge_next[e];
 			if (++count > h->edge_count) return 0; // infinite loop
 		} while (e != start);
 		if (count < 3) return 0;
@@ -939,7 +939,7 @@ static int hull_check_normals_outward(const Hull* h)
 		int cnt = 0;
 		int start = h->faces[fi].edge;
 		int e = start;
-		do { fc = add(fc, h->verts[h->edges[e].origin]); cnt++; e = h->edges[e].next; } while (e != start);
+		do { fc = add(fc, h->verts[h->edge_origin[e]]); cnt++; e = h->edge_next[e]; } while (e != start);
 		fc = scale(fc, 1.0f / cnt);
 		// Normal should point from hull centroid toward face centroid.
 		v3 to_face = sub(fc, h->centroid);
@@ -957,9 +957,9 @@ static int hull_check_planar(const Hull* h, float tol)
 		int start = h->faces[fi].edge;
 		int e = start;
 		do {
-			float dist = fabsf(dot(n, h->verts[h->edges[e].origin]) - d);
+			float dist = fabsf(dot(n, h->verts[h->edge_origin[e]]) - d);
 			if (dist > tol) return 0;
-			e = h->edges[e].next;
+			e = h->edge_next[e];
 		} while (e != start);
 	}
 	return 1;
@@ -1863,8 +1863,8 @@ static void test_quickhull_bipyramid_loops()
 		do {
 			count++;
 			if (count > 100) { any_broken = 1; break; }
-			if (h->edges[e].face != f) { any_broken = 1; break; }
-			e = h->edges[e].next;
+			if (h->edge_face[e] != f) { any_broken = 1; break; }
+			e = h->edge_next[e];
 		} while (e != start);
 	}
 	TEST_BEGIN("bipyramid face loops valid");
