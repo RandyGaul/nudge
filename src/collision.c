@@ -1318,7 +1318,7 @@ static ConvexHull make_convex_hull(BodyHot* h, ShapeInternal* s)
 // Narrowphase dispatch for a single body pair.
 // Narrowphase timing accumulators (indexed by shape pair type).
 // Pair encoding: type_a * 5 + type_b (upper triangle, type_a <= type_b).
-#define NP_PAIR_COUNT 15
+#define NP_PAIR_COUNT 25
 static double np_time_acc[NP_PAIR_COUNT];
 static int np_call_acc[NP_PAIR_COUNT];
 static int np_frame_count;
