@@ -47,6 +47,7 @@ void destroy_world(World world)
 		afree(w->body_cold[i].shapes);
 	}
 	afree(w->debug_contacts);
+	afree(w->body_vel);
 	map_free(w->warm_cache);
 	bvh_free(w->bvh_static); CK_FREE(w->bvh_static);
 	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
@@ -255,18 +256,35 @@ void world_step(World world, float dt)
 		t_ldl += perf_now() - tl0;
 
 		// PGS: iterate all constraints (contacts, and joints when LDL is off).
+		// Fast path: patch friction contacts with no joints use compact SolverBodyVel
+		// (32 bytes/body instead of 120 bytes — fits more bodies in cache).
+		int use_body_vel = (w->friction_model == FRICTION_PATCH && asize(sol_joints) == 0);
+		if (use_body_vel) solver_sync_vel_in(w);
+
 		double tp = perf_now();
-		for (int iter = 0; iter < w->velocity_iters; iter++) {
-			for (int c = 0; c < color_count; c++)
-				for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
-					solve_constraint(w, &crefs[i], sm, sc, sol_joints);
-			// Joint limits: solved each PGS iteration (limit DOFs only).
-			// LDL handles the bilateral DOFs; this handles the unilateral limit.
-			double tjl = perf_now();
-			joints_solve_limits(w, sol_joints, asize(sol_joints));
-			t_jlim += perf_now() - tjl;
+		if (use_body_vel) {
+			for (int iter = 0; iter < w->velocity_iters; iter++) {
+				for (int c = 0; c < color_count; c++)
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+						if (crefs[i].type == CTYPE_CONTACT)
+							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], sc);
+				double tjl = perf_now();
+				joints_solve_limits(w, sol_joints, asize(sol_joints));
+				t_jlim += perf_now() - tjl;
+			}
+		} else {
+			for (int iter = 0; iter < w->velocity_iters; iter++) {
+				for (int c = 0; c < color_count; c++)
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
+				double tjl = perf_now();
+				joints_solve_limits(w, sol_joints, asize(sol_joints));
+				t_jlim += perf_now() - tjl;
+			}
 		}
 		t_pgs += perf_now() - tp;
+
+		if (use_body_vel) solver_sync_vel_out(w);
 
 		double ti2 = perf_now();
 		integrate_positions(w, sub_dt);

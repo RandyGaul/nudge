@@ -57,6 +57,18 @@ typedef struct BodyHot
 	float sleep_time; // accumulated seconds below velocity threshold
 } BodyHot;
 
+// Solver velocity state: compact copy of just the fields the PGS inner loop
+// reads/writes. 32 bytes = half a cache line. The solver iterates this array
+// instead of the 120-byte BodyHot array during PGS iterations.
+// Synced from body_hot before PGS, synced back after.
+typedef struct SolverBodyVel
+{
+	v3 velocity;
+	v3 angular_velocity;
+	float inv_mass;
+	float _pad;
+} SolverBodyVel;
+
 typedef struct WarmManifold WarmManifold; // forward decl for warm cache
 
 
@@ -250,6 +262,7 @@ typedef struct WorldInternal
 	CK_DYNA BodyHot*     body_hot;
 	CK_DYNA uint32_t*    body_gen;
 	CK_DYNA int*         body_free;
+	CK_DYNA SolverBodyVel* body_vel; // compact solver velocity state (synced during PGS)
 	CK_DYNA Contact*     debug_contacts;
 	CK_MAP(WarmManifold) warm_cache;
 	// Joints

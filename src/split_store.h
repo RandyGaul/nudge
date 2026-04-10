@@ -89,6 +89,23 @@
 	afree(cold); afree(hot); afree(gen); afree(freelist); \
 } while(0)
 
+// Ensure an extra parallel array has capacity for index idx. Grows and zeros new slots.
+// Use after split_add to keep additional arrays (e.g. body_vel) in sync:
+//   split_add(cold, hot, gen, free, idx);
+//   split_ensure(vel, idx);
+#define split_ensure(arr, idx) do { \
+	int _need = (idx) + 1; \
+	if (asize(arr) < _need) { \
+		int _old = asize(arr); \
+		afit((arr), _need); \
+		asetlen((arr), _need); \
+		memset(&(arr)[_old], 0, (_need - _old) * sizeof(*(arr))); \
+	} \
+} while(0)
+
+// Zero a slot of an extra parallel array (call alongside split_del).
+#define split_clear(arr, idx) memset(&(arr)[(idx)], 0, sizeof(*(arr)))
+
 // Handle encoding: low 32 bits = index, high 32 bits = generation.
 #define handle_make(idx, gen)  ((uint64_t)(gen) << 32 | (uint32_t)(idx))
 #define handle_index(h)        ((int)((h).id & 0xFFFFFFFF))
