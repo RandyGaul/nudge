@@ -1109,97 +1109,6 @@ static AABB* bvh_build_lut(BVHTree* t)
 	return lut;
 }
 
-// Fused BVH traversal context: carries tight AABBs, world, and manifold list
-// so leaf-leaf pairs can be filtered + narrowphased inline without an intermediate array.
-typedef struct BVHBroadCtx { WorldInternal* w; InternalManifold** manifolds; AABB* tight; } BVHBroadCtx;
-
-static void bp_emit_pair(BVHBroadCtx* ctx, int ba, int bb)
-{
-	WorldInternal* w = ctx->w;
-	if (w->body_hot[ba].inv_mass == 0.0f && w->body_hot[bb].inv_mass == 0.0f) return;
-	int isl_a = w->body_cold[ba].island_id, isl_b = w->body_cold[bb].island_id;
-	if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) return;
-	if (jointed_pair_skip(w->joint_pairs, ba, bb)) return;
-	if (!aabb_overlaps(ctx->tight[ba], ctx->tight[bb])) return;
-	narrowphase_pair(w, ba, bb, ctx->manifolds);
-}
-
-// Fused self-test dispatch (no pairs array).
-static void bp_dispatch(BVHTree* t, BVHChild* a, BVHChild* b, BVHBroadCtx* ctx);
-
-static void bp_leaf_vs_node(BVHTree* t, BVHChild* leaf, int ni, BVHBroadCtx* ctx)
-{
-	BVHNode* n = &t->nodes[ni];
-	int oa = aabb_overlaps(bvh_child_aabb(leaf), bvh_child_aabb(&n->a));
-	int ob = aabb_overlaps(bvh_child_aabb(leaf), bvh_child_aabb(&n->b));
-	if (oa) {
-		if (bvh_child_is_leaf(&n->a)) bp_emit_pair(ctx, t->leaves[bvh_child_leaf_idx(leaf)].body_idx, t->leaves[bvh_child_leaf_idx(&n->a)].body_idx);
-		else if (bvh_child_is_internal(&n->a)) bp_leaf_vs_node(t, leaf, n->a.index, ctx);
-	}
-	if (ob) {
-		if (bvh_child_is_leaf(&n->b)) bp_emit_pair(ctx, t->leaves[bvh_child_leaf_idx(leaf)].body_idx, t->leaves[bvh_child_leaf_idx(&n->b)].body_idx);
-		else if (bvh_child_is_internal(&n->b)) bp_leaf_vs_node(t, leaf, n->b.index, ctx);
-	}
-}
-
-static void bp_nodes_vs_nodes(BVHTree* t, BVHNode* na, BVHNode* nb, BVHBroadCtx* ctx)
-{
-	int oo_aa = aabb_overlaps(bvh_child_aabb(&na->a), bvh_child_aabb(&nb->a));
-	int oo_ab = aabb_overlaps(bvh_child_aabb(&na->a), bvh_child_aabb(&nb->b));
-	int oo_ba = aabb_overlaps(bvh_child_aabb(&na->b), bvh_child_aabb(&nb->a));
-	int oo_bb = aabb_overlaps(bvh_child_aabb(&na->b), bvh_child_aabb(&nb->b));
-	if (oo_aa) bp_dispatch(t, &na->a, &nb->a, ctx);
-	if (oo_ab) bp_dispatch(t, &na->a, &nb->b, ctx);
-	if (oo_ba) bp_dispatch(t, &na->b, &nb->a, ctx);
-	if (oo_bb) bp_dispatch(t, &na->b, &nb->b, ctx);
-}
-
-static void bp_dispatch(BVHTree* t, BVHChild* a, BVHChild* b, BVHBroadCtx* ctx)
-{
-	if (bvh_child_is_internal(a) && bvh_child_is_internal(b)) bp_nodes_vs_nodes(t, &t->nodes[a->index], &t->nodes[b->index], ctx);
-	else if (bvh_child_is_leaf(a) && bvh_child_is_leaf(b)) bp_emit_pair(ctx, t->leaves[bvh_child_leaf_idx(a)].body_idx, t->leaves[bvh_child_leaf_idx(b)].body_idx);
-	else if (bvh_child_is_leaf(a) && bvh_child_is_internal(b)) bp_leaf_vs_node(t, a, b->index, ctx);
-	else if (bvh_child_is_internal(a) && bvh_child_is_leaf(b)) bp_leaf_vs_node(t, b, a->index, ctx);
-}
-
-// Fused cross-test dispatch (dynamic vs static, no pairs array).
-static void bp_cross_dispatch(BVHTree* ta, BVHChild* a, BVHTree* tb, BVHChild* b, BVHBroadCtx* ctx);
-
-static void bp_cross_leaf_vs_node(BVHTree* tl, BVHChild* leaf, BVHTree* tn, int ni, BVHBroadCtx* ctx)
-{
-	BVHNode* n = &tn->nodes[ni];
-	int oa = aabb_overlaps(bvh_child_aabb(leaf), bvh_child_aabb(&n->a));
-	int ob = aabb_overlaps(bvh_child_aabb(leaf), bvh_child_aabb(&n->b));
-	if (oa) {
-		if (bvh_child_is_leaf(&n->a)) bp_emit_pair(ctx, tl->leaves[bvh_child_leaf_idx(leaf)].body_idx, tn->leaves[bvh_child_leaf_idx(&n->a)].body_idx);
-		else if (bvh_child_is_internal(&n->a)) bp_cross_leaf_vs_node(tl, leaf, tn, n->a.index, ctx);
-	}
-	if (ob) {
-		if (bvh_child_is_leaf(&n->b)) bp_emit_pair(ctx, tl->leaves[bvh_child_leaf_idx(leaf)].body_idx, tn->leaves[bvh_child_leaf_idx(&n->b)].body_idx);
-		else if (bvh_child_is_internal(&n->b)) bp_cross_leaf_vs_node(tl, leaf, tn, n->b.index, ctx);
-	}
-}
-
-static void bp_cross_nodes(BVHTree* ta, BVHNode* na, BVHTree* tb, BVHNode* nb, BVHBroadCtx* ctx)
-{
-	int oo_aa = aabb_overlaps(bvh_child_aabb(&na->a), bvh_child_aabb(&nb->a));
-	int oo_ab = aabb_overlaps(bvh_child_aabb(&na->a), bvh_child_aabb(&nb->b));
-	int oo_ba = aabb_overlaps(bvh_child_aabb(&na->b), bvh_child_aabb(&nb->a));
-	int oo_bb = aabb_overlaps(bvh_child_aabb(&na->b), bvh_child_aabb(&nb->b));
-	if (oo_aa) bp_cross_dispatch(ta, &na->a, tb, &nb->a, ctx);
-	if (oo_ab) bp_cross_dispatch(ta, &na->a, tb, &nb->b, ctx);
-	if (oo_ba) bp_cross_dispatch(ta, &na->b, tb, &nb->a, ctx);
-	if (oo_bb) bp_cross_dispatch(ta, &na->b, tb, &nb->b, ctx);
-}
-
-static void bp_cross_dispatch(BVHTree* ta, BVHChild* a, BVHTree* tb, BVHChild* b, BVHBroadCtx* ctx)
-{
-	if (bvh_child_is_internal(a) && bvh_child_is_internal(b)) bp_cross_nodes(ta, &ta->nodes[a->index], tb, &tb->nodes[b->index], ctx);
-	else if (bvh_child_is_leaf(a) && bvh_child_is_leaf(b)) bp_emit_pair(ctx, ta->leaves[bvh_child_leaf_idx(a)].body_idx, tb->leaves[bvh_child_leaf_idx(b)].body_idx);
-	else if (bvh_child_is_leaf(a) && bvh_child_is_internal(b)) bp_cross_leaf_vs_node(ta, a, tb, b->index, ctx);
-	else if (bvh_child_is_internal(a) && bvh_child_is_leaf(b)) bp_cross_leaf_vs_node(tb, b, ta, a->index, ctx);
-}
-
 static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 {
 	bvh_refit(w->bvh_dynamic, w);
@@ -1207,6 +1116,10 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	// Incremental refinement: rebuild a subtree using binned SAH.
 	AABB* lut = bvh_build_lut(w->bvh_dynamic);
 	if (lut) { bvh_incremental_refine(w->bvh_dynamic, lut); CK_FREE(lut); }
+
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_self_test(w->bvh_dynamic, &pairs);
+	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
 
 	// Precompute tight AABBs (no fat margin) for overlap pre-filter.
 	int body_count = asize(w->body_hot);
@@ -1216,21 +1129,18 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]);
 	}
 
-	// Fused traversal: tight AABB check + pair filter + narrowphase inline.
-	BVHBroadCtx ctx = { w, manifolds, tight };
-	BVHTree* dyn = w->bvh_dynamic;
-	if (dyn->root != -1) {
-		for (int i = asize(dyn->nodes) - 1; i >= 0; --i) {
-			BVHNode* n = &dyn->nodes[i];
-			if (aabb_overlaps(bvh_child_aabb(&n->a), bvh_child_aabb(&n->b)))
-				bp_dispatch(dyn, &n->a, &n->b, &ctx);
-		}
+	for (int i = 0; i < asize(pairs); i++) {
+		int a = pairs[i].a, b = pairs[i].b;
+		if (w->body_hot[a].inv_mass == 0.0f && w->body_hot[b].inv_mass == 0.0f) continue;
+		int isl_a = w->body_cold[a].island_id, isl_b = w->body_cold[b].island_id;
+		if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
+		if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
+		if (!aabb_overlaps(tight[a], tight[b])) continue;
+		narrowphase_pair(w, a, b, manifolds);
 	}
-	BVHTree* sta = w->bvh_static;
-	if (dyn->root != -1 && sta->root != -1)
-		bp_cross_nodes(dyn, &dyn->nodes[dyn->root], sta, &sta->nodes[sta->root], &ctx);
 
 	CK_FREE(tight);
+	afree(pairs);
 }
 
 // Rebuild joint_pairs map when joint topology changes (create/destroy joint).
