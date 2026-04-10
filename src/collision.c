@@ -1120,6 +1120,105 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 // Falls through to collide_hull_hull for contact generation when penetrating.
 // sat_hint: if non-NULL, *sat_hint is the cached axis from last frame (-1 = no cache).
 // On return, *sat_hint is updated to the winning axis for next frame.
+// Batched Gottschalk SAT for up to 4 box pairs simultaneously (1 pair per SIMD lane).
+// Returns penetration + best_axis per pair. Separated pairs get pen < 0.
+static void box_sat_batch(const Box* __restrict as, const Box* __restrict bs, int count, float* __restrict out_pen, int* __restrict out_axis)
+{
+	assert(count >= 1 && count <= 4);
+	// Pack quaternions into SoA.
+	simd4f aqx = simd_set(as[0].rotation.x, count>1?as[1].rotation.x:0, count>2?as[2].rotation.x:0, count>3?as[3].rotation.x:0);
+	simd4f aqy = simd_set(as[0].rotation.y, count>1?as[1].rotation.y:0, count>2?as[2].rotation.y:0, count>3?as[3].rotation.y:0);
+	simd4f aqz = simd_set(as[0].rotation.z, count>1?as[1].rotation.z:0, count>2?as[2].rotation.z:0, count>3?as[3].rotation.z:0);
+	simd4f aqw = simd_set(as[0].rotation.w, count>1?as[1].rotation.w:0, count>2?as[2].rotation.w:0, count>3?as[3].rotation.w:0);
+	simd4f bqx = simd_set(bs[0].rotation.x, count>1?bs[1].rotation.x:0, count>2?bs[2].rotation.x:0, count>3?bs[3].rotation.x:0);
+	simd4f bqy = simd_set(bs[0].rotation.y, count>1?bs[1].rotation.y:0, count>2?bs[2].rotation.y:0, count>3?bs[3].rotation.y:0);
+	simd4f bqz = simd_set(bs[0].rotation.z, count>1?bs[1].rotation.z:0, count>2?bs[2].rotation.z:0, count>3?bs[3].rotation.z:0);
+	simd4f bqw = simd_set(bs[0].rotation.w, count>1?bs[1].rotation.w:0, count>2?bs[2].rotation.w:0, count>3?bs[3].rotation.w:0);
+
+	// SoA quat-to-rotation-matrix for A (9 components).
+	simd4f two = simd_set1(2.0f), one = simd_set1(1.0f);
+	simd4f ax2 = simd_mul(two, simd_mul(aqx,aqx)), ay2 = simd_mul(two, simd_mul(aqy,aqy)), az2 = simd_mul(two, simd_mul(aqz,aqz));
+	simd4f axy = simd_mul(two, simd_mul(aqx,aqy)), axz = simd_mul(two, simd_mul(aqx,aqz)), ayz = simd_mul(two, simd_mul(aqy,aqz));
+	simd4f awx = simd_mul(two, simd_mul(aqw,aqx)), awy = simd_mul(two, simd_mul(aqw,aqy)), awz = simd_mul(two, simd_mul(aqw,aqz));
+	simd4f acx_x = simd_sub(simd_sub(one,ay2),az2), acx_y = simd_add(axy,awz), acx_z = simd_sub(axz,awy);
+	simd4f acy_x = simd_sub(axy,awz), acy_y = simd_sub(simd_sub(one,ax2),az2), acy_z = simd_add(ayz,awx);
+	simd4f acz_x = simd_add(axz,awy), acz_y = simd_sub(ayz,awx), acz_z = simd_sub(simd_sub(one,ax2),ay2);
+
+	// Same for B.
+	simd4f bx2 = simd_mul(two, simd_mul(bqx,bqx)), by2 = simd_mul(two, simd_mul(bqy,bqy)), bz2 = simd_mul(two, simd_mul(bqz,bqz));
+	simd4f bxy = simd_mul(two, simd_mul(bqx,bqy)), bxz = simd_mul(two, simd_mul(bqx,bqz)), byz = simd_mul(two, simd_mul(bqy,bqz));
+	simd4f bwx = simd_mul(two, simd_mul(bqw,bqx)), bwy = simd_mul(two, simd_mul(bqw,bqy)), bwz = simd_mul(two, simd_mul(bqw,bqz));
+	simd4f bcx_x = simd_sub(simd_sub(one,by2),bz2), bcx_y = simd_add(bxy,bwz), bcx_z = simd_sub(bxz,bwy);
+	simd4f bcy_x = simd_sub(bxy,bwz), bcy_y = simd_sub(simd_sub(one,bx2),bz2), bcy_z = simd_add(byz,bwx);
+	simd4f bcz_x = simd_add(bxz,bwy), bcz_y = simd_sub(byz,bwx), bcz_z = simd_sub(simd_sub(one,bx2),by2);
+
+	// R matrix: R[i][j] = dot(A_col_i, B_col_j). 9 SoA dot products.
+	#define SDOT3(ax,ay,az,bx,by,bz) simd_add(simd_add(simd_mul(ax,bx),simd_mul(ay,by)),simd_mul(az,bz))
+	simd4f R00=SDOT3(acx_x,acx_y,acx_z,bcx_x,bcx_y,bcx_z), R01=SDOT3(acx_x,acx_y,acx_z,bcy_x,bcy_y,bcy_z), R02=SDOT3(acx_x,acx_y,acx_z,bcz_x,bcz_y,bcz_z);
+	simd4f R10=SDOT3(acy_x,acy_y,acy_z,bcx_x,bcx_y,bcx_z), R11=SDOT3(acy_x,acy_y,acy_z,bcy_x,bcy_y,bcy_z), R12=SDOT3(acy_x,acy_y,acy_z,bcz_x,bcz_y,bcz_z);
+	simd4f R20=SDOT3(acz_x,acz_y,acz_z,bcx_x,bcx_y,bcx_z), R21=SDOT3(acz_x,acz_y,acz_z,bcy_x,bcy_y,bcy_z), R22=SDOT3(acz_x,acz_y,acz_z,bcz_x,bcz_y,bcz_z);
+
+	simd4f eps4 = simd_set1(1e-6f);
+	simd4f sign_mask = simd_sign_mask();
+	#define SABS(x) simd_andnot(sign_mask, x)
+	simd4f A00=simd_add(SABS(R00),eps4),A01=simd_add(SABS(R01),eps4),A02=simd_add(SABS(R02),eps4);
+	simd4f A10=simd_add(SABS(R10),eps4),A11=simd_add(SABS(R11),eps4),A12=simd_add(SABS(R12),eps4);
+	simd4f A20=simd_add(SABS(R20),eps4),A21=simd_add(SABS(R21),eps4),A22=simd_add(SABS(R22),eps4);
+
+	// Translation d = pos_b - pos_a, projected into A's frame.
+	simd4f dx = simd_set(bs[0].center.x-as[0].center.x, count>1?bs[1].center.x-as[1].center.x:0, count>2?bs[2].center.x-as[2].center.x:0, count>3?bs[3].center.x-as[3].center.x:0);
+	simd4f dy = simd_set(bs[0].center.y-as[0].center.y, count>1?bs[1].center.y-as[1].center.y:0, count>2?bs[2].center.y-as[2].center.y:0, count>3?bs[3].center.y-as[3].center.y:0);
+	simd4f dz = simd_set(bs[0].center.z-as[0].center.z, count>1?bs[1].center.z-as[1].center.z:0, count>2?bs[2].center.z-as[2].center.z:0, count>3?bs[3].center.z-as[3].center.z:0);
+	simd4f ta = SDOT3(dx,dy,dz,acx_x,acx_y,acx_z), tb = SDOT3(dx,dy,dz,acy_x,acy_y,acy_z), tc = SDOT3(dx,dy,dz,acz_x,acz_y,acz_z);
+
+	// Half-extents.
+	simd4f ea = simd_set(as[0].half_extents.x, count>1?as[1].half_extents.x:0, count>2?as[2].half_extents.x:0, count>3?as[3].half_extents.x:0);
+	simd4f eb = simd_set(as[0].half_extents.y, count>1?as[1].half_extents.y:0, count>2?as[2].half_extents.y:0, count>3?as[3].half_extents.y:0);
+	simd4f ec = simd_set(as[0].half_extents.z, count>1?as[1].half_extents.z:0, count>2?as[2].half_extents.z:0, count>3?as[3].half_extents.z:0);
+	simd4f fa = simd_set(bs[0].half_extents.x, count>1?bs[1].half_extents.x:0, count>2?bs[2].half_extents.x:0, count>3?bs[3].half_extents.x:0);
+	simd4f fb = simd_set(bs[0].half_extents.y, count>1?bs[1].half_extents.y:0, count>2?bs[2].half_extents.y:0, count>3?bs[3].half_extents.y:0);
+	simd4f fc = simd_set(bs[0].half_extents.z, count>1?bs[1].half_extents.z:0, count>2?bs[2].half_extents.z:0, count>3?bs[3].half_extents.z:0);
+
+	// 15 axis tests. Track min pen + best axis per lane.
+	simd4f best_pen = simd_set1(1e18f);
+	simd4f best_ax_f = simd_set1(-1.0f);
+	simd4f zero4 = simd_zero();
+
+	#define SAT_TEST(axis_id, ra_expr, rb_expr, sep_expr) { \
+		simd4f _ra = (ra_expr), _rb = (rb_expr), _sep = SABS(sep_expr); \
+		simd4f _pen = simd_sub(simd_add(_ra, _rb), _sep); \
+		simd4f _better = simd_cmpgt(best_pen, _pen); \
+		best_pen = simd_blendv(best_pen, _pen, _better); \
+		best_ax_f = simd_blendv(best_ax_f, simd_set1((float)(axis_id)), _better); \
+	}
+
+	SAT_TEST(0, ea, simd_add(simd_add(simd_mul(fa,A00),simd_mul(fb,A01)),simd_mul(fc,A02)), ta)
+	SAT_TEST(1, eb, simd_add(simd_add(simd_mul(fa,A10),simd_mul(fb,A11)),simd_mul(fc,A12)), tb)
+	SAT_TEST(2, ec, simd_add(simd_add(simd_mul(fa,A20),simd_mul(fb,A21)),simd_mul(fc,A22)), tc)
+	SAT_TEST(3, simd_add(simd_add(simd_mul(ea,A00),simd_mul(eb,A10)),simd_mul(ec,A20)), fa, simd_add(simd_add(simd_mul(ta,R00),simd_mul(tb,R10)),simd_mul(tc,R20)))
+	SAT_TEST(4, simd_add(simd_add(simd_mul(ea,A01),simd_mul(eb,A11)),simd_mul(ec,A21)), fb, simd_add(simd_add(simd_mul(ta,R01),simd_mul(tb,R11)),simd_mul(tc,R21)))
+	SAT_TEST(5, simd_add(simd_add(simd_mul(ea,A02),simd_mul(eb,A12)),simd_mul(ec,A22)), fc, simd_add(simd_add(simd_mul(ta,R02),simd_mul(tb,R12)),simd_mul(tc,R22)))
+	SAT_TEST(6,  simd_add(simd_mul(eb,A20),simd_mul(ec,A10)), simd_add(simd_mul(fb,A02),simd_mul(fc,A01)), simd_sub(simd_mul(tc,R10),simd_mul(tb,R20)))
+	SAT_TEST(7,  simd_add(simd_mul(eb,A21),simd_mul(ec,A11)), simd_add(simd_mul(fa,A02),simd_mul(fc,A00)), simd_sub(simd_mul(tc,R11),simd_mul(tb,R21)))
+	SAT_TEST(8,  simd_add(simd_mul(eb,A22),simd_mul(ec,A12)), simd_add(simd_mul(fa,A01),simd_mul(fb,A00)), simd_sub(simd_mul(tc,R12),simd_mul(tb,R22)))
+	SAT_TEST(9,  simd_add(simd_mul(ea,A20),simd_mul(ec,A00)), simd_add(simd_mul(fb,A12),simd_mul(fc,A11)), simd_sub(simd_mul(ta,R20),simd_mul(tc,R00)))
+	SAT_TEST(10, simd_add(simd_mul(ea,A21),simd_mul(ec,A01)), simd_add(simd_mul(fa,A12),simd_mul(fc,A10)), simd_sub(simd_mul(ta,R21),simd_mul(tc,R01)))
+	SAT_TEST(11, simd_add(simd_mul(ea,A22),simd_mul(ec,A02)), simd_add(simd_mul(fa,A11),simd_mul(fb,A10)), simd_sub(simd_mul(ta,R22),simd_mul(tc,R02)))
+	SAT_TEST(12, simd_add(simd_mul(ea,A10),simd_mul(eb,A00)), simd_add(simd_mul(fb,A22),simd_mul(fc,A21)), simd_sub(simd_mul(tb,R00),simd_mul(ta,R10)))
+	SAT_TEST(13, simd_add(simd_mul(ea,A11),simd_mul(eb,A01)), simd_add(simd_mul(fa,A22),simd_mul(fc,A20)), simd_sub(simd_mul(tb,R01),simd_mul(ta,R11)))
+	SAT_TEST(14, simd_add(simd_mul(ea,A12),simd_mul(eb,A02)), simd_add(simd_mul(fa,A21),simd_mul(fb,A20)), simd_sub(simd_mul(tb,R02),simd_mul(ta,R12)))
+
+	#undef SAT_TEST
+	#undef SDOT3
+	#undef SABS
+
+	// Extract per-pair results.
+	float pen_arr[4], ax_arr[4];
+	simd_store(pen_arr, best_pen);
+	simd_store(ax_arr, best_ax_f);
+	for (int i = 0; i < count; i++) { out_pen[i] = pen_arr[i]; out_axis[i] = (int)ax_arr[i]; }
+}
+
 static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint)
 {
 	// Rotation columns for each box.
@@ -1469,7 +1568,8 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	int sap_count = asize(sap);
 	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAPEntry), sap_cmp);
 
-	// Sweep: test overlapping pairs along x-axis, then full 3D AABB overlap (SIMD branchless).
+	// Sweep: collect box-box pairs for batched SAT, dispatch others immediately.
+	CK_DYNA BroadPair* box_pairs = NULL;
 	for (int i = 0; i < sap_count; i++) {
 		float max_x = sap[i].max_x;
 		int a = sap[i].body_idx;
@@ -1481,9 +1581,40 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 			int isl_b = w->body_cold[b].island_id;
 			if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
 			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
-			narrowphase_pair(w, a, b, manifolds);
+			if (w->body_cold[a].shapes[0].type == SHAPE_BOX && w->body_cold[b].shapes[0].type == SHAPE_BOX) {
+				apush(box_pairs, ((BroadPair){ a < b ? a : b, a < b ? b : a }));
+			} else {
+				narrowphase_pair(w, a, b, manifolds);
+			}
 		}
 	}
+
+	// Batched box-box: 4-wide SIMD SAT + per-pair contact gen.
+	{
+		double t0_np = perf_now();
+		int bp_count = asize(box_pairs);
+		for (int bi = 0; bi < bp_count; bi += 4) {
+			int batch = bp_count - bi < 4 ? bp_count - bi : 4;
+			Box batch_a[4], batch_b[4];
+			for (int k = 0; k < batch; k++) {
+				int a = box_pairs[bi+k].a, b = box_pairs[bi+k].b;
+				batch_a[k] = make_box(&w->body_hot[a], &w->body_cold[a].shapes[0]);
+				batch_b[k] = make_box(&w->body_hot[b], &w->body_cold[b].shapes[0]);
+			}
+			float pen[4]; int axis[4];
+			box_sat_batch(batch_a, batch_b, batch, pen, axis);
+			for (int k = 0; k < batch; k++) {
+				if (pen[k] < 0.0f) continue; // separated
+				InternalManifold im = { .body_a = box_pairs[bi+k].a, .body_b = box_pairs[bi+k].b };
+				if (collide_box_box_ex(batch_a[k], batch_b[k], &im.m, NULL))
+					apush(*manifolds, im);
+			}
+		}
+		double dt_np = perf_now() - t0_np;
+		np_time_acc[np_pair_idx(SHAPE_BOX, SHAPE_BOX)] += dt_np;
+		np_call_acc[np_pair_idx(SHAPE_BOX, SHAPE_BOX)] += bp_count;
+	}
+	afree(box_pairs);
 
 	// Dynamic vs static: BVH cross-test with tight AABB pre-filter.
 	CK_DYNA BroadPair* pairs = NULL;
