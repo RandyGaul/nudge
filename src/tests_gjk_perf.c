@@ -440,9 +440,9 @@ static void test_gjk_known_distances()
 	TEST_BEGIN("hull-hull (box via hull)");
 	{
 		const Hull* ub = hull_unit_box();
-		v3 s1[8], s2[8];
-		GJK_Shape ga = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s1);
-		GJK_Shape gb = gjk_hull_scaled(ub, V3(4,0,0), id, V3(1,1,1), s2);
+		v3 s1[8], s2[8]; float so1[24], so2[24];
+		GJK_Shape ga = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s1, so1);
+		GJK_Shape gb = gjk_hull_scaled(ub, V3(4,0,0), id, V3(1,1,1), s2, so2);
 		r = gjk_distance(ga, gb);
 		TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
 	}
@@ -450,9 +450,9 @@ static void test_gjk_known_distances()
 	TEST_BEGIN("point-hull vertex region");
 	{
 		const Hull* ub = hull_unit_box();
-		v3 s[8];
+		v3 s[8]; float so[24];
 		GJK_Shape pt = gjk_sphere(V3(2,2,2), 0);
-		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s);
+		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s, so);
 		r = gjk_distance(pt, bx);
 		TEST_ASSERT_FLOAT(r.distance, sqrtf(3.0f), 0.02f);
 	}
@@ -460,9 +460,9 @@ static void test_gjk_known_distances()
 	TEST_BEGIN("point-hull edge region");
 	{
 		const Hull* ub = hull_unit_box();
-		v3 s[8];
+		v3 s[8]; float so[24];
 		GJK_Shape pt = gjk_sphere(V3(1.5f,1.5f,0), 0);
-		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s);
+		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s, so);
 		r = gjk_distance(pt, bx);
 		TEST_ASSERT_FLOAT(r.distance, sqrtf(0.5f), 0.02f);
 	}
@@ -470,9 +470,9 @@ static void test_gjk_known_distances()
 	TEST_BEGIN("point-hull face region");
 	{
 		const Hull* ub = hull_unit_box();
-		v3 s[8];
+		v3 s[8]; float so[24];
 		GJK_Shape pt = gjk_sphere(V3(3,0,0), 0);
-		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s);
+		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s, so);
 		r = gjk_distance(pt, bx);
 		TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
 	}
@@ -524,9 +524,9 @@ static void test_gjk_bf_box_box()
 		BruteResult ref = bf_hull_hull(wa, ub, wb, ub);
 
 		// gjk_hull path
-		v3 s1[8], s2[8];
-		GJK_Shape ga = gjk_hull_scaled(ub, posA, rA, heA, s1);
-		GJK_Shape gb = gjk_hull_scaled(ub, posB, rB, heB, s2);
+		v3 s1[8], s2[8]; float so1[24], so2[24];
+		GJK_Shape ga = gjk_hull_scaled(ub, posA, rA, heA, s1, so1);
+		GJK_Shape gb = gjk_hull_scaled(ub, posB, rB, heB, s2, so2);
 		double err = fabs((double)gjk_distance(ga, gb).distance - ref.distance);
 		if (err > max_err_hull) max_err_hull = err;
 
@@ -559,9 +559,9 @@ static void test_gjk_bf_segment_hull()
 		bf_hull_world_verts(wb, ub, boxHE, dv3_from_v3(boxPos), dquat_from_quat(rB));
 		BruteResult ref = bf_segment_hull(dv3_from_v3(segP), dv3_from_v3(segQ), wb, ub);
 
-		v3 sb[8];
+		v3 sb[8]; float sosb[24];
 		GJK_Shape sa = gjk_capsule(segP, segQ, 0);
-		GJK_Shape sbx = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb);
+		GJK_Shape sbx = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb, sosb);
 		double err = fabs((double)gjk_distance(sa, sbx).distance - ref.distance);
 		if (err > max_err) max_err = err;
 	}
@@ -591,9 +591,9 @@ static void test_gjk_bf_capsule_box()
 		BruteResult ref = bf_segment_hull(dv3_from_v3(capP), dv3_from_v3(capQ), wb, ub);
 		double bf_dist = ref.distance - (double)capR;
 
-		v3 sb[8];
+		v3 sb[8]; float sosb[24];
 		GJK_Shape sa = gjk_capsule(capP, capQ, capR);
-		GJK_Shape sbx = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb);
+		GJK_Shape sbx = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb, sosb);
 		double err = fabs((double)gjk_distance(sa, sbx).distance - bf_dist);
 		if (err > max_err) max_err = err;
 
@@ -628,8 +628,8 @@ static void test_gjk_bf_sphere_box()
 		double bf_dist = dv3_len(dv3_sub(dv3_from_v3(sphC), cp)) - (double)sphR;
 
 		GJK_Shape sa = gjk_sphere(sphC, sphR);
-		v3 sb[8];
-		GJK_Shape sbh = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb);
+		v3 sb[8]; float sosb[24];
+		GJK_Shape sbh = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb, sosb);
 		double err = fabs((double)gjk_distance(sa, sbh).distance - bf_dist);
 		if (err > max_err) max_err = err;
 
@@ -885,12 +885,12 @@ static PerfRow perf_hull_hull(int n_target)
 	Hull* hb = gjk_perf_make_random_hull(n_target, 1.0f);
 
 	GJK_Shape a[PERF_CONFIGS], b[PERF_CONFIGS];
-	v3 sca[PERF_CONFIGS][1024], scb[PERF_CONFIGS][1024];
+	v3 sca[PERF_CONFIGS][1024], scb[PERF_CONFIGS][1024]; float soac[PERF_CONFIGS][3072], sobc[PERF_CONFIGS][3072];
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		float sep = 0.5f + (float)(c % 4) * 2.5f;
 		float sc = 0.5f + (float)(c / 4 % 4) * 2.0f;
-		a[c] = gjk_hull_scaled(ha, V3(0,0,0), gjk_perf_random_quat(), V3(sc, sc*0.7f, sc*0.5f), sca[c]);
-		b[c] = gjk_hull_scaled(hb, V3(sep + sc*3, 0, 0), gjk_perf_random_quat(), V3(sc*0.8f, sc, sc*0.6f), scb[c]);
+		a[c] = gjk_hull_scaled(ha, V3(0,0,0), gjk_perf_random_quat(), V3(sc, sc*0.7f, sc*0.5f), sca[c], soac[c]);
+		b[c] = gjk_hull_scaled(hb, V3(sep + sc*3, 0, 0), gjk_perf_random_quat(), V3(sc*0.8f, sc, sc*0.6f), scb[c], sobc[c]);
 	}
 	// Scale iteration count down for large hulls to keep runtime reasonable
 	int n_iters = PERF_N;
@@ -929,9 +929,9 @@ static void test_gjk_bf_hull_hull(int n_target)
 		bf_hull_world_verts(wb, hb, heB, dv3_from_v3(posB), dquat_from_quat(rB));
 		BruteResult ref = bf_hull_hull(wa, ha, wb, hb);
 
-		v3 sa[1024], sb[1024];
-		GJK_Shape ga = gjk_hull_scaled(ha, posA, rA, heA, sa);
-		GJK_Shape gb = gjk_hull_scaled(hb, posB, rB, heB, sb);
+		v3 sa[1024], sb[1024]; float soa[3072], sob[3072];
+		GJK_Shape ga = gjk_hull_scaled(ha, posA, rA, heA, sa, soa);
+		GJK_Shape gb = gjk_hull_scaled(hb, posB, rB, heB, sb, sob);
 		double err = fabs((double)gjk_distance(ga, gb).distance - ref.distance);
 		if (err > max_err) max_err = err;
 

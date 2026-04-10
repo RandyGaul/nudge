@@ -54,7 +54,7 @@ typedef struct GJK_Shape
 		struct { v3 center; } point;
 		struct { v3 p, q; } segment;
 		struct { v3 center; quat rot; quat inv_rot; v3 half_extents; } box;
-		struct { v3 center; quat rot; quat inv_rot; const v3* verts; int count; } hull;
+		struct { v3 center; quat rot; quat inv_rot; const v3* verts; const float* soa; int count; } hull;
 		struct { v3 p, q; float radius; v3 axis; float inv_axis_len; } cylinder;
 	};
 } GJK_Shape;
@@ -62,7 +62,7 @@ typedef struct GJK_Shape
 static GJK_Shape gjk_sphere(v3 center, float radius) { return (GJK_Shape){ .type = GJK_POINT, .radius = radius, .point.center = center }; }
 static GJK_Shape gjk_capsule(v3 p, v3 q, float radius) { return (GJK_Shape){ .type = GJK_SEGMENT, .radius = radius, .segment.p = p, .segment.q = q }; }
 static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) { return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.rot = rot, .box.inv_rot = inv(rot), .box.half_extents = half_extents }; }
-static GJK_Shape gjk_hull(v3 center, quat rot, const v3* verts, int count) { return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.rot = rot, .hull.inv_rot = inv(rot), .hull.verts = verts, .hull.count = count }; }
+static GJK_Shape gjk_hull(v3 center, quat rot, const v3* verts, int count, const float* soa) { return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.rot = rot, .hull.inv_rot = inv(rot), .hull.verts = verts, .hull.soa = soa, .hull.count = count }; }
 static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
 	v3 axis = sub(q, p);
 	float al = len(axis);
@@ -72,11 +72,19 @@ static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
 
 // Hull convenience: pre-scale vertices and build shape.
 // Caller must keep scaled_verts alive for the duration of the GJK call.
-static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts)
+// For hulls > 32 verts, also builds SoA layout in soa_buf for fast SIMD scan.
+// soa_buf must hold 3*count floats (or NULL for small hulls).
+static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts, float* soa_buf)
 {
-	for (int i = 0; i < hull->vert_count; i++)
+	int n = hull->vert_count;
+	for (int i = 0; i < n; i++)
 		scaled_verts[i] = hmul(hull->verts[i], sc);
-	return gjk_hull(pos, rot, scaled_verts, hull->vert_count);
+	if (soa_buf && n > 32) {
+		float* sx = soa_buf, *sy = soa_buf + n, *sz = soa_buf + n * 2;
+		for (int i = 0; i < n; i++) { sx[i] = scaled_verts[i].x; sy[i] = scaled_verts[i].y; sz[i] = scaled_verts[i].z; }
+		return gjk_hull(pos, rot, scaled_verts, n, soa_buf);
+	}
+	return gjk_hull(pos, rot, scaled_verts, n, NULL);
 }
 
 // Support function: returns world-space support point + feature ID.
@@ -96,11 +104,46 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 	}                                                                                                            \
 	case GJK_HULL: {                                                                                             \
 		v3 ld = rotate(sp->hull.inv_rot, sd);                                                                    \
-		float hbest = -1e18f; int hbi = 0;                                                                       \
-		for (int hi = 0; hi < sp->hull.count; hi++) {                                                            \
-			float hd = dot(sp->hull.verts[hi], ld); if (hd > hbest) { hbest = hd; hbi = hi; }                    \
+		const v3* hv = sp->hull.verts; int hn = sp->hull.count;                                                  \
+		__m128 ldx = _mm_set1_ps(ld.x), ldy = _mm_set1_ps(ld.y), ldz = _mm_set1_ps(ld.z);                      \
+		__m128 vbest = _mm_set1_ps(-1e18f);                                                                      \
+		__m128i ibest = _mm_setzero_si128();                                                                     \
+		int hi = 0;                                                                                              \
+		if (sp->hull.soa) {                                                                                      \
+			/* SoA path for large hulls: contiguous x/y/z arrays, no transpose needed */                         \
+			const float* sx = sp->hull.soa, *sy = sx + hn, *sz = sy + hn;                                       \
+			for (; hi + 3 < hn; hi += 4) {                                                                       \
+				__m128 dots = _mm_add_ps(_mm_add_ps(                                                             \
+					_mm_mul_ps(_mm_loadu_ps(sx + hi), ldx),                                                      \
+					_mm_mul_ps(_mm_loadu_ps(sy + hi), ldy)),                                                     \
+					_mm_mul_ps(_mm_loadu_ps(sz + hi), ldz));                                                     \
+				__m128i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);                                               \
+				__m128 mask = _mm_cmpgt_ps(dots, vbest);                                                         \
+				vbest = _mm_blendv_ps(vbest, dots, mask);                                                        \
+				ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));    \
+			}                                                                                                    \
+		} else {                                                                                                 \
+			/* AoS path for small hulls: transpose 4 v3s per iteration */                                        \
+			for (; hi + 3 < hn; hi += 4) {                                                                       \
+				__m128 v0 = hv[hi].m, v1 = hv[hi+1].m, v2 = hv[hi+2].m, v3r = hv[hi+3].m;                      \
+				__m128 t0 = _mm_unpacklo_ps(v0, v1), t1 = _mm_unpacklo_ps(v2, v3r);                             \
+				__m128 t2 = _mm_unpackhi_ps(v0, v1), t3 = _mm_unpackhi_ps(v2, v3r);                             \
+				__m128 dots = _mm_add_ps(_mm_add_ps(                                                             \
+					_mm_mul_ps(_mm_movelh_ps(t0, t1), ldx),                                                     \
+					_mm_mul_ps(_mm_movehl_ps(t1, t0), ldy)),                                                    \
+					_mm_mul_ps(_mm_movelh_ps(t2, t3), ldz));                                                    \
+				__m128i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);                                               \
+				__m128 mask = _mm_cmpgt_ps(dots, vbest);                                                         \
+				vbest = _mm_blendv_ps(vbest, dots, mask);                                                        \
+				ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));    \
+			}                                                                                                    \
 		}                                                                                                        \
-		*(out_feat) = hbi; (out_point) = add(sp->hull.center, rotate(sp->hull.rot, sp->hull.verts[hbi])); break; \
+		float hbests[4]; int hbidxs[4];                                                                          \
+		_mm_storeu_ps(hbests, vbest); _mm_storeu_si128((__m128i*)hbidxs, ibest);                                 \
+		float hbest = hbests[0]; int hbi = hbidxs[0];                                                            \
+		for (int k = 1; k < 4; k++) { if (hbests[k] > hbest) { hbest = hbests[k]; hbi = hbidxs[k]; } }         \
+		for (; hi < hn; hi++) { float hd = dot(hv[hi], ld); if (hd > hbest) { hbest = hd; hbi = hi; } }         \
+		*(out_feat) = hbi; (out_point) = add(sp->hull.center, rotate(sp->hull.rot, hv[hbi])); break;             \
 	}                                                                                                            \
 	case GJK_CYLINDER: {                                                                                         \
 		v3 cu = sp->cylinder.axis;                                                                               \
