@@ -41,10 +41,10 @@ typedef struct GJK_Cache
 	int hintA;    // hull vertex hint for shape A
 	int hintB;    // hull vertex hint for shape B
 	int count;    // cached simplex vertex count (0 = direction-only warm start)
-	int feat1[3]; // feature IDs on shape A
-	int feat2[3]; // feature IDs on shape B
-	v3 point1[3]; // cached world-space support points on A
-	v3 point2[3]; // cached world-space support points on B
+	int feat1[2]; // feature IDs on shape A (max 2 cached vertices)
+	int feat2[2]; // feature IDs on shape B
+	v3 point1[2]; // cached world-space support points on A
+	v3 point2[2]; // cached world-space support points on B
 } GJK_Cache;
 // -----------------------------------------------------------------------------
 // Shape types and constructors.
@@ -464,7 +464,7 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	int fA, fB;
 	v3 sA, sB;
 	// Reconstruct simplex from cache: use world-space points (fast) or feature replay (accurate for cylinders).
-	int use_simplex_cache = cache && cache->count >= 1 && cache->count <= 3;
+	int use_simplex_cache = cache && cache->count >= 1 && cache->count <= 2;
 	if (use_simplex_cache) {
 		int has_cyl = shapeA->type == GJK_CYLINDER || shapeB->type == GJK_CYLINDER;
 		for (int i = 0; i < cache->count; i++) {
@@ -559,7 +559,7 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		if (shapeA->type == GJK_HULL) cache->hintA = shapeA->hull.hint;
 		if (shapeB->type == GJK_HULL) cache->hintB = shapeB->hull.hint;
 		// Cache simplex features for next frame warm-start
-		int cn = simplex.count < 3 ? simplex.count : 3;
+		int cn = simplex.count < 2 ? simplex.count : 2;
 		cache->count = cn;
 		for (int i = 0; i < cn; i++) { cache->feat1[i] = simplex.v[i].feat1; cache->feat2[i] = simplex.v[i].feat2; cache->point1[i] = simplex.v[i].point1; cache->point2[i] = simplex.v[i].point2; }
 	}
