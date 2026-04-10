@@ -398,9 +398,51 @@ int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold)
 	return 1;
 }
 
+// Analytical sphere-box: project sphere center to box local space, clamp to extents, compute distance.
+// Much faster than sphere_hull (which uses GJK + plane search).
 int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 {
-	return collide_sphere_hull(a, (ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents }, manifold);
+	// Transform sphere center to box local space.
+	quat inv_rot = inv(b.rotation);
+	v3 local_center = rotate(inv_rot, sub(a.center, b.center));
+
+	// Clamp to box extents = closest point on box surface.
+	v3 he = b.half_extents;
+	v3 clamped = V3(local_center.x < -he.x ? -he.x : (local_center.x > he.x ? he.x : local_center.x), local_center.y < -he.y ? -he.y : (local_center.y > he.y ? he.y : local_center.y), local_center.z < -he.z ? -he.z : (local_center.z > he.z ? he.z : local_center.z));
+
+	v3 diff = sub(local_center, clamped);
+	float dist2 = len2(diff);
+
+	if (dist2 > a.radius * a.radius && dist2 > 1e-12f) return 0;
+
+	if (dist2 > 1e-12f) {
+		// Sphere center outside box — contact on box surface.
+		float dist = sqrtf(dist2);
+		v3 local_n = scale(diff, 1.0f / dist);
+		v3 world_n = rotate(b.rotation, local_n);
+		v3 world_pt = add(b.center, rotate(b.rotation, clamped));
+		manifold->count = 1;
+		manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius - dist, .feature_id = 0 };
+		return 1;
+	}
+
+	// Sphere center inside box — find closest face.
+	float best_depth = he.x - fabsf(local_center.x);
+	int best_face = local_center.x > 0 ? 3 : 2; // +X:3, -X:2
+	float dy = he.y - fabsf(local_center.y);
+	if (dy < best_depth) { best_depth = dy; best_face = local_center.y > 0 ? 5 : 4; }
+	float dz = he.z - fabsf(local_center.z);
+	if (dz < best_depth) { best_depth = dz; best_face = local_center.z > 0 ? 1 : 0; }
+
+	v3 local_n = V3(0, 0, 0);
+	static const int face_axis[6] = {2, 2, 0, 0, 1, 1};
+	static const float face_sign[6] = {-1, 1, -1, 1, -1, 1};
+	(&local_n.x)[face_axis[best_face]] = face_sign[best_face];
+	v3 world_n = rotate(b.rotation, local_n);
+	v3 world_pt = sub(a.center, scale(world_n, a.radius));
+	manifold->count = 1;
+	manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius + best_depth, .feature_id = 0 };
+	return 1;
 }
 
 // Capsule-hull: GJK shallow path, face/edge-search deep path.
