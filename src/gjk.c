@@ -222,17 +222,32 @@ static int gjk_solve2(GJK_Simplex* s)
 	v3 ba = sub(b, a);
 	float u = dot(b, ba);
 	float v = -dot(a, ba);
-	// Branchless: compute edge case always, then conditionally override for vertex cases
 	float div = u + v;
 	if (div == 0.0f) return 0;
-	int va = v <= 0.0f, vb = u <= 0.0f;
-	if (va | vb) {
-		// One of the vertex regions. If vb, swap v[0]=v[1] first.
-		if (vb) s->v[0] = s->v[1];
-		s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1;
-		return 1;
-	}
-	s->v[0].u = u; s->v[1].u = v; s->divisor = div; s->count = 2;
+
+	// Branchless selection: pick vertex or edge region
+	__m128 is_vb = _mm_set1_ps(u <= 0.0f ? -1.0f : 0.0f);  // all-bits if vertex B
+	__m128 is_va = _mm_set1_ps(v <= 0.0f ? -1.0f : 0.0f);   // all-bits if vertex A
+	__m128 is_vtx = _mm_or_ps(is_va, is_vb);                 // any vertex region
+
+	// v[0].point: a normally, b if vertex-B
+	s->v[0].point.m = _mm_blendv_ps(a.m, b.m, is_vb);
+	// v[0].point1: keep v[0] or take v[1]
+	s->v[0].point1.m = _mm_blendv_ps(s->v[0].point1.m, s->v[1].point1.m, is_vb);
+	s->v[0].point2.m = _mm_blendv_ps(s->v[0].point2.m, s->v[1].point2.m, is_vb);
+	// feat IDs
+	s->v[0].feat1 = (u <= 0.0f) ? s->v[1].feat1 : s->v[0].feat1;
+	s->v[0].feat2 = (u <= 0.0f) ? s->v[1].feat2 : s->v[0].feat2;
+
+	// u/divisor/count: vertex → (1, 1, 1), edge → (u, v, div, 2)
+	float sel_u0   = _mm_cvtss_f32(_mm_blendv_ps(_mm_set_ss(u), _mm_set_ss(1.0f), is_vtx));
+	float sel_div  = _mm_cvtss_f32(_mm_blendv_ps(_mm_set_ss(div), _mm_set_ss(1.0f), is_vtx));
+	int sel_count  = _mm_cvtss_f32(is_vtx) != 0.0f ? 1 : 2;
+
+	s->v[0].u = sel_u0;
+	s->v[1].u = v; // always write (only read if count==2)
+	s->divisor = sel_div;
+	s->count = sel_count;
 	return 1;
 }
 
