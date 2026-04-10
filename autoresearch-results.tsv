@@ -90,3 +90,5 @@ clean_motion	1040	baseline	Clean motion baseline: constructor + gjk_distance + i
 83	1948.3	discard	forceinline mat rotate: noise
 84	1626.8	keep	simplex caching (feature replay, skip cylinders) -16.2%!!!
 85	1604.9	keep	cylinder simplex caching via half-float packed perp direction
+86	1544.2	keep	3x10-bit cylinder perpendicular encoding (avoid nz derivation)
+87	1530.6	keep	skip cylinder feature renormalization (approx unit-length)
