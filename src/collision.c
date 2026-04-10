@@ -536,19 +536,35 @@ typedef struct FaceQuery
 
 static FaceQuery sat_query_faces(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
 {
-	// Transform from world to hull2 local: p_local = rot2^-1 * (p_world - pos2)
-	quat inv2 = inv(rot2);
-
 	FaceQuery best = { .index = -1, .separation = -1e18f };
 
+	// Fast path: box vs any hull. Box has 6 faces with axis-aligned normals.
+	// Precompute 3 rotation columns once, derive all 6 world-space face planes.
+	// Avoids per-face plane_transform (which does quaternion rotation + normalize + dot).
+	if (hull1 == &s_unit_box_hull) {
+		v3 cols[3] = { rotate(rot1, V3(1, 0, 0)), rotate(rot1, V3(0, 1, 0)), rotate(rot1, V3(0, 0, 1)) };
+		quat inv2 = inv(rot2);
+		for (int i = 0; i < 6; i++) {
+			// Box planes: -Z=0,+Z=1,-X=2,+X=3,-Y=4,+Y=5. Normals: axis-aligned, offset=1.
+			HullPlane lp = hull1->planes[i];
+			// lp.normal is axis-aligned: one component is +/-1, rest 0. World normal = rotation column or its negation.
+			int axis = lp.normal.x != 0.0f ? 0 : (lp.normal.y != 0.0f ? 1 : 2);
+			float sign = (&lp.normal.x)[axis];
+			v3 face_n = sign > 0 ? cols[axis] : neg(cols[axis]);
+			float face_off = dot(face_n, pos1) + (&scale1.x)[axis];
+			v3 sup_dir_local = rotate(inv2, neg(face_n));
+			v3 sup_local = hull_support(hull2, sup_dir_local);
+			v3 sup_scaled = V3(sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z);
+			v3 sup_world = add(pos2, rotate(rot2, sup_scaled));
+			float sep = dot(face_n, sup_world) - face_off;
+			if (sep > best.separation) { best.separation = sep; best.index = i; }
+		}
+		return best;
+	}
+
 	for (int i = 0; i < hull1->face_count; i++) {
-		// Transform hull1's plane into hull2's local space
 		HullPlane pw = plane_transform(hull1->planes[i], pos1, rot1, scale1);
-		// Bring plane normal into hull2 local
-		v3 local_n = rotate(inv2, pw.normal);
-		v3 local_pt = rotate(inv2, sub(scale(pw.normal, pw.offset), pos2));
-		// Actually, let's just use world space and project hull2's support
-		// Support of hull2 in direction -pw.normal (world space)
+		quat inv2 = inv(rot2);
 		v3 sup_dir_local = rotate(inv2, neg(pw.normal));
 		v3 sup_local = hull_support(hull2, sup_dir_local);
 		v3 sup_scaled = { sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z };
