@@ -59,18 +59,23 @@ typedef struct QH_Edge {
 	int origin, face, mark;
 } QH_Edge;
 
+// Hot/cold face split: hot fields (scanned by qh_next_conflict + merge)
+// are packed together; cold fields (topology, metadata) accessed only
+// during cone creation, merge splicing, and output.
 typedef struct QH_Face {
-	int edge;
-	int next, prev;
-	int conflict_head;
-	int conflict_slot; // index into conflict_faces[] (-1 if not in list)
-	int mark;
-	int num_verts;
-	float area;
-	float maxoutside; // max distance any point was ever seen outside this face
-	HullPlane plane;
-	v3 centroid; // cached from qh_recompute_face
-} QH_Face;
+	// --- hot: conflict scanning + merge distance checks ---
+	HullPlane plane;     // 16 bytes
+	v3 centroid;         // 12 bytes
+	float maxoutside;    // 4 bytes
+	int conflict_head;   // 4 bytes
+	int mark;            // 4 bytes
+	// --- cold: topology + metadata ---
+	int edge;            // 4 bytes
+	int next, prev;      // 8 bytes
+	int conflict_slot;   // 4 bytes
+	int num_verts;       // 4 bytes
+	float area;          // 4 bytes
+} QH_Face;               // 64 bytes total, hot fields in first 40
 
 typedef struct QH_State {
 	QH_Verts verts;
@@ -787,18 +792,29 @@ static void qh_face_list_add(QH_State* s, QH_FaceList* list, int fi)
 	list->last = fi;
 }
 
+// Batch-allocate n contiguous edges at the end of the array.
+static int qh_alloc_edges_contiguous(QH_State* s, int n)
+{
+	int base = asize(s->edges);
+	afit(s->edges, base + n);
+	asetlen(s->edges, base + n);
+	memset(s->edges + base, 0, n * sizeof(QH_Edge));
+	return base;
+}
+
 static void qh_add_new_faces(QH_State* s, QH_FaceList* nf, int eye, CK_DYNA int* horizon, int nh)
 {
 	nf->first = nf->last = QH_INVALID;
 	int prev = QH_INVALID, begin = QH_INVALID;
 	v3 eye_pos = qh_vert_pos(&s->verts, eye);
+	// Batch-allocate all cone edges contiguously for cache-friendly writes.
+	int edge_base = qh_alloc_edges_contiguous(s, nh * 3);
 	for (int i = 0; i < nh; i++) {
 		int horizon_edge = horizon[i];
 		int tail = s->edges[horizon_edge].origin;
 		int head = s->edges[s->edges[horizon_edge].next].origin;
-		// Inline qh_create_triangle(s, eye, tail, head).
 		int fi = qh_alloc_face(s);
-		int e0 = qh_alloc_edge(s), e1 = qh_alloc_edge(s), e2 = qh_alloc_edge(s);
+		int e0 = edge_base + i*3, e1 = e0+1, e2 = e0+2;
 		s->edges[e0] = (QH_Edge){ .next=e1, .prev=e2, .twin=QH_INVALID, .origin=eye, .face=fi };
 		s->edges[e1] = (QH_Edge){ .next=e2, .prev=e0, .twin=QH_INVALID, .origin=tail, .face=fi };
 		s->edges[e2] = (QH_Edge){ .next=e0, .prev=e1, .twin=QH_INVALID, .origin=head, .face=fi };
