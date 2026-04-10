@@ -700,6 +700,20 @@ static int hull_face_verts_world(const Hull* hull, int face_idx, v3 pos, quat ro
 // Find face on hull most anti-parallel to a world-space normal.
 static int find_incident_face(const Hull* hull, v3 pos, quat rot, v3 sc, v3 ref_normal)
 {
+	// Fast path: box faces are rotation columns. 3 dot products vs 6 plane_transforms.
+	if (hull->verts == s_box_verts) {
+		v3 cols[3] = { rotate(rot, V3(1, 0, 0)), rotate(rot, V3(0, 1, 0)), rotate(rot, V3(0, 0, 1)) };
+		// Box faces: -Z=0,+Z=1, -X=2,+X=3, -Y=4,+Y=5. Normals: +-col[2], +-col[0], +-col[1].
+		static const int axis_to_neg_face[3] = {2, 4, 0}; // -X=2, -Y=4, -Z=0
+		int best = 0; float best_dot = 1e18f;
+		for (int i = 0; i < 3; i++) {
+			float d = dot(cols[i], ref_normal);
+			// Positive face: d itself. Negative face: -d.
+			if (d < best_dot) { best_dot = d; best = axis_to_neg_face[i] + 1; } // positive face
+			if (-d < best_dot) { best_dot = -d; best = axis_to_neg_face[i]; }   // negative face
+		}
+		return best;
+	}
 	int best = 0;
 	float best_dot = 1e18f;
 	for (int i = 0; i < hull->face_count; i++) {
