@@ -287,9 +287,8 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 		if (dsq >= dsq_prev) break;
 		dsq_prev = dsq;
 
-		v3 d = neg(closest);
-		gjk_support(&shapeA, neg(d), &fA, sA);
-		gjk_support(&shapeB, d, &fB, sB);
+		gjk_support(&shapeA, closest, &fA, sA);
+		gjk_support(&shapeB, neg(closest), &fB, sB);
 		v3 w = sub(sB, sA);
 
 		float max_vert2 = 0.0f;
@@ -297,7 +296,7 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 			float v2 = len2(simplex.v[i].point);
 			if (v2 > max_vert2) max_vert2 = v2;
 		}
-		float progress = dot(sub(w, closest), neg(closest));
+		float progress = dsq - dot(w, closest);
 		if (progress <= max_vert2 * GJK_PROGRESS_EPS) break;
 
 		iter++;
