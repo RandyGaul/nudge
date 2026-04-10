@@ -216,30 +216,22 @@ static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, in
 // -----------------------------------------------------------------------------
 // Simplex solvers: find closest point on simplex to origin.
 
-// a ^ ((a ^ b) & mask): branchless select, a where mask=0, b where mask=all-1s
-#define sel_ps(a, b, mask) _mm_xor_ps(a, _mm_and_ps(_mm_xor_ps(a, b), mask))
-#define sel_i(a, b, mask) ((a) ^ (((a) ^ (b)) & (mask)))
-
 static int gjk_solve2(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point;
 	v3 ba = sub(b, a);
 	float u = dot(b, ba);
 	float v = -dot(a, ba);
+	// Branchless: compute edge case always, then conditionally override for vertex cases
 	float div = u + v;
 	if (div == 0.0f) return 0;
-
-	int is_vtx = (v <= 0.0f) | (u <= 0.0f);
-	// Branchless swap: if u<=0, v[0] becomes v[1]; otherwise stays
-	__m128 swap = _mm_castsi128_ps(_mm_set1_epi32(u <= 0.0f ? ~0 : 0));
-	s->v[0].point.m  = sel_ps(s->v[0].point.m, s->v[1].point.m, swap);
-	s->v[0].point1.m = sel_ps(s->v[0].point1.m, s->v[1].point1.m, swap);
-	s->v[0].point2.m = sel_ps(s->v[0].point2.m, s->v[1].point2.m, swap);
-	s->v[0].feat1 = sel_i(s->v[0].feat1, s->v[1].feat1, u <= 0.0f ? ~0 : 0);
-	s->v[0].feat2 = sel_i(s->v[0].feat2, s->v[1].feat2, u <= 0.0f ? ~0 : 0);
-
-	// Now branch once: vertex region vs edge region
-	if (is_vtx) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	int va = v <= 0.0f, vb = u <= 0.0f;
+	if (va | vb) {
+		// One of the vertex regions. If vb, swap v[0]=v[1] first.
+		if (vb) s->v[0] = s->v[1];
+		s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1;
+		return 1;
+	}
 	s->v[0].u = u; s->v[1].u = v; s->divisor = div; s->count = 2;
 	return 1;
 }
