@@ -563,9 +563,70 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 	return 1;
 }
 
+// Analytical capsule-box: transform capsule to box local space, clamp segment to box,
+// compute closest point, then project back. Much faster than capsule_hull (GJK + SAT).
 int collide_capsule_box(Capsule a, Box b, Manifold* manifold)
 {
-	return collide_capsule_hull(a, (ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents }, manifold);
+	quat inv_rot = inv(b.rotation);
+	v3 lp = rotate(inv_rot, sub(a.p, b.center));
+	v3 lq = rotate(inv_rot, sub(a.q, b.center));
+	v3 he = b.half_extents;
+
+	// Find closest point on segment to box (in box local space).
+	// Clamp segment endpoints to box extents to get approximate closest point on box.
+	v3 seg_dir = sub(lq, lp);
+	float seg_len2 = len2(seg_dir);
+
+	// Find closest point on segment to box surface using iterative clamping.
+	// Start with segment closest point to box center, then clamp to box.
+	float t = seg_len2 > 1e-12f ? -dot(lp, seg_dir) / seg_len2 : 0.5f;
+	t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+	v3 seg_pt = add(lp, scale(seg_dir, t));
+
+	// Clamp to box = closest point on box to seg_pt.
+	v3 box_pt = V3(seg_pt.x < -he.x ? -he.x : (seg_pt.x > he.x ? he.x : seg_pt.x), seg_pt.y < -he.y ? -he.y : (seg_pt.y > he.y ? he.y : seg_pt.y), seg_pt.z < -he.z ? -he.z : (seg_pt.z > he.z ? he.z : seg_pt.z));
+
+	// Re-project: find closest point on segment to box_pt.
+	float t2 = seg_len2 > 1e-12f ? dot(sub(box_pt, lp), seg_dir) / seg_len2 : 0.5f;
+	t2 = t2 < 0.0f ? 0.0f : (t2 > 1.0f ? 1.0f : t2);
+	v3 seg_pt2 = add(lp, scale(seg_dir, t2));
+
+	// Re-clamp box point to segment's new closest point.
+	v3 box_pt2 = V3(seg_pt2.x < -he.x ? -he.x : (seg_pt2.x > he.x ? he.x : seg_pt2.x), seg_pt2.y < -he.y ? -he.y : (seg_pt2.y > he.y ? he.y : seg_pt2.y), seg_pt2.z < -he.z ? -he.z : (seg_pt2.z > he.z ? he.z : seg_pt2.z));
+
+	v3 diff = sub(seg_pt2, box_pt2);
+	float dist2 = len2(diff);
+
+	if (dist2 > a.radius * a.radius && dist2 > 1e-12f) return 0;
+
+	if (dist2 > 1e-12f) {
+		float dist = sqrtf(dist2);
+		v3 local_n = scale(diff, 1.0f / dist);
+		v3 world_n = rotate(b.rotation, local_n);
+		v3 world_pt = add(b.center, rotate(b.rotation, box_pt2));
+		manifold->count = 1;
+		manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius - dist, .feature_id = 0 };
+		return 1;
+	}
+
+	// Deep penetration: capsule segment inside box. Use face search like sphere-box.
+	float best_depth = he.x - fabsf(seg_pt2.x);
+	int best_face = seg_pt2.x > 0 ? 3 : 2;
+	float dy = he.y - fabsf(seg_pt2.y);
+	if (dy < best_depth) { best_depth = dy; best_face = seg_pt2.y > 0 ? 5 : 4; }
+	float dz = he.z - fabsf(seg_pt2.z);
+	if (dz < best_depth) { best_depth = dz; best_face = seg_pt2.z > 0 ? 1 : 0; }
+
+	v3 local_n = V3(0, 0, 0);
+	static const int face_axis[6] = {2, 2, 0, 0, 1, 1};
+	static const float face_sign[6] = {-1, 1, -1, 1, -1, 1};
+	(&local_n.x)[face_axis[best_face]] = face_sign[best_face];
+	v3 world_n = rotate(b.rotation, local_n);
+	v3 world_seg = add(b.center, rotate(b.rotation, seg_pt2));
+	v3 world_pt = sub(world_seg, scale(world_n, a.radius));
+	manifold->count = 1;
+	manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius + best_depth, .feature_id = 0 };
+	return 1;
 }
 
 // -----------------------------------------------------------------------------
