@@ -129,10 +129,13 @@ static inline v3 hull_vert_scaled(const Hull* hull, int i, v3 scale)
 // Transform a plane from hull-local into world space.
 static inline HullPlane plane_transform(HullPlane p, v3 pos, quat rot, v3 scale)
 {
-	// For axis-aligned unit box with uniform-ish scale:
-	// normal needs inverse-transpose scale, then rotate.
+	// Fast path: uniform scale skips inverse-transpose normalization (rotation preserves unit length).
+	if (scale.x == scale.y && scale.y == scale.z) {
+		v3 n = rotate(rot, p.normal);
+		float off = dot(n, pos) + p.offset * scale.x;
+		return (HullPlane){ .normal = n, .offset = off };
+	}
 	v3 n = norm(rotate(rot, V3(p.normal.x / scale.x, p.normal.y / scale.y, p.normal.z / scale.z)));
-	// A point on the plane in local space: normal * offset, then scale + transform
 	v3 local_pt = V3(p.normal.x * p.offset * scale.x, p.normal.y * p.offset * scale.y, p.normal.z * p.offset * scale.z);
 	v3 world_pt = add(pos, rotate(rot, local_pt));
 	return (HullPlane){ .normal = n, .offset = dot(n, world_pt) };
