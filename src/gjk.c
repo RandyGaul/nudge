@@ -463,13 +463,22 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	}
 	int fA, fB;
 	v3 sA, sB;
-	// Use cached world-space support points directly (skip feature reconstruction).
+	// Reconstruct simplex from cache: use world-space points (fast) or feature replay (accurate for cylinders).
 	int use_simplex_cache = cache && cache->count >= 1 && cache->count <= 3;
 	if (use_simplex_cache) {
+		int has_cyl = shapeA->type == GJK_CYLINDER || shapeB->type == GJK_CYLINDER;
 		for (int i = 0; i < cache->count; i++) {
-			simplex.v[i].point1 = cache->point1[i];
-			simplex.v[i].point2 = cache->point2[i];
-			simplex.v[i].point = sub(cache->point2[i], cache->point1[i]);
+			v3 p1, p2;
+			if (has_cyl) {
+				p1 = gjk_support_feature(shapeA, cache->feat1[i]);
+				p2 = gjk_support_feature(shapeB, cache->feat2[i]);
+			} else {
+				p1 = cache->point1[i];
+				p2 = cache->point2[i];
+			}
+			simplex.v[i].point1 = p1;
+			simplex.v[i].point2 = p2;
+			simplex.v[i].point = sub(p2, p1);
 			simplex.v[i].feat1 = cache->feat1[i];
 			simplex.v[i].feat2 = cache->feat2[i];
 			simplex.v[i].u = 1.0f;
