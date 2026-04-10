@@ -255,6 +255,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 // Support macro: dispatches per shape type. Box/cylinder/hull-scan are functions to reduce code size.
 #define gjk_support(shape, dir, out_feat, out_point) do {                                                                 \
 	GJK_Shape* sp = (shape); v3 sd = (dir);                                                                               \
+	__assume(sp->type >= GJK_POINT && sp->type <= GJK_TRIANGLE);                                                          \
 	switch (sp->type) {                                                                                                   \
 	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                               \
 	case GJK_SEGMENT: {                                                                                                   \
