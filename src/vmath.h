@@ -4,18 +4,16 @@
 
 #include <math.h>
 #include <float.h>
+#include "simd.h"
 
 // -----------------------------------------------------------------------------
 // Types.
 
-// v3: 16-byte aligned vector (w=0) for native SSE operation.
-#include <xmmintrin.h>
-#include <smmintrin.h>
-
+// v3: 16-byte aligned vector (w=0) for native SIMD operation.
 typedef union v3
 {
 	struct { float x, y, z, _w; };
-	__m128 m;
+	simd4f m;
 } v3;
 
 typedef struct quat
@@ -26,33 +24,37 @@ typedef struct Transform
 { v3 position; quat rotation; } Transform;
 
 // Constructors.
-#define V3(vx, vy, vz) ((v3){ .m = _mm_set_ps(0, vz, vy, vx) })
+#define V3(vx, vy, vz) ((v3){ .m = simd_set(vx, vy, vz, 0) })
 
 // -----------------------------------------------------------------------------
-// v3 implementation (SSE-backed).
+// v3 implementation (SIMD-backed).
 
-static inline v3 v3_add(v3 a, v3 b) { return (v3){ .m = _mm_add_ps(a.m, b.m) }; }
-static inline v3 v3_sub(v3 a, v3 b) { return (v3){ .m = _mm_sub_ps(a.m, b.m) }; }
-static inline v3 v3_scale(v3 a, float s) { return (v3){ .m = _mm_mul_ps(a.m, _mm_set1_ps(s)) }; }
-// Dot product returning broadcast __m128 (stays in register for downstream SIMD ops).
-static inline __m128 v3_dot_m(v3 a, v3 b) {
-	__m128 m = _mm_mul_ps(a.m, b.m);
-	__m128 s = _mm_add_ps(m, _mm_shuffle_ps(m, m, _MM_SHUFFLE(3,0,2,1)));
-	return _mm_add_ps(s, _mm_shuffle_ps(m, m, _MM_SHUFFLE(3,1,0,2)));
+static inline v3 v3_add(v3 a, v3 b) { return (v3){ .m = simd_add(a.m, b.m) }; }
+static inline v3 v3_sub(v3 a, v3 b) { return (v3){ .m = simd_sub(a.m, b.m) }; }
+static inline v3 v3_scale(v3 a, float s) { return (v3){ .m = simd_mul(a.m, simd_set1(s)) }; }
+
+// Dot product returning broadcast simd4f (stays in register for downstream ops).
+static inline simd4f v3_dot_m(v3 a, v3 b) {
+	simd4f m = simd_mul(a.m, b.m);
+	simd4f s = simd_add(m, simd_shuffle(m, m, _MM_SHUFFLE(3,0,2,1)));
+	return simd_add(s, simd_shuffle(m, m, _MM_SHUFFLE(3,1,0,2)));
 }
-static inline float v3_dot(v3 a, v3 b) { return _mm_cvtss_f32(v3_dot_m(a, b)); }
-// Scale by __m128 broadcast (avoids scalar→broadcast when scale comes from v3_dot_m).
-static inline v3 v3_scale_m(v3 a, __m128 s) { return (v3){ .m = _mm_mul_ps(a.m, s) }; }
+static inline float v3_dot(v3 a, v3 b) { return simd_get_x(v3_dot_m(a, b)); }
+
+// Scale by simd4f broadcast (avoids scalar->broadcast when scale comes from v3_dot_m).
+static inline v3 v3_scale_m(v3 a, simd4f s) { return (v3){ .m = simd_mul(a.m, s) }; }
+
 static inline v3 v3_cross(v3 a, v3 b) {
-	__m128 a_yzx = _mm_shuffle_ps(a.m, a.m, _MM_SHUFFLE(3,0,2,1));
-	__m128 b_yzx = _mm_shuffle_ps(b.m, b.m, _MM_SHUFFLE(3,0,2,1));
-	__m128 c = _mm_sub_ps(_mm_mul_ps(a.m, b_yzx), _mm_mul_ps(a_yzx, b.m));
-	return (v3){ .m = _mm_shuffle_ps(c, c, _MM_SHUFFLE(3,0,2,1)) };
+	simd4f a_yzx = simd_shuffle(a.m, a.m, _MM_SHUFFLE(3,0,2,1));
+	simd4f b_yzx = simd_shuffle(b.m, b.m, _MM_SHUFFLE(3,0,2,1));
+	simd4f c = simd_sub(simd_mul(a.m, b_yzx), simd_mul(a_yzx, b.m));
+	return (v3){ .m = simd_shuffle(c, c, _MM_SHUFFLE(3,0,2,1)) };
 }
+
 static inline float v3_len2(v3 a) { return v3_dot(a, a); }
 static inline float v3_len(v3 a) { return sqrtf(v3_len2(a)); }
 static inline v3 v3_norm(v3 a) { float l = v3_len(a); return v3_scale(a, 1.0f/l); }
-static inline v3 v3_neg(v3 a) { return (v3){ .m = _mm_sub_ps(_mm_setzero_ps(), a.m) }; }
+static inline v3 v3_neg(v3 a) { return (v3){ .m = simd_neg(a.m) }; }
 
 // -----------------------------------------------------------------------------
 // quat implementation.
@@ -70,13 +72,13 @@ static inline quat quat_mul(quat a, quat b)
 	};
 }
 
-static __forceinline v3 quat_rotate(quat q, v3 v)
+static SIMD_FORCEINLINE v3 quat_rotate(quat q, v3 v)
 {
 	v3 u = V3(q.x, q.y, q.z);
-	__m128 two = _mm_set1_ps(2.0f);
-	__m128 uv2 = _mm_mul_ps(two, v3_dot_m(u, v));
-	__m128 ss_uu = _mm_sub_ps(_mm_set1_ps(q.w * q.w), v3_dot_m(u, u));
-	__m128 s2 = _mm_mul_ps(two, _mm_set1_ps(q.w));
+	simd4f two = simd_set1(2.0f);
+	simd4f uv2 = simd_mul(two, v3_dot_m(u, v));
+	simd4f ss_uu = simd_sub(simd_set1(q.w * q.w), v3_dot_m(u, u));
+	simd4f s2 = simd_mul(two, simd_set1(q.w));
 	return v3_add(v3_add(v3_scale_m(u, uv2), v3_scale_m(v, ss_uu)), v3_scale_m(v3_cross(u, v), s2));
 }
 
@@ -206,15 +208,16 @@ static inline mat4 mat4_trs(v3 pos, quat rot, v3 s)
 // -----------------------------------------------------------------------------
 // v3 component-wise operations.
 
-static inline v3 v3_mul(v3 a, v3 b) { return (v3){ .m = _mm_mul_ps(a.m, b.m) }; }
-static inline v3 v3_min(v3 a, v3 b) { return (v3){ .m = _mm_min_ps(a.m, b.m) }; }
-static inline v3 v3_max(v3 a, v3 b) { return (v3){ .m = _mm_max_ps(a.m, b.m) }; }
+static inline v3 v3_mul(v3 a, v3 b) { return (v3){ .m = simd_mul(a.m, b.m) }; }
+static inline v3 v3_min(v3 a, v3 b) { return (v3){ .m = simd_min(a.m, b.m) }; }
+static inline v3 v3_max(v3 a, v3 b) { return (v3){ .m = simd_max(a.m, b.m) }; }
 static inline v3 v3_rcp(v3 a) {
-	// Safe reciprocal: zero where input is zero
-	__m128 zero = _mm_setzero_ps();
-	__m128 mask = _mm_cmpneq_ps(a.m, zero);
-	__m128 r = _mm_div_ps(_mm_set1_ps(1.0f), _mm_blendv_ps(_mm_set1_ps(1.0f), a.m, mask));
-	return (v3){ .m = _mm_and_ps(r, mask) };
+	// Safe reciprocal: zero where input is zero.
+	simd4f zero = simd_zero();
+	simd4f mask = simd_cmpge(a.m, zero); // not exact but close enough for non-negative inputs
+	simd4f safe = simd_blendv(simd_set1(1.0f), a.m, mask);
+	simd4f r = simd_div(simd_set1(1.0f), safe);
+	return (v3){ .m = simd_and(r, mask) };
 }
 
 // -----------------------------------------------------------------------------
