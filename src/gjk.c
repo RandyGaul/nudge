@@ -233,7 +233,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	v3 cu = sp->cylinder.axis;
 	if (sp->cylinder.inv_axis_len == 0.0f) { *feat = 0; return sp->cylinder.mid; }
 	float cda = dot(sd, cu);
-	*feat = cda >= 0.0f;
+	int cap = cda >= 0.0f;
 	// Branchless base: mid + copysign(half_axis, da)
 	__m128 sign = _mm_and_ps(_mm_set1_ps(cda), _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000)));
 	v3 cbase = add(sp->cylinder.mid, (v3){ .m = _mm_xor_ps(sp->cylinder.half_axis.m, sign) });
@@ -241,7 +241,11 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	__m128 cdp2 = v3_dot_m(cdp, cdp);
 	__m128 cpl = _mm_sqrt_ss(cdp2);
 	float cplf = _mm_cvtss_f32(cpl);
-	if (cplf <= FLT_EPSILON) return cbase;
+	if (cplf <= FLT_EPSILON) { *feat = cap; return cbase; }
+	float inv_cpl = 1.0f / cplf;
+	// Pack normalized perp direction as 2 half-floats (15-bit signed each) + cap bit
+	int hx = (int)(cdp.x * inv_cpl * 16383.0f), hy = (int)(cdp.y * inv_cpl * 16383.0f);
+	*feat = cap | ((hx & 0x7FFF) << 1) | ((hy & 0x7FFF) << 16);
 	return add(cbase, v3_scale_m(cdp, _mm_div_ss(_mm_set_ss(sp->cylinder.radius), cpl)));
 }
 // Support macro: dispatches per shape type. Box/cylinder/hull-scan are functions to reduce code size.
@@ -285,8 +289,20 @@ static v3 gjk_support_feature(const GJK_Shape* sp, int feat)
 	case GJK_HULL:
 		return add(sp->hull.center, gjk_mat_rotate_t(sp->hull.col0, sp->hull.col1, sp->hull.col2, hmul(sp->hull.verts[feat], sp->hull.scale)));
 	case GJK_CYLINDER: {
-		__m128 sign = feat ? _mm_setzero_ps() : _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000));
-		return add(sp->cylinder.mid, (v3){ .m = _mm_xor_ps(sp->cylinder.half_axis.m, sign) });
+		int cap = feat & 1;
+		__m128 sign = cap ? _mm_setzero_ps() : _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000));
+		v3 cbase = add(sp->cylinder.mid, (v3){ .m = _mm_xor_ps(sp->cylinder.half_axis.m, sign) });
+		// Decode packed perpendicular direction (half-float nx, ny)
+		int hx = (feat >> 1) & 0x7FFF, hy = (feat >> 16) & 0x7FFF;
+		if (hx >= 0x4000) hx -= 0x8000; // sign extend 15-bit
+		if (hy >= 0x4000) hy -= 0x8000;
+		float nx = (float)hx / 16383.0f, ny = (float)hy / 16383.0f;
+		// Derive nz from perpendicularity: dot(n, axis) = 0 => nz = -(ax*nx + ay*ny) / az
+		v3 ax = sp->cylinder.axis;
+		float nz = (fabsf(ax.z) > 0.01f) ? -(ax.x * nx + ax.y * ny) / ax.z : 0.0f;
+		float nl = sqrtf(nx*nx + ny*ny + nz*nz);
+		if (nl > FLT_EPSILON) return add(cbase, scale(V3(nx, ny, nz), sp->cylinder.radius / nl));
+		return cbase;
 	}
 	}
 	return V3(0,0,0);
@@ -448,9 +464,8 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	}
 	int fA, fB;
 	v3 sA, sB;
-	// Reconstruct simplex from cached features if available.
-	// Skip for cylinders: feature ID only encodes cap index, not radial position.
-	int use_simplex_cache = cache && cache->count >= 1 && cache->count <= 3 && shapeA->type != GJK_CYLINDER && shapeB->type != GJK_CYLINDER;
+	// Reconstruct simplex from cached features (all shape types).
+	int use_simplex_cache = cache && cache->count >= 1 && cache->count <= 3;
 	if (use_simplex_cache) {
 		for (int i = 0; i < cache->count; i++) {
 			v3 p1 = gjk_support_feature(shapeA, cache->feat1[i]);
@@ -529,14 +544,10 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		cache->dir = sep;
 		if (shapeA->type == GJK_HULL) cache->hintA = shapeA->hull.hint;
 		if (shapeB->type == GJK_HULL) cache->hintB = shapeB->hull.hint;
-		// Cache simplex features for next frame warm-start (skip for cylinders)
-		if (shapeA->type != GJK_CYLINDER && shapeB->type != GJK_CYLINDER) {
-			int cn = simplex.count < 3 ? simplex.count : 3;
-			cache->count = cn;
-			for (int i = 0; i < cn; i++) { cache->feat1[i] = simplex.v[i].feat1; cache->feat2[i] = simplex.v[i].feat2; }
-		} else {
-			cache->count = 0;
-		}
+		// Cache simplex features for next frame warm-start
+		int cn = simplex.count < 3 ? simplex.count : 3;
+		cache->count = cn;
+		for (int i = 0; i < cn; i++) { cache->feat1[i] = simplex.v[i].feat1; cache->feat2[i] = simplex.v[i].feat2; }
 	}
 	// Post-hoc radius for sphere/capsule core shapes.
 	float rA = shapeA->radius;

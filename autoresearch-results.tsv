@@ -85,3 +85,7 @@ clean_motion	1040	baseline	Clean motion baseline: constructor + gjk_distance + i
 79	1973.9	keep	skip len2 check on cached path (cleaner code)
 80	1957.4	keep	noinline simplex solvers (reduce icache pressure)
 81	1941.4	keep	__restrict on support function pointer params
+82	1964.3	discard	__restrict on cache pointer: regression
+82b	-	discard	2-vertex seed: extra support cost outweighs iteration savings
+83	1948.3	discard	forceinline mat rotate: noise
+84	1626.8	keep	simplex caching (feature replay, skip cylinders) -16.2%!!!
