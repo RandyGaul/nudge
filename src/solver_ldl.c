@@ -1528,30 +1528,34 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 // Position correction pass. Refactorizes K with compressed masses for better
 // conditioning at extreme mass ratios. Position correction is stabilization,
 // not dynamics — using compressed masses is safe.
-static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt)
+static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt, int sub)
 {
 	double t_pos_start = perf_now();
-	// Compress inv_mass and inv_inertia for position stage.
-	// LDL_POS_MASS_EXP is 0.5 so powf -> sqrtf.
+
 	int body_count = asize(w->body_hot);
-	float* save_inv_mass = CK_ALLOC(body_count * sizeof(float));
-	v3* save_inv_inertia = CK_ALLOC(body_count * sizeof(v3));
-	for (int i = 0; i < body_count; i++) {
-		save_inv_mass[i] = w->body_hot[i].inv_mass;
-		save_inv_inertia[i] = w->body_hot[i].inv_inertia_local;
-		if (w->body_hot[i].inv_mass > 0.0f) {
-			w->body_hot[i].inv_mass = sqrtf(w->body_hot[i].inv_mass);
-			w->body_hot[i].inv_inertia_local = scale(w->body_hot[i].inv_inertia_local, w->body_hot[i].inv_mass / save_inv_mass[i]);
+	// Refactorize K with compressed masses on even substeps only.
+	// Odd substeps reuse the previous factorization — lever arms change little per substep.
+	int refactor = (sub % 2 == 0);
+
+	float* save_inv_mass = NULL;
+	v3* save_inv_inertia = NULL;
+	if (refactor) {
+		// Compress inv_mass and inv_inertia for position stage.
+		save_inv_mass = CK_ALLOC(body_count * sizeof(float));
+		save_inv_inertia = CK_ALLOC(body_count * sizeof(v3));
+		for (int i = 0; i < body_count; i++) {
+			save_inv_mass[i] = w->body_hot[i].inv_mass;
+			save_inv_inertia[i] = w->body_hot[i].inv_inertia_local;
+			if (w->body_hot[i].inv_mass > 0.0f) {
+				w->body_hot[i].inv_mass = sqrtf(w->body_hot[i].inv_mass);
+				w->body_hot[i].inv_inertia_local = scale(w->body_hot[i].inv_inertia_local, w->body_hot[i].inv_mass / save_inv_mass[i]);
+			}
 		}
+		for (int i = 0; i < body_count; i++)
+			if (w->body_hot[i].inv_mass > 0.0f) body_compute_inv_inertia_world(&w->body_hot[i]);
 	}
 
-	// Recompute world-space inverse inertia from compressed masses so
-	// dinv_inertia_world_mul uses the correct tensor during K fill and apply.
-	for (int i = 0; i < body_count; i++)
-		if (w->body_hot[i].inv_mass > 0.0f) body_compute_inv_inertia_world(&w->body_hot[i]);
-
-	// Refresh lever arms from current rotations (positions changed since pre-solve).
-	// Without this, K uses stale lever arms while the RHS uses current positions.
+	// Always refresh lever arms (position errors depend on current body state).
 	ldl_refresh_lever_arms(w, sol_joints, joint_count, sub_dt);
 
 	// Allocate delta buffers once per substep, reuse across all islands.
@@ -1566,8 +1570,7 @@ static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 		if (isl->joint_count == 0) continue;
 		LDL_Cache* c = &isl->ldl;
 		if (c->n == 0 || !c->topo) continue;
-		// Refactorize K with compressed masses and current lever arms
-		ldl_numeric_factor(c, w, sol_joints);
+		if (refactor) ldl_numeric_factor(c, w, sol_joints);
 		ldl_island_position_correct(c, w, sol_joints, sub_dt, pos_delta, ang_delta);
 	}
 
@@ -1576,11 +1579,12 @@ static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 
 	ldl_pos_acc += perf_now() - t_pos_start;
 
-	// Restore real masses
-	for (int i = 0; i < body_count; i++) {
-		w->body_hot[i].inv_mass = save_inv_mass[i];
-		w->body_hot[i].inv_inertia_local = save_inv_inertia[i];
+	if (refactor) {
+		for (int i = 0; i < body_count; i++) {
+			w->body_hot[i].inv_mass = save_inv_mass[i];
+			w->body_hot[i].inv_inertia_local = save_inv_inertia[i];
+		}
+		CK_FREE(save_inv_mass);
+		CK_FREE(save_inv_inertia);
 	}
-	CK_FREE(save_inv_mass);
-	CK_FREE(save_inv_inertia);
 }
