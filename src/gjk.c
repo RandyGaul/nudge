@@ -548,14 +548,12 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		dsq_prev = dsq;
 		gjk_support(shapeA, closest, &fA, sA);
 		gjk_support(shapeB, neg(closest), &fB, sB);
-		// Duplicate vertex check: if support point matches an existing simplex vertex by feature index, terminate.
-		// Skip for cylinders where feature IDs don't fully describe the support point.
+		v3 w = sub(sB, sA);
 		if (use_index_term) {
 			int dup = 0;
 			for (int i = 0; i < simplex.count; i++) if (simplex.v[i].feat1 == fA && simplex.v[i].feat2 == fB) { dup = 1; break; }
 			if (dup) break;
 		}
-		v3 w = sub(sB, sA);
 		float max_vert2 = 0.0f;
 		for (int i = 0; i < simplex.count; i++) {
 			float v2 = len2(simplex.v[i].point);
