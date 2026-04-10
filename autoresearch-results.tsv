@@ -93,3 +93,7 @@ clean_motion	1040	baseline	Clean motion baseline: constructor + gjk_distance + i
 86	1544.2	keep	3x10-bit cylinder perpendicular encoding (avoid nz derivation)
 87	1530.6	keep	skip cylinder feature renormalization (approx unit-length)
 88	1472.9	keep	inline gjk_support_feature for faster simplex reconstruction
+89	1493.3	discard	macro gjk_support_feature: 2x expansion causes icache bloat
+90	1486.3	discard	analytical fast paths: dispatch overhead + formula cost > cached GJK
+91	1479.9	discard	max iters 64->20: no measurable change
+95	1374.1	keep	cache world-space support points directly (skip feature reconstruction) -6.7%
