@@ -677,7 +677,7 @@ static void apply_impulse_row_sv(SolverBodyVel* a, SolverBodyVel* b, float ima, 
 // BEPU-style: recompute cross+inertia inline instead of reading precomputed data.
 // Trades ALU (cheap in Release) for bandwidth (expensive at 10K+ bodies).
 // SolverContact only needs: r_a, r_b, eff_mass_n, bias, bounce, softness, lambda_n.
-static void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, SolverContact* sc)
+static SIMD_FORCEINLINE void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, SolverContact* sc)
 {
 	SolverBodyVel* a = &bodies[m->body_a];
 	SolverBodyVel* b = &bodies[m->body_b];
