@@ -46,7 +46,7 @@ typedef struct GJK_Shape
 		struct { v3 center; } point;
 		struct { v3 p, q; } segment;
 		struct { v3 center; v3 rot_row0, rot_row1, rot_row2; v3 inv_row0, inv_row1, inv_row2; v3 half_extents; } box;
-		struct { v3 center; v3 rot_row0, rot_row1, rot_row2; v3 inv_row0, inv_row1, inv_row2; const v3* verts; const float* soa; int count; } hull;
+		struct { v3 center; v3 rot_row0, rot_row1, rot_row2; v3 inv_row0, inv_row1, inv_row2; const v3* verts; const float* soa; const HalfEdge* edges; const int* vert_edge; int count; } hull;
 		struct { v3 p, q; float radius; v3 axis; float inv_axis_len; } cylinder;
 	};
 } GJK_Shape;
@@ -75,11 +75,11 @@ static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) {
 	v3 i0 = quat_rotate(ir, V3(1,0,0)), i1 = quat_rotate(ir, V3(0,1,0)), i2 = quat_rotate(ir, V3(0,0,1));
 	return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.rot_row0 = r0, .box.rot_row1 = r1, .box.rot_row2 = r2, .box.inv_row0 = i0, .box.inv_row1 = i1, .box.inv_row2 = i2, .box.half_extents = half_extents };
 }
-static GJK_Shape gjk_hull(v3 center, quat rot, const v3* verts, int count, const float* soa) {
+static GJK_Shape gjk_hull(v3 center, quat rot, const v3* verts, int count, const float* soa, const HalfEdge* edges, const int* vert_edge) {
 	v3 r0 = quat_rotate(rot, V3(1,0,0)), r1 = quat_rotate(rot, V3(0,1,0)), r2 = quat_rotate(rot, V3(0,0,1));
 	quat ir = inv(rot);
 	v3 i0 = quat_rotate(ir, V3(1,0,0)), i1 = quat_rotate(ir, V3(0,1,0)), i2 = quat_rotate(ir, V3(0,0,1));
-	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.rot_row0 = r0, .hull.rot_row1 = r1, .hull.rot_row2 = r2, .hull.inv_row0 = i0, .hull.inv_row1 = i1, .hull.inv_row2 = i2, .hull.verts = verts, .hull.soa = soa, .hull.count = count };
+	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.rot_row0 = r0, .hull.rot_row1 = r1, .hull.rot_row2 = r2, .hull.inv_row0 = i0, .hull.inv_row1 = i1, .hull.inv_row2 = i2, .hull.verts = verts, .hull.soa = soa, .hull.edges = edges, .hull.vert_edge = vert_edge, .hull.count = count };
 }
 static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
 	v3 axis = sub(q, p);
@@ -91,20 +91,54 @@ static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
 // Caller must keep scaled_verts alive for the duration of the GJK call.
 // For hulls > 32 verts, also builds SoA layout in soa_buf for fast SIMD scan.
 // soa_buf must hold 3*count floats (or NULL for small hulls).
+// vert_edge_buf must hold hull->vert_count ints. Builds per-vertex first-edge lookup.
 static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts, float* soa_buf)
 {
 	int n = hull->vert_count;
 	for (int i = 0; i < n; i++)
 		scaled_verts[i] = hmul(hull->verts[i], sc);
+	const float* soa = NULL;
 	if (soa_buf && n > 32) {
 		float* sx = soa_buf, *sy = soa_buf + n, *sz = soa_buf + n * 2;
 		for (int i = 0; i < n; i++) { sx[i] = scaled_verts[i].x; sy[i] = scaled_verts[i].y; sz[i] = scaled_verts[i].z; }
-		return gjk_hull(pos, rot, scaled_verts, n, soa_buf);
+		soa = soa_buf;
 	}
-	return gjk_hull(pos, rot, scaled_verts, n, NULL);
+	// Build per-vertex first-edge lookup for hill climbing (one-time O(E) setup)
+	static int vert_edge_buf[1024]; // max verts
+	if (hull->edges && n <= 1024) {
+		for (int i = 0; i < n; i++) vert_edge_buf[i] = -1;
+		for (int i = 0; i < hull->edge_count; i++)
+			if (vert_edge_buf[hull->edges[i].origin] < 0) vert_edge_buf[hull->edges[i].origin] = i;
+		return gjk_hull(pos, rot, scaled_verts, n, soa, hull->edges, vert_edge_buf);
+	}
+	return gjk_hull(pos, rot, scaled_verts, n, soa, hull->edges, NULL);
 }
 // Hull support scan: extracted to a function to reduce macro expansion size,
 // allowing the compiler to inline quat_rotate in the caller.
+// Hill-climbing support: walk vertex adjacency graph from a start vertex.
+// O(sqrt(n)) expected for convex hulls vs O(n) for linear scan.
+// Hill-climbing support: walk vertex adjacency graph from vertex 0.
+// Ring walk: next outgoing edge from v = edges[current ^ 1].next
+static int gjk_hull_support_climb(const v3* verts, const HalfEdge* edges, const int* vert_edge, v3 ld)
+{
+	int best = 0;
+	float best_d = dot(verts[0], ld);
+	for (;;) {
+		int e = vert_edge[best];
+		if (e < 0) break;
+		int start = e;
+		int improved = 0;
+		do {
+			int neighbor = edges[e ^ 1].origin;
+			float nd = dot(verts[neighbor], ld);
+			if (nd > best_d) { best_d = nd; best = neighbor; improved = 1; }
+			e = edges[e ^ 1].next; // walk ring: twin's next gives next outgoing from same vertex
+		} while (e != start);
+		if (!improved) break;
+	}
+	return best;
+}
+
 static int gjk_hull_support_scan(const v3* verts, int count, const float* soa, v3 ld)
 {
 	__m128 ldx = _mm_shuffle_ps(ld.m, ld.m, 0x00);
@@ -188,7 +222,9 @@ static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
 	case GJK_BOX: (out_point) = gjk_box_support(sp, sd, (out_feat)); break;                                                \
 	case GJK_HULL: {                                                                                                      \
 		v3 ld = gjk_mat_rotate(sp->hull.inv_row0, sp->hull.inv_row1, sp->hull.inv_row2, sd);                               \
-		int hbi = gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, ld);                                 \
+		int hbi = (sp->hull.vert_edge && sp->hull.count > 32)                                                              \
+			? gjk_hull_support_climb(sp->hull.verts, sp->hull.edges, sp->hull.vert_edge, ld)                                \
+			: gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, ld);                                     \
 		*(out_feat) = hbi;                                                                                                \
 		(out_point) = add(sp->hull.center, gjk_mat_rotate(sp->hull.rot_row0, sp->hull.rot_row1, sp->hull.rot_row2,         \
 		                  sp->hull.verts[hbi]));                                                                           \
