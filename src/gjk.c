@@ -46,7 +46,7 @@ typedef struct GJK_Shape
 		struct { v3 center; } point;
 		struct { v3 p, q; } segment;
 		struct { v3 center; v3 col0, col1, col2; v3 half_extents; } box;
-		struct { v3 center; v3 col0, col1, col2; const v3* verts; const float* soa; const HalfEdge* edges; const int* vert_edge; int count; int hint; } hull;
+		struct { v3 center; v3 col0, col1, col2; v3 scale; const v3* verts; const float* soa; const HalfEdge* edges; const int* vert_edge; int count; int hint; } hull;
 		struct { v3 mid; v3 half_axis; float radius; v3 axis; float inv_axis_len; } cylinder;
 	};
 } GJK_Shape;
@@ -80,9 +80,9 @@ static GJK_Shape gjk_box(v3 center, quat rot, v3 half_extents) {
 	v3 c0 = quat_rotate(rot, V3(1,0,0)), c1 = quat_rotate(rot, V3(0,1,0)), c2 = quat_rotate(rot, V3(0,0,1));
 	return (GJK_Shape){ .type = GJK_BOX, .box.center = center, .box.col0 = c0, .box.col1 = c1, .box.col2 = c2, .box.half_extents = half_extents };
 }
-static GJK_Shape gjk_hull(v3 center, quat rot, const v3* verts, int count, const float* soa, const HalfEdge* edges, const int* vert_edge) {
+static GJK_Shape gjk_hull(v3 center, quat rot, v3 sc, const v3* verts, int count, const float* soa, const HalfEdge* edges, const int* vert_edge) {
 	v3 c0 = quat_rotate(rot, V3(1,0,0)), c1 = quat_rotate(rot, V3(0,1,0)), c2 = quat_rotate(rot, V3(0,0,1));
-	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = c0, .hull.col1 = c1, .hull.col2 = c2, .hull.verts = verts, .hull.soa = soa, .hull.edges = edges, .hull.vert_edge = vert_edge, .hull.count = count };
+	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = c0, .hull.col1 = c1, .hull.col2 = c2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edges = edges, .hull.vert_edge = vert_edge, .hull.count = count };
 }
 static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
 	v3 axis = sub(q, p);
@@ -100,15 +100,10 @@ static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
 static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts, float* soa_buf)
 {
 	int n = hull->vert_count;
-	for (int i = 0; i < n; i++)
-		scaled_verts[i] = hmul(hull->verts[i], sc);
-	// Skip SoA build when hill climbing is available (SoA only needed for linear scan fallback)
+	// Store raw vertices (not scaled) — scale applied in support function via dot(v*sc, ld) = dot(v, sc*ld)
+	const v3* raw_verts = hull->verts;
+	(void)scaled_verts; // unused now — keeping parameter for API compat
 	const float* soa = NULL;
-	if (soa_buf && n > 32 && !hull->edges) {
-		float* sx = soa_buf, *sy = soa_buf + n, *sz = soa_buf + n * 2;
-		for (int i = 0; i < n; i++) { sx[i] = scaled_verts[i].x; sy[i] = scaled_verts[i].y; sz[i] = scaled_verts[i].z; }
-		soa = soa_buf;
-	}
 	// Cache per-vertex first-edge lookup: topology-only, rebuild when hull pointer changes.
 	#define VE_CACHE_SLOTS 4
 	static const Hull* ve_cache_hull[VE_CACHE_SLOTS] = {0};
@@ -125,9 +120,9 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 				if (ve_cache_buf[slot][hull->edges[i].origin] < 0) ve_cache_buf[slot][hull->edges[i].origin] = i;
 			ve_cache_hull[slot] = hull;
 		}
-		return gjk_hull(pos, rot, scaled_verts, n, soa, hull->edges, ve_cache_buf[slot]);
+		return gjk_hull(pos, rot, sc, raw_verts, n, soa, hull->edges, ve_cache_buf[slot]);
 	}
-	return gjk_hull(pos, rot, scaled_verts, n, soa, hull->edges, NULL);
+	return gjk_hull(pos, rot, sc, raw_verts, n, soa, hull->edges, NULL);
 }
 // Hull support scan: extracted to a function to reduce macro expansion size,
 // allowing the compiler to inline quat_rotate in the caller.
@@ -242,14 +237,15 @@ static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
 	}                                                                                                                     \
 	case GJK_BOX: (out_point) = gjk_box_support(sp, sd, (out_feat)); break;                                                \
 	case GJK_HULL: {                                                                                                      \
-		v3 ld = gjk_mat_rotate(sp->hull.col0, sp->hull.col1, sp->hull.col2, sd);                               \
+		v3 ld = gjk_mat_rotate(sp->hull.col0, sp->hull.col1, sp->hull.col2, sd);                                          \
+		v3 sld = hmul(ld, sp->hull.scale); /* scale-weighted direction for dot(v, sld) = dot(v*sc, ld) */                  \
 		int hbi = (sp->hull.vert_edge && sp->hull.count > 0)                                                              \
-			? gjk_hull_support_climb(sp->hull.verts, sp->hull.edges, sp->hull.vert_edge, ld, sp->hull.hint)                 \
-			: gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, ld);                                     \
+			? gjk_hull_support_climb(sp->hull.verts, sp->hull.edges, sp->hull.vert_edge, sld, sp->hull.hint)               \
+			: gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, sld);                                   \
 		sp->hull.hint = hbi;                                                                                               \
 		*(out_feat) = hbi;                                                                                                \
-		(out_point) = add(sp->hull.center, gjk_mat_rotate_t(sp->hull.col0, sp->hull.col1, sp->hull.col2,         \
-		                  sp->hull.verts[hbi]));                                                                           \
+		(out_point) = add(sp->hull.center, gjk_mat_rotate_t(sp->hull.col0, sp->hull.col1, sp->hull.col2,                  \
+		                  hmul(sp->hull.verts[hbi], sp->hull.scale)));                                                     \
 		break;                                                                                                            \
 	}                                                                                                                     \
 	case GJK_CYLINDER: (out_point) = gjk_cylinder_support(sp, sd, (out_feat)); break;                                      \
