@@ -731,35 +731,46 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 
 	EdgeQuery best = { .index1 = -1, .index2 = -1, .separation = -1e18f };
 
+	// Precompute hull2 edge data for the inner loop.
+	int n2 = hull2->edge_count / 2;
+	v3 e2_arr[128], nu2_arr[128], nv2_arr[128], ne2_arr[128];
+	assert(n2 <= 128);
+	for (int k = 0; k < n2; k++) {
+		int i2 = k * 2;
+		v3 p2 = hull_vert_scaled(hull2, hull2->edges[i2].origin, scale2);
+		v3 q2 = hull_vert_scaled(hull2, hull2->edges[i2+1].origin, scale2);
+		e2_arr[k] = sub(q2, p2);
+		nu2_arr[k] = neg(hull2->planes[hull2->edges[i2].face].normal);
+		nv2_arr[k] = neg(hull2->planes[hull2->edges[i2+1].face].normal);
+		ne2_arr[k] = neg(e2_arr[k]);
+	}
+
 	for (int i1 = 0; i1 < hull1->edge_count; i1 += 2) {
 		const HalfEdge* edge1 = &hull1->edges[i1];
 		const HalfEdge* twin1 = &hull1->edges[i1 + 1];
 
 		v3 p1 = hull_vert_scaled(hull1, edge1->origin, scale1);
 		v3 q1 = hull_vert_scaled(hull1, twin1->origin, scale1);
-		// Transform to hull2 local
 		p1 = add(c1_local, rotate(rel_rot, p1));
 		q1 = add(c1_local, rotate(rel_rot, q1));
 		v3 e1 = sub(q1, p1);
 
 		v3 u1 = rotate(rel_rot, hull1->planes[edge1->face].normal);
 		v3 v1 = rotate(rel_rot, hull1->planes[twin1->face].normal);
+		v3 b_x_a = neg(e1); // precompute for Gauss test
 
-		for (int i2 = 0; i2 < hull2->edge_count; i2 += 2) {
-			const HalfEdge* edge2 = &hull2->edges[i2];
-			const HalfEdge* twin2 = &hull2->edges[i2 + 1];
+		for (int k = 0; k < n2; k++) {
+			v3 e2 = e2_arr[k];
+			v3 nu2 = nu2_arr[k], nv2 = nv2_arr[k], ne2 = ne2_arr[k];
 
-			v3 p2 = hull_vert_scaled(hull2, edge2->origin, scale2);
-			v3 q2 = hull_vert_scaled(hull2, twin2->origin, scale2);
-			v3 e2 = sub(q2, p2);
-
-			v3 u2 = hull2->planes[edge2->face].normal;
-			v3 v2 = hull2->planes[twin2->face].normal;
-
-			// Gauss map pruning
-			if (!is_minkowski_face(u1, v1, neg(e1), neg(u2), neg(v2), neg(e2)))
+			// Gauss map pruning (inlined is_minkowski_face).
+			v3 d_x_c = ne2;
+			float cba = dot(nu2, b_x_a), dba = dot(nv2, b_x_a);
+			float adc = dot(u1, d_x_c), bdc = dot(v1, d_x_c);
+			if (!((cba * dba < 0.0f) && (adc * bdc < 0.0f) && (cba * bdc > 0.0f)))
 				continue;
 
+			int i2 = k * 2;
 			float sep = sat_edge_project_full(e1, e2, c1_local, hull1, rel_rot, scale1, hull2, scale2);
 			if (sep > best.separation) {
 				best.index1 = i1;
