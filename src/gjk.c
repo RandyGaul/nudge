@@ -76,19 +76,8 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 	return gjk_hull(pos, rot, scaled_verts, hull->vert_count);
 }
 
-// -----------------------------------------------------------------------------
 // Support function: returns world-space support point + feature ID.
-// Point/segment operate in world space with no rotation.
-//
-// Feature IDs per shape type:
-//   Point:    always 0
-//   Segment:  0 = endpoint p, 1 = endpoint q
-//   Box:      3 sign bits (0-7), one per axis
-//   Hull:     vertex index
-//   Cylinder: 0 = endpoint p, 1 = endpoint q
-
-// Macro-inlined support function. Assigns result to out_point, feature ID to *out_feat.
-#define GJK_SUPPORT(shape, dir, out_feat, out_point) do {                                                        \
+#define gjk_support(shape, dir, out_feat, out_point) do {                                                        \
 	const GJK_Shape* sp = (shape); v3 sd = (dir);                                                                \
 	switch (sp->type) {                                                                                          \
 	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                      \
@@ -222,19 +211,16 @@ static int gjk_solve4(GJK_Simplex* s)
 	return 1;
 }
 
-// -----------------------------------------------------------------------------
-// Closest point and witness points.
-
-#define GJK_CLOSEST_POINT(simplex, out) do {                                                                                    \
-	const GJK_Simplex* cs = (simplex);                                                                                         \
-	float cinv = 1.0f / cs->divisor;                                                                                           \
-	switch (cs->count) {                                                                                                       \
-	case 1: (out) = cs->v[0].point; break;                                                                                     \
-	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break;            \
-	case 3: (out) = add(add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)),               \
-	                     scale(cs->v[2].point, cs->v[2].u * cinv)); break;                                                     \
-	default: (out) = V3(0,0,0); break;                                                                                        \
-	}                                                                                                                          \
+#define gjk_closest_point(simplex, out) do {                                                                        \
+	const GJK_Simplex* cs = (simplex);                                                                              \
+	float cinv = 1.0f / cs->divisor;                                                                                \
+	switch (cs->count) {                                                                                            \
+	case 1: (out) = cs->v[0].point; break;                                                                          \
+	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break; \
+	case 3: (out) = add(add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)),    \
+	                     scale(cs->v[2].point, cs->v[2].u * cinv)); break;                                          \
+	default: (out) = V3(0,0,0); break;                                                                              \
+	}                                                                                                               \
 } while(0)
 
 static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, int* f2)
@@ -268,8 +254,8 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 	if (len2(init_d) < FLT_EPSILON) init_d = V3(1, 0, 0);
 
 	int fA, fB;
-	v3 sA; GJK_SUPPORT(&shapeA, init_d, &fA, sA);
-	v3 sB; GJK_SUPPORT(&shapeB, neg(init_d), &fB, sB);
+	v3 sA; gjk_support(&shapeA, init_d, &fA, sA);
+	v3 sB; gjk_support(&shapeB, neg(init_d), &fB, sB);
 	simplex.v[0].point1 = sA;
 	simplex.v[0].point2 = sB;
 	simplex.v[0].point = sub(sB, sA);
@@ -280,6 +266,7 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 	simplex.count = 1;
 
 	float dsq_prev = FLT_MAX;
+	float max_vert2 = len2(simplex.v[0].point);
 	int iter = 0;
 
 	while (iter < GJK_MAX_ITERS) {
@@ -294,7 +281,7 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 		if (!solved) { simplex = backup; break; }
 		if (simplex.count == 4) break;
 
-		v3 closest; GJK_CLOSEST_POINT(&simplex, closest);
+		v3 closest; gjk_closest_point(&simplex, closest);
 		float dsq = len2(closest);
 
 		if (dsq <= GJK_CONTAINMENT_EPS2) break;
@@ -302,15 +289,12 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 		dsq_prev = dsq;
 
 		v3 d = neg(closest);
-		GJK_SUPPORT(&shapeA, neg(d), &fA, sA);
-		GJK_SUPPORT(&shapeB, d, &fB, sB);
+		gjk_support(&shapeA, neg(d), &fA, sA);
+		gjk_support(&shapeB, d, &fB, sB);
 		v3 w = sub(sB, sA);
 
-		float max_vert2 = 0.0f;
-		for (int i = 0; i < simplex.count; i++) {
-			float v2 = len2(simplex.v[i].point);
-			if (v2 > max_vert2) max_vert2 = v2;
-		}
+		float w2 = len2(w);
+		if (w2 > max_vert2) max_vert2 = w2;
 		float progress = dot(sub(w, closest), neg(closest));
 		if (progress <= max_vert2 * GJK_PROGRESS_EPS) break;
 
