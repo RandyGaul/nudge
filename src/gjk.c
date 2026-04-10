@@ -207,16 +207,8 @@ static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
 	if (sp->cylinder.inv_axis_len == 0.0f) { *feat = 0; return sp->cylinder.p; }
 	float cda = dot(sd, cu); int cf = cda >= 0.0f; *feat = cf;
 	v3 cbase = cf ? sp->cylinder.q : sp->cylinder.p;
-	v3 cdp = sub(sd, scale(cu, cda));
-	float cdp2 = len2(cdp);
-	if (cdp2 > FLT_EPSILON * FLT_EPSILON) {
-		// Fast normalize: rsqrt + one Newton-Raphson step (~23 bit precision)
-		__m128 x = _mm_set_ss(cdp2);
-		__m128 r = _mm_rsqrt_ss(x);
-		r = _mm_mul_ss(r, _mm_sub_ss(_mm_set_ss(1.5f), _mm_mul_ss(_mm_mul_ss(_mm_set_ss(0.5f), x), _mm_mul_ss(r, r))));
-		return add(cbase, scale(cdp, sp->cylinder.radius * _mm_cvtss_f32(r)));
-	}
-	return cbase;
+	v3 cdp = sub(sd, scale(cu, cda)); float cpl = len(cdp);
+	return (cpl > FLT_EPSILON) ? add(cbase, scale(cdp, sp->cylinder.radius / cpl)) : cbase;
 }
 // Support macro: dispatches per shape type. Box/cylinder/hull-scan are functions to reduce code size.
 #define gjk_support(shape, dir, out_feat, out_point) do {                                                                 \
