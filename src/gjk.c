@@ -9,48 +9,13 @@
 // Termination: 3-condition (containment, monotonic progress, support progress).
 
 // -----------------------------------------------------------------------------
-// SSE v3: a v3 packed into __m128 (w=0). Used internally for SIMD math.
-
-#include <xmmintrin.h>
-#include <smmintrin.h> // SSE4.1 for _mm_dp_ps
-
-typedef __m128 s3; // SSE v3: [x, y, z, 0]
-
-#define s3_load(a)       _mm_set_ps(0, (a).z, (a).y, (a).x)
-#define s3_add(a, b)     _mm_add_ps(a, b)
-#define s3_sub(a, b)     _mm_sub_ps(a, b)
-#define s3_neg(a)        _mm_sub_ps(_mm_setzero_ps(), a)
-#define s3_scale(a, s)   _mm_mul_ps(a, _mm_set1_ps(s))
-#define s3_dot(a, b)     _mm_cvtss_f32(_mm_dp_ps(a, b, 0x71))
-#define s3_len2(a)       s3_dot(a, a)
-#define s3_stp(a, b, c)  s3_dot(a, s3_cross(b, c))
-
-static inline v3 s3_store(s3 a) { float t[4]; _mm_storeu_ps(t, a); return V3(t[0], t[1], t[2]); }
-
-static inline s3 s3_cross(s3 a, s3 b) {
-	s3 a1 = _mm_shuffle_ps(a, a, _MM_SHUFFLE(3,0,2,1));
-	s3 b1 = _mm_shuffle_ps(b, b, _MM_SHUFFLE(3,0,2,1));
-	s3 r = _mm_sub_ps(_mm_mul_ps(a, b1), _mm_mul_ps(a1, b));
-	return _mm_shuffle_ps(r, r, _MM_SHUFFLE(3,0,2,1));
-}
-
-static inline s3 s3_quat_rotate(quat q, s3 v) {
-	s3 u = _mm_set_ps(0, q.z, q.y, q.x);
-	float s = q.w;
-	float uv = s3_dot(u, v);
-	float uu = s3_dot(u, u);
-	s3 uXv = s3_cross(u, v);
-	return s3_add(s3_add(s3_scale(u, 2.0f * uv), s3_scale(v, s*s - uu)), s3_scale(uXv, 2.0f * s));
-}
-
-// -----------------------------------------------------------------------------
 // Simplex types.
 
 typedef struct GJK_Vertex
 {
-	s3 point1;  // support point on shape A (SSE __m128)
-	s3 point2;  // support point on shape B (SSE __m128)
-	s3 point;   // Minkowski difference: point2 - point1
+	v3 point1;  // support point on shape A (world space)
+	v3 point2;  // support point on shape B (world space)
+	v3 point;   // Minkowski difference: point2 - point1
 	float u;    // barycentric coordinate
 	int feat1;  // feature ID on shape A
 	int feat2;  // feature ID on shape B
@@ -161,31 +126,30 @@ static v3 gjk_center(const GJK_Shape* s)
 	return V3(0,0,0);
 }
 
-#define gjk_closest_point(simplex, out) do {                                                                                        \
-	const GJK_Simplex* cs = (simplex);                                                                                              \
-	float cinv = 1.0f / cs->divisor;                                                                                                \
-	switch (cs->count) {                                                                                                            \
-	case 1: (out) = cs->v[0].point; break;                                                                                          \
-	case 2: (out) = s3_add(s3_scale(cs->v[0].point, cs->v[0].u * cinv), s3_scale(cs->v[1].point, cs->v[1].u * cinv)); break;        \
-	case 3: (out) = s3_add(s3_add(s3_scale(cs->v[0].point, cs->v[0].u * cinv), s3_scale(cs->v[1].point, cs->v[1].u * cinv)),        \
-	                        s3_scale(cs->v[2].point, cs->v[2].u * cinv)); break;                                                    \
-	default: (out) = _mm_setzero_ps(); break;                                                                                       \
-	}                                                                                                                               \
+#define gjk_closest_point(simplex, out) do {                                                                        \
+	const GJK_Simplex* cs = (simplex);                                                                              \
+	float cinv = 1.0f / cs->divisor;                                                                                \
+	switch (cs->count) {                                                                                            \
+	case 1: (out) = cs->v[0].point; break;                                                                          \
+	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break; \
+	case 3: (out) = add(add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)),    \
+	                     scale(cs->v[2].point, cs->v[2].u * cinv)); break;                                          \
+	default: (out) = V3(0,0,0); break;                                                                              \
+	}                                                                                                               \
 } while(0)
 
 static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, int* f2)
 {
 	float inv = 1.0f / s->divisor;
-	s3 sp1 = _mm_setzero_ps(), sp2 = _mm_setzero_ps();
+	*p1 = V3(0,0,0); *p2 = V3(0,0,0);
 	float best_u = -1.0f;
 	*f1 = 0; *f2 = 0;
 	for (int i = 0; i < s->count; i++) {
 		float w = s->v[i].u * inv;
-		sp1 = s3_add(sp1, s3_scale(s->v[i].point1, w));
-		sp2 = s3_add(sp2, s3_scale(s->v[i].point2, w));
+		*p1 = add(*p1, scale(s->v[i].point1, w));
+		*p2 = add(*p2, scale(s->v[i].point2, w));
 		if (s->v[i].u > best_u) { best_u = s->v[i].u; *f1 = s->v[i].feat1; *f2 = s->v[i].feat2; }
 	}
-	*p1 = s3_store(sp1); *p2 = s3_store(sp2);
 }
 
 // -----------------------------------------------------------------------------
@@ -193,10 +157,9 @@ static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, in
 
 static int gjk_solve2(GJK_Simplex* s)
 {
-	s3 a = s->v[0].point, b = s->v[1].point;
-	s3 ba = s3_sub(b, a);
-	float u = s3_dot(b, ba);
-	float v = -s3_dot(a, ba);
+	v3 a = s->v[0].point, b = s->v[1].point;
+	float u = dot(b, sub(b, a));
+	float v = dot(a, sub(a, b));
 	if (v <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
 	if (u <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
 	s->divisor = u + v;
@@ -207,13 +170,12 @@ static int gjk_solve2(GJK_Simplex* s)
 
 static int gjk_solve3(GJK_Simplex* s)
 {
-	s3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point;
-	s3 ba = s3_sub(b, a), cb = s3_sub(c, b), ac = s3_sub(a, c);
-	float uAB = s3_dot(b, ba), vAB = -s3_dot(a, ba);
-	float uBC = s3_dot(c, cb), vBC = -s3_dot(b, cb);
-	float uCA = s3_dot(a, ac), vCA = -s3_dot(c, ac);
-	s3 n = s3_cross(ba, s3_sub(c, a));
-	float uABC = s3_dot(s3_cross(b, c), n), vABC = s3_dot(s3_cross(c, a), n), wABC = s3_dot(s3_cross(a, b), n);
+	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point;
+	float uAB = dot(b, sub(b, a)), vAB = dot(a, sub(a, b));
+	float uBC = dot(c, sub(c, b)), vBC = dot(b, sub(b, c));
+	float uCA = dot(a, sub(a, c)), vCA = dot(c, sub(c, a));
+	v3 n = cross(sub(b, a), sub(c, a));
+	float uABC = dot(cross(b, c), n), vABC = dot(cross(c, a), n), wABC = dot(cross(a, b), n);
 
 	if (vAB <= 0.0f && uCA <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
 	if (uAB <= 0.0f && vBC <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
@@ -227,37 +189,34 @@ static int gjk_solve3(GJK_Simplex* s)
 	return 1;
 }
 
-#define s3_stp(a, b, c) s3_dot(a, s3_cross(b, c))
+#define stp(a, b, c) dot(a, cross(b, c))
 
 static int gjk_solve4(GJK_Simplex* s)
 {
-	s3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point, d = s->v[3].point;
+	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point, d = s->v[3].point;
 
-	s3 ba = s3_sub(b, a), cb = s3_sub(c, b), ac = s3_sub(a, c);
-	s3 db = s3_sub(d, b), bd = s3_sub(b, d), dc = s3_sub(d, c), cd = s3_sub(c, d);
-	s3 da = s3_sub(d, a), ad = s3_sub(a, d);
-	float uAB = s3_dot(b, ba), vAB = -s3_dot(a, ba);
-	float uBC = s3_dot(c, cb), vBC = -s3_dot(b, cb);
-	float uCA = s3_dot(a, ac), vCA = -s3_dot(c, ac);
-	float uBD = s3_dot(d, db), vBD = -s3_dot(b, db);
-	float uDC = s3_dot(c, cd), vDC = -s3_dot(d, cd);
-	float uAD = s3_dot(d, da), vAD = -s3_dot(a, da);
+	float uAB = dot(b, sub(b, a)), vAB = dot(a, sub(a, b));
+	float uBC = dot(c, sub(c, b)), vBC = dot(b, sub(b, c));
+	float uCA = dot(a, sub(a, c)), vCA = dot(c, sub(c, a));
+	float uBD = dot(d, sub(d, b)), vBD = dot(b, sub(b, d));
+	float uDC = dot(c, sub(c, d)), vDC = dot(d, sub(d, c));
+	float uAD = dot(d, sub(d, a)), vAD = dot(a, sub(a, d));
 
-	s3 n;
-	n = s3_cross(da, ba);
-	float uADB = s3_dot(s3_cross(d, b), n), vADB = s3_dot(s3_cross(b, a), n), wADB = s3_dot(s3_cross(a, d), n);
-	n = s3_cross(s3_sub(c, a), da);
-	float uACD = s3_dot(s3_cross(c, d), n), vACD = s3_dot(s3_cross(d, a), n), wACD = s3_dot(s3_cross(a, c), n);
-	n = s3_cross(s3_sub(b, c), dc);
-	float uCBD = s3_dot(s3_cross(b, d), n), vCBD = s3_dot(s3_cross(d, c), n), wCBD = s3_dot(s3_cross(c, b), n);
-	n = s3_cross(ba, s3_sub(c, a));
-	float uABC = s3_dot(s3_cross(b, c), n), vABC = s3_dot(s3_cross(c, a), n), wABC = s3_dot(s3_cross(a, b), n);
+	v3 n;
+	n = cross(sub(d, a), sub(b, a));
+	float uADB = dot(cross(d, b), n), vADB = dot(cross(b, a), n), wADB = dot(cross(a, d), n);
+	n = cross(sub(c, a), sub(d, a));
+	float uACD = dot(cross(c, d), n), vACD = dot(cross(d, a), n), wACD = dot(cross(a, c), n);
+	n = cross(sub(b, c), sub(d, c));
+	float uCBD = dot(cross(b, d), n), vCBD = dot(cross(d, c), n), wCBD = dot(cross(c, b), n);
+	n = cross(sub(b, a), sub(c, a));
+	float uABC = dot(cross(b, c), n), vABC = dot(cross(c, a), n), wABC = dot(cross(a, b), n);
 
-	float denom = s3_stp(cb, s3_sub(a, b), db);
+	float denom = stp(sub(c, b), sub(a, b), sub(d, b));
 	if (denom == 0.0f) return 0;
 	float vol = 1.0f / denom;
-	float uABCD = s3_stp(c, d, b) * vol, vABCD = s3_stp(c, a, d) * vol;
-	float wABCD = s3_stp(d, a, b) * vol, xABCD = s3_stp(b, a, c) * vol;
+	float uABCD = stp(c, d, b) * vol, vABCD = stp(c, a, d) * vol;
+	float wABCD = stp(d, a, b) * vol, xABCD = stp(b, a, c) * vol;
 
 	if (vAB <= 0 && uCA <= 0 && vAD <= 0) { s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
 	if (uAB <= 0 && vBC <= 0 && vBD <= 0) { s->v[0] = s->v[1]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
@@ -300,9 +259,9 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 	int fA, fB;
 	v3 sA; gjk_support(&shapeA, init_d, &fA, sA);
 	v3 sB; gjk_support(&shapeB, neg(init_d), &fB, sB);
-	simplex.v[0].point1 = s3_load(sA);
-	simplex.v[0].point2 = s3_load(sB);
-	simplex.v[0].point = s3_sub(s3_load(sB), s3_load(sA));
+	simplex.v[0].point1 = sA;
+	simplex.v[0].point2 = sB;
+	simplex.v[0].point = sub(sB, sA);
 	simplex.v[0].feat1 = fA;
 	simplex.v[0].feat2 = fB;
 	simplex.v[0].u = 1.0f;
@@ -326,31 +285,30 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 		}
 		if (simplex.count == 4) break;
 
-		s3 closest; gjk_closest_point(&simplex, closest);
-		float dsq = s3_len2(closest);
+		v3 closest; gjk_closest_point(&simplex, closest);
+		float dsq = len2(closest);
 
 		if (dsq <= GJK_CONTAINMENT_EPS2) break;
 		if (dsq >= dsq_prev) break;
 		dsq_prev = dsq;
 
-		v3 cv = s3_store(closest);
-		gjk_support(&shapeA, cv, &fA, sA);
-		gjk_support(&shapeB, neg(cv), &fB, sB);
-		s3 sw = s3_sub(s3_load(sB), s3_load(sA));
+		gjk_support(&shapeA, closest, &fA, sA);
+		gjk_support(&shapeB, neg(closest), &fB, sB);
+		v3 w = sub(sB, sA);
 
 		float max_vert2 = 0.0f;
 		for (int i = 0; i < simplex.count; i++) {
-			float v2 = s3_len2(simplex.v[i].point);
+			float v2 = len2(simplex.v[i].point);
 			if (v2 > max_vert2) max_vert2 = v2;
 		}
-		float progress = dsq - s3_dot(sw, closest);
+		float progress = dsq - dot(w, closest);
 		if (progress <= max_vert2 * GJK_PROGRESS_EPS) break;
 
 		iter++;
 		GJK_Vertex* vert = &simplex.v[simplex.count];
-		vert->point1 = s3_load(sA);
-		vert->point2 = s3_load(sB);
-		vert->point = sw;
+		vert->point1 = sA;
+		vert->point2 = sB;
+		vert->point = w;
 		vert->feat1 = fA;
 		vert->feat2 = fB;
 		simplex.count++;
