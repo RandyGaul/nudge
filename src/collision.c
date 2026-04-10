@@ -640,10 +640,9 @@ typedef struct FaceQuery
 } FaceQuery;
 
 // Evaluate a single face of hull1 against hull2. Returns separation.
-static float sat_eval_face(const Hull* hull1, int face_idx, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
+static float sat_eval_face_ex(const Hull* hull1, int face_idx, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, quat inv2, v3 scale2)
 {
 	HullPlane pw = plane_transform(hull1->planes[face_idx], pos1, rot1, scale1);
-	quat inv2 = inv(rot2);
 	v3 sup_dir_local = rotate(inv2, neg(pw.normal));
 	v3 sup_local = hull_support(hull2, sup_dir_local);
 	v3 sup_scaled = V3(sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z);
@@ -677,21 +676,21 @@ static FaceQuery sat_query_faces_hint(const Hull* hull1, v3 pos1, quat rot1, v3 
 	}
 
 	// Hill-climb from cached face: walk to topological neighbors with better separation.
-	// For large hulls (20+ faces), this is O(sqrt(F)) vs O(F) for full scan.
+	// Precompute inv(rot2) once for all face evaluations.
+	quat inv2_pre = inv(rot2);
 	if (face_hint >= 0 && face_hint < hull1->face_count && hull1->face_count > 8) {
 		int cur = face_hint;
-		float cur_sep = sat_eval_face(hull1, cur, pos1, rot1, scale1, hull2, pos2, rot2, scale2);
+		float cur_sep = sat_eval_face_ex(hull1, cur, pos1, rot1, scale1, hull2, pos2, rot2, inv2_pre, scale2);
 		best.index = cur; best.separation = cur_sep;
 		for (int iter = 0; iter < hull1->face_count; iter++) {
 			int improved = 0;
-			// Walk adjacent faces via shared edges.
 			int start_e = hull1->faces[cur].edge;
 			int ei = start_e;
 			do {
 				int twin = hull1->edges[ei].twin;
 				int adj_face = hull1->edges[twin].face;
 				if (adj_face != cur) {
-					float adj_sep = sat_eval_face(hull1, adj_face, pos1, rot1, scale1, hull2, pos2, rot2, scale2);
+					float adj_sep = sat_eval_face_ex(hull1, adj_face, pos1, rot1, scale1, hull2, pos2, rot2, inv2_pre, scale2);
 					if (adj_sep > best.separation) { best.separation = adj_sep; best.index = adj_face; improved = 1; }
 				}
 				ei = hull1->edges[ei].next;
@@ -704,8 +703,7 @@ static FaceQuery sat_query_faces_hint(const Hull* hull1, v3 pos1, quat rot1, v3 
 
 	for (int i = 0; i < hull1->face_count; i++) {
 		HullPlane pw = plane_transform(hull1->planes[i], pos1, rot1, scale1);
-		quat inv2 = inv(rot2);
-		v3 sup_dir_local = rotate(inv2, neg(pw.normal));
+		v3 sup_dir_local = rotate(inv2_pre, neg(pw.normal));
 		v3 sup_local = hull_support(hull2, sup_dir_local);
 		v3 sup_scaled = { sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z };
 		v3 sup_world = add(pos2, rotate(rot2, sup_scaled));
