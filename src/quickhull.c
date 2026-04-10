@@ -975,23 +975,25 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	// Post-build plane widening: widen each plane so ALL original input points
 	// lie on or behind the plane. Must use original points (not welded subset)
 	// since welded-away points may lie outside the welded hull.
-	// Plane widening: points outer loop for cache locality on all_points.
+	// SoA transpose for SIMD-friendly inner loop.
 	h->maxoutside = 0;
-	float* max_ds = (float*)CK_ALLOC(h->face_count * sizeof(float));
-	for (int i = 0; i < h->face_count; i++) max_ds[i] = pcp[i].offset;
+	int fc = h->face_count;
+	float* nx = (float*)CK_ALLOC(fc * 4 * sizeof(float));
+	float* ny = nx + fc, *nz = ny + fc, *max_ds = nz + fc;
+	for (int i = 0; i < fc; i++) { nx[i] = pcp[i].normal.x; ny[i] = pcp[i].normal.y; nz[i] = pcp[i].normal.z; max_ds[i] = pcp[i].offset; }
 	for (int pi = 0; pi < all_count; pi++) {
-		v3 pt = all_points[pi];
-		for (int i = 0; i < h->face_count; i++) {
-			float d = dot(pcp[i].normal, pt);
+		float px = all_points[pi].x, py = all_points[pi].y, pz = all_points[pi].z;
+		for (int i = 0; i < fc; i++) {
+			float d = nx[i]*px + ny[i]*py + nz[i]*pz;
 			if (d > max_ds[i]) max_ds[i] = d;
 		}
 	}
-	for (int i = 0; i < h->face_count; i++) {
+	for (int i = 0; i < fc; i++) {
 		float widen = max_ds[i] - pcp[i].offset;
 		if (widen > h->maxoutside) h->maxoutside = widen;
 		pcp[i].offset = max_ds[i];
 	}
-	free(max_ds);
+	free(nx);
 
 	afree(live); afree(vremap); afree(ov); afree(eremap); afree(oe); afree(of); afree(op);
 	return h;
