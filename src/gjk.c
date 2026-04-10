@@ -219,31 +219,50 @@ static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, in
 static int gjk_solve2(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point;
-	float u = dot(b, sub(b, a));
-	float v = dot(a, sub(a, b));
-	if (v <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
-	if (u <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
-	s->divisor = u + v;
-	if (s->divisor == 0.0f) return 0;
-	s->v[0].u = u; s->v[1].u = v; s->count = 2;
+	v3 ba = sub(b, a);
+	float u = dot(b, ba);
+	float v = -dot(a, ba);
+	// Branchless: compute edge case always, then conditionally override for vertex cases
+	float div = u + v;
+	if (div == 0.0f) return 0;
+	int va = v <= 0.0f, vb = u <= 0.0f;
+	if (va | vb) {
+		// One of the vertex regions. If vb, swap v[0]=v[1] first.
+		if (vb) s->v[0] = s->v[1];
+		s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1;
+		return 1;
+	}
+	s->v[0].u = u; s->v[1].u = v; s->divisor = div; s->count = 2;
 	return 1;
 }
 
 static int gjk_solve3(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point;
-	float uAB = dot(b, sub(b, a)), vAB = dot(a, sub(a, b));
-	float uBC = dot(c, sub(c, b)), vBC = dot(b, sub(b, c));
-	float uCA = dot(a, sub(a, c)), vCA = dot(c, sub(c, a));
-	v3 n = cross(sub(b, a), sub(c, a));
+	v3 ba = sub(b, a), cb = sub(c, b), ac = sub(a, c);
+	float uAB = dot(b, ba), vAB = -dot(a, ba);
+	float uBC = dot(c, cb), vBC = -dot(b, cb);
+	float uCA = dot(a, ac), vCA = -dot(c, ac);
+	v3 n = cross(ba, sub(c, a));
 	float uABC = dot(cross(b, c), n), vABC = dot(cross(c, a), n), wABC = dot(cross(a, b), n);
 
-	if (vAB <= 0.0f && uCA <= 0.0f) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
-	if (uAB <= 0.0f && vBC <= 0.0f) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
-	if (uBC <= 0.0f && vCA <= 0.0f) { s->v[0] = s->v[2]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
-	if (uAB > 0.0f && vAB > 0.0f && wABC <= 0.0f) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
-	if (uBC > 0.0f && vBC > 0.0f && uABC <= 0.0f) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
-	if (uCA > 0.0f && vCA > 0.0f && vABC <= 0.0f) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
+	// Pack sign bits: bit=1 means value > 0
+	int signs = (uAB > 0) | ((vAB > 0) << 1) | ((uBC > 0) << 2) | ((vBC > 0) << 3) |
+	            ((uCA > 0) << 4) | ((vCA > 0) << 5) | ((uABC > 0) << 6) | ((vABC > 0) << 7) | ((wABC > 0) << 8);
+
+	// Vertex A: vAB<=0 && uCA<=0 → bits 1,4 both 0
+	if ((signs & 0x12) == 0) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	// Vertex B: uAB<=0 && vBC<=0 → bits 0,3 both 0
+	if ((signs & 0x09) == 0) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	// Vertex C: uBC<=0 && vCA<=0 → bits 2,5 both 0
+	if ((signs & 0x24) == 0) { s->v[0] = s->v[2]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
+	// Edge AB: uAB>0 && vAB>0 && wABC<=0 → bits 0,1 set, bit 8 clear
+	if ((signs & 0x103) == 0x03) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
+	// Edge BC: uBC>0 && vBC>0 && uABC<=0 → bits 2,3 set, bit 6 clear
+	if ((signs & 0x4C) == 0x0C) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
+	// Edge CA: uCA>0 && vCA>0 && vABC<=0 → bits 4,5 set, bit 7 clear
+	if ((signs & 0xB0) == 0x30) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
+	// Face ABC
 	s->divisor = uABC + vABC + wABC;
 	if (s->divisor == 0.0f) return 0;
 	s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->count = 3;
