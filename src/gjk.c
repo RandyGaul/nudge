@@ -297,10 +297,9 @@ static v3 gjk_support_feature(const GJK_Shape* sp, int feat)
 		if (ix >= 0x200) ix -= 0x400; // sign extend 10-bit
 		if (iy >= 0x200) iy -= 0x400;
 		if (iz >= 0x200) iz -= 0x400;
-		float nx = (float)ix / 511.0f, ny = (float)iy / 511.0f, nz = (float)iz / 511.0f;
-		float nl2 = nx*nx + ny*ny + nz*nz;
-		if (nl2 > FLT_EPSILON) return add(cbase, scale(V3(nx, ny, nz), sp->cylinder.radius / sqrtf(nl2)));
-		return cbase;
+		if ((ix | iy | iz) == 0) return cbase;
+		// Direction is approximately unit-length after quantization; skip renormalization.
+		return add(cbase, scale(V3((float)ix, (float)iy, (float)iz), sp->cylinder.radius / 511.0f));
 	}
 	}
 	return V3(0,0,0);
