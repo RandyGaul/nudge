@@ -87,6 +87,79 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 	return gjk_hull(pos, rot, scaled_verts, n, NULL);
 }
 
+// Hull support scan: extracted to a function to reduce macro expansion size,
+// allowing the compiler to inline quat_rotate in the caller.
+static int gjk_hull_support_scan(const v3* verts, int count, const float* soa, v3 ld)
+{
+	__m128 ldx = _mm_set1_ps(ld.x), ldy = _mm_set1_ps(ld.y), ldz = _mm_set1_ps(ld.z);
+	__m128 vbest = _mm_set1_ps(-1e18f);
+	__m128i ibest = _mm_setzero_si128();
+	int hi = 0;
+	if (soa) {
+		const float* sx = soa, *sy = sx + count, *sz = sy + count;
+		__m128 vbest2 = _mm_set1_ps(-1e18f);
+		__m128i ibest2 = _mm_setzero_si128();
+		__m128i idx0 = _mm_set_epi32(3,2,1,0), idx1 = _mm_set_epi32(7,6,5,4);
+		__m128i eight = _mm_set1_epi32(8);
+		for (; hi + 7 < count; hi += 8) {
+			__m128 d0 = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi), ldx), _mm_mul_ps(_mm_loadu_ps(sy+hi), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi), ldz));
+			__m128 d1 = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi+4), ldx), _mm_mul_ps(_mm_loadu_ps(sy+hi+4), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi+4), ldz));
+			__m128 m0 = _mm_cmpgt_ps(d0, vbest), m1 = _mm_cmpgt_ps(d1, vbest2);
+			vbest = _mm_blendv_ps(vbest, d0, m0);
+			ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx0), m0));
+			vbest2 = _mm_blendv_ps(vbest2, d1, m1);
+			ibest2 = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest2), _mm_castsi128_ps(idx1), m1));
+			idx0 = _mm_add_epi32(idx0, eight); idx1 = _mm_add_epi32(idx1, eight);
+		}
+		__m128 mg = _mm_cmpgt_ps(vbest2, vbest);
+		vbest = _mm_blendv_ps(vbest, vbest2, mg);
+		ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(ibest2), mg));
+		for (; hi + 3 < count; hi += 4) {
+			__m128 dots = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi), ldx), _mm_mul_ps(_mm_loadu_ps(sy+hi), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi), ldz));
+			__m128i idx = _mm_set_epi32(hi+3,hi+2,hi+1,hi);
+			__m128 mask = _mm_cmpgt_ps(dots, vbest);
+			vbest = _mm_blendv_ps(vbest, dots, mask);
+			ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));
+		}
+	} else {
+		for (; hi + 3 < count; hi += 4) {
+			__m128 v0 = verts[hi].m, v1 = verts[hi+1].m, v2 = verts[hi+2].m, v3r = verts[hi+3].m;
+			__m128 t0 = _mm_unpacklo_ps(v0, v1), t1 = _mm_unpacklo_ps(v2, v3r);
+			__m128 t2 = _mm_unpackhi_ps(v0, v1), t3 = _mm_unpackhi_ps(v2, v3r);
+			__m128 dots = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_movelh_ps(t0, t1), ldx), _mm_mul_ps(_mm_movehl_ps(t1, t0), ldy)), _mm_mul_ps(_mm_movelh_ps(t2, t3), ldz));
+			__m128i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);
+			__m128 mask = _mm_cmpgt_ps(dots, vbest);
+			vbest = _mm_blendv_ps(vbest, dots, mask);
+			ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));
+		}
+	}
+	float hbests[4]; int hbidxs[4];
+	_mm_storeu_ps(hbests, vbest); _mm_storeu_si128((__m128i*)hbidxs, ibest);
+	float hbest = hbests[0]; int hbi = hbidxs[0];
+	for (int k = 1; k < 4; k++) { if (hbests[k] > hbest) { hbest = hbests[k]; hbi = hbidxs[k]; } }
+	for (; hi < count; hi++) { float hd = dot(verts[hi], ld); if (hd > hbest) { hbest = hd; hbi = hi; } }
+	return hbi;
+}
+
+// Box/cylinder support: separate functions to keep gjk_support macro small for inlining budget.
+static v3 gjk_box_support(const GJK_Shape* sp, v3 sd, int* feat)
+{
+	v3 ld = rotate(sp->box.inv_rot, sd); v3 he = sp->box.half_extents;
+	v3 lc = V3(ld.x >= 0 ? he.x : -he.x, ld.y >= 0 ? he.y : -he.y, ld.z >= 0 ? he.z : -he.z);
+	*feat = (ld.x >= 0.0f) | ((ld.y >= 0.0f) << 1) | ((ld.z >= 0.0f) << 2);
+	return add(sp->box.center, rotate(sp->box.rot, lc));
+}
+
+static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
+{
+	v3 cu = sp->cylinder.axis;
+	if (sp->cylinder.inv_axis_len == 0.0f) { *feat = 0; return sp->cylinder.p; }
+	float cda = dot(sd, cu); int cf = cda >= 0.0f; *feat = cf;
+	v3 cbase = cf ? sp->cylinder.q : sp->cylinder.p;
+	v3 cdp = sub(sd, scale(cu, cda)); float cpl = len(cdp);
+	return (cpl > FLT_EPSILON) ? add(cbase, scale(cdp, sp->cylinder.radius / cpl)) : cbase;
+}
+
 // Support function: returns world-space support point + feature ID.
 #define gjk_support(shape, dir, out_feat, out_point) do {                                                        \
 	const GJK_Shape* sp = (shape); v3 sd = (dir);                                                                \
@@ -96,81 +169,13 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 		int sf = dot(sd, sub(sp->segment.q, sp->segment.p)) >= 0.0f;                                             \
 		*(out_feat) = sf; (out_point) = sf ? sp->segment.q : sp->segment.p; break;                               \
 	}                                                                                                            \
-	case GJK_BOX: {                                                                                              \
-		v3 ld = rotate(sp->box.inv_rot, sd); v3 he = sp->box.half_extents;                                       \
-		v3 lc = V3(ld.x >= 0 ? he.x : -he.x, ld.y >= 0 ? he.y : -he.y, ld.z >= 0 ? he.z : -he.z);                \
-		*(out_feat) = (ld.x >= 0.0f) | ((ld.y >= 0.0f) << 1) | ((ld.z >= 0.0f) << 2);                            \
-		(out_point) = add(sp->box.center, rotate(sp->box.rot, lc)); break;                                       \
-	}                                                                                                            \
+	case GJK_BOX: (out_point) = gjk_box_support(sp, sd, (out_feat)); break;                                      \                                                                                                            \
 	case GJK_HULL: {                                                                                             \
 		v3 ld = rotate(sp->hull.inv_rot, sd);                                                                    \
-		const v3* hv = sp->hull.verts; int hn = sp->hull.count;                                                  \
-		__m128 ldx = _mm_set1_ps(ld.x), ldy = _mm_set1_ps(ld.y), ldz = _mm_set1_ps(ld.z);                      \
-		__m128 vbest = _mm_set1_ps(-1e18f);                                                                      \
-		__m128i ibest = _mm_setzero_si128();                                                                     \
-		int hi = 0;                                                                                              \
-		if (sp->hull.soa) {                                                                                      \
-			/* SoA path for large hulls: 8-wide (2x SSE4) */                                                     \
-			const float* sx = sp->hull.soa, *sy = sx + hn, *sz = sy + hn;                                       \
-			__m128 vbest2 = _mm_set1_ps(-1e18f);                                                                 \
-			__m128i ibest2 = _mm_setzero_si128();                                                                \
-			__m128i idx0 = _mm_set_epi32(3,2,1,0), idx1 = _mm_set_epi32(7,6,5,4);                               \
-			__m128i eight = _mm_set1_epi32(8);                                                                    \
-			for (; hi + 7 < hn; hi += 8) {                                                                       \
-				__m128 d0 = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi), ldx),                          \
-					_mm_mul_ps(_mm_loadu_ps(sy+hi), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi), ldz));                \
-				__m128 d1 = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi+4), ldx),                        \
-					_mm_mul_ps(_mm_loadu_ps(sy+hi+4), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi+4), ldz));            \
-				__m128 m0 = _mm_cmpgt_ps(d0, vbest), m1 = _mm_cmpgt_ps(d1, vbest2);                              \
-				vbest = _mm_blendv_ps(vbest, d0, m0);                                                            \
-				ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx0), m0));     \
-				vbest2 = _mm_blendv_ps(vbest2, d1, m1);                                                          \
-				ibest2 = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest2), _mm_castsi128_ps(idx1), m1));   \
-				idx0 = _mm_add_epi32(idx0, eight); idx1 = _mm_add_epi32(idx1, eight);                            \
-			}                                                                                                    \
-			/* Merge the two 4-wide accumulators */                                                               \
-			__m128 mg = _mm_cmpgt_ps(vbest2, vbest);                                                              \
-			vbest = _mm_blendv_ps(vbest, vbest2, mg);                                                             \
-			ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(ibest2), mg));       \
-			for (; hi + 3 < hn; hi += 4) {                                                                       \
-				__m128 dots = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi), ldx),                         \
-					_mm_mul_ps(_mm_loadu_ps(sy+hi), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi), ldz));                \
-				__m128i idx = _mm_set_epi32(hi+3,hi+2,hi+1,hi);                                                  \
-				__m128 mask = _mm_cmpgt_ps(dots, vbest);                                                          \
-				vbest = _mm_blendv_ps(vbest, dots, mask);                                                         \
-				ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));     \
-			}                                                                                                    \
-		} else {                                                                                                 \
-			/* AoS path for small hulls: transpose 4 v3s per iteration */                                        \
-			for (; hi + 3 < hn; hi += 4) {                                                                       \
-				__m128 v0 = hv[hi].m, v1 = hv[hi+1].m, v2 = hv[hi+2].m, v3r = hv[hi+3].m;                      \
-				__m128 t0 = _mm_unpacklo_ps(v0, v1), t1 = _mm_unpacklo_ps(v2, v3r);                             \
-				__m128 t2 = _mm_unpackhi_ps(v0, v1), t3 = _mm_unpackhi_ps(v2, v3r);                             \
-				__m128 dots = _mm_add_ps(_mm_add_ps(                                                             \
-					_mm_mul_ps(_mm_movelh_ps(t0, t1), ldx),                                                     \
-					_mm_mul_ps(_mm_movehl_ps(t1, t0), ldy)),                                                    \
-					_mm_mul_ps(_mm_movelh_ps(t2, t3), ldz));                                                    \
-				__m128i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);                                               \
-				__m128 mask = _mm_cmpgt_ps(dots, vbest);                                                         \
-				vbest = _mm_blendv_ps(vbest, dots, mask);                                                        \
-				ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));    \
-			}                                                                                                    \
-		}                                                                                                        \
-		float hbests[4]; int hbidxs[4];                                                                          \
-		_mm_storeu_ps(hbests, vbest); _mm_storeu_si128((__m128i*)hbidxs, ibest);                                 \
-		float hbest = hbests[0]; int hbi = hbidxs[0];                                                            \
-		for (int k = 1; k < 4; k++) { if (hbests[k] > hbest) { hbest = hbests[k]; hbi = hbidxs[k]; } }         \
-		for (; hi < hn; hi++) { float hd = dot(hv[hi], ld); if (hd > hbest) { hbest = hd; hbi = hi; } }         \
-		*(out_feat) = hbi; (out_point) = add(sp->hull.center, rotate(sp->hull.rot, hv[hbi])); break;             \
+		int hbi = gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, ld);                       \
+		*(out_feat) = hbi; (out_point) = add(sp->hull.center, rotate(sp->hull.rot, sp->hull.verts[hbi])); break; \
 	}                                                                                                            \
-	case GJK_CYLINDER: {                                                                                         \
-		v3 cu = sp->cylinder.axis;                                                                               \
-		if (sp->cylinder.inv_axis_len == 0.0f) { *(out_feat) = 0; (out_point) = sp->cylinder.p; break; }         \
-		float cda = dot(sd, cu); int cf = cda >= 0.0f; *(out_feat) = cf;                                         \
-		v3 cbase = cf ? sp->cylinder.q : sp->cylinder.p;                                                         \
-		v3 cdp = sub(sd, scale(cu, cda)); float cpl = len(cdp);                                                  \
-		(out_point) = (cpl > FLT_EPSILON) ? add(cbase, scale(cdp, sp->cylinder.radius / cpl)) : cbase; break;    \
-	}                                                                                                            \
+	case GJK_CYLINDER: (out_point) = gjk_cylinder_support(sp, sd, (out_feat)); break;                            \                                                                                                            \
 	default: *(out_feat) = 0; (out_point) = V3(0,0,0); break;                                                    \
 	}                                                                                                            \
 } while(0)
