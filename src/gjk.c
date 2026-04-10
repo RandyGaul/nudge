@@ -123,6 +123,32 @@ static v3 gjk_center(const GJK_Shape* s)
 	return V3(0,0,0);
 }
 
+#define gjk_closest_point(simplex, out) do {                                                                        \
+	const GJK_Simplex* cs = (simplex);                                                                              \
+	float cinv = 1.0f / cs->divisor;                                                                                \
+	switch (cs->count) {                                                                                            \
+	case 1: (out) = cs->v[0].point; break;                                                                          \
+	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break; \
+	case 3: (out) = add(add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)),    \
+	                     scale(cs->v[2].point, cs->v[2].u * cinv)); break;                                          \
+	default: (out) = V3(0,0,0); break;                                                                              \
+	}                                                                                                               \
+} while(0)
+
+static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, int* f2)
+{
+	float inv = 1.0f / s->divisor;
+	*p1 = V3(0,0,0); *p2 = V3(0,0,0);
+	float best_u = -1.0f;
+	*f1 = 0; *f2 = 0;
+	for (int i = 0; i < s->count; i++) {
+		float w = s->v[i].u * inv;
+		*p1 = add(*p1, scale(s->v[i].point1, w));
+		*p2 = add(*p2, scale(s->v[i].point2, w));
+		if (s->v[i].u > best_u) { best_u = s->v[i].u; *f1 = s->v[i].feat1; *f2 = s->v[i].feat2; }
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Simplex solvers: find closest point on simplex to origin.
 
@@ -209,32 +235,6 @@ static int gjk_solve4(GJK_Simplex* s)
 	s->v[0].u = uABCD; s->v[1].u = vABCD; s->v[2].u = wABCD; s->v[3].u = xABCD;
 	s->divisor = 1.0f; s->count = 4;
 	return 1;
-}
-
-#define gjk_closest_point(simplex, out) do {                                                                        \
-	const GJK_Simplex* cs = (simplex);                                                                              \
-	float cinv = 1.0f / cs->divisor;                                                                                \
-	switch (cs->count) {                                                                                            \
-	case 1: (out) = cs->v[0].point; break;                                                                          \
-	case 2: (out) = add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)); break; \
-	case 3: (out) = add(add(scale(cs->v[0].point, cs->v[0].u * cinv), scale(cs->v[1].point, cs->v[1].u * cinv)),    \
-	                     scale(cs->v[2].point, cs->v[2].u * cinv)); break;                                          \
-	default: (out) = V3(0,0,0); break;                                                                              \
-	}                                                                                                               \
-} while(0)
-
-static void gjk_witness_points(const GJK_Simplex* s, v3* p1, v3* p2, int* f1, int* f2)
-{
-	float inv = 1.0f / s->divisor;
-	*p1 = V3(0,0,0); *p2 = V3(0,0,0);
-	float best_u = -1.0f;
-	*f1 = 0; *f2 = 0;
-	for (int i = 0; i < s->count; i++) {
-		float w = s->v[i].u * inv;
-		*p1 = add(*p1, scale(s->v[i].point1, w));
-		*p2 = add(*p2, scale(s->v[i].point2, w));
-		if (s->v[i].u > best_u) { best_u = s->v[i].u; *f1 = s->v[i].feat1; *f2 = s->v[i].feat2; }
-	}
 }
 
 // -----------------------------------------------------------------------------
