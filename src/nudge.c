@@ -264,10 +264,29 @@ void world_step(World world, float dt)
 		double tp = perf_now();
 		if (use_body_vel) {
 			for (int iter = 0; iter < w->velocity_iters; iter++) {
-				for (int c = 0; c < color_count; c++)
+				for (int c = 0; c < color_count; c++) {
+#if SIMD_SSE
+					// Batch 4 manifolds at a time for SIMD solve.
+					int start = batch_starts[c], end = batch_starts[c + 1];
+					int i = start;
+					for (; i + 3 < end; i += 4) {
+						int idx[4] = { crefs[i].index, crefs[i+1].index, crefs[i+2].index, crefs[i+3].index };
+						PGS_Batch4 bt;
+						pgs_batch4_prepare(&bt, sm, idx, 4);
+						solve_contact_batch4_sv(w->body_vel, &bt, sc);
+						// Scatter manifold lambdas back
+						for (int j = 0; j < 4; j++) { sm[idx[j]].lambda_t1 = ((float*)&bt.lambda_t1)[j]; sm[idx[j]].lambda_t2 = ((float*)&bt.lambda_t2)[j]; sm[idx[j]].lambda_twist = ((float*)&bt.lambda_twist)[j]; }
+					}
+					// Remainder: scalar path
+					for (; i < end; i++)
+						if (crefs[i].type == CTYPE_CONTACT)
+							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], sc);
+#else
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
 						if (crefs[i].type == CTYPE_CONTACT)
 							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], sc);
+#endif
+				}
 				double tjl = perf_now();
 				joints_solve_limits(w, sol_joints, asize(sol_joints));
 				t_jlim += perf_now() - tjl;
