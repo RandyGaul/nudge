@@ -1451,6 +1451,64 @@ static void ldl_refresh_lever_arms(WorldInternal* w, SolverJoint* sol_joints, in
 	}
 }
 
+// Lightweight lever arm refresh for sub > 0: recompute only Jacobians, lever arms,
+// and pos_error from current body state. Skips memsets (all values overwritten for
+// distance joints), spring_compute (softness constant across substeps), and
+// lambda save/restore (not touched). Falls back to full joint_fill_rows for
+// joint types with complex state (limits, motors).
+static void ldl_refresh_lever_arms_light(WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt)
+{
+	for (int i = 0; i < joint_count; i++) {
+		SolverJoint* s = &sol_joints[i];
+		BodyHot* a = &w->body_hot[s->body_a];
+		BodyHot* b = &w->body_hot[s->body_b];
+		JointInternal* j = &w->joints[s->joint_idx];
+
+		if (s->type == JOINT_DISTANCE) {
+			// Fast path: all 12 J values set explicitly, no memset needed.
+			// Softness unchanged from sub 0 — skip spring_compute.
+			s->r_a = rotate(a->rotation, j->distance.local_a);
+			s->r_b = rotate(b->rotation, j->distance.local_b);
+			v3 anchor_a = add(a->position, s->r_a);
+			v3 anchor_b = add(b->position, s->r_b);
+			v3 delta = sub(anchor_b, anchor_a);
+			float dist_val = len(delta);
+			v3 axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
+			v3 rxa = cross(s->r_a, axis), rxb = cross(s->r_b, axis);
+			s->rows[0].J_a[0] = -axis.x; s->rows[0].J_a[1] = -axis.y; s->rows[0].J_a[2] = -axis.z;
+			s->rows[0].J_a[3] = -rxa.x;  s->rows[0].J_a[4] = -rxa.y;  s->rows[0].J_a[5] = -rxa.z;
+			s->rows[0].J_b[0] =  axis.x; s->rows[0].J_b[1] =  axis.y; s->rows[0].J_b[2] =  axis.z;
+			s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
+			s->pos_error[0] = dist_val - j->distance.rest_length;
+			float dmin = j->distance.limit_min, dmax = j->distance.limit_max;
+			if (dmin > 0 || dmax > 0) {
+				if (dmin > 0 && dist_val < dmin) { s->pos_error[0] = dist_val - dmin; s->lo[0] = 0.0f; s->hi[0] = FLT_MAX; }
+				else if (dmax > 0 && dist_val > dmax) { s->pos_error[0] = dist_val - dmax; s->lo[0] = -FLT_MAX; s->hi[0] = 0.0f; }
+				else s->pos_error[0] = 0;
+			}
+		} else if (s->type == JOINT_BALL_SOCKET) {
+			s->r_a = rotate(a->rotation, j->ball_socket.local_a);
+			s->r_b = rotate(b->rotation, j->ball_socket.local_b);
+			v3 ra = s->r_a, rb = s->r_b;
+			s->rows[0].J_a[0] = -1; s->rows[0].J_a[1] = 0; s->rows[0].J_a[2] = 0; s->rows[0].J_a[3] = 0; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
+			s->rows[0].J_b[0] =  1; s->rows[0].J_b[1] = 0; s->rows[0].J_b[2] = 0; s->rows[0].J_b[3] = 0; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
+			s->rows[1].J_a[0] = 0; s->rows[1].J_a[1] = -1; s->rows[1].J_a[2] = 0; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[4] = 0; s->rows[1].J_a[5] = -ra.x;
+			s->rows[1].J_b[0] = 0; s->rows[1].J_b[1] =  1; s->rows[1].J_b[2] = 0; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[4] = 0; s->rows[1].J_b[5] =  rb.x;
+			s->rows[2].J_a[0] = 0; s->rows[2].J_a[1] = 0; s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x; s->rows[2].J_a[5] = 0;
+			s->rows[2].J_b[0] = 0; s->rows[2].J_b[1] = 0; s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x; s->rows[2].J_b[5] = 0;
+			v3 err = sub(add(b->position, rb), add(a->position, ra));
+			s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
+		} else {
+			// Complex joints (hinge, fixed, prismatic): fall back to full refresh.
+			float saved_softness = s->softness;
+			float saved_lambda[JOINT_MAX_DOF];
+			for (int d = 0; d < JOINT_MAX_DOF; d++) saved_lambda[d] = s->lambda[d];
+			joint_fill_rows(s, a, b, w, sub_dt);
+			for (int d = 0; d < JOINT_MAX_DOF; d++) s->lambda[d] = saved_lambda[d];
+		}
+	}
+}
+
 // Factor K for all islands (topology rebuild + numeric factorization). No solve.
 // Factorizes with compressed masses for better K conditioning, then restores real masses.
 // The factored K is reused for both velocity solve (real-mass apply) and position solve
@@ -1459,9 +1517,10 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 {
 	if (joint_count == 0) return;
 
-	// Refresh lever arms on substeps after the first (positions/rotations changed)
+	// Refresh lever arms on substeps after the first (positions/rotations changed).
+	// Use lightweight refresh: skips memsets, spring_compute, lambda save/restore.
 	if (sub > 0)
-		ldl_refresh_lever_arms(w, sol_joints, joint_count, sub_dt);
+		ldl_refresh_lever_arms_light(w, sol_joints, joint_count, sub_dt);
 
 	// Compress masses for K conditioning: sqrt compression (100:1 -> 10:1).
 	// Save inv_mass, inv_inertia_local, and precomputed world inertia (iw_diag/iw_off)
