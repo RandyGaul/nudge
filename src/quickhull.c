@@ -731,14 +731,39 @@ static void qh_add_new_faces(QH_State* s, QH_FaceList* nf, int eye, CK_DYNA int*
 {
 	nf->first = nf->last = QH_INVALID;
 	int prev = QH_INVALID, begin = QH_INVALID;
+	v3 eye_pos = s->verts[eye].pos;
 	for (int i = 0; i < nh; i++) {
-		int side = qh_add_adjoining_face(s, eye, horizon[i]);
-		if (prev != QH_INVALID) qh_set_opposite(s, s->edges[side].next, prev);
-		else begin = side;
-		qh_face_list_add(s, nf, s->edges[side].face);
-		prev = side;
+		int horizon_edge = horizon[i];
+		int tail = s->edges[horizon_edge].origin;
+		int head = s->edges[s->edges[horizon_edge].next].origin;
+		// Inline qh_create_triangle(s, eye, tail, head).
+		int fi = qh_alloc_face(s);
+		int e0 = qh_alloc_edge(s), e1 = qh_alloc_edge(s), e2 = qh_alloc_edge(s);
+		s->edges[e0] = (QH_Edge){ .next=e1, .prev=e2, .twin=QH_INVALID, .origin=eye, .face=fi };
+		s->edges[e1] = (QH_Edge){ .next=e2, .prev=e0, .twin=QH_INVALID, .origin=tail, .face=fi };
+		s->edges[e2] = (QH_Edge){ .next=e0, .prev=e1, .twin=QH_INVALID, .origin=head, .face=fi };
+		s->faces[fi].edge = e0;
+		s->faces[fi].next = fi;
+		s->faces[fi].prev = fi;
+		v3 p0 = eye_pos, p1 = s->verts[tail].pos, p2 = s->verts[head].pos;
+		v3 n = cross(sub(p1, p0), sub(p2, p0));
+		float a = len(n);
+		if (a > 0) n = scale(n, 1.0f / a);
+		v3 c = scale(add(add(p0, p1), p2), 1.0f / 3.0f);
+		s->faces[fi].plane = (HullPlane){ n, dot(n, c) };
+		s->faces[fi].centroid = c;
+		s->faces[fi].num_verts = 3;
+		s->faces[fi].area = a;
+		// Twin e1 with old twin of horizon edge.
+		qh_set_opposite(s, e1, s->edges[horizon_edge].twin);
+		// Link side edges between consecutive cone triangles.
+		// e2.next == e0 (eye->tail), which is the inward side edge.
+		if (prev != QH_INVALID) qh_set_opposite(s, e0, prev);
+		else begin = e0;
+		qh_face_list_add(s, nf, fi);
+		prev = e2;
 	}
-	qh_set_opposite(s, s->edges[begin].next, prev);
+	qh_set_opposite(s, begin, prev);
 }
 
 // Reassign orphaned conflict vertices from the unclaimed list to new faces.
@@ -953,27 +978,23 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 		}
 	});
 
-	// Vertex remap.
+	// Vertex + edge remap in a single pass over live face edges.
 	CK_DYNA int* vremap = NULL;
 	afit_set(vremap, asize(s->verts));
 	memset(vremap, -1, asize(s->verts) * sizeof(int));
-	CK_DYNA v3* ov = NULL; afit(ov, asize(s->verts)); int vc = 0;
-	for (int i = 0; i < asize(live); i++) {
-		int e = s->faces[live[i]].edge, start = e;
-		do { int vi = s->edges[e].origin;
-			if (vremap[vi]<0) { vremap[vi]=vc++; apush(ov, s->verts[vi].pos); }
-			e = s->edges[e].next;
-		} while (e != start);
-	}
-
-	// Edge remap.
 	CK_DYNA int* eremap = NULL;
 	afit_set(eremap, asize(s->edges));
 	memset(eremap, -1, asize(s->edges) * sizeof(int));
+	CK_DYNA v3* ov = NULL; afit(ov, asize(s->verts)); int vc = 0;
 	CK_DYNA HalfEdge* oe = NULL; afit(oe, asize(s->edges)); int ec = 0;
 	for (int i = 0; i < asize(live); i++) {
 		int e = s->faces[live[i]].edge, start = e;
-		do { eremap[e]=ec++; HalfEdge he={0}; apush(oe, he); e=s->edges[e].next; } while (e!=start);
+		do {
+			int vi = s->edges[e].origin;
+			if (vremap[vi] < 0) { vremap[vi] = vc++; apush(ov, s->verts[vi].pos); }
+			eremap[e] = ec++; HalfEdge he = {0}; apush(oe, he);
+			e = s->edges[e].next;
+		} while (e != start);
 	}
 	for (int i = 0; i < asize(live); i++) {
 		int e = s->faces[live[i]].edge, start = e;
@@ -1022,7 +1043,8 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	// SoA transpose for SIMD-friendly inner loop.
 	h->maxoutside = 0;
 	int fc = h->face_count;
-	float* nx = (float*)CK_ALLOC(fc * 4 * sizeof(float));
+	int soa_bytes = fc * 4 * sizeof(float);
+	float* nx = (soa_bytes <= 4096) ? (float*)_alloca(soa_bytes) : (float*)CK_ALLOC(soa_bytes);
 	float* ny = nx + fc, *nz = ny + fc, *max_ds = nz + fc;
 	for (int i = 0; i < fc; i++) { nx[i] = pcp[i].normal.x; ny[i] = pcp[i].normal.y; nz[i] = pcp[i].normal.z; max_ds[i] = pcp[i].offset; }
 	for (int pi = 0; pi < all_count; pi++) {
@@ -1037,7 +1059,7 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 		if (widen > h->maxoutside) h->maxoutside = widen;
 		pcp[i].offset = max_ds[i];
 	}
-	free(nx);
+	if (soa_bytes > 4096) free(nx);
 
 	afree(live); afree(vremap); afree(ov); afree(eremap); afree(oe); afree(of); afree(op);
 	return h;
