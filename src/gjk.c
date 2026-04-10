@@ -110,17 +110,33 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 		__m128i ibest = _mm_setzero_si128();                                                                     \
 		int hi = 0;                                                                                              \
 		if (sp->hull.soa) {                                                                                      \
-			/* SoA path for large hulls: contiguous x/y/z arrays, no transpose needed */                         \
+			/* SoA path for large hulls: 8-wide (2x SSE4) */                                                     \
 			const float* sx = sp->hull.soa, *sy = sx + hn, *sz = sy + hn;                                       \
+			__m128 vbest2 = _mm_set1_ps(-1e18f);                                                                 \
+			__m128i ibest2 = _mm_setzero_si128();                                                                \
+			for (; hi + 7 < hn; hi += 8) {                                                                       \
+				__m128 d0 = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi), ldx),                          \
+					_mm_mul_ps(_mm_loadu_ps(sy+hi), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi), ldz));                \
+				__m128 d1 = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi+4), ldx),                        \
+					_mm_mul_ps(_mm_loadu_ps(sy+hi+4), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi+4), ldz));            \
+				__m128i i0 = _mm_set_epi32(hi+3,hi+2,hi+1,hi), i1 = _mm_set_epi32(hi+7,hi+6,hi+5,hi+4);        \
+				__m128 m0 = _mm_cmpgt_ps(d0, vbest), m1 = _mm_cmpgt_ps(d1, vbest2);                              \
+				vbest = _mm_blendv_ps(vbest, d0, m0);                                                            \
+				ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(i0), m0));       \
+				vbest2 = _mm_blendv_ps(vbest2, d1, m1);                                                          \
+				ibest2 = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest2), _mm_castsi128_ps(i1), m1));     \
+			}                                                                                                    \
+			/* Merge the two 4-wide accumulators */                                                               \
+			__m128 mg = _mm_cmpgt_ps(vbest2, vbest);                                                              \
+			vbest = _mm_blendv_ps(vbest, vbest2, mg);                                                             \
+			ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(ibest2), mg));       \
 			for (; hi + 3 < hn; hi += 4) {                                                                       \
-				__m128 dots = _mm_add_ps(_mm_add_ps(                                                             \
-					_mm_mul_ps(_mm_loadu_ps(sx + hi), ldx),                                                      \
-					_mm_mul_ps(_mm_loadu_ps(sy + hi), ldy)),                                                     \
-					_mm_mul_ps(_mm_loadu_ps(sz + hi), ldz));                                                     \
-				__m128i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);                                               \
-				__m128 mask = _mm_cmpgt_ps(dots, vbest);                                                         \
-				vbest = _mm_blendv_ps(vbest, dots, mask);                                                        \
-				ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));    \
+				__m128 dots = _mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_loadu_ps(sx+hi), ldx),                         \
+					_mm_mul_ps(_mm_loadu_ps(sy+hi), ldy)), _mm_mul_ps(_mm_loadu_ps(sz+hi), ldz));                \
+				__m128i idx = _mm_set_epi32(hi+3,hi+2,hi+1,hi);                                                  \
+				__m128 mask = _mm_cmpgt_ps(dots, vbest);                                                          \
+				vbest = _mm_blendv_ps(vbest, dots, mask);                                                         \
+				ibest = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(ibest), _mm_castsi128_ps(idx), mask));     \
 			}                                                                                                    \
 		} else {                                                                                                 \
 			/* AoS path for small hulls: transpose 4 v3s per iteration */                                        \
