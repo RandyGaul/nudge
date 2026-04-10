@@ -341,6 +341,7 @@ typedef struct SolverManifold
 	int contact_start;
 	int contact_count;
 	float friction;
+	float inv_mass_a, inv_mass_b; // cached from body (avoids body array lookup during iteration)
 	// Manifold-level patch friction data (FRICTION_PATCH only)
 	v3 centroid_r_a;
 	v3 centroid_r_b;

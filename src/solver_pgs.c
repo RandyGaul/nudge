@@ -94,6 +94,8 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 			.contact_start = asize(sc),
 			.contact_count = im->m.count,
 			.friction = mu,
+			.inv_mass_a = a->inv_mass,
+			.inv_mass_b = b->inv_mass,
 		};
 
 		int patch_mode = (w->friction_model == FRICTION_PATCH);
@@ -647,21 +649,23 @@ static void solver_sync_vel_out(WorldInternal* w)
 	}
 }
 
-// Apply impulse row using compact SolverBodyVel (no rotation/inertia lookup).
-static void apply_impulse_row_sv(SolverBodyVel* a, SolverBodyVel* b, v3 direction, v3 w_a, v3 w_b, float delta)
+// Apply impulse row to velocity-only body state. inv_mass comes from the manifold (cached).
+static void apply_impulse_row_sv(SolverBodyVel* a, SolverBodyVel* b, float ima, float imb, v3 direction, v3 w_a, v3 w_b, float delta)
 {
 	v3 P = scale(direction, delta);
-	a->velocity = sub(a->velocity, scale(P, a->inv_mass));
-	b->velocity = add(b->velocity, scale(P, b->inv_mass));
+	a->velocity = sub(a->velocity, scale(P, ima));
+	b->velocity = add(b->velocity, scale(P, imb));
 	a->angular_velocity = sub(a->angular_velocity, scale(w_a, delta));
 	b->angular_velocity = add(b->angular_velocity, scale(w_b, delta));
 }
 
 // Solve one patch-friction manifold using compact SolverBodyVel arrays.
+// Body inv_mass is read from the manifold (cached in pre_solve), never from body arrays.
 static void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, SolverContact* sc)
 {
 	SolverBodyVel* a = &bodies[m->body_a];
 	SolverBodyVel* b = &bodies[m->body_b];
+	float ima = m->inv_mass_a, imb = m->inv_mass_b;
 
 	float total_lambda_n = 0.0f;
 	for (int ci = 0; ci < m->contact_count; ci++) {
@@ -670,7 +674,7 @@ static void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, Sol
 		float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
 		float old_n = s->lambda_n;
 		s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
-		apply_impulse_row_sv(a, b, s->normal, s->w_n_a, s->w_n_b, s->lambda_n - old_n);
+		apply_impulse_row_sv(a, b, ima, imb, s->normal, s->w_n_a, s->w_n_b, s->lambda_n - old_n);
 		total_lambda_n += s->lambda_n;
 	}
 
@@ -679,12 +683,12 @@ static void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, Sol
 	float vt1 = dot(sub(b->velocity, a->velocity), m->tangent1) + dot(b->angular_velocity, m->rct1_b) - dot(a->angular_velocity, m->rct1_a);
 	float old_t1 = m->lambda_t1;
 	m->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + m->eff_mass_t1 * (-vt1), max_f));
-	apply_impulse_row_sv(a, b, m->tangent1, m->w_t1_a, m->w_t1_b, m->lambda_t1 - old_t1);
+	apply_impulse_row_sv(a, b, ima, imb, m->tangent1, m->w_t1_a, m->w_t1_b, m->lambda_t1 - old_t1);
 
 	float vt2 = dot(sub(b->velocity, a->velocity), m->tangent2) + dot(b->angular_velocity, m->rct2_b) - dot(a->angular_velocity, m->rct2_a);
 	float old_t2 = m->lambda_t2;
 	m->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + m->eff_mass_t2 * (-vt2), max_f));
-	apply_impulse_row_sv(a, b, m->tangent2, m->w_t2_a, m->w_t2_b, m->lambda_t2 - old_t2);
+	apply_impulse_row_sv(a, b, ima, imb, m->tangent2, m->w_t2_a, m->w_t2_b, m->lambda_t2 - old_t2);
 
 	float max_twist = m->friction * total_lambda_n * m->patch_radius;
 	float w_rel = dot(sub(b->angular_velocity, a->angular_velocity), m->normal);
