@@ -276,9 +276,19 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	}                                                                                                                     \
 	case GJK_CYLINDER: (out_point) = gjk_cylinder_support(sp, sd, (out_feat)); break;                                      \
 	case GJK_TRIANGLE: {                                                                                                  \
-		float da = dot(sp->tri.a, sd), db = dot(sp->tri.b, sd), dc = dot(sp->tri.c, sd);                                  \
-		if (da >= db && da >= dc) { *(out_feat) = 0; (out_point) = sp->tri.a; }                                            \
-		else if (db >= dc) { *(out_feat) = 1; (out_point) = sp->tri.b; }                                                  \
+		/* 3 dots in parallel via AoS→SoA transpose */                                                                     \
+		__m128 v0 = sp->tri.a.m, v1 = sp->tri.b.m, v2 = sp->tri.c.m;                                                     \
+		__m128 t01lo = _mm_unpacklo_ps(v0, v1), t01hi = _mm_unpackhi_ps(v0, v1);                                          \
+		__m128 t2lo = _mm_unpacklo_ps(v2, _mm_setzero_ps());                                                              \
+		__m128 t2hi = _mm_unpackhi_ps(v2, _mm_setzero_ps());                                                              \
+		__m128 xs = _mm_movelh_ps(t01lo, t2lo), ys = _mm_movehl_ps(t2lo, t01lo), zs = _mm_movelh_ps(t01hi, t2hi);         \
+		__m128 dx = _mm_shuffle_ps(sd.m, sd.m, 0x00), dy = _mm_shuffle_ps(sd.m, sd.m, 0x55);                              \
+		__m128 dz = _mm_shuffle_ps(sd.m, sd.m, 0xAA);                                                                     \
+		__m128 dots = _mm_add_ps(_mm_add_ps(_mm_mul_ps(xs, dx), _mm_mul_ps(ys, dy)), _mm_mul_ps(zs, dz));                 \
+		/* dots = {da, db, dc, 0} — find max */                                                                            \
+		float td[4]; _mm_storeu_ps(td, dots);                                                                              \
+		if (td[0] >= td[1] && td[0] >= td[2]) { *(out_feat) = 0; (out_point) = sp->tri.a; }                               \
+		else if (td[1] >= td[2]) { *(out_feat) = 1; (out_point) = sp->tri.b; }                                            \
 		else { *(out_feat) = 2; (out_point) = sp->tri.c; }                                                                \
 		break;                                                                                                            \
 	}                                                                                                                     \
