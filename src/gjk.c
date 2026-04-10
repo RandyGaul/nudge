@@ -368,7 +368,7 @@ static int gjk_solve4(GJK_Simplex* s)
 // 3-condition termination + post-hoc radius for sphere/capsule.
 #define GJK_MAX_ITERS         64
 #define GJK_CONTAINMENT_EPS2  1e-8f
-#define GJK_PROGRESS_EPS      1e-7f
+#define GJK_PROGRESS_EPS      1e-6f
 static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 {
 	GJK_Result result = {0};
