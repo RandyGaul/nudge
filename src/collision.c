@@ -1117,10 +1117,6 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 {
 	bvh_refit(w->bvh_dynamic, w);
 
-	// Incremental refinement: rebuild a subtree using binned SAH.
-	AABB* lut = bvh_build_lut(w->bvh_dynamic);
-	if (lut) { bvh_incremental_refine(w->bvh_dynamic, lut); CK_FREE(lut); }
-
 	// Build tight AABBs + sweep-and-prune entries for all dynamic bodies.
 	int body_count = asize(w->body_hot);
 	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
