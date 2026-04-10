@@ -1081,24 +1081,11 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 // Dedicated box-box SAT: Gottschalk OBB test with direct rotation column arithmetic.
 // Tests all 15 separating axes without generic hull machinery (plane_transform, hull_support loops, Gauss map).
 // Falls through to collide_hull_hull for contact generation when penetrating.
-// Convert quaternion to 3 rotation matrix columns using shared intermediates.
-// ~40 FLOPs total vs ~75 for 3 separate rotate() calls.
-static void quat_to_cols(quat q, v3* cx, v3* cy, v3* cz)
-{
-	float x2 = 2.0f * q.x * q.x, y2 = 2.0f * q.y * q.y, z2 = 2.0f * q.z * q.z;
-	float xy = 2.0f * q.x * q.y, xz = 2.0f * q.x * q.z, yz = 2.0f * q.y * q.z;
-	float wx = 2.0f * q.w * q.x, wy = 2.0f * q.w * q.y, wz = 2.0f * q.w * q.z;
-	*cx = V3(1.0f - y2 - z2, xy + wz, xz - wy);
-	*cy = V3(xy - wz, 1.0f - x2 - z2, yz + wx);
-	*cz = V3(xz + wy, yz - wx, 1.0f - x2 - y2);
-}
-
 int collide_box_box(Box a, Box b, Manifold* manifold)
 {
-	// Rotation columns for each box (shared intermediates, ~40 FLOPs vs ~75 for 3 rotates).
-	v3 ax, ay, az, bx, by, bz;
-	quat_to_cols(a.rotation, &ax, &ay, &az);
-	quat_to_cols(b.rotation, &bx, &by, &bz);
+	// Rotation columns for each box.
+	v3 ax = rotate(a.rotation, V3(1, 0, 0)), ay = rotate(a.rotation, V3(0, 1, 0)), az = rotate(a.rotation, V3(0, 0, 1));
+	v3 bx = rotate(b.rotation, V3(1, 0, 0)), by = rotate(b.rotation, V3(0, 1, 0)), bz = rotate(b.rotation, V3(0, 0, 1));
 
 	v3 d = sub(b.center, a.center);
 	float ea = a.half_extents.x, eb = a.half_extents.y, ec = a.half_extents.z;
