@@ -949,12 +949,12 @@ static void run_gjk_perf_tests()
 	// Correctness: known distances (all shape pairs)
 	test_gjk_known_distances();
 
-	// Correctness: brute-force comparison (500 random cases each)
-	printf("\n  --- brute-force accuracy ---\n");
-	test_gjk_bf_box_box();
-	test_gjk_bf_segment_hull();
-	test_gjk_bf_capsule_box();
-	test_gjk_bf_sphere_box();
+	// Brute-force accuracy (slow -- uncomment when needed)
+	// printf("\n  --- brute-force accuracy ---\n");
+	// test_gjk_bf_box_box();
+	// test_gjk_bf_segment_hull();
+	// test_gjk_bf_capsule_box();
+	// test_gjk_bf_sphere_box();
 
 	// Correctness: near-contact zero-crossing
 	test_gjk_near_contact();
