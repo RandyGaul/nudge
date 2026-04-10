@@ -1148,17 +1148,15 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		}
 	}
 
-	// Dynamic vs static: direct AABB scan (no BVH cross-test overhead).
-	for (int si = 0; si < body_count; si++) {
-		if (!split_alive(w->body_gen, si) || asize(w->body_cold[si].shapes) == 0) continue;
-		if (w->body_hot[si].inv_mass != 0.0f) continue; // only static bodies
-		AABB ts = tight[si];
-		for (int di = 0; di < sap_count; di++) {
-			int d = sap[di].body_idx;
-			if (!aabb_overlaps(ts, tight[d])) continue;
-			narrowphase_pair(w, si, d, manifolds);
-		}
+	// Dynamic vs static: BVH cross-test with tight AABB pre-filter.
+	CK_DYNA BroadPair* pairs = NULL;
+	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
+	for (int i = 0; i < asize(pairs); i++) {
+		int a = pairs[i].a, b = pairs[i].b;
+		if (!aabb_overlaps(tight[a], tight[b])) continue;
+		narrowphase_pair(w, a, b, manifolds);
 	}
+	afree(pairs);
 
 	CK_FREE(tight);
 	afree(sap);
