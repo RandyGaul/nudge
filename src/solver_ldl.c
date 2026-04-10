@@ -238,13 +238,13 @@ static void apply_rotation_delta(quat* q, dv3 w)
 // Copies from SolverJoint.rows[] for real joints; builds identity for synthetic welds.
 static void ldl_fill_jacobian(LDL_Constraint* con, SolverJoint* sol_joints, LDL_JacobianRow* jac)
 {
-	int dof = con->dof;
-	for (int d = 0; d < dof; d++) { memset(jac[d].J_a, 0, 6 * sizeof(double)); memset(jac[d].J_b, 0, 6 * sizeof(double)); }
-
 	if (con->is_synthetic) {
-		// Weld: J_a = -I_6, J_b = +I_6
+		// Weld: J_a = -I_6, J_b = +I_6 (zero first, then set diagonal)
+		int dof = con->dof;
+		for (int d = 0; d < dof; d++) { memset(jac[d].J_a, 0, 6 * sizeof(double)); memset(jac[d].J_b, 0, 6 * sizeof(double)); }
 		for (int d = 0; d < 6; d++) { jac[d].J_a[d] = -1.0; jac[d].J_b[d] = 1.0; }
 	} else {
+		// Non-synthetic: all 6 values per row are copied, no memset needed.
 		SolverJoint* sj = &sol_joints[con->solver_idx];
 		for (int d = 0; d < con->dof; d++) {
 			for (int k = 0; k < 6; k++) { jac[d].J_a[k] = (double)sj->rows[d].J_a[k]; jac[d].J_b[k] = (double)sj->rows[d].J_b[k]; }
