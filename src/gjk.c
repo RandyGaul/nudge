@@ -271,13 +271,14 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 	while (iter < GJK_MAX_ITERS) {
 		int solved = 1;
 		if (simplex.count > 1) {
-			GJK_Simplex backup = simplex;
+			GJK_Simplex backup;
+			memcpy(&backup, &simplex, sizeof(GJK_Vertex) * simplex.count + sizeof(float) + sizeof(int));
 			switch (simplex.count) {
 			case 2: solved = gjk_solve2(&simplex); break;
 			case 3: solved = gjk_solve3(&simplex); break;
 			case 4: solved = gjk_solve4(&simplex); break;
 			}
-			if (!solved) { simplex = backup; break; }
+			if (!solved) { memcpy(&simplex, &backup, sizeof(GJK_Vertex) * backup.count + sizeof(float) + sizeof(int)); break; }
 		}
 		if (simplex.count == 4) break;
 
