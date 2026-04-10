@@ -34,8 +34,8 @@ static float compute_effective_mass(BodyHot* a, BodyHot* b, float inv_mass_sum, 
 	v3 ra_x_d = cross(r_a, dir);
 	v3 rb_x_d = cross(r_b, dir);
 	float k = inv_mass_sum
-		+ dot(cross(inv_inertia_mul(a->rotation, a->inv_inertia_local, ra_x_d), r_a), dir)
-		+ dot(cross(inv_inertia_mul(b->rotation, b->inv_inertia_local, rb_x_d), r_b), dir);
+		+ dot(cross(inv_inertia_world_mul(a, ra_x_d), r_a), dir)
+		+ dot(cross(inv_inertia_world_mul(b, rb_x_d), r_b), dir);
 	return k > 1e-12f ? 1.0f / k : 0.0f;
 }
 
