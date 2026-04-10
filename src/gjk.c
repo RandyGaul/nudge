@@ -354,9 +354,9 @@ static int gjk_solve3(GJK_Simplex* s)
 	// Edge CA: uCA>0 && vCA>0 && vABC<=0 → bits 4,5 set, bit 7 clear
 	if ((signs & 0xB0) == 0x30) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
 	// Face ABC
-	s->divisor = uABC + vABC + wABC;
-	if (s->divisor == 0.0f) return 0;
-	s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->count = 3;
+	float divABC = uABC + vABC + wABC;
+	if (divABC == 0.0f) return 0;
+	s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = divABC; s->count = 3;
 	return 1;
 }
 #define stp(a, b, c) dot(a, cross(b, c))
@@ -429,16 +429,15 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB, v3* cache)
 	float dsq_prev = FLT_MAX;
 	int iter = 0;
 	while (iter < GJK_MAX_ITERS) {
-		int solved = 1;
 		if (simplex.count > 1) {
-			GJK_Simplex backup;
-			memcpy(&backup, &simplex, gjk_simplex_size(simplex.count));
+			int solved;
 			switch (simplex.count) {
 			case 2: solved = gjk_solve2(&simplex); break;
 			case 3: solved = gjk_solve3(&simplex); break;
 			case 4: solved = gjk_solve4(&simplex); break;
+			default: solved = 0; break;
 			}
-			if (!solved) { memcpy(&simplex, &backup, gjk_simplex_size(backup.count)); break; }
+			if (!solved) break;
 		}
 		if (simplex.count == 4) break;
 		v3 closest; gjk_closest_point(&simplex, closest);
