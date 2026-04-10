@@ -252,26 +252,31 @@ static float qh_plane_dist(HullPlane p, v3 pt)
 }
 
 // Compute face normal, centroid, area via Newell method.
+// Uses scalar SoA access to avoid v3/simd4f lane extraction overhead.
 static void qh_recompute_face(QH_State* s, int fi)
 {
 	QH_Face* f = &s->faces[fi];
-	v3 normal = V3(0,0,0), centroid = V3(0,0,0);
+	QH_Verts* V = &s->verts;
+	float nx = 0, ny = 0, nz = 0, cx = 0, cy = 0, cz = 0;
 	int count = 0, e = f->edge;
 	do {
-		v3 cur = qh_vert_pos(&s->verts, s->edges[e].origin);
-		v3 nxt = qh_vert_pos(&s->verts, s->edges[s->edges[e].next].origin);
-		normal.x += (cur.y - nxt.y) * (cur.z + nxt.z);
-		normal.y += (cur.z - nxt.z) * (cur.x + nxt.x);
-		normal.z += (cur.x - nxt.x) * (cur.y + nxt.y);
-		centroid = add(centroid, cur);
+		int vi = s->edges[e].origin, vn = s->edges[s->edges[e].next].origin;
+		float curx = V->x[vi], cury = V->y[vi], curz = V->z[vi];
+		float nxtx = V->x[vn], nxty = V->y[vn], nxtz = V->z[vn];
+		nx += (cury - nxty) * (curz + nxtz);
+		ny += (curz - nxtz) * (curx + nxtx);
+		nz += (curx - nxtx) * (cury + nxty);
+		cx += curx; cy += cury; cz += curz;
 		count++;
 		if (count > 1000) { QH_ASSERT(0, "infinite face loop in qh_recompute_face"); }
 		e = s->edges[e].next;
 	} while (e != f->edge);
 
-	float a = len(normal);
-	if (a > 0) normal = scale(normal, 1.0f / a);
-	centroid = scale(centroid, 1.0f / count);
+	float a = sqrtf(nx*nx + ny*ny + nz*nz);
+	if (a > 0) { float inv = 1.0f / a; nx *= inv; ny *= inv; nz *= inv; }
+	float inv_c = 1.0f / count;
+	cx *= inv_c; cy *= inv_c; cz *= inv_c;
+	v3 normal = V3(nx, ny, nz), centroid = V3(cx, cy, cz);
 	f->plane = (HullPlane){ normal, dot(normal, centroid) };
 	f->centroid = centroid;
 	f->num_verts = count;
