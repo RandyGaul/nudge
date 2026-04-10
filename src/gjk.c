@@ -248,7 +248,7 @@ static int gjk_solve4(GJK_Simplex* s)
 #define GJK_CONTAINMENT_EPS2  1e-8f
 #define GJK_PROGRESS_EPS      1e-7f
 
-static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
+static __forceinline GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 {
 	GJK_Result result = {0};
 	GJK_Simplex simplex = {0};
