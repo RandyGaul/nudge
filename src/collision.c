@@ -801,50 +801,46 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 
 	EdgeQuery best = { .index1 = -1, .index2 = -1, .separation = -1e18f };
 
-	// Precompute hull2 edge data for the inner loop.
-	int n2 = hull2->edge_count / 2;
+	// Precompute both hulls' edge data into contiguous arrays.
+	int n1 = hull1->edge_count / 2, n2 = hull2->edge_count / 2;
+	assert(n1 <= 128 && n2 <= 128);
+	v3 e1_arr[128], u1_arr[128], v1_arr[128], ne1_arr[128];
 	v3 e2_arr[128], nu2_arr[128], nv2_arr[128], ne2_arr[128];
-	assert(n2 <= 128);
+	for (int k = 0; k < n1; k++) {
+		int i = k * 2;
+		v3 p = add(c1_local, rotate(rel_rot, hull_vert_scaled(hull1, hull1->edges[i].origin, scale1)));
+		v3 q = add(c1_local, rotate(rel_rot, hull_vert_scaled(hull1, hull1->edges[i+1].origin, scale1)));
+		e1_arr[k] = sub(q, p);
+		u1_arr[k] = rotate(rel_rot, hull1->planes[hull1->edges[i].face].normal);
+		v1_arr[k] = rotate(rel_rot, hull1->planes[hull1->edges[i+1].face].normal);
+		ne1_arr[k] = neg(e1_arr[k]);
+	}
 	for (int k = 0; k < n2; k++) {
-		int i2 = k * 2;
-		v3 p2 = hull_vert_scaled(hull2, hull2->edges[i2].origin, scale2);
-		v3 q2 = hull_vert_scaled(hull2, hull2->edges[i2+1].origin, scale2);
-		e2_arr[k] = sub(q2, p2);
-		nu2_arr[k] = neg(hull2->planes[hull2->edges[i2].face].normal);
-		nv2_arr[k] = neg(hull2->planes[hull2->edges[i2+1].face].normal);
+		int i = k * 2;
+		v3 p = hull_vert_scaled(hull2, hull2->edges[i].origin, scale2);
+		v3 q = hull_vert_scaled(hull2, hull2->edges[i+1].origin, scale2);
+		e2_arr[k] = sub(q, p);
+		nu2_arr[k] = neg(hull2->planes[hull2->edges[i].face].normal);
+		nv2_arr[k] = neg(hull2->planes[hull2->edges[i+1].face].normal);
 		ne2_arr[k] = neg(e2_arr[k]);
 	}
 
-	for (int i1 = 0; i1 < hull1->edge_count; i1 += 2) {
-		const HalfEdge* edge1 = &hull1->edges[i1];
-		const HalfEdge* twin1 = &hull1->edges[i1 + 1];
+	for (int k1 = 0; k1 < n1; k1++) {
+		v3 e1 = e1_arr[k1], u1 = u1_arr[k1], v1 = v1_arr[k1], b_x_a = ne1_arr[k1];
 
-		v3 p1 = hull_vert_scaled(hull1, edge1->origin, scale1);
-		v3 q1 = hull_vert_scaled(hull1, twin1->origin, scale1);
-		p1 = add(c1_local, rotate(rel_rot, p1));
-		q1 = add(c1_local, rotate(rel_rot, q1));
-		v3 e1 = sub(q1, p1);
-
-		v3 u1 = rotate(rel_rot, hull1->planes[edge1->face].normal);
-		v3 v1 = rotate(rel_rot, hull1->planes[twin1->face].normal);
-		v3 b_x_a = neg(e1); // precompute for Gauss test
-
-		for (int k = 0; k < n2; k++) {
-			v3 e2 = e2_arr[k];
-			v3 nu2 = nu2_arr[k], nv2 = nv2_arr[k], ne2 = ne2_arr[k];
+		for (int k2 = 0; k2 < n2; k2++) {
+			v3 e2 = e2_arr[k2], ne2 = ne2_arr[k2];
 
 			// Gauss map pruning (inlined is_minkowski_face).
-			v3 d_x_c = ne2;
-			float cba = dot(nu2, b_x_a), dba = dot(nv2, b_x_a);
-			float adc = dot(u1, d_x_c), bdc = dot(v1, d_x_c);
+			float cba = dot(nu2_arr[k2], b_x_a), dba = dot(nv2_arr[k2], b_x_a);
+			float adc = dot(u1, ne2), bdc = dot(v1, ne2);
 			if (!((cba * dba < 0.0f) && (adc * bdc < 0.0f) && (cba * bdc > 0.0f)))
 				continue;
 
-			int i2 = k * 2;
 			float sep = sat_edge_project_full(e1, e2, c1_local, hull1, rel_rot, scale1, hull2, scale2);
 			if (sep > best.separation) {
-				best.index1 = i1;
-				best.index2 = i2;
+				best.index1 = k1 * 2;
+				best.index2 = k2 * 2;
 				best.separation = sep;
 			}
 		}
