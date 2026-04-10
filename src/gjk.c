@@ -376,11 +376,10 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 		gjk_support(&shapeB, neg(closest), &fB, sB);
 		v3 w = sub(sB, sA);
 
-		float max_vert2;
-		{
-			__m128 mv = _mm_set_ss(len2(simplex.v[0].point));
-			for (int i = 1; i < simplex.count; i++) mv = _mm_max_ss(mv, _mm_set_ss(len2(simplex.v[i].point)));
-			max_vert2 = _mm_cvtss_f32(mv);
+		float max_vert2 = 0.0f;
+		for (int i = 0; i < simplex.count; i++) {
+			float v2 = len2(simplex.v[i].point);
+			if (v2 > max_vert2) max_vert2 = v2;
 		}
 		float progress = dsq - dot(w, closest);
 		if (progress <= max_vert2 * GJK_PROGRESS_EPS) break;
