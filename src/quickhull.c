@@ -42,11 +42,17 @@ static int        qh_dbg_count;
 // -----------------------------------------------------------------------------
 // Internal types.
 
-typedef struct QH_Vertex {
-	v3 pos;
-	int conflict_next;
-	int conflict_prev;
-} QH_Vertex;
+// Vertex data in SoA layout for SIMD-friendly access.
+// Positions in aligned float arrays, conflict links in separate int arrays.
+typedef struct QH_Verts {
+	float* x;   // aligned position arrays
+	float* y;
+	float* z;
+	int* cnext; // conflict list next (circular doubly-linked)
+	int* cprev; // conflict list prev
+	int count;
+	int cap;
+} QH_Verts;
 
 typedef struct QH_Edge {
 	int next, prev, twin;
@@ -67,7 +73,7 @@ typedef struct QH_Face {
 } QH_Face;
 
 typedef struct QH_State {
-	CK_DYNA QH_Vertex* verts;
+	QH_Verts verts;
 	CK_DYNA QH_Edge*   edges;
 	CK_DYNA QH_Face*   faces;
 	CK_DYNA int*       conflict_faces; // compact list of faces with non-empty conflict lists
@@ -116,6 +122,46 @@ static int qh_alloc_face(QH_State* s)
 	return asize(s->faces) - 1;
 }
 
+// SoA vertex management.
+static void qh_verts_reserve(QH_Verts* v, int n)
+{
+	if (n <= v->cap) return;
+	int newcap = v->cap ? v->cap * 2 : 16;
+	while (newcap < n) newcap *= 2;
+	int align = 16;
+	float* nx = (float*)CK_ALLOC_ALIGNED(newcap * sizeof(float), align);
+	float* ny = (float*)CK_ALLOC_ALIGNED(newcap * sizeof(float), align);
+	float* nz = (float*)CK_ALLOC_ALIGNED(newcap * sizeof(float), align);
+	int* ncnext = (int*)CK_ALLOC_ALIGNED(newcap * sizeof(int), align);
+	int* ncprev = (int*)CK_ALLOC_ALIGNED(newcap * sizeof(int), align);
+	if (v->count > 0) {
+		memcpy(nx, v->x, v->count * sizeof(float));
+		memcpy(ny, v->y, v->count * sizeof(float));
+		memcpy(nz, v->z, v->count * sizeof(float));
+		memcpy(ncnext, v->cnext, v->count * sizeof(int));
+		memcpy(ncprev, v->cprev, v->count * sizeof(int));
+	}
+	if (v->x) { CK_FREE_ALIGNED(v->x); CK_FREE_ALIGNED(v->y); CK_FREE_ALIGNED(v->z); CK_FREE_ALIGNED(v->cnext); CK_FREE_ALIGNED(v->cprev); }
+	v->x = nx; v->y = ny; v->z = nz; v->cnext = ncnext; v->cprev = ncprev; v->cap = newcap;
+}
+
+static int qh_verts_push(QH_Verts* v, v3 pos)
+{
+	if (v->count >= v->cap) qh_verts_reserve(v, v->count + 1);
+	int idx = v->count++;
+	v->x[idx] = pos.x; v->y[idx] = pos.y; v->z[idx] = pos.z;
+	v->cnext[idx] = QH_INVALID; v->cprev[idx] = QH_INVALID;
+	return idx;
+}
+
+static v3 qh_vert_pos(QH_Verts* v, int i) { return V3(v->x[i], v->y[i], v->z[i]); }
+
+static void qh_verts_free(QH_Verts* v)
+{
+	if (v->x) { CK_FREE_ALIGNED(v->x); CK_FREE_ALIGNED(v->y); CK_FREE_ALIGNED(v->z); CK_FREE_ALIGNED(v->cnext); CK_FREE_ALIGNED(v->cprev); }
+	*v = (QH_Verts){0};
+}
+
 // Conflict face list: compact array of face indices with non-empty conflict lists.
 static void qh_cfl_add(QH_State* s, int fi)
 {
@@ -147,50 +193,46 @@ static float qh_plane_dist(HullPlane p, v3 pt);
 static void qh_conflict_add(QH_State* s, int fi, int vi)
 {
 	QH_Face* f = &s->faces[fi];
-	QH_Vertex* v = &s->verts[vi];
+	QH_Verts* V = &s->verts;
 	if (f->conflict_head != QH_INVALID) {
-		QH_Vertex* head = &s->verts[f->conflict_head];
-		int tail = head->conflict_prev;
-		v->conflict_next = f->conflict_head;
-		v->conflict_prev = tail;
-		head->conflict_prev = vi;
-		s->verts[tail].conflict_next = vi;
+		int tail = V->cprev[f->conflict_head];
+		V->cnext[vi] = f->conflict_head;
+		V->cprev[vi] = tail;
+		V->cprev[f->conflict_head] = vi;
+		V->cnext[tail] = vi;
 	} else {
-		v->conflict_next = vi;
-		v->conflict_prev = vi;
+		V->cnext[vi] = vi;
+		V->cprev[vi] = vi;
 		qh_cfl_add(s, fi);
 	}
 	f->conflict_head = vi;
-	// Track max distance any point was seen outside this face.
-	float d = qh_plane_dist(f->plane, v->pos);
+	float d = qh_plane_dist(f->plane, qh_vert_pos(V, vi));
 	if (d > f->maxoutside) f->maxoutside = d;
 }
 
 static void qh_conflict_remove(QH_State* s, int fi, int vi)
 {
 	QH_Face* f = &s->faces[fi];
-	QH_Vertex* v = &s->verts[vi];
-	if (v->conflict_next == vi) {
+	QH_Verts* V = &s->verts;
+	if (V->cnext[vi] == vi) {
 		f->conflict_head = QH_INVALID;
 		qh_cfl_remove(s, fi);
 	} else {
-		s->verts[v->conflict_next].conflict_prev = v->conflict_prev;
-		s->verts[v->conflict_prev].conflict_next = v->conflict_next;
-		if (f->conflict_head == vi) f->conflict_head = v->conflict_next;
+		V->cprev[V->cnext[vi]] = V->cprev[vi];
+		V->cnext[V->cprev[vi]] = V->cnext[vi];
+		if (f->conflict_head == vi) f->conflict_head = V->cnext[vi];
 	}
-	v->conflict_next = QH_INVALID;
-	v->conflict_prev = QH_INVALID;
+	V->cnext[vi] = QH_INVALID;
+	V->cprev[vi] = QH_INVALID;
 }
 
-// Remove all conflict vertices. Returns singly-linked list (via conflict_next),
-// terminated by QH_INVALID.
 static int qh_conflict_remove_all(QH_State* s, int fi)
 {
 	QH_Face* f = &s->faces[fi];
 	int head = f->conflict_head;
 	if (head == QH_INVALID) return QH_INVALID;
-	int last = s->verts[head].conflict_prev;
-	s->verts[last].conflict_next = QH_INVALID;
+	int last = s->verts.cprev[head];
+	s->verts.cnext[last] = QH_INVALID;
 	f->conflict_head = QH_INVALID;
 	qh_cfl_remove(s, fi);
 	return head;
@@ -211,8 +253,8 @@ static void qh_recompute_face(QH_State* s, int fi)
 	v3 normal = V3(0,0,0), centroid = V3(0,0,0);
 	int count = 0, e = f->edge;
 	do {
-		v3 cur = s->verts[s->edges[e].origin].pos;
-		v3 nxt = s->verts[s->edges[s->edges[e].next].origin].pos;
+		v3 cur = qh_vert_pos(&s->verts, s->edges[e].origin);
+		v3 nxt = qh_vert_pos(&s->verts, s->edges[s->edges[e].next].origin);
 		normal.x += (cur.y - nxt.y) * (cur.z + nxt.z);
 		normal.y += (cur.z - nxt.z) * (cur.x + nxt.x);
 		normal.z += (cur.x - nxt.x) * (cur.y + nxt.y);
@@ -283,7 +325,7 @@ static int qh_create_triangle(QH_State* s, int v0, int v1, int v2)
 	s->faces[fi].next = fi;
 	s->faces[fi].prev = fi;
 	// Fast triangle normal via cross product (avoids Newell loop).
-	v3 p0 = s->verts[v0].pos, p1 = s->verts[v1].pos, p2 = s->verts[v2].pos;
+	v3 p0 = qh_vert_pos(&s->verts, v0), p1 = qh_vert_pos(&s->verts, v1), p2 = qh_vert_pos(&s->verts, v2);
 	v3 n = cross(sub(p1, p0), sub(p2, p0));
 	float a = len(n);
 	if (a > 0) n = scale(n, 1.0f / a);
@@ -303,9 +345,9 @@ static int qh_build_simplex(QH_State* s, int nv)
 	// Find extremal vertices on each axis.
 	int maxV[3], minV[3];
 	for (int i = 0; i < 3; i++) { maxV[i] = minV[i] = 0; }
-	v3 mx = s->verts[0].pos, mn = s->verts[0].pos;
+	v3 mx = qh_vert_pos(&s->verts, 0), mn = qh_vert_pos(&s->verts, 0);
 	for (int i = 1; i < nv; i++) {
-		v3 p = s->verts[i].pos;
+		v3 p = qh_vert_pos(&s->verts, i);
 		if (p.x > mx.x) { mx.x = p.x; maxV[0] = i; } else if (p.x < mn.x) { mn.x = p.x; minV[0] = i; }
 		if (p.y > mx.y) { mx.y = p.y; maxV[1] = i; } else if (p.y < mn.y) { mn.y = p.y; minV[1] = i; }
 		if (p.z > mx.z) { mx.z = p.z; maxV[2] = i; } else if (p.z < mn.z) { mn.z = p.z; minV[2] = i; }
@@ -314,7 +356,7 @@ static int qh_build_simplex(QH_State* s, int nv)
 	// Pick axis with greatest spread.
 	float best = 0; int imax = 0;
 	for (int i = 0; i < 3; i++) {
-		v3 a = s->verts[maxV[i]].pos, b = s->verts[minV[i]].pos;
+		v3 a = qh_vert_pos(&s->verts, maxV[i]), b = qh_vert_pos(&s->verts, minV[i]);
 		float d = (i==0) ? a.x-b.x : (i==1) ? a.y-b.y : a.z-b.z;
 		if (d > best) { best = d; imax = i; }
 	}
@@ -324,10 +366,10 @@ static int qh_build_simplex(QH_State* s, int nv)
 	vtx[0] = maxV[imax]; vtx[1] = minV[imax];
 
 	// Find vertex farthest from line vtx[0]-vtx[1].
-	v3 u01 = norm(sub(s->verts[vtx[1]].pos, s->verts[vtx[0]].pos));
+	v3 u01 = norm(sub(qh_vert_pos(&s->verts, vtx[1]), qh_vert_pos(&s->verts, vtx[0])));
 	float maxSqr = 0; v3 nrml = V3(0,0,0); vtx[2] = -1;
 	for (int i = 0; i < nv; i++) {
-		v3 xp = cross(u01, sub(s->verts[i].pos, s->verts[vtx[0]].pos));
+		v3 xp = cross(u01, sub(qh_vert_pos(&s->verts, i), qh_vert_pos(&s->verts, vtx[0])));
 		float ls = len2(xp);
 		if (ls > maxSqr && i != vtx[0] && i != vtx[1]) { maxSqr = ls; vtx[2] = i; nrml = xp; }
 	}
@@ -336,10 +378,10 @@ static int qh_build_simplex(QH_State* s, int nv)
 	nrml = norm(sub(nrml, scale(u01, dot(nrml, u01)))); // orthogonalize
 
 	// Find vertex farthest from plane through vtx[0..2].
-	float d0 = dot(s->verts[vtx[2]].pos, nrml);
+	float d0 = dot(qh_vert_pos(&s->verts, vtx[2]), nrml);
 	float maxDist = 0; vtx[3] = -1;
 	for (int i = 0; i < nv; i++) {
-		float d = fabsf(dot(s->verts[i].pos, nrml) - d0);
+		float d = fabsf(dot(qh_vert_pos(&s->verts, i), nrml) - d0);
 		if (d > maxDist && i != vtx[0] && i != vtx[1] && i != vtx[2]) { maxDist = d; vtx[3] = i; }
 	}
 	if (vtx[3] < 0 || maxDist <= 100*s->epsilon) return 0;
@@ -347,7 +389,7 @@ static int qh_build_simplex(QH_State* s, int nv)
 	// Build 4 triangle faces with correct winding.
 	// With origin-vertex convention, edge indices within a triangle: e0, e1, e2.
 	int tris[4];
-	if (dot(s->verts[vtx[3]].pos, nrml) - d0 < 0) {
+	if (dot(qh_vert_pos(&s->verts, vtx[3]), nrml) - d0 < 0) {
 		tris[0] = qh_create_triangle(s, vtx[0], vtx[1], vtx[2]);
 		tris[1] = qh_create_triangle(s, vtx[3], vtx[1], vtx[0]);
 		tris[2] = qh_create_triangle(s, vtx[3], vtx[2], vtx[1]);
@@ -371,20 +413,30 @@ static int qh_build_simplex(QH_State* s, int nv)
 		}
 	}
 
-	s->interior = scale(add(add(s->verts[vtx[0]].pos, s->verts[vtx[1]].pos), add(s->verts[vtx[2]].pos, s->verts[vtx[3]].pos)), 0.25f);
+	s->interior = scale(add(add(qh_vert_pos(&s->verts, vtx[0]), qh_vert_pos(&s->verts, vtx[1])), add(qh_vert_pos(&s->verts, vtx[2]), qh_vert_pos(&s->verts, vtx[3]))), 0.25f);
 
-	// Assign conflict vertices: each point goes to the face it's furthest outside of.
-	HullPlane tp[4]; for (int k = 0; k < 4; k++) tp[k] = s->faces[tris[k]].plane;
-	float eps = s->epsilon;
-	for (int i = 0; i < nv; i++) {
-		if (i==vtx[0]||i==vtx[1]||i==vtx[2]||i==vtx[3]) continue;
-		v3 p = s->verts[i].pos;
-		float bd = eps; int bf = -1;
-		for (int k = 0; k < 4; k++) {
-			float d = dot(tp[k].normal, p) - tp[k].offset;
-			if (d > bd) { bd = d; bf = tris[k]; }
+	// Assign conflict vertices: SIMD 4-wide dot product against all 4 initial faces.
+	{
+		HullPlane tp[4]; for (int k = 0; k < 4; k++) tp[k] = s->faces[tris[k]].plane;
+		simd4f tnx = simd_set(tp[0].normal.x, tp[1].normal.x, tp[2].normal.x, tp[3].normal.x);
+		simd4f tny = simd_set(tp[0].normal.y, tp[1].normal.y, tp[2].normal.y, tp[3].normal.y);
+		simd4f tnz = simd_set(tp[0].normal.z, tp[1].normal.z, tp[2].normal.z, tp[3].normal.z);
+		simd4f toff = simd_set(tp[0].offset, tp[1].offset, tp[2].offset, tp[3].offset);
+		simd4f veps = simd_set1(s->epsilon);
+		for (int i = 0; i < nv; i++) {
+			if (i==vtx[0]||i==vtx[1]||i==vtx[2]||i==vtx[3]) continue;
+			v3 p = qh_vert_pos(&s->verts, i);
+			simd4f d = simd_sub(simd_add(simd_add(simd_mul(tnx, simd_set1(p.x)), simd_mul(tny, simd_set1(p.y))), simd_mul(tnz, simd_set1(p.z))), toff);
+			// Find lane with max distance above epsilon.
+			simd4f above = simd_cmpgt(d, veps);
+			int mask = simd_movemask(above);
+			if (mask) {
+				float ds[4]; simd_store(ds, d);
+				float bd = s->epsilon; int bf = -1;
+				for (int k = 0; k < 4; k++) if (ds[k] > bd) { bd = ds[k]; bf = tris[k]; }
+				if (bf >= 0) qh_conflict_add(s, bf, i);
+			}
 		}
-		if (bf >= 0) qh_conflict_add(s, bf, i);
 	}
 	return 1;
 }
@@ -396,7 +448,7 @@ static int qh_next_conflict(QH_State* s, int* out_face)
 {
 	int bv = QH_INVALID, bf = QH_INVALID; float bd = -1e18f;
 	QH_Face* faces = s->faces;
-	QH_Vertex* verts = s->verts;
+	QH_Verts* V = &s->verts;
 	int ncf = asize(s->conflict_faces);
 	for (int ci_idx = 0; ci_idx < ncf; ci_idx++) {
 		int fi = s->conflict_faces[ci_idx];
@@ -405,9 +457,9 @@ static int qh_next_conflict(QH_State* s, int* out_face)
 		int head = faces[fi].conflict_head;
 		int ci = head;
 		do {
-			float d = dot(p.normal, verts[ci].pos) - p.offset;
+			float d = p.normal.x * V->x[ci] + p.normal.y * V->y[ci] + p.normal.z * V->z[ci] - p.offset;
 			if (d > bd) { bd = d; bv = ci; bf = fi; }
-			ci = verts[ci].conflict_next;
+			ci = V->cnext[ci];
 		} while (ci != head);
 	}
 	*out_face = bf;
@@ -424,8 +476,8 @@ static void qh_delete_face_points(QH_State* s, int fi, int absorb, int* unclaime
 	if (absorb == QH_INVALID) {
 		// Fast path: push all vertices to unclaimed (no distance check).
 		int v = vlist;
-		while (s->verts[v].conflict_next != QH_INVALID) v = s->verts[v].conflict_next;
-		s->verts[v].conflict_next = *unclaimed;
+		while (s->verts.cnext[v] != QH_INVALID) v = s->verts.cnext[v];
+		s->verts.cnext[v] = *unclaimed;
 		*unclaimed = vlist;
 		return;
 	}
@@ -433,11 +485,11 @@ static void qh_delete_face_points(QH_State* s, int fi, int absorb, int* unclaime
 	HullPlane ap = s->faces[absorb].plane;
 	int v = vlist;
 	while (v != QH_INVALID) {
-		int nxt = s->verts[v].conflict_next;
-		if (dot(ap.normal, s->verts[v].pos) - ap.offset > eps) {
+		int nxt = s->verts.cnext[v];
+		if (dot(ap.normal, qh_vert_pos(&s->verts, v)) - ap.offset > eps) {
 			qh_conflict_add(s, absorb, v);
 		} else {
-			s->verts[v].conflict_next = *unclaimed;
+			s->verts.cnext[v] = *unclaimed;
 			*unclaimed = v;
 		}
 		v = nxt;
@@ -731,7 +783,7 @@ static void qh_add_new_faces(QH_State* s, QH_FaceList* nf, int eye, CK_DYNA int*
 {
 	nf->first = nf->last = QH_INVALID;
 	int prev = QH_INVALID, begin = QH_INVALID;
-	v3 eye_pos = s->verts[eye].pos;
+	v3 eye_pos = qh_vert_pos(&s->verts, eye);
 	for (int i = 0; i < nh; i++) {
 		int horizon_edge = horizon[i];
 		int tail = s->edges[horizon_edge].origin;
@@ -745,7 +797,7 @@ static void qh_add_new_faces(QH_State* s, QH_FaceList* nf, int eye, CK_DYNA int*
 		s->faces[fi].edge = e0;
 		s->faces[fi].next = fi;
 		s->faces[fi].prev = fi;
-		v3 p0 = eye_pos, p1 = s->verts[tail].pos, p2 = s->verts[head].pos;
+		v3 p0 = eye_pos, p1 = qh_vert_pos(&s->verts, tail), p2 = qh_vert_pos(&s->verts, head);
 		v3 n = cross(sub(p1, p0), sub(p2, p0));
 		float a = len(n);
 		if (a > 0) n = scale(n, 1.0f / a);
@@ -771,12 +823,12 @@ static void qh_resolve_unclaimed(QH_State* s, QH_FaceList* nf, int* unclaimed)
 {
 	int v = *unclaimed;
 	while (v != QH_INVALID) {
-		int nxt = s->verts[v].conflict_next;
+		int nxt = s->verts.cnext[v];
 		float bd = s->epsilon; int bf = QH_INVALID;
 		// First try new faces (most likely home for orphaned points).
 		for (int fi = nf->first; fi != QH_INVALID; fi = s->faces[fi].next) {
 			if (s->faces[fi].mark == QH_VISIBLE) {
-				float d = qh_face_dist(s, fi, s->verts[v].pos);
+				float d = qh_face_dist(s, fi, qh_vert_pos(&s->verts, v));
 				if (d > bd) { bd = d; bf = fi; }
 				if (bd > 1000*s->epsilon) break;
 			}
@@ -789,7 +841,7 @@ static void qh_resolve_unclaimed(QH_State* s, QH_FaceList* nf, int* unclaimed)
 			float closest = -1e18f;
 			for (int fi = 0; fi < asize(s->faces); fi++) {
 				if (s->faces[fi].mark == QH_DELETED) continue;
-				float d = qh_face_dist(s, fi, s->verts[v].pos);
+				float d = qh_face_dist(s, fi, qh_vert_pos(&s->verts, v));
 				if (d > closest) { closest = d; bf = fi; }
 			}
 			// Only assign if the point is reasonably close to some face plane.
@@ -841,8 +893,8 @@ static void qh_validate_mesh(QH_State* s, const char* ctx)
 	// Euler check: V - E/2 + F = 2 on the live mesh.
 	{
 		CK_DYNA int* vremap = NULL;
-		afit(vremap, asize(s->verts));
-		for (int i = 0; i < asize(s->verts); i++) apush(vremap, 0);
+		afit(vremap, s->verts.count);
+		for (int i = 0; i < s->verts.count; i++) apush(vremap, 0);
 		int nf = 0, ne = 0;
 		for (int fi = 0; fi < asize(s->faces); fi++) {
 			if (s->faces[fi].mark != QH_VISIBLE) continue;
@@ -855,7 +907,7 @@ static void qh_validate_mesh(QH_State* s, const char* ctx)
 			} while (e != start);
 		}
 		int nv = 0;
-		for (int i = 0; i < asize(s->verts); i++) nv += vremap[i];
+		for (int i = 0; i < s->verts.count; i++) nv += vremap[i];
 		afree(vremap);
 		if (nv - ne/2 + nf != 2) {
 			fprintf(stderr, "qh_validate: Euler FAIL V=%d E=%d F=%d (V-E/2+F=%d) at %s\n",
@@ -874,7 +926,7 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 	int unclaimed = QH_INVALID;
 
 	qh_conflict_remove(s, eye_face, eye);
-	qh_calculate_horizon(s, s->verts[eye].pos, QH_INVALID, eye_face, &horizon, &unclaimed);
+	qh_calculate_horizon(s, qh_vert_pos(&s->verts, eye), QH_INVALID, eye_face, &horizon, &unclaimed);
 
 	QH_FaceList nf;
 	qh_add_new_faces(s, &nf, eye, horizon, asize(horizon));
@@ -980,18 +1032,18 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 
 	// Vertex + edge remap in a single pass over live face edges.
 	CK_DYNA int* vremap = NULL;
-	afit_set(vremap, asize(s->verts));
-	memset(vremap, -1, asize(s->verts) * sizeof(int));
+	afit_set(vremap, s->verts.count);
+	memset(vremap, -1, s->verts.count * sizeof(int));
 	CK_DYNA int* eremap = NULL;
 	afit_set(eremap, asize(s->edges));
 	memset(eremap, -1, asize(s->edges) * sizeof(int));
-	CK_DYNA v3* ov = NULL; afit(ov, asize(s->verts)); int vc = 0;
+	CK_DYNA v3* ov = NULL; afit(ov, s->verts.count); int vc = 0;
 	CK_DYNA HalfEdge* oe = NULL; afit(oe, asize(s->edges)); int ec = 0;
 	for (int i = 0; i < asize(live); i++) {
 		int e = s->faces[live[i]].edge, start = e;
 		do {
 			int vi = s->edges[e].origin;
-			if (vremap[vi] < 0) { vremap[vi] = vc++; apush(ov, s->verts[vi].pos); }
+			if (vremap[vi] < 0) { vremap[vi] = vc++; apush(ov, qh_vert_pos(&s->verts, vi)); }
 			eremap[e] = ec++; HalfEdge he = {0}; apush(oe, he);
 			e = s->edges[e].next;
 		} while (e != start);
@@ -1047,10 +1099,16 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	float* nx = (soa_bytes <= 4096) ? (float*)_alloca(soa_bytes) : (float*)CK_ALLOC(soa_bytes);
 	float* ny = nx + fc, *nz = ny + fc, *max_ds = nz + fc;
 	for (int i = 0; i < fc; i++) { nx[i] = pcp[i].normal.x; ny[i] = pcp[i].normal.y; nz[i] = pcp[i].normal.z; max_ds[i] = pcp[i].offset; }
+	int fc4 = fc & ~3;
 	for (int pi = 0; pi < all_count; pi++) {
-		float px = all_points[pi].x, py = all_points[pi].y, pz = all_points[pi].z;
-		for (int i = 0; i < fc; i++) {
-			float d = nx[i]*px + ny[i]*py + nz[i]*pz;
+		simd4f vpx = simd_set1(all_points[pi].x), vpy = simd_set1(all_points[pi].y), vpz = simd_set1(all_points[pi].z);
+		int i = 0;
+		for (; i < fc4; i += 4) {
+			simd4f d = simd_add(simd_add(simd_mul(simd_load(nx + i), vpx), simd_mul(simd_load(ny + i), vpy)), simd_mul(simd_load(nz + i), vpz));
+			simd_store(max_ds + i, simd_max(simd_load(max_ds + i), d));
+		}
+		for (; i < fc; i++) {
+			float d = nx[i]*all_points[pi].x + ny[i]*all_points[pi].y + nz[i]*all_points[pi].z;
 			if (d > max_ds[i]) max_ds[i] = d;
 		}
 	}
@@ -1090,26 +1148,24 @@ Hull* quickhull(const v3* points, int count)
 	// topology during merge. Weld distance is epsilon (the floating-point
 	// precision floor for this input extent).
 	float weld_dist2 = state.epsilon * state.epsilon;
+	qh_verts_reserve(&state.verts, count);
 	for (int i = 0; i < count; i++) {
 		v3 p = points[i];
 		int dup = 0;
-		for (int j = 0; j < asize(state.verts); j++) {
-			if (len2(sub(p, state.verts[j].pos)) <= weld_dist2) { dup = 1; break; }
+		for (int j = 0; j < state.verts.count; j++) {
+			if (len2(sub(p, qh_vert_pos(&state.verts, j))) <= weld_dist2) { dup = 1; break; }
 		}
-		if (!dup) {
-			QH_Vertex v = { .pos=p, .conflict_next=QH_INVALID, .conflict_prev=QH_INVALID };
-			apush(state.verts, v);
-		}
+		if (!dup) qh_verts_push(&state.verts, p);
 	}
-	int welded_count = asize(state.verts);
+	int welded_count = state.verts.count;
 
 	if (welded_count < 4) {
-		afree(state.verts); afree(state.edges); afree(state.faces); afree(state.conflict_faces);
+		qh_verts_free(&state.verts); afree(state.edges); afree(state.faces); afree(state.conflict_faces);
 		return NULL;
 	}
 
 	if (!qh_build_simplex(&state, welded_count)) {
-		afree(state.verts); afree(state.edges); afree(state.faces); afree(state.conflict_faces);
+		qh_verts_free(&state.verts); afree(state.edges); afree(state.faces); afree(state.conflict_faces);
 		return NULL;
 	}
 
@@ -1125,6 +1181,6 @@ Hull* quickhull(const v3* points, int count)
 	}
 
 	Hull* result = qh_build_output(&state, points, count);
-	afree(state.verts); afree(state.edges); afree(state.faces); afree(state.conflict_faces);
+	qh_verts_free(&state.verts); afree(state.edges); afree(state.faces); afree(state.conflict_faces);
 	return result;
 }
