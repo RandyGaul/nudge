@@ -10934,11 +10934,14 @@ static void bench_box_stack(int height)
 // Bench: large box pile for PGS solver perf profiling.
 // Creates a grid_w x grid_w x height pile of unit boxes, no sleeping.
 // Runs frames_count frames and prints per-phase PGSTimers averages.
+static int bench_thread_count; // set by CLI --threads
+
 static void bench_box_pile(int grid_w, int height, int frames_count, WorldParams wp)
 {
 	World w = create_world(wp);
 	WorldInternal* wi = (WorldInternal*)w.id;
 	wi->sleep_enabled = 0;
+	wi->thread_count = bench_thread_count;
 
 	// Floor
 	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });

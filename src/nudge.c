@@ -120,6 +120,135 @@ static void integrate_positions(WorldInternal* w, float dt)
 
 static int perf_initialized;
 
+// -----------------------------------------------------------------------------
+// Thread pool for parallel PGS solver (Box2D/BEPU-style spin-wait).
+
+#ifdef _WIN32
+#include <windows.h>
+#include <intrin.h>
+
+#define SOLVER_MAX_THREADS 16
+#define SOLVER_BLOCK_SIZE  8  // batches per block
+
+typedef struct SolverBlock
+{
+	int start, count;         // range into batch array
+	volatile long sync_index; // atomic CAS claim counter
+} SolverBlock;
+
+typedef struct SolverStage
+{
+	SolverBlock* blocks;
+	int block_count;
+	volatile long completion_count;
+	char _pad[52]; // pad to avoid false sharing (64 - 12 = 52)
+} SolverStage;
+
+typedef struct SolverThreadCtx
+{
+	// Shared state (read by all workers)
+	SolverBodyVel* bodies;
+	PGS_Batch4* batches;
+	SolverStage* stages;
+	int stage_count;
+	volatile long sync_bits;  // (stage_index << 16) | sync_counter. UINT_MAX = exit.
+	int worker_count;
+} SolverThreadCtx;
+
+// Execute blocks within a stage. Workers claim blocks via atomic CAS.
+static void solver_execute_stage(SolverStage* stage, SolverBodyVel* bodies, PGS_Batch4* batches, int prev_sync, int cur_sync)
+{
+	int completed = 0;
+	// Forward sweep: claim blocks from start
+	for (int bi = 0; bi < stage->block_count; bi++) {
+		SolverBlock* blk = &stage->blocks[bi];
+		if (_InterlockedCompareExchange(&blk->sync_index, cur_sync, prev_sync) != prev_sync) continue;
+		for (int i = blk->start; i < blk->start + blk->count; i++)
+			solve_contact_batch4_sv(bodies, &batches[i]);
+		completed++;
+	}
+	// Backward sweep: steal remaining blocks
+	for (int bi = stage->block_count - 1; bi >= 0; bi--) {
+		SolverBlock* blk = &stage->blocks[bi];
+		if (_InterlockedCompareExchange(&blk->sync_index, cur_sync, prev_sync) != prev_sync) continue;
+		for (int i = blk->start; i < blk->start + blk->count; i++)
+			solve_contact_batch4_sv(bodies, &batches[i]);
+		completed++;
+	}
+	if (completed > 0) _InterlockedExchangeAdd(&stage->completion_count, completed);
+}
+
+// Worker thread function.
+static DWORD WINAPI solver_worker_thread(LPVOID param)
+{
+	SolverThreadCtx* ctx = (SolverThreadCtx*)param;
+	long last_sync = 0;
+	for (;;) {
+		long sync = ctx->sync_bits;
+		if (sync == (long)0xFFFFFFFF) break; // exit signal
+		if (sync == last_sync) { _mm_pause(); continue; }
+		int stage_idx = sync & 0xFFFF;
+		int cur_sync = (sync >> 16) & 0xFFFF;
+		solver_execute_stage(&ctx->stages[stage_idx], ctx->bodies, ctx->batches, cur_sync - 1, cur_sync);
+		last_sync = sync;
+	}
+	return 0;
+}
+
+// Global thread pool (lazy-initialized).
+static HANDLE solver_threads[SOLVER_MAX_THREADS];
+static SolverThreadCtx solver_ctx;
+static int solver_thread_count;
+
+static void solver_pool_ensure(int n_workers)
+{
+	if (n_workers <= 1) return; // single-threaded, no pool needed
+	if (n_workers > SOLVER_MAX_THREADS) n_workers = SOLVER_MAX_THREADS;
+	int needed = n_workers - 1; // main thread is worker 0
+	if (solver_thread_count >= needed) return;
+	solver_ctx.worker_count = n_workers;
+	solver_ctx.sync_bits = 0;
+	for (int i = solver_thread_count; i < needed; i++)
+		solver_threads[i] = CreateThread(NULL, 0, solver_worker_thread, &solver_ctx, 0, NULL);
+	solver_thread_count = needed;
+}
+
+// Run one color's batches in parallel across the thread pool.
+static void solver_run_parallel(SolverBodyVel* bodies, PGS_Batch4* batches, int batch_start, int batch_end, int sync_counter)
+{
+	int n_batches = batch_end - batch_start;
+	if (n_batches <= 0) return;
+
+	// Build blocks
+	int n_blocks = (n_batches + SOLVER_BLOCK_SIZE - 1) / SOLVER_BLOCK_SIZE;
+	SolverBlock blocks[256]; // max blocks per color
+	if (n_blocks > 256) n_blocks = 256;
+	for (int i = 0; i < n_blocks; i++) {
+		blocks[i].start = batch_start + i * SOLVER_BLOCK_SIZE;
+		int remaining = batch_end - blocks[i].start;
+		blocks[i].count = remaining < SOLVER_BLOCK_SIZE ? remaining : SOLVER_BLOCK_SIZE;
+		blocks[i].sync_index = sync_counter - 1;
+	}
+
+	SolverStage stage = { .blocks = blocks, .block_count = n_blocks, .completion_count = 0 };
+	solver_ctx.bodies = bodies;
+	solver_ctx.batches = batches;
+	solver_ctx.stages = &stage;
+	solver_ctx.stage_count = 1;
+
+	// Signal workers
+	long sync_bits = (long)((sync_counter << 16) | 0);
+	_InterlockedExchange(&solver_ctx.sync_bits, sync_bits);
+
+	// Main thread participates as worker
+	solver_execute_stage(&stage, bodies, batches, sync_counter - 1, sync_counter);
+
+	// Wait for all blocks to complete
+	while (stage.completion_count < n_blocks) _mm_pause();
+}
+
+#endif // _WIN32
+
 void world_step(World world, float dt)
 {
 	if (!perf_initialized) { perf_init(); perf_initialized = 1; }
@@ -287,16 +416,32 @@ void world_step(World world, float dt)
 			int batch_count = asize(batches);
 
 			// Iteration loop: just gather velocities → solve → scatter velocities.
+			// Parallel: within each color, blocks of batches are claimed by worker threads.
+			// Sequential: colors are processed one at a time (graph coloring guarantees).
+			int n_workers = w->thread_count > 0 ? w->thread_count : 1;
+#ifdef _WIN32
+			if (n_workers > 1) solver_pool_ensure(n_workers);
+#endif
+			static int sync_counter;
 			for (int iter = 0; iter < w->velocity_iters; iter++) {
 				for (int c = 0; c < color_count; c++) {
 					int bs = color_batch_starts[c], be = color_batch_starts[c + 1];
-					for (int bi = bs; bi < be; bi++) {
-						if (bi + 1 < be) {
-							_mm_prefetch((char*)&batches[bi+1], _MM_HINT_T0);
-							_mm_prefetch((char*)&w->body_vel[batches[bi+1].body_a[0]], _MM_HINT_T0);
-							_mm_prefetch((char*)&w->body_vel[batches[bi+1].body_b[0]], _MM_HINT_T0);
+					int n_color_batches = be - bs;
+#ifdef _WIN32
+					if (n_workers > 1 && n_color_batches >= n_workers * 2) {
+						sync_counter++;
+						solver_run_parallel(w->body_vel, batches, bs, be, sync_counter);
+					} else
+#endif
+					{
+						for (int bi = bs; bi < be; bi++) {
+							if (bi + 1 < be) {
+								_mm_prefetch((char*)&batches[bi+1], _MM_HINT_T0);
+								_mm_prefetch((char*)&w->body_vel[batches[bi+1].body_a[0]], _MM_HINT_T0);
+								_mm_prefetch((char*)&w->body_vel[batches[bi+1].body_b[0]], _MM_HINT_T0);
+							}
+							solve_contact_batch4_sv(w->body_vel, &batches[bi]);
 						}
-						solve_contact_batch4_sv(w->body_vel, &batches[bi]);
 					}
 				}
 				double tjl = perf_now();

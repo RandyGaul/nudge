@@ -45,6 +45,7 @@ int main(int argc, char* argv[])
 	int bench_pile_frames = 300;
 	int sub_steps = 0;
 	int vel_iters = 0;
+	int threads = 0;
 	float hertz = 0;
 	float damping = 0;
 	for (int i = 1; i < argc; i++) {
@@ -80,6 +81,8 @@ int main(int argc, char* argv[])
 			hertz = (float)atof(argv[++i]);
 		else if (strcmp(argv[i], "--damping") == 0 && i + 1 < argc)
 			damping = (float)atof(argv[++i]);
+		else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc)
+			threads = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--bench-qh") == 0)
 			bench_qh = 1;
 		else if (strcmp(argv[i], "--bench-ldl") == 0)
@@ -91,6 +94,9 @@ int main(int argc, char* argv[])
 		else if (strcmp(argv[i], "--ldl-frames") == 0 && i + 1 < argc)
 			ldl_frames = atoi(argv[++i]);
 	}
+
+	extern int bench_thread_count;
+	bench_thread_count = threads;
 
 	if (bench_qh) {
 		bench_quickhull();
