@@ -387,9 +387,6 @@ struct WarmManifold
 	float manifold_lambda_t1;
 	float manifold_lambda_t2;
 	float manifold_lambda_twist;
-	// Cached SAT axis from previous frame for hill-climb warm-start.
-	// -1 = no cache. 0-2 = face A axis, 3-5 = face B axis, 6-14 = edge-edge.
-	int sat_axis;
 };
 
 // -----------------------------------------------------------------------------

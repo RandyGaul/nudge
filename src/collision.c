@@ -1081,9 +1081,11 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 // Dedicated box-box SAT: Gottschalk OBB test with direct rotation column arithmetic.
 // Tests all 15 separating axes without generic hull machinery (plane_transform, hull_support loops, Gauss map).
 // Falls through to collide_hull_hull for contact generation when penetrating.
-// Core box-box SAT + contact generation. Takes precomputed rotation columns.
-static int collide_box_box_core(Box a, Box b, v3 ax, v3 ay, v3 az, v3 bx, v3 by, v3 bz, Manifold* manifold)
+int collide_box_box(Box a, Box b, Manifold* manifold)
 {
+	// Rotation columns for each box.
+	v3 ax = rotate(a.rotation, V3(1, 0, 0)), ay = rotate(a.rotation, V3(0, 1, 0)), az = rotate(a.rotation, V3(0, 0, 1));
+	v3 bx = rotate(b.rotation, V3(1, 0, 0)), by = rotate(b.rotation, V3(0, 1, 0)), bz = rotate(b.rotation, V3(0, 0, 1));
 
 	v3 d = sub(b.center, a.center);
 	float ea = a.half_extents.x, eb = a.half_extents.y, ec = a.half_extents.z;
@@ -1166,19 +1168,6 @@ static int collide_box_box_core(Box a, Box b, v3 ax, v3 ay, v3 az, v3 bx, v3 by,
 		manifold);
 }
 
-// Box-box with precomputed rotation columns (from broadphase cache).
-static int collide_box_box_cached(Box a, Box b, const v3* cols_a, const v3* cols_b, Manifold* manifold)
-{
-	return collide_box_box_core(a, b, cols_a[0], cols_a[1], cols_a[2], cols_b[0], cols_b[1], cols_b[2], manifold);
-}
-
-int collide_box_box(Box a, Box b, Manifold* manifold)
-{
-	v3 ax = rotate(a.rotation, V3(1, 0, 0)), ay = rotate(a.rotation, V3(0, 1, 0)), az = rotate(a.rotation, V3(0, 0, 1));
-	v3 bx = rotate(b.rotation, V3(1, 0, 0)), by = rotate(b.rotation, V3(0, 1, 0)), bz = rotate(b.rotation, V3(0, 0, 1));
-	return collide_box_box_core(a, b, ax, ay, az, bx, by, bz, manifold);
-}
-
 const Hull* hull_unit_box() { return &s_unit_box_hull; }
 
 // Quickhull implemented in quickhull.c.
@@ -1218,29 +1207,6 @@ static Box make_box(BodyHot* h, ShapeInternal* s)
 static ConvexHull make_convex_hull(BodyHot* h, ShapeInternal* s)
 {
 	return (ConvexHull){ s->hull.hull, h->position, h->rotation, s->hull.scale };
-}
-
-// Per-body rotation column cache. Computed once per frame in broadphase, used by narrowphase.
-static v3* s_rot_cols;
-static int s_rot_cols_cap;
-
-static void rot_cols_ensure(int body_count)
-{
-	if (body_count * 3 > s_rot_cols_cap) {
-		CK_FREE(s_rot_cols);
-		s_rot_cols_cap = body_count * 3;
-		s_rot_cols = CK_ALLOC(sizeof(v3) * s_rot_cols_cap);
-	}
-}
-
-static void rot_cols_compute(BodyHot* hot, int body_count)
-{
-	for (int i = 0; i < body_count; i++) {
-		v3* c = &s_rot_cols[i * 3];
-		c[0] = rotate(hot[i].rotation, V3(1, 0, 0));
-		c[1] = rotate(hot[i].rotation, V3(0, 1, 0));
-		c[2] = rotate(hot[i].rotation, V3(0, 0, 1));
-	}
 }
 
 // Narrowphase dispatch for a single body pair.
@@ -1303,7 +1269,7 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX)
 		hit = collide_capsule_box(make_capsule(h0, s0), make_box(h1, s1), &im.m);
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX)
-		hit = collide_box_box_cached(make_box(h0, s0), make_box(h1, s1), &s_rot_cols[i * 3], &s_rot_cols[j * 3], &im.m);
+		hit = collide_box_box(make_box(h0, s0), make_box(h1, s1), &im.m);
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL)
 		hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL)
@@ -1376,12 +1342,8 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 {
 	bvh_refit(w->bvh_dynamic, w);
 
-	// Precompute rotation columns for all bodies (used by narrowphase box fast paths).
-	int body_count = asize(w->body_hot);
-	rot_cols_ensure(body_count);
-	rot_cols_compute(w->body_hot, body_count);
-
 	// Build tight AABBs + sweep-and-prune entries for all dynamic bodies.
+	int body_count = asize(w->body_hot);
 	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
 	CK_DYNA SAPEntry* sap = NULL;
 	for (int i = 0; i < body_count; i++) {
