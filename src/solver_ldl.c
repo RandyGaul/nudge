@@ -833,11 +833,14 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 	if (c->L_factors) memset(c->L_factors, 0, t->L_factors_size * sizeof(double));
 
 	// Compute and store Jacobians for all constraints.
+	// Jacobian array is sized to c->n (constant across substeps) — reuse if already allocated.
 	int jc = c->joint_count;
-	afree(c->jacobians);
-	c->jacobians = NULL;
-	afit(c->jacobians, c->n);
-	asetlen(c->jacobians, c->n);
+	if (asize(c->jacobians) != c->n) {
+		afree(c->jacobians);
+		c->jacobians = NULL;
+		afit(c->jacobians, c->n);
+		asetlen(c->jacobians, c->n);
+	}
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
 		con->jacobian_start = t->row_offset[con->bundle_idx] + con->bundle_offset;
