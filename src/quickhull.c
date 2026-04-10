@@ -62,6 +62,7 @@ typedef struct QH_Face {
 	float area;
 	float maxoutside; // max distance any point was ever seen outside this face
 	HullPlane plane;
+	v3 centroid; // cached from qh_recompute_face
 } QH_Face;
 
 typedef struct QH_State {
@@ -198,6 +199,7 @@ static void qh_recompute_face(QH_State* s, int fi)
 	if (a > 0) normal = scale(normal, 1.0f / a);
 	centroid = scale(centroid, 1.0f / count);
 	f->plane = (HullPlane){ normal, dot(normal, centroid) };
+	f->centroid = centroid;
 	f->num_verts = count;
 	f->area = a;
 }
@@ -220,7 +222,7 @@ static float qh_opp_face_dist(QH_State* s, int ei)
 {
 	int fi = s->edges[ei].face;
 	int ofi = s->edges[s->edges[ei].twin].face;
-	return qh_face_dist(s, fi, qh_face_centroid(s, ofi));
+	return qh_face_dist(s, fi, s->faces[ofi].centroid);
 }
 
 static int qh_face_vert_count(QH_State* s, int fi)
@@ -260,7 +262,16 @@ static int qh_create_triangle(QH_State* s, int v0, int v1, int v2)
 	s->faces[fi].edge = e0;
 	s->faces[fi].next = fi;
 	s->faces[fi].prev = fi;
-	qh_recompute_face(s, fi);
+	// Fast triangle normal via cross product (avoids Newell loop).
+	v3 p0 = s->verts[v0].pos, p1 = s->verts[v1].pos, p2 = s->verts[v2].pos;
+	v3 n = cross(sub(p1, p0), sub(p2, p0));
+	float a = len(n);
+	if (a > 0) n = scale(n, 1.0f / a);
+	v3 c = scale(add(add(p0, p1), p2), 1.0f / 3.0f);
+	s->faces[fi].plane = (HullPlane){ n, dot(n, c) };
+	s->faces[fi].centroid = c;
+	s->faces[fi].num_verts = 3;
+	s->faces[fi].area = a;
 	return fi;
 }
 
@@ -367,6 +378,7 @@ static int qh_next_conflict(QH_State* s, int* out_face)
 		if (s->faces[fi].mark != QH_VISIBLE) continue;
 		int head = s->faces[fi].conflict_head;
 		if (head == QH_INVALID) continue;
+		if (s->faces[fi].maxoutside <= bd) continue;
 		int ci = head;
 		do {
 			float d = qh_face_dist(s, fi, s->verts[ci].pos);
@@ -801,17 +813,29 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 			s->faces[fi].mark = QH_VISIBLE;
 			while (qh_do_adjacent_merge(s, fi, QH_MERGE_ANY, &unclaimed));
 		}
-
-
 	// Global topology fixup: cascade merges + degenerate connect can create
-	// face pairs sharing >1 edge, violating manifold topology. Sweep ALL
-	// live faces and forcibly merge multi-adjacent pairs.
+	// face pairs sharing >1 edge, violating manifold topology. Sweep only
+	// new faces (and faces touching them) for multi-adjacent pairs.
+	// Detect duplicates with a generation-stamped marker array.
 	{
+		// Ensure marker array is large enough.
+		int nfaces = asize(s->faces);
+		static int* qh_face_seen = NULL;
+		static int qh_face_seen_cap = 0;
+		static int qh_face_gen = 0;
+		if (nfaces > qh_face_seen_cap) {
+			free(qh_face_seen);
+			qh_face_seen_cap = nfaces * 2;
+			qh_face_seen = (int*)calloc(qh_face_seen_cap, sizeof(int));
+			qh_face_gen = 0;
+		}
 		int fixed = 1;
 		while (fixed) {
 			fixed = 0;
-			for (int fi = 0; fi < asize(s->faces) && !fixed; fi++) {
+			for (int fi = nf.first; fi != QH_INVALID && !fixed; fi = s->faces[fi].next) {
 				if (s->faces[fi].mark != QH_VISIBLE) continue;
+				qh_face_gen++;
+				if (qh_face_gen == 0) { memset(qh_face_seen, 0, qh_face_seen_cap * sizeof(int)); qh_face_gen = 1; }
 				int hedge = s->faces[fi].edge;
 				do {
 					int ofi = qh_opp_face(s, hedge);
@@ -819,15 +843,8 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 						hedge = s->edges[hedge].next;
 						continue;
 					}
-					int shared = 0;
-					int e2 = s->faces[fi].edge;
-					do {
-						if (qh_opp_face(s, e2) == ofi) shared++;
-						e2 = s->edges[e2].next;
-					} while (e2 != s->faces[fi].edge);
-					if (shared > 1) {
-						// Merge smaller into larger so boundary walk sees
-						// contiguous shared edges on the absorbed (smaller) face.
+					if (qh_face_seen[ofi] == qh_face_gen) {
+						// Multi-adjacent: ofi seen twice.
 						int small = (s->faces[fi].num_verts <= s->faces[ofi].num_verts) ? fi : ofi;
 						int large = (small == fi) ? ofi : fi;
 						int me = s->faces[large].edge;
@@ -836,9 +853,17 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 						int nd = qh_merge_adjacent_face(s, me, disc, &unclaimed);
 						for (int k = 0; k < nd; k++)
 							qh_delete_face_points(s, disc[k], large, &unclaimed);
+						nfaces = asize(s->faces);
+						if (nfaces > qh_face_seen_cap) {
+							free(qh_face_seen);
+							qh_face_seen_cap = nfaces * 2;
+							qh_face_seen = (int*)calloc(qh_face_seen_cap, sizeof(int));
+							qh_face_gen = 0;
+						}
 						fixed = 1;
 						break;
 					}
+					qh_face_seen[ofi] = qh_face_gen;
 					hedge = s->edges[hedge].next;
 				} while (hedge != s->faces[fi].edge);
 			}
@@ -943,17 +968,23 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	// Post-build plane widening: widen each plane so ALL original input points
 	// lie on or behind the plane. Must use original points (not welded subset)
 	// since welded-away points may lie outside the welded hull.
+	// Plane widening: points outer loop for cache locality on all_points.
 	h->maxoutside = 0;
-	for (int i = 0; i < h->face_count; i++) {
-		float max_d = pcp[i].offset;
-		for (int pi = 0; pi < all_count; pi++) {
-			float d = dot(pcp[i].normal, all_points[pi]);
-			if (d > max_d) max_d = d;
+	float* max_ds = (float*)CK_ALLOC(h->face_count * sizeof(float));
+	for (int i = 0; i < h->face_count; i++) max_ds[i] = pcp[i].offset;
+	for (int pi = 0; pi < all_count; pi++) {
+		v3 pt = all_points[pi];
+		for (int i = 0; i < h->face_count; i++) {
+			float d = dot(pcp[i].normal, pt);
+			if (d > max_ds[i]) max_ds[i] = d;
 		}
-		float widen = max_d - pcp[i].offset;
-		if (widen > h->maxoutside) h->maxoutside = widen;
-		pcp[i].offset = max_d;
 	}
+	for (int i = 0; i < h->face_count; i++) {
+		float widen = max_ds[i] - pcp[i].offset;
+		if (widen > h->maxoutside) h->maxoutside = widen;
+		pcp[i].offset = max_ds[i];
+	}
+	free(max_ds);
 
 	afree(live); afree(vremap); afree(ov); afree(eremap); afree(oe); afree(of); afree(op);
 	return h;
