@@ -1503,5 +1503,55 @@ static void run_gjk_perf_tests()
 		printf("  scalar:  %6.1f ns/pair\n", scalar_ns);
 		printf("  batch:   %6.1f ns/pair (%.1fx)\n", batch_ns, scalar_ns / batch_ns);
 	}
+
+	// Batch sphere-tri: 1 sphere vs many triangles
+	{
+		gjk_perf_rng = 88888;
+		int n_tris = 1024;
+		int n_queries = 10000;
+		v3 tri_verts[1024*3];
+		for (int i = 0; i < n_tris; i++) {
+			v3 base = V3(gjk_perf_randf()*20-10, gjk_perf_randf()*20-10, gjk_perf_randf()*20-10);
+			float sc = 0.5f + gjk_perf_randf();
+			tri_verts[i*3+0] = add(base, V3(-sc, 0, -sc));
+			tri_verts[i*3+1] = add(base, V3(sc, 0, -sc));
+			tri_verts[i*3+2] = add(base, V3(0, 0, sc));
+		}
+		v3 sph_pos = V3(0,0,0); float sph_rad = 1.0f;
+
+		// Scalar
+		float sum = 0;
+		double t0 = qpc_now();
+		for (int q = 0; q < n_queries; q++) {
+			GJK_Cache c = {0};
+			GJK_Shape a = gjk_sphere(sph_pos, sph_rad);
+			for (int i = 0; i < n_tris; i++) {
+				GJK_Shape b = gjk_triangle(tri_verts[i*3], tri_verts[i*3+1], tri_verts[i*3+2]);
+				GJK_Result r = gjk_distance(&a, &b, &c);
+				sum += r.distance;
+			}
+		}
+		double t1 = qpc_now();
+		volatile float sink = sum; (void)sink;
+		double scalar_tri = (t1 - t0) * 1e9 / (n_queries * n_tris);
+
+		// Batch
+		sum = 0;
+		t0 = qpc_now();
+		for (int q = 0; q < n_queries; q++) {
+			for (int i = 0; i < n_tris; i += 4) {
+				float dist[4];
+				gjk_distance_batch_sphere_tri(sph_pos, sph_rad, &tri_verts[i*3], dist);
+				sum += dist[0] + dist[1] + dist[2] + dist[3];
+			}
+		}
+		t1 = qpc_now();
+		volatile float sink2 = sum; (void)sink2;
+		double batch_tri = (t1 - t0) * 1e9 / (n_queries * n_tris);
+
+		printf("\n  --- batch sphere vs %d triangles ---\n", n_tris);
+		printf("  scalar:  %6.1f ns/tri\n", scalar_tri);
+		printf("  batch:   %6.1f ns/tri (%.1fx)\n", batch_tri, scalar_tri / batch_tri);
+	}
 	printf("\n");
 }

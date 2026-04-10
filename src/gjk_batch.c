@@ -145,3 +145,69 @@ static void gjk_distance_batch_box(const GJK_Shape* a[4], const GJK_Shape* b[4],
 		}
 	}
 }
+
+// 4-wide triangle support: max dot of 3 vertices per lane.
+static inline v3w v3w_tri_support(v3w ta, v3w tb, v3w tc, v3w dir) {
+	__m128 da = v3w_dot(ta, dir), db = v3w_dot(tb, dir), dc = v3w_dot(tc, dir);
+	__m128 ab = _mm_cmpge_ps(da, db), ac = _mm_cmpge_ps(da, dc), bc = _mm_cmpge_ps(db, dc);
+	__m128 pick_a = _mm_and_ps(ab, ac);             // da >= db && da >= dc
+	__m128 pick_b = _mm_andnot_ps(pick_a, bc);       // not-a && db >= dc
+	v3w result = tc;                                  // default: pick C
+	result = v3w_sel(tb, result, pick_b);             // if pick_b: use B
+	result = v3w_sel(ta, result, pick_a);             // if pick_a: use A
+	return result;
+}
+
+// Batched sphere vs 4 triangles. sphere is shared across all 4 lanes.
+static void gjk_distance_batch_sphere_tri(v3 sphere_center, float sphere_radius, const v3 tri_verts[12], float out_dist[4])
+{
+	// Load sphere (broadcast to all lanes)
+	v3w sph = v3w_set1(sphere_center);
+	// Load 4 triangles: tri_verts[0..2]=tri0, [3..5]=tri1, [6..8]=tri2, [9..11]=tri3
+	v3w ta = v3w_load4(tri_verts[0], tri_verts[3], tri_verts[6], tri_verts[9]);
+	v3w tb = v3w_load4(tri_verts[1], tri_verts[4], tri_verts[7], tri_verts[10]);
+	v3w tc = v3w_load4(tri_verts[2], tri_verts[5], tri_verts[8], tri_verts[11]);
+
+	// Initial direction: sphere center to triangle centroid
+	v3w tri_cen = v3w_scale(v3w_add(v3w_add(ta, tb), tc), _mm_set1_ps(1.0f/3.0f));
+	v3w init_d = v3w_sub(tri_cen, sph);
+
+	// Initial support: sphere = center, triangle = max dot vertex
+	v3w supA = sph; // sphere core is just the center
+	v3w supB = v3w_tri_support(ta, tb, tc, v3w_neg(init_d));
+	v3w simplex_p = v3w_sub(supB, supA);
+	v3w best_p1 = supA, best_p2 = supB;
+
+	__m128 dsq_prev = _mm_set1_ps(FLT_MAX);
+	__m128 done_mask = _mm_setzero_ps();
+	__m128 eps2 = _mm_set1_ps(GJK_CONTAINMENT_EPS2);
+	__m128 prog_eps = _mm_set1_ps(GJK_PROGRESS_EPS);
+
+	for (int iter = 0; iter < 20; iter++) {
+		v3w closest = simplex_p;
+		__m128 dsq = v3w_len2(closest);
+		done_mask = _mm_or_ps(done_mask, _mm_cmple_ps(dsq, eps2));
+		done_mask = _mm_or_ps(done_mask, _mm_cmpge_ps(dsq, dsq_prev));
+		if (_mm_movemask_ps(done_mask) == 0xF) break;
+		dsq_prev = _mm_blendv_ps(dsq, dsq_prev, done_mask);
+
+		// Sphere support in direction closest = just sphere center (always)
+		v3w newA = sph;
+		v3w newB = v3w_tri_support(ta, tb, tc, v3w_neg(closest));
+		v3w w = v3w_sub(newB, newA);
+
+		__m128 progress = _mm_sub_ps(dsq, v3w_dot(w, closest));
+		__m128 threshold = _mm_mul_ps(v3w_len2(simplex_p), prog_eps);
+		done_mask = _mm_or_ps(done_mask, _mm_cmple_ps(progress, threshold));
+
+		simplex_p = v3w_sel(w, simplex_p, done_mask);
+		best_p1 = v3w_sel(newA, best_p1, done_mask);
+		best_p2 = v3w_sel(newB, best_p2, done_mask);
+	}
+
+	// Distance = |p2 - p1| - radius
+	v3w sep = v3w_sub(best_p2, best_p1);
+	__m128 dist = _mm_sqrt_ps(v3w_len2(sep));
+	dist = _mm_max_ps(_mm_setzero_ps(), _mm_sub_ps(dist, _mm_set1_ps(sphere_radius)));
+	_mm_storeu_ps(out_dist, dist);
+}
