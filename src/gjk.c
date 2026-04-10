@@ -108,13 +108,23 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 		for (int i = 0; i < n; i++) { sx[i] = scaled_verts[i].x; sy[i] = scaled_verts[i].y; sz[i] = scaled_verts[i].z; }
 		soa = soa_buf;
 	}
-	// Build per-vertex first-edge lookup for hill climbing (one-time O(E) setup)
-	static int vert_edge_buf[1024]; // max verts
+	// Cache per-vertex first-edge lookup: topology-only, rebuild when hull pointer changes.
+	#define VE_CACHE_SLOTS 4
+	static const Hull* ve_cache_hull[VE_CACHE_SLOTS] = {0};
+	static int ve_cache_buf[VE_CACHE_SLOTS][1024];
 	if (hull->edges && n <= 1024) {
-		for (int i = 0; i < n; i++) vert_edge_buf[i] = -1;
-		for (int i = 0; i < hull->edge_count; i++)
-			if (vert_edge_buf[hull->edges[i].origin] < 0) vert_edge_buf[hull->edges[i].origin] = i;
-		return gjk_hull(pos, rot, scaled_verts, n, soa, hull->edges, vert_edge_buf);
+		int slot = -1;
+		for (int s = 0; s < VE_CACHE_SLOTS; s++) if (ve_cache_hull[s] == hull) { slot = s; break; }
+		if (slot < 0) {
+			// Evict oldest (round-robin)
+			static int ve_next_slot = 0;
+			slot = ve_next_slot; ve_next_slot = (ve_next_slot + 1) % VE_CACHE_SLOTS;
+			for (int i = 0; i < n; i++) ve_cache_buf[slot][i] = -1;
+			for (int i = 0; i < hull->edge_count; i++)
+				if (ve_cache_buf[slot][hull->edges[i].origin] < 0) ve_cache_buf[slot][hull->edges[i].origin] = i;
+			ve_cache_hull[slot] = hull;
+		}
+		return gjk_hull(pos, rot, scaled_verts, n, soa, hull->edges, ve_cache_buf[slot]);
 	}
 	return gjk_hull(pos, rot, scaled_verts, n, soa, hull->edges, NULL);
 }
