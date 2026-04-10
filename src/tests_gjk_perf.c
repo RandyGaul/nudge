@@ -342,98 +342,98 @@ static void test_gjk_known_distances()
 
 	// --- Sphere ---
 	TEST_BEGIN("sphere-sphere separated");
-	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_sphere(V3(3,0,0), 1));
+	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_sphere(V3(3,0,0), 1), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 1.0f, 0.01f);
 
 	TEST_BEGIN("sphere-sphere touching");
-	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_sphere(V3(2,0,0), 1));
+	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_sphere(V3(2,0,0), 1), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
 
 	TEST_BEGIN("sphere-sphere overlap");
-	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_sphere(V3(1,0,0), 1));
+	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_sphere(V3(1,0,0), 1), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
 
 	TEST_BEGIN("sphere-box face");
-	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_box(V3(4,0,0), id, V3(1,1,1)));
+	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_box(V3(4,0,0), id, V3(1,1,1)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
 
 	TEST_BEGIN("sphere-box edge");
-	r = gjk_distance(gjk_sphere(V3(0,0,0), 0.5f), gjk_box(V3(2,2,0), id, V3(1,1,1)));
+	r = gjk_distance(gjk_sphere(V3(0,0,0), 0.5f), gjk_box(V3(2,2,0), id, V3(1,1,1)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, sqrtf(2.0f) - 0.5f, 0.02f);
 
 	TEST_BEGIN("sphere-box vertex");
-	r = gjk_distance(gjk_sphere(V3(0,0,0), 0.5f), gjk_box(V3(3,3,3), id, V3(1,1,1)));
+	r = gjk_distance(gjk_sphere(V3(0,0,0), 0.5f), gjk_box(V3(3,3,3), id, V3(1,1,1)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, sqrtf(12.0f) - 0.5f, 0.02f);
 
 	TEST_BEGIN("sphere-capsule separated");
-	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_capsule(V3(4,-1,0), V3(4,1,0), 0.5f));
+	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_capsule(V3(4,-1,0), V3(4,1,0), 0.5f), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.5f, 0.01f);
 
 	TEST_BEGIN("sphere-cylinder separated");
-	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_cylinder(V3(4,-1,0), V3(4,1,0), 0.5f));
+	r = gjk_distance(gjk_sphere(V3(0,0,0), 1), gjk_cylinder(V3(4,-1,0), V3(4,1,0), 0.5f), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.5f, 0.02f);
 
 	// --- Capsule ---
 	TEST_BEGIN("capsule-capsule parallel separated");
-	r = gjk_distance(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_capsule(V3(3,-1,0), V3(3,1,0), 0.5f));
+	r = gjk_distance(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_capsule(V3(3,-1,0), V3(3,1,0), 0.5f), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
 
 	TEST_BEGIN("capsule-capsule crossed");
-	r = gjk_distance(gjk_capsule(V3(0,-2,0), V3(0,2,0), 0.3f), gjk_capsule(V3(2,0,-2), V3(2,0,2), 0.3f));
+	r = gjk_distance(gjk_capsule(V3(0,-2,0), V3(0,2,0), 0.3f), gjk_capsule(V3(2,0,-2), V3(2,0,2), 0.3f), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 1.4f, 0.01f);
 
 	TEST_BEGIN("capsule-capsule touching");
-	r = gjk_distance(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_capsule(V3(1,-1,0), V3(1,1,0), 0.5f));
+	r = gjk_distance(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_capsule(V3(1,-1,0), V3(1,1,0), 0.5f), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
 
 	TEST_BEGIN("capsule-box face");
-	r = gjk_distance(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_box(V3(3,0,0), id, V3(1,1,1)));
+	r = gjk_distance(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_box(V3(3,0,0), id, V3(1,1,1)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 1.5f, 0.01f);
 
 	TEST_BEGIN("capsule-cylinder separated");
-	r = gjk_distance(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_cylinder(V3(3,-1,0), V3(3,1,0), 0.5f));
+	r = gjk_distance(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_cylinder(V3(3,-1,0), V3(3,1,0), 0.5f), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.02f);
 
 	// --- Box ---
 	TEST_BEGIN("box-box face separated");
-	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(V3(4,0,0), id, V3(1,1,1)));
+	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(V3(4,0,0), id, V3(1,1,1)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
 
 	TEST_BEGIN("box-box face touching");
-	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(V3(2,0,0), id, V3(1,1,1)));
+	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(V3(2,0,0), id, V3(1,1,1)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
 
 	TEST_BEGIN("box-box edge-edge");
 	{
 		quat rot45z = { 0, 0, 0.3826834f, 0.9238795f };
 		float expected = 1.0f; // gap between face at x=1 and rotated edge
-		r = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(V3(1 + sqrtf(2.0f) + expected, 0, 0), rot45z, V3(1,1,1)));
+		r = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(V3(1 + sqrtf(2.0f, NULL) + expected, 0, 0), rot45z, V3(1,1,1)));
 		TEST_ASSERT_FLOAT(r.distance, expected, 0.02f);
 	}
 
 	TEST_BEGIN("box-box different sizes");
-	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(0.5f,0.5f,0.5f)), gjk_box(V3(3,0,0), id, V3(2,2,2)));
+	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(0.5f,0.5f,0.5f)), gjk_box(V3(3,0,0), id, V3(2,2,2)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 0.5f, 0.01f);
 
 	TEST_BEGIN("box-box Y axis");
-	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(V3(0,5,0), id, V3(1,1,1)));
+	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(V3(0,5,0), id, V3(1,1,1)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 3.0f, 0.01f);
 
 	TEST_BEGIN("box-box Z axis");
-	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(V3(0,0,4), id, V3(1,1,1)));
+	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(V3(0,0,4), id, V3(1,1,1)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
 
 	// --- Cylinder ---
 	TEST_BEGIN("cylinder-box face");
-	r = gjk_distance(gjk_cylinder(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_box(V3(3,0,0), id, V3(1,1,1)));
+	r = gjk_distance(gjk_cylinder(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_box(V3(3,0,0), id, V3(1,1,1)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 1.5f, 0.02f);
 
 	TEST_BEGIN("cylinder-cylinder parallel");
-	r = gjk_distance(gjk_cylinder(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_cylinder(V3(3,-1,0), V3(3,1,0), 0.5f));
+	r = gjk_distance(gjk_cylinder(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_cylinder(V3(3,-1,0), V3(3,1,0), 0.5f), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.02f);
 
 	TEST_BEGIN("cylinder-cylinder crossed");
-	r = gjk_distance(gjk_cylinder(V3(0,-2,0), V3(0,2,0), 0.5f), gjk_cylinder(V3(3,0,-2), V3(3,0,2), 0.5f));
+	r = gjk_distance(gjk_cylinder(V3(0,-2,0), V3(0,2,0), 0.5f), gjk_cylinder(V3(3,0,-2), V3(3,0,2), 0.5f), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.02f);
 
 	// --- Hull ---
@@ -443,7 +443,7 @@ static void test_gjk_known_distances()
 		v3 s1[8], s2[8]; float so1[24], so2[24];
 		GJK_Shape ga = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s1, so1);
 		GJK_Shape gb = gjk_hull_scaled(ub, V3(4,0,0), id, V3(1,1,1), s2, so2);
-		r = gjk_distance(ga, gb);
+		r = gjk_distance(ga, gb, NULL);
 		TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
 	}
 
@@ -453,7 +453,7 @@ static void test_gjk_known_distances()
 		v3 s[8]; float so[24];
 		GJK_Shape pt = gjk_sphere(V3(2,2,2), 0);
 		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s, so);
-		r = gjk_distance(pt, bx);
+		r = gjk_distance(pt, bx, NULL);
 		TEST_ASSERT_FLOAT(r.distance, sqrtf(3.0f), 0.02f);
 	}
 
@@ -463,7 +463,7 @@ static void test_gjk_known_distances()
 		v3 s[8]; float so[24];
 		GJK_Shape pt = gjk_sphere(V3(1.5f,1.5f,0), 0);
 		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s, so);
-		r = gjk_distance(pt, bx);
+		r = gjk_distance(pt, bx, NULL);
 		TEST_ASSERT_FLOAT(r.distance, sqrtf(0.5f), 0.02f);
 	}
 
@@ -473,13 +473,13 @@ static void test_gjk_known_distances()
 		v3 s[8]; float so[24];
 		GJK_Shape pt = gjk_sphere(V3(3,0,0), 0);
 		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s, so);
-		r = gjk_distance(pt, bx);
+		r = gjk_distance(pt, bx, NULL);
 		TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
 	}
 
 	// --- Asymmetric scales ---
 	TEST_BEGIN("box-box asymmetric half_extents");
-	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(3,0.5f,0.5f)), gjk_box(V3(5,0,0), id, V3(0.5f,3,3)));
+	r = gjk_distance(gjk_box(V3(0,0,0), id, V3(3,0.5f,0.5f)), gjk_box(V3(5,0,0), id, V3(0.5f,3,3)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 1.5f, 0.01f);
 
 	// --- Rotated box ---
@@ -489,7 +489,7 @@ static void test_gjk_known_distances()
 		quat rot45z = { 0, 0, 0.3826834f, 0.9238795f };
 		GJK_Shape a = gjk_box(V3(0,0,0), rot45z, V3(1,1,1));
 		GJK_Shape b = gjk_box(V3(5,0,0), id, V3(1,1,1));
-		r = gjk_distance(a, b);
+		r = gjk_distance(a, b, NULL);
 		float expected = 5.0f - sqrtf(2.0f) - 1.0f;
 		TEST_ASSERT_FLOAT(r.distance, expected, 0.02f);
 	}
@@ -527,11 +527,11 @@ static void test_gjk_bf_box_box()
 		v3 s1[8], s2[8]; float so1[24], so2[24];
 		GJK_Shape ga = gjk_hull_scaled(ub, posA, rA, heA, s1, so1);
 		GJK_Shape gb = gjk_hull_scaled(ub, posB, rB, heB, s2, so2);
-		double err = fabs((double)gjk_distance(ga, gb).distance - ref.distance);
+		double err = fabs((double)gjk_distance(ga, gb, NULL).distance - ref.distance);
 		if (err > max_err_hull) max_err_hull = err;
 
 		// gjk_box path
-		double err2 = fabs((double)gjk_distance(gjk_box(posA, rA, heA), gjk_box(posB, rB, heB)).distance - ref.distance);
+		double err2 = fabs((double)gjk_distance(gjk_box(posA, rA, heA), gjk_box(posB, rB, heB), NULL).distance - ref.distance);
 		if (err2 > max_err_box) max_err_box = err2;
 	}
 	printf("  bf box-box (%d): hull max_err=%.3e  box max_err=%.3e\n", BF_NCASES, max_err_hull, max_err_box);
@@ -562,7 +562,7 @@ static void test_gjk_bf_segment_hull()
 		v3 sb[8]; float sosb[24];
 		GJK_Shape sa = gjk_capsule(segP, segQ, 0);
 		GJK_Shape sbx = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb, sosb);
-		double err = fabs((double)gjk_distance(sa, sbx).distance - ref.distance);
+		double err = fabs((double)gjk_distance(sa, sbx, NULL).distance - ref.distance);
 		if (err > max_err) max_err = err;
 	}
 	printf("  bf seg-hull (%d): max_err=%.3e\n", BF_NCASES, max_err);
@@ -594,11 +594,11 @@ static void test_gjk_bf_capsule_box()
 		v3 sb[8]; float sosb[24];
 		GJK_Shape sa = gjk_capsule(capP, capQ, capR);
 		GJK_Shape sbx = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb, sosb);
-		double err = fabs((double)gjk_distance(sa, sbx).distance - bf_dist);
+		double err = fabs((double)gjk_distance(sa, sbx, NULL).distance - bf_dist);
 		if (err > max_err) max_err = err;
 
 		// Also test capsule vs gjk_box
-		double err2 = fabs((double)gjk_distance(sa, gjk_box(boxPos, rB, boxHE)).distance - bf_dist);
+		double err2 = fabs((double)gjk_distance(sa, gjk_box(boxPos, rB, boxHE), NULL).distance - bf_dist);
 		if (err2 > max_err) max_err = err2;
 	}
 	printf("  bf capsule-box (%d): max_err=%.3e\n", BF_NCASES, max_err);
@@ -630,11 +630,11 @@ static void test_gjk_bf_sphere_box()
 		GJK_Shape sa = gjk_sphere(sphC, sphR);
 		v3 sb[8]; float sosb[24];
 		GJK_Shape sbh = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb, sosb);
-		double err = fabs((double)gjk_distance(sa, sbh).distance - bf_dist);
+		double err = fabs((double)gjk_distance(sa, sbh, NULL).distance - bf_dist);
 		if (err > max_err) max_err = err;
 
 		GJK_Shape sbb = gjk_box(boxPos, rB, boxHE);
-		double err2 = fabs((double)gjk_distance(sa, sbb).distance - bf_dist);
+		double err2 = fabs((double)gjk_distance(sa, sbb, NULL).distance - bf_dist);
 		if (err2 > max_err) max_err = err2;
 	}
 	printf("  bf sphere-box (%d): max_err=%.3e\n", BF_NCASES, max_err);
@@ -658,7 +658,7 @@ static void test_gjk_near_contact()
 			bf_hull_world_verts(wa, ub, V3(1,1,1), DV3(0,0,0), dquat_from_quat(id));
 			bf_hull_world_verts(wb, ub, V3(1,1,1), dv3_from_v3(posB), dquat_from_quat(id));
 			BruteResult ref = bf_hull_hull(wa, ub, wb, ub);
-			GJK_Result rg = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(posB, id, V3(1,1,1)));
+			GJK_Result rg = gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(posB, id, V3(1,1,1)), NULL);
 			if ((ref.distance == 0) != (rg.distance == 0)) { agree = 0; break; }
 			if (ref.distance == 0 && rg.distance == 0) break;
 			gap *= 0.8f;
@@ -678,7 +678,7 @@ static void test_gjk_near_contact()
 			bf_hull_world_verts(wa, ub, V3(1,1,1), DV3(0,0,0), dquat_from_quat(id));
 			bf_hull_world_verts(wb, ub, V3(1,1,1), dv3_from_v3(posB), dquat_from_quat(rot45z));
 			BruteResult ref = bf_hull_hull(wa, ub, wb, ub);
-			GJK_Result rg =gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(posB, rot45z, V3(1,1,1)));
+			GJK_Result rg =gjk_distance(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(posB, rot45z, V3(1,1,1)), NULL);
 			if ((ref.distance == 0) != (rg.distance == 0)) { agree = 0; break; }
 			if (ref.distance == 0 && rg.distance == 0) break;
 			gap *= 0.8f;
@@ -702,8 +702,8 @@ static void test_gjk_properties()
 		quat rA = gjk_perf_random_quat(), rB = gjk_perf_random_quat();
 		GJK_Shape a = gjk_box(V3(0,0,0), rA, V3(sc, sc*0.7f, sc*0.5f));
 		GJK_Shape b = gjk_box(V3(sep, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f), rB, V3(sc*0.6f, sc, sc*0.8f));
-		GJK_Result rab = gjk_distance(a, b);
-		GJK_Result rba = gjk_distance(b, a);
+		GJK_Result rab = gjk_distance(a, b, NULL);
+		GJK_Result rba = gjk_distance(b, a, NULL);
 		TEST_BEGIN("symmetry: box-box");
 		TEST_ASSERT(fabsf(rab.distance - rba.distance) < 1e-4f);
 	}
@@ -715,8 +715,8 @@ static void test_gjk_properties()
 		float sep = 1.0f + gjk_perf_randf() * 8.0f;
 		GJK_Shape a = gjk_capsule(V3(0,-sc,0), V3(0,sc,0), sc*0.3f);
 		GJK_Shape b = gjk_box(V3(sep, 0, 0), gjk_perf_random_quat(), V3(sc, sc*0.8f, sc*0.6f));
-		GJK_Result rab = gjk_distance(a, b);
-		GJK_Result rba = gjk_distance(b, a);
+		GJK_Result rab = gjk_distance(a, b, NULL);
+		GJK_Result rba = gjk_distance(b, a, NULL);
 		TEST_BEGIN("symmetry: capsule-box");
 		TEST_ASSERT(fabsf(rab.distance - rba.distance) < 1e-4f);
 	}
@@ -727,7 +727,7 @@ static void test_gjk_properties()
 		float sc = 0.3f + gjk_perf_randf() * 5.0f;
 		GJK_Shape a = gjk_box(V3(0,0,0), gjk_perf_random_quat(), V3(sc, sc*0.7f, sc*0.5f));
 		GJK_Shape b = gjk_box(V3(gjk_perf_randf()*20-10, gjk_perf_randf()*20-10, gjk_perf_randf()*20-10), gjk_perf_random_quat(), V3(sc*0.6f, sc, sc*0.8f));
-		GJK_Result r = gjk_distance(a, b);
+		GJK_Result r = gjk_distance(a, b, &cache[c]);
 		TEST_BEGIN("non-negative distance");
 		TEST_ASSERT(r.distance >= 0.0f);
 	}
@@ -736,21 +736,21 @@ static void test_gjk_properties()
 	TEST_BEGIN("self-distance box");
 	{
 		GJK_Shape a = gjk_box(V3(1,2,3), gjk_perf_random_quat(), V3(1,1,1));
-		GJK_Result r = gjk_distance(a, a);
+		GJK_Result r = gjk_distance(a, a, &cache[c]);
 		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
 	}
 
 	TEST_BEGIN("self-distance capsule");
 	{
 		GJK_Shape a = gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f);
-		GJK_Result r = gjk_distance(a, a);
+		GJK_Result r = gjk_distance(a, a, &cache[c]);
 		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
 	}
 
 	TEST_BEGIN("self-distance sphere");
 	{
 		GJK_Shape a = gjk_sphere(V3(3,4,5), 2.0f);
-		GJK_Result r = gjk_distance(a, a);
+		GJK_Result r = gjk_distance(a, a, &cache[c]);
 		TEST_ASSERT_FLOAT(r.distance, 0.0f, 0.01f);
 	}
 
@@ -761,7 +761,7 @@ static void test_gjk_properties()
 		float sep = sc * 2.0f + 0.5f + gjk_perf_randf() * 5.0f;
 		GJK_Shape a = gjk_box(V3(0,0,0), gjk_perf_random_quat(), V3(sc, sc*0.7f, sc*0.5f));
 		GJK_Shape b = gjk_box(V3(sep, 0, 0), gjk_perf_random_quat(), V3(sc*0.6f, sc, sc*0.8f));
-		GJK_Result r = gjk_distance(a, b);
+		GJK_Result r = gjk_distance(a, b, NULL);
 		if (r.distance > 0.01f) {
 			// witness distance should match reported distance
 			float wd = len(sub(r.point2, r.point1));
@@ -819,6 +819,7 @@ static PerfRow perf_box_box()
 		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
 		m[c].heA = V3(sc, sc*0.7f, sc*0.5f); m[c].heB = V3(sc*0.8f, sc, sc*0.6f);
 	}
+	v3 cache[PERF_CONFIGS]; for (int c = 0; c < PERF_CONFIGS; c++) cache[c] = V3(0,0,0);
 	int total = PERF_N * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
 	double t0 = qpc_now();
@@ -826,7 +827,7 @@ static PerfRow perf_box_box()
 		PerfMotion* mc = &m[c];
 		for (int i = 0; i < PERF_N; i++) {
 			// Construct proxies + GJK = the per-pair cost an engine pays
-			GJK_Result r = gjk_distance(gjk_box(mc->posA, mc->rotA, mc->heA), gjk_box(mc->posB, mc->rotB, mc->heB));
+			GJK_Result r = gjk_distance(gjk_box(mc->posA, mc->rotA, mc->heA), gjk_box(mc->posB, mc->rotB, mc->heB), &cache[c]);
 			sum += r.distance; iters += r.iterations;
 			// Integration: not timed, but interleaved to vary transforms
 			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
@@ -856,6 +857,7 @@ static PerfRow perf_capsule_box()
 		m[c].heA = V3(sc, sc, sc); m[c].heB = V3(sc, sc*0.8f, sc*0.6f);
 		m[c].radiusA = sc * 0.3f;
 	}
+	v3 cache[PERF_CONFIGS]; for (int c = 0; c < PERF_CONFIGS; c++) cache[c] = V3(0,0,0);
 	int total = PERF_N * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
 	double t0 = qpc_now();
@@ -865,7 +867,7 @@ static PerfRow perf_capsule_box()
 			v3 cap_dir = quat_rotate(mc->rotA, V3(0,1,0));
 			v3 cap_p = sub(mc->posA, scale(cap_dir, mc->heA.y));
 			v3 cap_q = add(mc->posA, scale(cap_dir, mc->heA.y));
-			GJK_Result r = gjk_distance(gjk_capsule(cap_p, cap_q, mc->radiusA), gjk_box(mc->posB, mc->rotB, mc->heB));
+			GJK_Result r = gjk_distance(gjk_capsule(cap_p, cap_q, mc->radiusA), gjk_box(mc->posB, mc->rotB, mc->heB), &cache[c]);
 			sum += r.distance; iters += r.iterations;
 			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
 			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
@@ -894,6 +896,7 @@ static PerfRow perf_capsule_capsule()
 		m[c].heA = V3(sc, sc, sc); m[c].heB = V3(sc*0.8f, sc*0.8f, sc*0.8f);
 		m[c].radiusA = sc * 0.3f; m[c].radiusB = sc * 0.4f;
 	}
+	v3 cache[PERF_CONFIGS]; for (int c = 0; c < PERF_CONFIGS; c++) cache[c] = V3(0,0,0);
 	int total = PERF_N * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
 	double t0 = qpc_now();
@@ -903,7 +906,7 @@ static PerfRow perf_capsule_capsule()
 			v3 da = quat_rotate(mc->rotA, V3(0,1,0)), db = quat_rotate(mc->rotB, V3(0,1,0));
 			GJK_Result r = gjk_distance(
 				gjk_capsule(sub(mc->posA, scale(da, mc->heA.y)), add(mc->posA, scale(da, mc->heA.y)), mc->radiusA),
-				gjk_capsule(sub(mc->posB, scale(db, mc->heB.y)), add(mc->posB, scale(db, mc->heB.y)), mc->radiusB));
+				gjk_capsule(sub(mc->posB, scale(db, mc->heB.y)), add(mc->posB, scale(db, mc->heB.y)), mc->radiusB), &cache[c]);
 			sum += r.distance; iters += r.iterations;
 			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
 			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
@@ -932,6 +935,7 @@ static PerfRow perf_cylinder_box()
 		m[c].heA = V3(sc, sc, sc); m[c].heB = V3(sc, sc*0.8f, sc*0.6f);
 		m[c].radiusA = sc * 0.5f;
 	}
+	v3 cache[PERF_CONFIGS]; for (int c = 0; c < PERF_CONFIGS; c++) cache[c] = V3(0,0,0);
 	int total = PERF_N * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
 	double t0 = qpc_now();
@@ -941,7 +945,7 @@ static PerfRow perf_cylinder_box()
 			v3 ca = quat_rotate(mc->rotA, V3(0,1,0));
 			v3 cp = sub(mc->posA, scale(ca, mc->heA.y));
 			v3 cq = add(mc->posA, scale(ca, mc->heA.y));
-			GJK_Result r = gjk_distance(gjk_cylinder(cp, cq, mc->radiusA), gjk_box(mc->posB, mc->rotB, mc->heB));
+			GJK_Result r = gjk_distance(gjk_cylinder(cp, cq, mc->radiusA), gjk_box(mc->posB, mc->rotB, mc->heB), &cache[c]);
 			sum += r.distance; iters += r.iterations;
 			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
 			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
@@ -970,6 +974,7 @@ static PerfRow perf_cylinder_cylinder()
 		m[c].heA = V3(sc, sc, sc); m[c].heB = V3(sc*0.7f, sc*0.7f, sc*0.7f);
 		m[c].radiusA = sc * 0.5f; m[c].radiusB = sc * 0.4f;
 	}
+	v3 cache[PERF_CONFIGS]; for (int c = 0; c < PERF_CONFIGS; c++) cache[c] = V3(0,0,0);
 	int total = PERF_N * PERF_CONFIGS;
 	float sum = 0; int iters = 0;
 	double t0 = qpc_now();
@@ -979,7 +984,7 @@ static PerfRow perf_cylinder_cylinder()
 			v3 da = quat_rotate(mc->rotA, V3(0,1,0)), db = quat_rotate(mc->rotB, V3(0,1,0));
 			GJK_Result r = gjk_distance(
 				gjk_cylinder(sub(mc->posA, scale(da, mc->heA.y)), add(mc->posA, scale(da, mc->heA.y)), mc->radiusA),
-				gjk_cylinder(sub(mc->posB, scale(db, mc->heB.y)), add(mc->posB, scale(db, mc->heB.y)), mc->radiusB));
+				gjk_cylinder(sub(mc->posB, scale(db, mc->heB.y)), add(mc->posB, scale(db, mc->heB.y)), mc->radiusB), &cache[c]);
 			sum += r.distance; iters += r.iterations;
 			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
 			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
@@ -1014,6 +1019,7 @@ static PerfRow perf_hull_hull(int n_target)
 		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
 		m[c].heA = V3(sc, sc*0.7f, sc*0.5f); m[c].heB = V3(sc*0.8f, sc, sc*0.6f);
 	}
+	v3 cache[PERF_CONFIGS]; for (int c = 0; c < PERF_CONFIGS; c++) cache[c] = V3(0,0,0);
 	int n_iters = PERF_N;
 	if (n_target >= 200) n_iters = PERF_N / 10;
 	if (n_target >= 1000) n_iters = PERF_N / 100;
@@ -1025,7 +1031,7 @@ static PerfRow perf_hull_hull(int n_target)
 		for (int i = 0; i < n_iters; i++) {
 			GJK_Shape ga = gjk_hull_scaled(ha, mc->posA, mc->rotA, mc->heA, NULL, NULL);
 			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB, NULL, NULL);
-			GJK_Result r = gjk_distance(ga, gb);
+			GJK_Result r = gjk_distance(ga, gb, &cache[c]);
 			sum += r.distance; iters += r.iterations;
 			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
 			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
@@ -1065,7 +1071,7 @@ static void test_gjk_bf_hull_hull(int n_target)
 		v3 sa[1024], sb[1024]; float soa[3072], sob[3072];
 		GJK_Shape ga = gjk_hull_scaled(ha, posA, rA, heA, sa, soa);
 		GJK_Shape gb = gjk_hull_scaled(hb, posB, rB, heB, sb, sob);
-		double err = fabs((double)gjk_distance(ga, gb).distance - ref.distance);
+		double err = fabs((double)gjk_distance(ga, gb, NULL).distance - ref.distance);
 		if (err > max_err) max_err = err;
 
 		hull_free(ha); hull_free(hb);

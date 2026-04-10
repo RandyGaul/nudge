@@ -387,11 +387,13 @@ static int gjk_solve4(GJK_Simplex* s)
 #define GJK_MAX_ITERS         64
 #define GJK_CONTAINMENT_EPS2  1e-8f
 #define GJK_PROGRESS_EPS      1e-4f
-static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
+// cache: optional pointer to separating direction from previous call.
+// If non-NULL, used as initial search direction (warm-start) and updated with result.
+static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB, v3* cache)
 {
 	GJK_Result result;
 	GJK_Simplex simplex;
-	v3 init_d = sub(gjk_center(&shapeB), gjk_center(&shapeA));
+	v3 init_d = (cache && len2(*cache) > FLT_EPSILON) ? *cache : sub(gjk_center(&shapeB), gjk_center(&shapeA));
 	if (len2(init_d) < FLT_EPSILON) init_d = V3(1, 0, 0);
 	int fA, fB;
 	v3 sA; gjk_support(&shapeA, init_d, &fA, sA);
@@ -444,8 +446,10 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB)
 		simplex.count++;
 	}
 	gjk_witness_points(&simplex, &result.point1, &result.point2, &result.feat1, &result.feat2);
-	result.distance = len(sub(result.point2, result.point1));
+	v3 sep = sub(result.point2, result.point1);
+	result.distance = len(sep);
 	result.iterations = iter;
+	if (cache) *cache = sep;
 	// Post-hoc radius for sphere/capsule core shapes.
 	float rA = shapeA.radius;
 	float rB = shapeB.radius;
