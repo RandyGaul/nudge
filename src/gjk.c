@@ -422,8 +422,13 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		if (shapeA->type == GJK_HULL) shapeA->hull.hint = cache->hintA;
 		if (shapeB->type == GJK_HULL) shapeB->hull.hint = cache->hintB;
 	}
-	v3 init_d = (cache && len2(cache->dir) > FLT_EPSILON) ? cache->dir : sub(gjk_center(shapeB), gjk_center(shapeA));
-	if (len2(init_d) < FLT_EPSILON) init_d = V3(1, 0, 0);
+	v3 init_d;
+	if (cache && len2(cache->dir) > FLT_EPSILON) {
+		init_d = cache->dir;
+	} else {
+		init_d = sub(gjk_center(shapeB), gjk_center(shapeA));
+		if (len2(init_d) < FLT_EPSILON) init_d = V3(1, 0, 0);
+	}
 	int fA, fB;
 	v3 sA; gjk_support(shapeA, init_d, &fA, sA);
 	v3 sB; gjk_support(shapeB, neg(init_d), &fB, sB);
