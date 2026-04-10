@@ -146,7 +146,7 @@ static __forceinline v3 gjk_center(const GJK_Shape* s)
 // -----------------------------------------------------------------------------
 // Simplex solvers: find closest point on simplex to origin.
 
-static int gjk_solve2(GJK_Simplex* s)
+static __forceinline int gjk_solve2(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point;
 	float u = dot(b, sub(b, a));
@@ -159,7 +159,7 @@ static int gjk_solve2(GJK_Simplex* s)
 	return 1;
 }
 
-static int gjk_solve3(GJK_Simplex* s)
+static __forceinline int gjk_solve3(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point;
 	float uAB = dot(b, sub(b, a)), vAB = dot(a, sub(a, b));
@@ -182,7 +182,7 @@ static int gjk_solve3(GJK_Simplex* s)
 
 #define stp(a, b, c) dot(a, cross(b, c))
 
-static int gjk_solve4(GJK_Simplex* s)
+static __forceinline int gjk_solve4(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point, d = s->v[3].point;
 
