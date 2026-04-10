@@ -356,6 +356,7 @@ static v3 gjk_center(const GJK_Shape* s)
 #define gjk_witness_points(simplex, out_p1, out_p2, out_f1, out_f2) do {                                              \
 	const GJK_Simplex* ws = (simplex);                                                                                \
 	float winv = 1.0f / ws->divisor;                                                                                  \
+	__assume(ws->count >= 1 && ws->count <= 3);                                                                       \
 	switch (ws->count) {                                                                                              \
 	case 1:                                                                                                           \
 		(out_p1) = ws->v[0].point1; (out_p2) = ws->v[0].point2;                                                       \
