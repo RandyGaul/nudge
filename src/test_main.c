@@ -30,6 +30,7 @@ int main(int argc, char* argv[])
 	int soak = 0;
 	int bench_stack = 0;
 	int bench_pile = 0;
+	int bench_suite_flag = 0;
 	int bench_pile_grid = 10;
 	int bench_pile_height = 5;
 	int bench_pile_frames = 300;
@@ -46,6 +47,8 @@ int main(int argc, char* argv[])
 			bench_stack = (i + 1 < argc && argv[i+1][0] != '-') ? atoi(argv[++i]) : 10;
 		else if (strcmp(argv[i], "--bench-pile") == 0)
 			bench_pile = 1;
+		else if (strcmp(argv[i], "--bench-suite") == 0)
+			bench_suite_flag = 1;
 		else if (strcmp(argv[i], "--pile-grid") == 0 && i + 1 < argc)
 			bench_pile_grid = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--pile-height") == 0 && i + 1 < argc)
@@ -60,6 +63,12 @@ int main(int argc, char* argv[])
 			hertz = (float)atof(argv[++i]);
 		else if (strcmp(argv[i], "--damping") == 0 && i + 1 < argc)
 			damping = (float)atof(argv[++i]);
+	}
+
+	if (bench_suite_flag) {
+		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .friction_model = FRICTION_PATCH, .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
+		bench_suite(wp);
+		return 0;
 	}
 
 	if (bench_pile) {

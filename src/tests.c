@@ -10881,6 +10881,23 @@ static void bench_box_pile(int grid_w, int height, int frames_count, WorldParams
 	destroy_world(w);
 }
 
+// Run bench_box_pile at multiple scales for scaling analysis.
+static void bench_suite(WorldParams wp)
+{
+	struct { int grid; int height; int frames; } configs[] = {
+		{  8,  4, 100 },  //    256 bodies
+		{ 15,  5,  30 },  //  1,125 bodies
+		{ 22,  5,  15 },  //  2,420 bodies
+		{ 32,  5,  10 },  //  5,120 bodies
+		{ 32, 10,   5 },  // 10,240 bodies
+	};
+	int n = sizeof(configs) / sizeof(configs[0]);
+	printf("=== Bench Suite (sub=%d vel=%d) ===\n", wp.sub_steps > 0 ? wp.sub_steps : 4, wp.velocity_iters > 0 ? wp.velocity_iters : 10);
+	for (int i = 0; i < n; i++)
+		bench_box_pile(configs[i].grid, configs[i].height, configs[i].frames, wp);
+	printf("=== Suite Complete ===\n");
+}
+
 // Soak test: infinite-loop fuzz with crash logging to file.
 static void test_quickhull_soak()
 {
