@@ -1364,7 +1364,7 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 
 // Position correction using factored K. Called AFTER integrate_positions to correct
 // drift from velocity/rotation coupling. Reuses the K factored in ldl_numeric_factor.
-static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_joints, float sub_dt)
+static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_joints, float sub_dt, dv3* pos_delta, dv3* ang_delta)
 {
 	int jc = c->joint_count;
 	int n = c->n;
@@ -1394,8 +1394,6 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 	// breaking the coupled solution the LDL solve computed.
 	if (ldl_validate_lambda(pos_lambda, n)) {
 		int body_count = asize(w->body_hot);
-		dv3* pos_delta = CK_ALLOC(body_count * sizeof(dv3));
-		dv3* ang_delta = CK_ALLOC(body_count * sizeof(dv3));
 		memset(pos_delta, 0, body_count * sizeof(dv3));
 		memset(ang_delta, 0, body_count * sizeof(dv3));
 
@@ -1427,8 +1425,6 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 			apply_rotation_delta(&w->body_hot[bi].rotation, ang_delta[bi]);
 		}
 
-		CK_FREE(pos_delta);
-		CK_FREE(ang_delta);
 	}
 }
 
@@ -1558,6 +1554,10 @@ static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 	// Without this, K uses stale lever arms while the RHS uses current positions.
 	ldl_refresh_lever_arms(w, sol_joints, joint_count, sub_dt);
 
+	// Allocate delta buffers once per substep, reuse across all islands.
+	dv3* pos_delta = CK_ALLOC(body_count * sizeof(dv3));
+	dv3* ang_delta = CK_ALLOC(body_count * sizeof(dv3));
+
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {
 		if (!(w->island_gen[ii] & 1)) continue;
@@ -1568,8 +1568,11 @@ static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 		if (c->n == 0 || !c->topo) continue;
 		// Refactorize K with compressed masses and current lever arms
 		ldl_numeric_factor(c, w, sol_joints);
-		ldl_island_position_correct(c, w, sol_joints, sub_dt);
+		ldl_island_position_correct(c, w, sol_joints, sub_dt, pos_delta, ang_delta);
 	}
+
+	CK_FREE(pos_delta);
+	CK_FREE(ang_delta);
 
 	ldl_pos_acc += perf_now() - t_pos_start;
 
