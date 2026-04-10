@@ -1452,6 +1452,9 @@ static void ldl_refresh_lever_arms(WorldInternal* w, SolverJoint* sol_joints, in
 }
 
 // Factor K for all islands (topology rebuild + numeric factorization). No solve.
+// Factorizes with compressed masses for better K conditioning, then restores real masses.
+// The factored K is reused for both velocity solve (real-mass apply) and position solve
+// (real-mass apply), eliminating the need for a separate position refactorization.
 static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_count, int sub, float sub_dt)
 {
 	if (joint_count == 0) return;
@@ -1459,6 +1462,26 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 	// Refresh lever arms on substeps after the first (positions/rotations changed)
 	if (sub > 0)
 		ldl_refresh_lever_arms(w, sol_joints, joint_count, sub_dt);
+
+	// Compress masses for K conditioning: sqrt compression (100:1 -> 10:1).
+	// Save inv_mass, inv_inertia_local, and precomputed world inertia (iw_diag/iw_off)
+	// so we can restore all of them without an expensive world inertia recompute.
+	int body_count = asize(w->body_hot);
+	float* save_inv_mass = CK_ALLOC(body_count * sizeof(float));
+	v3* save_inv_inertia = CK_ALLOC(body_count * sizeof(v3));
+	v3* save_iw_diag = CK_ALLOC(body_count * sizeof(v3));
+	v3* save_iw_off = CK_ALLOC(body_count * sizeof(v3));
+	for (int i = 0; i < body_count; i++) {
+		save_inv_mass[i] = w->body_hot[i].inv_mass;
+		save_inv_inertia[i] = w->body_hot[i].inv_inertia_local;
+		save_iw_diag[i] = w->body_hot[i].iw_diag;
+		save_iw_off[i] = w->body_hot[i].iw_off;
+		if (w->body_hot[i].inv_mass > 0.0f) {
+			w->body_hot[i].inv_mass = sqrtf(w->body_hot[i].inv_mass);
+			w->body_hot[i].inv_inertia_local = scale(w->body_hot[i].inv_inertia_local, w->body_hot[i].inv_mass / save_inv_mass[i]);
+			body_compute_inv_inertia_world(&w->body_hot[i]);
+		}
+	}
 
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {
@@ -1498,9 +1521,21 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 			asetlen(c->solve_lambda, c->n);
 		}
 
-		// Numeric factorization every substep (lever arms change after integrate_positions)
+		// Numeric factorization with compressed masses
 		ldl_numeric_factor(c, w, sol_joints);
 	}
+
+	// Restore real masses + world inertia (no recompute needed — saved values are exact).
+	for (int i = 0; i < body_count; i++) {
+		w->body_hot[i].inv_mass = save_inv_mass[i];
+		w->body_hot[i].inv_inertia_local = save_inv_inertia[i];
+		w->body_hot[i].iw_diag = save_iw_diag[i];
+		w->body_hot[i].iw_off = save_iw_off[i];
+	}
+	CK_FREE(save_inv_mass);
+	CK_FREE(save_inv_inertia);
+	CK_FREE(save_iw_diag);
+	CK_FREE(save_iw_off);
 }
 
 // Velocity correction using already-factored K. Solves and applies impulses.
@@ -1525,40 +1560,18 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 // 0.5 = sqrt compression (100:1 → 10:1). 1.0 = no compression (real masses).
 #define LDL_POS_MASS_EXP 0.5f
 
-// Position correction pass. Refactorizes K with compressed masses for better
-// conditioning at extreme mass ratios. Position correction is stabilization,
-// not dynamics — using compressed masses is safe.
-static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt, int sub)
+// Lightweight position correction: solve through the already-factored K (from ldl_factor).
+// No refactorization, no mass compression — K was factored with compressed masses in ldl_factor,
+// and position deltas are applied with real masses. This unified approach eliminates the
+// second fill_K + factorize pass that the old ldl_position_correct required.
+static void ldl_position_solve(WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt)
 {
 	double t_pos_start = perf_now();
 
-	int body_count = asize(w->body_hot);
-	// Refactorize K with compressed masses on even substeps only.
-	// Odd substeps reuse the previous factorization — lever arms change little per substep.
-	int refactor = (sub % 2 == 0);
-
-	float* save_inv_mass = NULL;
-	v3* save_inv_inertia = NULL;
-	if (refactor) {
-		// Compress inv_mass and inv_inertia for position stage.
-		save_inv_mass = CK_ALLOC(body_count * sizeof(float));
-		save_inv_inertia = CK_ALLOC(body_count * sizeof(v3));
-		for (int i = 0; i < body_count; i++) {
-			save_inv_mass[i] = w->body_hot[i].inv_mass;
-			save_inv_inertia[i] = w->body_hot[i].inv_inertia_local;
-			if (w->body_hot[i].inv_mass > 0.0f) {
-				w->body_hot[i].inv_mass = sqrtf(w->body_hot[i].inv_mass);
-				w->body_hot[i].inv_inertia_local = scale(w->body_hot[i].inv_inertia_local, w->body_hot[i].inv_mass / save_inv_mass[i]);
-			}
-		}
-		for (int i = 0; i < body_count; i++)
-			if (w->body_hot[i].inv_mass > 0.0f) body_compute_inv_inertia_world(&w->body_hot[i]);
-	}
-
-	// Always refresh lever arms (position errors depend on current body state).
+	// Refresh lever arms from current body state (positions changed by integrate_positions).
 	ldl_refresh_lever_arms(w, sol_joints, joint_count, sub_dt);
 
-	// Allocate delta buffers once per substep, reuse across all islands.
+	int body_count = asize(w->body_hot);
 	dv3* pos_delta = CK_ALLOC(body_count * sizeof(dv3));
 	dv3* ang_delta = CK_ALLOC(body_count * sizeof(dv3));
 
@@ -1570,7 +1583,6 @@ static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 		if (isl->joint_count == 0) continue;
 		LDL_Cache* c = &isl->ldl;
 		if (c->n == 0 || !c->topo) continue;
-		if (refactor) ldl_numeric_factor(c, w, sol_joints);
 		ldl_island_position_correct(c, w, sol_joints, sub_dt, pos_delta, ang_delta);
 	}
 
@@ -1578,13 +1590,4 @@ static void ldl_position_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 	CK_FREE(ang_delta);
 
 	ldl_pos_acc += perf_now() - t_pos_start;
-
-	if (refactor) {
-		for (int i = 0; i < body_count; i++) {
-			w->body_hot[i].inv_mass = save_inv_mass[i];
-			w->body_hot[i].inv_inertia_local = save_inv_inertia[i];
-		}
-		CK_FREE(save_inv_mass);
-		CK_FREE(save_inv_inertia);
-	}
 }

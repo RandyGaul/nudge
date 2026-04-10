@@ -300,7 +300,7 @@ void world_step(World world, float dt)
 		// LDL: direct solve projects out bulk joint error, NGS cleans up residual.
 		double tl1 = perf_now();
 		if (has_ldl)
-			ldl_position_correct(w, sol_joints, asize(sol_joints), sub_dt, sub);
+			ldl_position_solve(w, sol_joints, asize(sol_joints), sub_dt);
 		t_ldl += perf_now() - tl1;
 
 		double tpj = perf_now();
