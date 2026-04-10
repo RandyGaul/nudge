@@ -1115,27 +1115,26 @@ static int sap_cmp(const void* a, const void* b) { float d = ((SAPEntry*)a)->min
 
 static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 {
+	// Refit BVH for external queries (raycast, AABB query). Skip incremental refine.
 	bvh_refit(w->bvh_dynamic, w);
 
-	// Incremental refinement: rebuild a subtree using binned SAH.
-	AABB* lut = bvh_build_lut(w->bvh_dynamic);
-	if (lut) { bvh_incremental_refine(w->bvh_dynamic, lut); CK_FREE(lut); }
-
-	// Build tight AABBs + sweep-and-prune entries for all dynamic bodies.
+	// Build tight AABBs + sweep-and-prune entries for dynamic bodies, collect static body indices.
 	int body_count = asize(w->body_hot);
 	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
 	CK_DYNA SAPEntry* sap = NULL;
+	CK_DYNA int* statics = NULL;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
 		tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]);
 		if (w->body_hot[i].inv_mass > 0.0f) apush(sap, ((SAPEntry){ i, tight[i].min.x, tight[i].max.x }));
+		else apush(statics, i);
 	}
 
 	// Sort dynamic bodies by x-axis AABB min.
 	int sap_count = asize(sap);
 	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAPEntry), sap_cmp);
 
-	// Sweep: test overlapping pairs along x-axis, then full 3D AABB check.
+	// Sweep: test overlapping dynamic-dynamic pairs.
 	for (int i = 0; i < sap_count; i++) {
 		float max_x = sap[i].max_x;
 		int a = sap[i].body_idx;
@@ -1152,18 +1151,21 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		}
 	}
 
-	// Dynamic vs static: BVH cross-test with tight AABB pre-filter.
-	CK_DYNA BroadPair* pairs = NULL;
-	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
-	for (int i = 0; i < asize(pairs); i++) {
-		int a = pairs[i].a, b = pairs[i].b;
-		if (!aabb_overlaps(tight[a], tight[b])) continue;
-		narrowphase_pair(w, a, b, manifolds);
+	// Dynamic vs static: direct AABB scan (avoids BVH cross-test overhead).
+	int static_count = asize(statics);
+	for (int si = 0; si < static_count; si++) {
+		int s = statics[si];
+		AABB ts = tight[s];
+		for (int di = 0; di < sap_count; di++) {
+			int d = sap[di].body_idx;
+			if (!aabb_overlaps(ts, tight[d])) continue;
+			narrowphase_pair(w, s, d, manifolds);
+		}
 	}
-	afree(pairs);
 
 	CK_FREE(tight);
 	afree(sap);
+	afree(statics);
 }
 
 // Rebuild joint_pairs map when joint topology changes (create/destroy joint).
