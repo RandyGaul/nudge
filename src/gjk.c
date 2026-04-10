@@ -100,16 +100,14 @@ static v3 gjk_support(const GJK_Shape* s, v3 d, int* feat)
 	}
 	case GJK_HULL: {
 		v3 ld = rotate(inv(s->hull.rot), d);
-		const v3* restrict verts = s->hull.verts;
-		int n = s->hull.count;
-		float best = dot(verts[0], ld);
+		float best = -1e18f;
 		int bi = 0;
-		for (int i = 1; i < n; i++) {
-			float dd = verts[i].x * ld.x + verts[i].y * ld.y + verts[i].z * ld.z;
+		for (int i = 0; i < s->hull.count; i++) {
+			float dd = dot(s->hull.verts[i], ld);
 			if (dd > best) { best = dd; bi = i; }
 		}
 		*feat = bi;
-		return add(s->hull.center, rotate(s->hull.rot, verts[bi]));
+		return add(s->hull.center, rotate(s->hull.rot, s->hull.verts[bi]));
 	}
 	case GJK_CYLINDER: {
 		v3 axis = sub(s->cylinder.q, s->cylinder.p);
