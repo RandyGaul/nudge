@@ -12,8 +12,6 @@ int g_hull_trace;
 // Support function: furthest vertex along a direction.
 static v3 hull_support(const Hull* hull, v3 dir)
 {
-	// Fast path: unit box support is sign selection (3 comparisons vs 8 dot products).
-	if (hull->verts == s_box_verts) return V3(dir.x >= 0.0f ? 1.0f : -1.0f, dir.y >= 0.0f ? 1.0f : -1.0f, dir.z >= 0.0f ? 1.0f : -1.0f);
 	float best = -1e18f;
 	int best_i = 0;
 	for (int i = 0; i < hull->vert_count; i++) {
