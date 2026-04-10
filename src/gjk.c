@@ -530,13 +530,14 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	int use_index_term = shapeA->type != GJK_CYLINDER && shapeB->type != GJK_CYLINDER;
 	int iter = 0;
 	while (iter < GJK_MAX_ITERS) {
+		__assume(simplex.count >= 1 && simplex.count <= 4);
 		if (simplex.count > 1) {
 			int solved;
 			switch (simplex.count) {
 			case 2: solved = gjk_solve2(&simplex); break;
 			case 3: solved = gjk_solve3(&simplex); break;
 			case 4: solved = gjk_solve4(&simplex); break;
-			default: solved = 0; break;
+			default: __assume(0);
 			}
 			if (!solved) break;
 		}
