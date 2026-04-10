@@ -828,9 +828,8 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 
 	double t_fill_start = perf_now();
 
-	// Zero buffers
-	memset(c->diag_data, 0, sizeof(c->diag_data));
-	memset(c->diag_D, 0, sizeof(c->diag_D));
+	// Zero only the used portion of diagonal blocks (nc out of LDL_MAX_NODES).
+	for (int i = 0; i < nc; i++) { memset(c->diag_data[i], 0, sizeof(c->diag_data[i])); memset(c->diag_D[i], 0, sizeof(c->diag_D[i])); }
 	if (c->L_factors) memset(c->L_factors, 0, t->L_factors_size * sizeof(double));
 
 	// Compute and store Jacobians for all constraints.
