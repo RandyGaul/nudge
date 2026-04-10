@@ -46,7 +46,7 @@ typedef struct GJK_Shape
 		struct { v3 center; } point;
 		struct { v3 p, q; } segment;
 		struct { v3 center; v3 rot_row0, rot_row1, rot_row2; v3 inv_row0, inv_row1, inv_row2; v3 half_extents; } box;
-		struct { v3 center; v3 rot_row0, rot_row1, rot_row2; v3 inv_row0, inv_row1, inv_row2; const v3* verts; const float* soa; const HalfEdge* edges; const int* vert_edge; int count; } hull;
+		struct { v3 center; v3 rot_row0, rot_row1, rot_row2; v3 inv_row0, inv_row1, inv_row2; const v3* verts; const float* soa; const HalfEdge* edges; const int* vert_edge; int count; int hint; } hull;
 		struct { v3 p, q; float radius; v3 axis; float inv_axis_len; } cylinder;
 	};
 } GJK_Shape;
@@ -119,10 +119,10 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 // O(sqrt(n)) expected for convex hulls vs O(n) for linear scan.
 // Hill-climbing support: walk vertex adjacency graph from vertex 0.
 // Ring walk: next outgoing edge from v = edges[current ^ 1].next
-static int gjk_hull_support_climb(const v3* verts, const HalfEdge* edges, const int* vert_edge, v3 ld)
+static int gjk_hull_support_climb(const v3* verts, const HalfEdge* edges, const int* vert_edge, v3 ld, int start)
 {
-	int best = 0;
-	float best_d = dot(verts[0], ld);
+	int best = start;
+	float best_d = dot(verts[start], ld);
 	for (;;) {
 		int e = vert_edge[best];
 		if (e < 0) break;
@@ -212,7 +212,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
 }
 // Support macro: dispatches per shape type. Box/cylinder/hull-scan are functions to reduce code size.
 #define gjk_support(shape, dir, out_feat, out_point) do {                                                                 \
-	const GJK_Shape* sp = (shape); v3 sd = (dir);                                                                         \
+	GJK_Shape* sp = (shape); v3 sd = (dir);                                                                               \
 	switch (sp->type) {                                                                                                   \
 	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                               \
 	case GJK_SEGMENT: {                                                                                                   \
@@ -223,8 +223,9 @@ static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
 	case GJK_HULL: {                                                                                                      \
 		v3 ld = gjk_mat_rotate(sp->hull.inv_row0, sp->hull.inv_row1, sp->hull.inv_row2, sd);                               \
 		int hbi = (sp->hull.vert_edge && sp->hull.count > 32)                                                              \
-			? gjk_hull_support_climb(sp->hull.verts, sp->hull.edges, sp->hull.vert_edge, ld)                                \
+			? gjk_hull_support_climb(sp->hull.verts, sp->hull.edges, sp->hull.vert_edge, ld, sp->hull.hint)                 \
 			: gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, ld);                                     \
+		sp->hull.hint = hbi;                                                                                               \
 		*(out_feat) = hbi;                                                                                                \
 		(out_point) = add(sp->hull.center, gjk_mat_rotate(sp->hull.rot_row0, sp->hull.rot_row1, sp->hull.rot_row2,         \
 		                  sp->hull.verts[hbi]));                                                                           \
