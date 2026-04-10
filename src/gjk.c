@@ -47,7 +47,7 @@ typedef struct GJK_Shape
 		struct { v3 p, q; } segment;
 		struct { v3 center; v3 col0, col1, col2; v3 half_extents; } box;
 		struct { v3 center; v3 col0, col1, col2; const v3* verts; const float* soa; const HalfEdge* edges; const int* vert_edge; int count; int hint; } hull;
-		struct { v3 p, q; float radius; v3 axis; float inv_axis_len; } cylinder;
+		struct { v3 mid; v3 half_axis; float radius; v3 axis; float inv_axis_len; } cylinder;
 	};
 } GJK_Shape;
 static GJK_Shape gjk_sphere(v3 center, float radius) { return (GJK_Shape){ .type = GJK_POINT, .radius = radius, .point.center = center }; }
@@ -88,7 +88,9 @@ static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius) {
 	v3 axis = sub(q, p);
 	float al = len(axis);
 	float inv_al = al > FLT_EPSILON ? 1.0f / al : 0.0f;
-	return (GJK_Shape){ .type = GJK_CYLINDER, .cylinder.p = p, .cylinder.q = q, .cylinder.radius = radius, .cylinder.axis = scale(axis, inv_al), .cylinder.inv_axis_len = inv_al };
+	v3 mid = scale(add(p, q), 0.5f);
+	v3 half_axis = scale(axis, 0.5f);
+	return (GJK_Shape){ .type = GJK_CYLINDER, .cylinder.mid = mid, .cylinder.half_axis = half_axis, .cylinder.radius = radius, .cylinder.axis = scale(axis, inv_al), .cylinder.inv_axis_len = inv_al };
 }
 // Hull convenience: pre-scale vertices and build shape.
 // Caller must keep scaled_verts alive for the duration of the GJK call.
@@ -209,9 +211,12 @@ static v3 gjk_box_support(const GJK_Shape* sp, v3 sd, int* feat)
 static v3 gjk_cylinder_support(const GJK_Shape* sp, v3 sd, int* feat)
 {
 	v3 cu = sp->cylinder.axis;
-	if (sp->cylinder.inv_axis_len == 0.0f) { *feat = 0; return sp->cylinder.p; }
-	float cda = dot(sd, cu); int cf = cda >= 0.0f; *feat = cf;
-	v3 cbase = cf ? sp->cylinder.q : sp->cylinder.p;
+	if (sp->cylinder.inv_axis_len == 0.0f) { *feat = 0; return sp->cylinder.mid; }
+	float cda = dot(sd, cu);
+	*feat = cda >= 0.0f;
+	// Branchless base: mid + copysign(half_axis, da)
+	__m128 sign = _mm_and_ps(_mm_set1_ps(cda), _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000)));
+	v3 cbase = add(sp->cylinder.mid, (v3){ .m = _mm_xor_ps(sp->cylinder.half_axis.m, sign) });
 	v3 cdp = sub(sd, scale(cu, cda)); float cpl = len(cdp);
 	return (cpl > FLT_EPSILON) ? add(cbase, scale(cdp, sp->cylinder.radius / cpl)) : cbase;
 }
@@ -248,7 +253,7 @@ static v3 gjk_center(const GJK_Shape* s)
 	case GJK_SEGMENT:  return scale(add(s->segment.p, s->segment.q), 0.5f);
 	case GJK_BOX:      return s->box.center;
 	case GJK_HULL:     return s->hull.center;
-	case GJK_CYLINDER: return scale(add(s->cylinder.p, s->cylinder.q), 0.5f);
+	case GJK_CYLINDER: return s->cylinder.mid;
 	}
 	return V3(0,0,0);
 }
