@@ -35,6 +35,12 @@ typedef struct GJK_Result
 	int feat1;  // feature ID on shape A (from contributing simplex vertex)
 	int feat2;  // feature ID on shape B
 } GJK_Result;
+typedef struct GJK_Cache
+{
+	v3 dir;     // separating direction from previous call
+	int hintA;  // hull vertex hint for shape A
+	int hintB;  // hull vertex hint for shape B
+} GJK_Cache;
 // -----------------------------------------------------------------------------
 // Shape types and constructors.
 enum { GJK_POINT, GJK_SEGMENT, GJK_BOX, GJK_HULL, GJK_CYLINDER };
@@ -407,17 +413,20 @@ static int gjk_solve4(GJK_Simplex* s)
 #define GJK_MAX_ITERS         64
 #define GJK_CONTAINMENT_EPS2  1e-8f
 #define GJK_PROGRESS_EPS      1e-4f
-// cache: optional pointer to separating direction from previous call.
-// If non-NULL, used as initial search direction (warm-start) and updated with result.
-static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB, v3* cache)
+// cache: optional warm-start from previous frame (separating direction + hull hints).
+static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restrict shapeB, GJK_Cache* cache)
 {
 	GJK_Result result;
 	GJK_Simplex simplex;
-	v3 init_d = (cache && len2(*cache) > FLT_EPSILON) ? *cache : sub(gjk_center(&shapeB), gjk_center(&shapeA));
+	if (cache) {
+		if (shapeA->type == GJK_HULL) shapeA->hull.hint = cache->hintA;
+		if (shapeB->type == GJK_HULL) shapeB->hull.hint = cache->hintB;
+	}
+	v3 init_d = (cache && len2(cache->dir) > FLT_EPSILON) ? cache->dir : sub(gjk_center(shapeB), gjk_center(shapeA));
 	if (len2(init_d) < FLT_EPSILON) init_d = V3(1, 0, 0);
 	int fA, fB;
-	v3 sA; gjk_support(&shapeA, init_d, &fA, sA);
-	v3 sB; gjk_support(&shapeB, neg(init_d), &fB, sB);
+	v3 sA; gjk_support(shapeA, init_d, &fA, sA);
+	v3 sB; gjk_support(shapeB, neg(init_d), &fB, sB);
 	simplex.v[0].point1 = sA;
 	simplex.v[0].point2 = sB;
 	simplex.v[0].point = sub(sB, sA);
@@ -445,8 +454,8 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB, v3* cache)
 		if (dsq <= GJK_CONTAINMENT_EPS2) break;
 		if (dsq >= dsq_prev) break;
 		dsq_prev = dsq;
-		gjk_support(&shapeA, closest, &fA, sA);
-		gjk_support(&shapeB, neg(closest), &fB, sB);
+		gjk_support(shapeA, closest, &fA, sA);
+		gjk_support(shapeB, neg(closest), &fB, sB);
 		v3 w = sub(sB, sA);
 		float max_vert2 = 0.0f;
 		for (int i = 0; i < simplex.count; i++) {
@@ -468,10 +477,14 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB, v3* cache)
 	v3 sep = sub(result.point2, result.point1);
 	result.distance = len(sep);
 	result.iterations = iter;
-	if (cache) *cache = sep;
+	if (cache) {
+		cache->dir = sep;
+		if (shapeA->type == GJK_HULL) cache->hintA = shapeA->hull.hint;
+		if (shapeB->type == GJK_HULL) cache->hintB = shapeB->hull.hint;
+	}
 	// Post-hoc radius for sphere/capsule core shapes.
-	float rA = shapeA.radius;
-	float rB = shapeB.radius;
+	float rA = shapeA->radius;
+	float rB = shapeB->radius;
 	if (rA != 0.0f || rB != 0.0f) {
 		if (result.distance > FLT_EPSILON) {
 			v3 normal = scale(sep, 1.0f / result.distance);
@@ -488,4 +501,15 @@ static GJK_Result gjk_distance(GJK_Shape shapeA, GJK_Shape shapeB, v3* cache)
 		}
 	}
 	return result;
+}
+// By-value convenience wrapper for callers that construct shapes inline.
+// The v3* cache variant is for callers that don't need hull hint caching.
+static GJK_Result gjk_distance_v(GJK_Shape a, GJK_Shape b, v3* dir_cache)
+{
+	GJK_Cache c = {0};
+	GJK_Cache* cp = NULL;
+	if (dir_cache) { c.dir = *dir_cache; cp = &c; }
+	GJK_Result r = gjk_distance(&a, &b, cp);
+	if (dir_cache) *dir_cache = c.dir;
+	return r;
 }

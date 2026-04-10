@@ -314,7 +314,7 @@ static GJK_Result gjk_query_point_hull(v3 pt, ConvexHull h)
 	v3 scaled[MAX_HULL_VERTS]; float soa[MAX_HULL_VERTS*3];
 	GJK_Shape a = gjk_sphere(pt, 0);
 	GJK_Shape b = gjk_hull_scaled(h.hull, h.center, h.rotation, h.scale, scaled, soa);
-	return gjk_distance(a, b, NULL);
+	return gjk_distance(&a, &b, NULL);
 }
 
 static GJK_Result gjk_query_segment_hull(v3 p, v3 q, ConvexHull h)
@@ -322,7 +322,7 @@ static GJK_Result gjk_query_segment_hull(v3 p, v3 q, ConvexHull h)
 	v3 scaled[MAX_HULL_VERTS]; float soa[MAX_HULL_VERTS*3];
 	GJK_Shape a = gjk_capsule(p, q, 0);
 	GJK_Shape b = gjk_hull_scaled(h.hull, h.center, h.rotation, h.scale, scaled, soa);
-	return gjk_distance(a, b, NULL);
+	return gjk_distance(&a, &b, NULL);
 }
 
 static GJK_Result gjk_query_hull_hull(ConvexHull a, ConvexHull b)
@@ -330,7 +330,7 @@ static GJK_Result gjk_query_hull_hull(ConvexHull a, ConvexHull b)
 	v3 sa[MAX_HULL_VERTS], sb[MAX_HULL_VERTS]; float soa_a[MAX_HULL_VERTS*3], soa_b[MAX_HULL_VERTS*3];
 	GJK_Shape ga = gjk_hull_scaled(a.hull, a.center, a.rotation, a.scale, sa, soa_a);
 	GJK_Shape gb = gjk_hull_scaled(b.hull, b.center, b.rotation, b.scale, sb, soa_b);
-	return gjk_distance(ga, gb, NULL);
+	return gjk_distance(&ga, &gb, NULL);
 }
 
 
