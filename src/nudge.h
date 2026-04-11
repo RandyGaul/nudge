@@ -201,21 +201,27 @@ typedef struct CompactHull
 {
 	uint16_t  vert_count;
 	uint16_t  neighbor_total;
-	uint16_t  face_count;
+	uint16_t  face_count; // 0 until planes are attached
 	uint16_t  _pad;
-	uint16_t* offsets;   // [vert_count + 1]
-	uint16_t* neighbors; // [neighbor_total]
-	float*    verts_x;   // SoA vertex positions
+	uint16_t* offsets;    // [vert_count + 1]
+	uint16_t* neighbors;  // [neighbor_total]
+	float*    verts_x;    // SoA vertex positions
 	float*    verts_y;
 	float*    verts_z;
-	HullPlane* planes;   // [face_count] -- cached from quickhull for bitwise determinism
+	HullPlane* planes;    // NULL until compact_hull_attach_planes(); [face_count] when set
 	v3        centroid;
 } CompactHull;
 
 // Convert a full Hull to compact form. Returns 0 on success, -1 if too many verts.
+// Planes are NOT copied -- call compact_hull_attach_planes() separately if needed.
 int compact_hull32_from_hull(CompactHull32* out, const Hull* hull);
 int compact_hull_from_hull(CompactHull* out, const Hull* hull);
 void compact_hull_free(CompactHull* ch);
+
+// Attach face planes to a CompactHull (on-demand, from a full Hull).
+// Copies hull->planes into ch->planes. After this, face_count > 0 and
+// hull_face_extension_build will use these for bitwise-deterministic output.
+void compact_hull_attach_planes(CompactHull* ch, const Hull* hull);
 
 // On-demand face plane extension for SAT contact generation.
 // Built from compact hull CSR adjacency + vertex positions.
@@ -242,10 +248,9 @@ void hull_face_extension_free(HullFaceExtension* ext);
 // Caller must keep ch and ext alive while using the Hull.
 Hull hull_from_compact(const CompactHull* ch, const HullFaceExtension* ext);
 
-// Validate compact hull round-trip: builds face extension, checks bitwise plane
-// identity with stored planes, verifies Euler/twin/loop invariants.
-// Returns 0 on success, -1 on failure (prints diagnostics to stderr).
-// Call this from tests to guard against code rot in hull reconstruction.
+// Validate compact hull round-trip: builds face extension, verifies
+// Euler/twin/loop invariants. If planes are attached, also checks
+// bitwise plane identity. Returns 0 on success, -1 on failure.
 int compact_hull_validate_roundtrip(const CompactHull* ch);
 
 // -----------------------------------------------------------------------------

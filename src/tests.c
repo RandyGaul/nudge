@@ -1524,6 +1524,10 @@ static void test_quickhull_fuzz(int iterations)
 			if (h->vert_count <= 65535) {
 				CompactHull ch_fuzz;
 				compact_hull_from_hull(&ch_fuzz, h);
+				// Topology-only validation (no planes).
+				if (compact_hull_validate_roundtrip(&ch_fuzz) != 0) total_fails++;
+				// Attach planes, then validate bitwise identity.
+				compact_hull_attach_planes(&ch_fuzz, h);
 				if (compact_hull_validate_roundtrip(&ch_fuzz) != 0) total_fails++;
 				compact_hull_free(&ch_fuzz);
 			}
@@ -11133,6 +11137,7 @@ static void run_tests()
 			Hull* fh = quickhull(bpts, 8);
 			CompactHull fc;
 			compact_hull_from_hull(&fc, fh);
+			compact_hull_attach_planes(&fc, fh);
 			HullFaceExtension ext;
 			TEST_ASSERT(hull_face_extension_build(&ext, &fc) == 0);
 			TEST_ASSERT(ext.face_count == fh->face_count);
@@ -11203,6 +11208,7 @@ static void run_tests()
 			Hull* fh = quickhull(ico, 12);
 			CompactHull fc;
 			compact_hull_from_hull(&fc, fh);
+			compact_hull_attach_planes(&fc, fh);
 			HullFaceExtension ext;
 			TEST_ASSERT(hull_face_extension_build(&ext, &fc) == 0);
 			TEST_ASSERT(ext.face_count == 20); // icosahedron has 20 faces
@@ -11260,6 +11266,7 @@ static void run_tests()
 			Hull* fh = quickhull(cpts, asize(cpts));
 			CompactHull fc;
 			compact_hull_from_hull(&fc, fh);
+			compact_hull_attach_planes(&fc, fh);
 			HullFaceExtension ext;
 			TEST_ASSERT(hull_face_extension_build(&ext, &fc) == 0);
 			TEST_ASSERT(fc.vert_count - ext.edge_count / 2 + ext.face_count == 2);
@@ -11290,6 +11297,7 @@ static void run_tests()
 			Hull* fh = quickhull(bpts, 8);
 			CompactHull fc;
 			compact_hull_from_hull(&fc, fh);
+			compact_hull_attach_planes(&fc, fh);
 			HullFaceExtension ext;
 			hull_face_extension_build(&ext, &fc);
 			Hull reassembled = hull_from_compact(&fc, &ext);

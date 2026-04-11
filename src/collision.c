@@ -1628,12 +1628,16 @@ int compact_hull_from_hull(CompactHull* out, const Hull* hull)
 	int total = 0;
 	hull_build_csr(hull, 65535, out->offsets, 2, out->neighbors, 2, &total);
 	out->neighbor_total = (uint16_t)total;
-
-	// Cache face planes from quickhull for bitwise-deterministic reconstruction.
-	out->face_count = (uint16_t)hull->face_count;
-	out->planes = (HullPlane*)CK_ALLOC(hull->face_count * sizeof(HullPlane));
-	memcpy(out->planes, hull->planes, hull->face_count * sizeof(HullPlane));
+	// Planes left NULL -- caller uses compact_hull_attach_planes() on demand.
 	return 0;
+}
+
+void compact_hull_attach_planes(CompactHull* ch, const Hull* hull)
+{
+	if (ch->planes) CK_FREE(ch->planes);
+	ch->face_count = (uint16_t)hull->face_count;
+	ch->planes = (HullPlane*)CK_ALLOC(hull->face_count * sizeof(HullPlane));
+	memcpy(ch->planes, hull->planes, hull->face_count * sizeof(HullPlane));
 }
 
 void compact_hull_free(CompactHull* ch)
@@ -1668,21 +1672,21 @@ int compact_hull_validate_roundtrip(const CompactHull* ch)
 		}
 	}
 
-	// Face count matches stored planes.
-	if (ext.face_count != ch->face_count) {
-		fprintf(stderr, "compact_hull_validate: face count mismatch ext=%d stored=%d\n", ext.face_count, ch->face_count);
-		ok = 0;
-	}
-
-	// Bitwise plane identity: every extension plane must match a stored plane exactly.
-	for (int f = 0; f < ext.face_count && ok; f++) {
-		int found = 0;
-		for (int g = 0; g < ch->face_count; g++) {
-			if (memcmp(&ext.planes[f], &ch->planes[g], sizeof(HullPlane)) == 0) { found = 1; break; }
-		}
-		if (!found) {
-			fprintf(stderr, "compact_hull_validate: plane %d has no bitwise match (n=%g,%g,%g d=%g)\n", f, ext.planes[f].normal.x, ext.planes[f].normal.y, ext.planes[f].normal.z, ext.planes[f].offset);
+	// If planes are attached, check bitwise identity.
+	if (ch->planes && ch->face_count > 0) {
+		if (ext.face_count != ch->face_count) {
+			fprintf(stderr, "compact_hull_validate: face count mismatch ext=%d stored=%d\n", ext.face_count, ch->face_count);
 			ok = 0;
+		}
+		for (int f = 0; f < ext.face_count && ok; f++) {
+			int found = 0;
+			for (int g = 0; g < ch->face_count; g++) {
+				if (memcmp(&ext.planes[f], &ch->planes[g], sizeof(HullPlane)) == 0) { found = 1; break; }
+			}
+			if (!found) {
+				fprintf(stderr, "compact_hull_validate: plane %d has no bitwise match\n", f);
+				ok = 0;
+			}
 		}
 	}
 
@@ -1780,15 +1784,19 @@ int hull_face_extension_build(HullFaceExtension* out, const CompactHull* ch)
 		} while (e != i);
 		apush(faces_arr, ((HullFace){ .edge = (uint16_t)best_start }));
 
-		// Use planes stored in the compact hull (captured from quickhull for bitwise determinism).
-		// Match by Newell normal direction since face ordering may differ.
-		HullPlane recomputed = hull_newell_plane(out->edge_next, out->edge_origin, ch->verts_x, ch->verts_y, ch->verts_z, best_start, ch->centroid);
-		float best_dot = -2; int best_match = fi;
-		for (int g = 0; g < ch->face_count; g++) {
-			float d = dot(recomputed.normal, ch->planes[g].normal);
-			if (d > best_dot) { best_dot = d; best_match = g; }
+		if (ch->planes && ch->face_count > 0) {
+			// Planes attached: match by Newell normal direction for bitwise determinism.
+			HullPlane recomputed = hull_newell_plane(out->edge_next, out->edge_origin, ch->verts_x, ch->verts_y, ch->verts_z, best_start, ch->centroid);
+			float best_dot = -2; int best_match = fi;
+			for (int g = 0; g < ch->face_count; g++) {
+				float d = dot(recomputed.normal, ch->planes[g].normal);
+				if (d > best_dot) { best_dot = d; best_match = g; }
+			}
+			apush(planes_arr, ch->planes[best_match]);
+		} else {
+			// No planes attached: recompute from Newell method.
+			apush(planes_arr, hull_newell_plane(out->edge_next, out->edge_origin, ch->verts_x, ch->verts_y, ch->verts_z, best_start, ch->centroid));
 		}
-		apush(planes_arr, ch->planes[best_match]);
 	}
 
 	out->face_count = (uint16_t)face_count;
