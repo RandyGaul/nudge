@@ -396,12 +396,13 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 	}
 
 	// Motor/limit bias for DOF 5.
+	// When a motor is present, it dominates the bias and the lo/hi clamps handle
+	// limit enforcement. Falling through to Baumgarte on any nonzero pos_error
+	// would disable the motor whenever the arm sits even a float-epsilon past a
+	// limit, so the motor can never drive the arm back off the limit.
 	if (s->type == JOINT_HINGE && s->dof == 6) {
 		float hmin = j->hinge.limit_min, hmax = j->hinge.limit_max;
-		if (s->pos_error[5] != 0.0f) {
-			// Limit active: strong Baumgarte correction to push back.
-			s->bias[5] = (0.2f / dt) * s->pos_error[5];
-		} else if (j->hinge.motor_max_impulse > 0.0f) {
+		if (j->hinge.motor_max_impulse > 0.0f) {
 			float speed = j->hinge.motor_speed;
 			// Clamp motor speed so it can't overshoot limits in one substep.
 			// Jv = omega_a.axis - omega_b.axis = -d(angle)/dt. Convergence: d(angle)/dt = bias.
@@ -415,6 +416,9 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 				if (hmin != 0.0f) { float min_speed = (hmin - angle) / dt; if (speed < min_speed) speed = fminf(min_speed, 0.0f); }
 			}
 			s->bias[5] = speed;
+		} else if (s->pos_error[5] != 0.0f) {
+			// No motor, limit active: strong Baumgarte correction to push back.
+			s->bias[5] = (0.2f / dt) * s->pos_error[5];
 		}
 	}
 	if (s->type == JOINT_PRISMATIC && j->prismatic.motor_max_impulse > 0.0f && s->dof == 6) {

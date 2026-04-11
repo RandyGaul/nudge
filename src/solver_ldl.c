@@ -858,6 +858,20 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 
 	double t_fill_start = perf_now();
 
+	// Lazy allocation of solve scratch buffers. The top-level ldl_position_correct
+	// preallocates these, but direct callers (tests, ldl_island_solve standalone)
+	// pass through numeric_factor first, so ensure they're ready.
+	if (!c->solve_rhs && c->n > 0) {
+		afit(c->solve_rhs, c->n);
+		asetlen(c->solve_rhs, c->n);
+		afit(c->solve_lambda, c->n);
+		asetlen(c->solve_lambda, c->n);
+	}
+	if (!c->L_factors && c->topo && c->topo->L_factors_size > 0) {
+		afit(c->L_factors, c->topo->L_factors_size);
+		asetlen(c->L_factors, c->topo->L_factors_size);
+	}
+
 	// Zero only the used portion of diagonal blocks (nc out of LDL_MAX_NODES).
 	for (int i = 0; i < nc; i++) { memset(c->diag_data[i], 0, sizeof(c->diag_data[i])); memset(c->diag_D[i], 0, sizeof(c->diag_D[i])); }
 	if (c->L_factors) memset(c->L_factors, 0, t->L_factors_size * sizeof(double));

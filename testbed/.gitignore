@@ -1,0 +1,22 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Native build
+native/build/
+native/out/
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.obj
+*.exe
+
+# IDE
+.idea/
+*.swp
+*~

@@ -180,6 +180,7 @@ static void test_soft_spring_pulls_together()
 		 // error * ptv
 		.joint_idx = 0,
 	};
+	test_fill_bs_rows(&sw.sol_joints[0]);
 	{ v3 _b = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
 
 	LDL_Cache c = {0};
@@ -237,9 +238,10 @@ static void test_soft_spring_no_overshoot()
 		.body_a = 0, .body_b = 1,
 		.r_a = V3(0,0,0), .r_b = V3(0,0,0),
 		.softness = soft,
-		
+
 		.joint_idx = 0,
 	};
+	test_fill_bs_rows(&sw.sol_joints[0]);
 	{ v3 _b = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
 
 	LDL_Cache c = {0};
@@ -296,9 +298,10 @@ static void test_soft_spring_heavy_light()
 		.body_a = 0, .body_b = 1,
 		.r_a = V3(0,0,0), .r_b = V3(0,0,0),
 		.softness = soft,
-		
+
 		.joint_idx = 0,
 	};
+	test_fill_bs_rows(&sw.sol_joints[0]);
 	{ v3 _b = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
 
 	LDL_Cache c = {0};
@@ -354,6 +357,7 @@ static void test_rigid_constraint_zeroes_velocity()
 		.softness = 0, // rigid: no position bias in velocity solve
 		.joint_idx = 0,
 	};
+	test_fill_bs_rows(&sw.sol_joints[0]);
 
 	float sub_dt = 1.0f / 240.0f;
 
@@ -408,6 +412,7 @@ static void test_rigid_constraint_with_lever()
 		.r_a = r_a, .r_b = V3(0,0,0),
 		.softness = 0, .joint_idx = 0,
 	};
+	test_fill_bs_rows(&sw.sol_joints[0]);
 
 	float sub_dt = 1.0f / 240.0f;
 	LDL_Cache c = {0};

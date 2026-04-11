@@ -143,8 +143,8 @@ static void test_pgs_vs_ldl_chain_gravity()
 	bodies_pgs[2].velocity.y += g * sub_dt;
 
 	SolverJoint pgs_sols[2] = {
-		{ .body_a = 0, .body_b = 1, .r_a = V3(0,0,0), .r_b = V3(0,1,0), .softness = 0 },
-		{ .body_a = 1, .body_b = 2, .r_a = V3(0,-1,0), .r_b = V3(0,0,0), .softness = 0 },
+		{ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .r_a = V3(0,0,0), .r_b = V3(0,1,0), .softness = 0 },
+		{ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 1, .body_b = 2, .r_a = V3(0,-1,0), .r_b = V3(0,0,0), .softness = 0 },
 	};
 	compute_ball_socket_rows(&pgs_sols[0], &bodies_pgs[0], &bodies_pgs[1]);
 	compute_ball_socket_rows(&pgs_sols[1], &bodies_pgs[1], &bodies_pgs[2]);
@@ -254,10 +254,10 @@ static void test_pgs_vs_ldl_star_gravity()
 	bodies_pgs[4].velocity.y += g * sub_dt;
 
 	SolverJoint pgs_sols[4] = {
-		{ .body_a = 0, .body_b = 1, .r_a = V3(0,0,0), .r_b = V3(0,1,0), .softness = 0 },
-		{ .body_a = 1, .body_b = 2, .r_a = V3(1,0,0), .r_b = V3(0,0,0), .softness = 0 },
-		{ .body_a = 1, .body_b = 3, .r_a = V3(-1,0,0), .r_b = V3(0,0,0), .softness = 0 },
-		{ .body_a = 1, .body_b = 4, .r_a = V3(0,0,1), .r_b = V3(0,0,0), .softness = 0 },
+		{ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .r_a = V3(0,0,0), .r_b = V3(0,1,0), .softness = 0 },
+		{ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 1, .body_b = 2, .r_a = V3(1,0,0), .r_b = V3(0,0,0), .softness = 0 },
+		{ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 1, .body_b = 3, .r_a = V3(-1,0,0), .r_b = V3(0,0,0), .softness = 0 },
+		{ .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 1, .body_b = 4, .r_a = V3(0,0,1), .r_b = V3(0,0,0), .softness = 0 },
 	};
 	for (int i = 0; i < 4; i++)
 		compute_ball_socket_rows(&pgs_sols[i], &bodies_pgs[pgs_sols[i].body_a], &bodies_pgs[pgs_sols[i].body_b]);

@@ -62,6 +62,7 @@ static BodyHot make_body(float mass, float inertia)
 		float inv_i = (inertia > 0) ? 1.0f / inertia : 0;
 		b.inv_inertia_local = V3(inv_i, inv_i, inv_i);
 	}
+	body_compute_inv_inertia_world(&b);
 	return b;
 }
 
@@ -78,6 +79,7 @@ static BodyHot make_body_full(float mass, v3 inertia, quat rot)
 			inertia.z > 0 ? 1.0f / inertia.z : 0
 		);
 	}
+	body_compute_inv_inertia_world(&b);
 	return b;
 }
 

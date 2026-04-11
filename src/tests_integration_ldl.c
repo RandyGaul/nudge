@@ -266,8 +266,10 @@ static void test_integ_chain_3()
 	iw.body_count = 4;
 	for (int i = 0; i < 4; i++) iw.bodies[i] = make_body((float)(2 + i), (float)(4 + i));
 	// joint_count set below (was bs: 3
-	for (int i = 0; i < 3; i++)
+	for (int i = 0; i < 3; i++) {
 		iw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = i, .body_b = i + 1 };
+		test_fill_bs_rows(&iw.sol_joints[i]);
+	}
 
 	LDL_Cache c = {0};
 	for (int i = 0; i < 3; i++) {
@@ -294,8 +296,10 @@ static void test_integ_chain_5()
 	iw.body_count = 6;
 	for (int i = 0; i < 6; i++) iw.bodies[i] = make_body((float)(1 + i), (float)(2 + i));
 	// joint_count set below (was bs: 5
-	for (int i = 0; i < 5; i++)
+	for (int i = 0; i < 5; i++) {
 		iw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = i, .body_b = i + 1 };
+		test_fill_bs_rows(&iw.sol_joints[i]);
+	}
 
 	LDL_Cache c = {0};
 	for (int i = 0; i < 5; i++) {
@@ -401,8 +405,10 @@ static void test_integ_star_6()
 	for (int i = 1; i <= 6; i++) iw.bodies[i] = make_body((float)(1 + i), (float)(2 + i));
 	// joint_count set below (was bs: 6
 	v3 dirs[6] = { V3(1,0,0), V3(-1,0,0), V3(0,1,0), V3(0,-1,0), V3(0,0,1), V3(0,0,-1) };
-	for (int i = 0; i < 6; i++)
+	for (int i = 0; i < 6; i++) {
 		iw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = dirs[i], .r_b = scale(dirs[i], -1), .body_a = 0, .body_b = i + 1 };
+		test_fill_bs_rows(&iw.sol_joints[i]);
+	}
 
 	LDL_Cache c = {0};
 	for (int i = 0; i < 6; i++) {
@@ -615,8 +621,10 @@ static void test_integ_chain_3_mixed_mass()
 	iw.bodies[2] = make_body(1, 1);
 	iw.bodies[3] = make_body(100, 100);
 	// joint_count set below (was bs: 3
-	for (int i = 0; i < 3; i++)
+	for (int i = 0; i < 3; i++) {
 		iw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = i, .body_b = i + 1 };
+		test_fill_bs_rows(&iw.sol_joints[i]);
+	}
 
 	LDL_Cache c = {0};
 	for (int i = 0; i < 3; i++) {
