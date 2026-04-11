@@ -1750,6 +1750,11 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	CK_DYNA SAP_Entry* sap = NULL;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
+		// Skip tight AABB for sleeping dynamic bodies (static AABBs still needed for cross test)
+		if (w->body_hot[i].inv_mass > 0.0f) {
+			int isl = w->body_cold[i].island_id;
+			if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) { tight[i] = aabb_empty(); continue; }
+		}
 		tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]);
 		if (w->body_hot[i].inv_mass > 0.0f) { scene_bounds = aabb_merge(scene_bounds, tight[i]); }
 	}
