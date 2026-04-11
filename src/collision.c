@@ -1680,10 +1680,11 @@ static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
 		for (int j = i + 1; j < count; j++) {
 			if (!split_alive(w->body_gen, j)) continue;
 			if (asize(w->body_cold[j].shapes) == 0) continue;
-			if (w->body_hot[i].inv_mass == 0.0f && w->body_hot[j].inv_mass == 0.0f) continue;
-			// Skip sleeping-vs-sleeping pairs
+			// Skip pair if both bodies are inactive (static or sleeping)
 			int isl_i = w->body_cold[i].island_id, isl_j = w->body_cold[j].island_id;
-			if (isl_i >= 0 && isl_j >= 0 && (w->island_gen[isl_i] & 1) && (w->island_gen[isl_j] & 1) && !w->islands[isl_i].awake && !w->islands[isl_j].awake) continue;
+			int inactive_i = w->body_hot[i].inv_mass == 0.0f || (isl_i >= 0 && (w->island_gen[isl_i] & 1) && !w->islands[isl_i].awake);
+			int inactive_j = w->body_hot[j].inv_mass == 0.0f || (isl_j >= 0 && (w->island_gen[isl_j] & 1) && !w->islands[isl_j].awake);
+			if (inactive_i && inactive_j) continue;
 			if (jointed_pair_skip(w->joint_pairs, i, j)) continue;
 			narrowphase_pair(w, i, j, manifolds);
 		}
@@ -1747,6 +1748,8 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		for (int j = i + 1; j < sap_count && sap[j].min_val <= max_val; j++) {
 			int b = sap[j].body_idx;
 			if (!aabb_overlaps(ta, tight[b])) continue;
+			// Skip pair if both bodies are inactive (sleeping dynamic-dynamic)
+			// Note: SAP only contains dynamic bodies (inv_mass > 0), so no static check needed
 			int isl_b = w->body_cold[b].island_id;
 			if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
 			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
@@ -1762,6 +1765,9 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	for (int i = 0; i < asize(pairs); i++) {
 		int a = pairs[i].a, b = pairs[i].b;
 		if (!aabb_overlaps(tight[a], tight[b])) continue;
+		// Skip sleeping dynamic vs static (static is always inactive)
+		int isl_a = w->body_cold[a].island_id;
+		if (isl_a >= 0 && (w->island_gen[isl_a] & 1) && !w->islands[isl_a].awake) continue;
 		apush(dd_pairs, ((BroadPair){ a, b }));
 	}
 	afree(pairs);
