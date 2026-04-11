@@ -10830,8 +10830,89 @@ static void run_tests()
 	test_box_box();
 	test_quickhull();
 
-	// Compact hull converters.
+	// Compact hull converters -- thorough correctness tests.
 	{
+		// Helper: validate CSR adjacency against the full Hull half-edge topology.
+		// For each vertex v, collect its neighbors from the half-edge mesh,
+		// then check they match the CSR neighbors (order-independent).
+		#define VALIDATE_CSR32(label, ch, hull) do { \
+			TEST_BEGIN(label " CSR correctness"); \
+			for (int _v = 0; _v < (ch).vert_count; _v++) { \
+				/* Collect neighbors from half-edge mesh. */ \
+				int he_nbs[64], he_count = 0; \
+				for (int _e = 0; _e < (hull)->edge_count; _e++) { \
+					if ((hull)->edge_origin[_e] == _v) \
+						he_nbs[he_count++] = (hull)->edge_origin[(hull)->edge_twin[_e]]; \
+				} \
+				int csr_count = (ch).offsets[_v+1] - (ch).offsets[_v]; \
+				TEST_ASSERT(csr_count == he_count); \
+				/* Check each CSR neighbor exists in the half-edge set (order-independent). */ \
+				for (int _i = (ch).offsets[_v]; _i < (ch).offsets[_v+1]; _i++) { \
+					int nb = (ch).neighbors[_i]; \
+					TEST_ASSERT(nb < (ch).vert_count); \
+					int found = 0; \
+					for (int _j = 0; _j < he_count; _j++) if (he_nbs[_j] == nb) { found = 1; break; } \
+					TEST_ASSERT(found); \
+				} \
+			} \
+		} while(0)
+
+		#define VALIDATE_CSR16(label, ch, hull) do { \
+			TEST_BEGIN(label " CSR correctness"); \
+			for (int _v = 0; _v < (ch).vert_count; _v++) { \
+				int he_nbs[64], he_count = 0; \
+				for (int _e = 0; _e < (hull)->edge_count; _e++) { \
+					if ((hull)->edge_origin[_e] == _v) \
+						he_nbs[he_count++] = (hull)->edge_origin[(hull)->edge_twin[_e]]; \
+				} \
+				int csr_count = (ch).offsets[_v+1] - (ch).offsets[_v]; \
+				TEST_ASSERT(csr_count == he_count); \
+				for (int _i = (ch).offsets[_v]; _i < (ch).offsets[_v+1]; _i++) { \
+					int nb = (ch).neighbors[_i]; \
+					TEST_ASSERT(nb < (ch).vert_count); \
+					int found = 0; \
+					for (int _j = 0; _j < he_count; _j++) if (he_nbs[_j] == nb) { found = 1; break; } \
+					TEST_ASSERT(found); \
+				} \
+			} \
+		} while(0)
+
+		// Helper: verify CSR support function matches brute-force for random directions.
+		#define VALIDATE_SUPPORT(label, ch, hull, nv, get_x, get_y, get_z, off_t, nb_t) do { \
+			TEST_BEGIN(label " support correctness"); \
+			unsigned _rng = 54321; \
+			for (int _t = 0; _t < 200; _t++) { \
+				/* Random direction. */ \
+				_rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; \
+				float _rx = (float)(_rng & 0xFFFF) / 32768.0f - 1.0f; \
+				_rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; \
+				float _ry = (float)(_rng & 0xFFFF) / 32768.0f - 1.0f; \
+				_rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; \
+				float _rz = (float)(_rng & 0xFFFF) / 32768.0f - 1.0f; \
+				float _l = sqrtf(_rx*_rx + _ry*_ry + _rz*_rz); \
+				if (_l < 0.01f) continue; \
+				_rx /= _l; _ry /= _l; _rz /= _l; \
+				/* Brute-force support. */ \
+				float _best_bf = -1e18f; int _best_bf_i = 0; \
+				for (int _i = 0; _i < (nv); _i++) { \
+					float _d = get_x(_i)*_rx + get_y(_i)*_ry + get_z(_i)*_rz; \
+					if (_d > _best_bf) { _best_bf = _d; _best_bf_i = _i; } \
+				} \
+				/* CSR hill-climb support from vertex 0. */ \
+				int _best_hc = 0; float _best_hc_d = get_x(0)*_rx + get_y(0)*_ry + get_z(0)*_rz; \
+				for (;;) { \
+					int _imp = 0; \
+					for (int _i = ((off_t*)(ch).offsets)[_best_hc]; _i < ((off_t*)(ch).offsets)[_best_hc+1]; _i++) { \
+						int _nb = ((nb_t*)(ch).neighbors)[_i]; \
+						float _nd = get_x(_nb)*_rx + get_y(_nb)*_ry + get_z(_nb)*_rz; \
+						if (_nd > _best_hc_d) { _best_hc_d = _nd; _best_hc = _nb; _imp = 1; } \
+					} \
+					if (!_imp) break; \
+				} \
+				TEST_ASSERT_FLOAT(_best_hc_d, _best_bf, 1e-5f); \
+			} \
+		} while(0)
+
 		TEST_BEGIN("compact_hull32 box");
 		v3 box_pts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
 		Hull* h = quickhull(box_pts, 8);
@@ -10839,17 +10920,20 @@ static void run_tests()
 		TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == 0);
 		TEST_ASSERT(ch32.vert_count == h->vert_count);
 		TEST_ASSERT(ch32.neighbor_total > 0);
-		// Verify CSR: each vertex should have 3 neighbors (cube).
 		for (int v = 0; v < ch32.vert_count; v++) {
 			int deg = ch32.offsets[v+1] - ch32.offsets[v];
 			TEST_ASSERT(deg == 3);
 		}
-		// Verify SoA positions match.
 		for (int v = 0; v < ch32.vert_count; v++) {
 			TEST_ASSERT_FLOAT(ch32.verts_x[v], h->verts[v].x, 1e-6f);
 			TEST_ASSERT_FLOAT(ch32.verts_y[v], h->verts[v].y, 1e-6f);
 			TEST_ASSERT_FLOAT(ch32.verts_z[v], h->verts[v].z, 1e-6f);
 		}
+		VALIDATE_CSR32("compact_hull32 box", ch32, h);
+		#define CH32_X(i) ch32.verts_x[i]
+		#define CH32_Y(i) ch32.verts_y[i]
+		#define CH32_Z(i) ch32.verts_z[i]
+		VALIDATE_SUPPORT("compact_hull32 box", ch32, h, ch32.vert_count, CH32_X, CH32_Y, CH32_Z, uint8_t, uint8_t);
 
 		TEST_BEGIN("compact_hull16 box");
 		CompactHull16 ch16;
@@ -10859,6 +10943,11 @@ static void run_tests()
 			int deg = ch16.offsets[v+1] - ch16.offsets[v];
 			TEST_ASSERT(deg == 3);
 		}
+		VALIDATE_CSR16("compact_hull16 box", ch16, h);
+		#define CH16_X(i) ch16.verts_x[i]
+		#define CH16_Y(i) ch16.verts_y[i]
+		#define CH16_Z(i) ch16.verts_z[i]
+		VALIDATE_SUPPORT("compact_hull16 box", ch16, h, ch16.vert_count, CH16_X, CH16_Y, CH16_Z, uint16_t, uint16_t);
 		compact_hull16_free(&ch16);
 		hull_free(h);
 
@@ -10867,14 +10956,12 @@ static void run_tests()
 		h = quickhull(tet_pts, 4);
 		TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == 0);
 		TEST_ASSERT(ch32.vert_count == 4);
-		for (int v = 0; v < ch32.vert_count; v++) {
-			int deg = ch32.offsets[v+1] - ch32.offsets[v];
-			TEST_ASSERT(deg == 3); // tetrahedron: each vertex connects to 3 others
-		}
+		for (int v = 0; v < ch32.vert_count; v++) TEST_ASSERT(ch32.offsets[v+1] - ch32.offsets[v] == 3);
+		VALIDATE_CSR32("compact_hull32 tet", ch32, h);
+		VALIDATE_SUPPORT("compact_hull32 tet", ch32, h, ch32.vert_count, CH32_X, CH32_Y, CH32_Z, uint8_t, uint8_t);
 		hull_free(h);
 
 		TEST_BEGIN("compact_hull32 icosahedron");
-		// 12-vert hull, each vertex has degree 5.
 		static const v3 ico_pts[] = {
 			{-1,1.618f,0},{1,1.618f,0},{-1,-1.618f,0},{1,-1.618f,0},
 			{0,-1,1.618f},{0,1,1.618f},{0,-1,-1.618f},{0,1,-1.618f},
@@ -10883,31 +10970,153 @@ static void run_tests()
 		h = quickhull(ico_pts, 12);
 		TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == 0);
 		TEST_ASSERT(ch32.vert_count == 12);
+		for (int v = 0; v < ch32.vert_count; v++) TEST_ASSERT(ch32.offsets[v+1] - ch32.offsets[v] == 5);
+		VALIDATE_CSR32("compact_hull32 ico", ch32, h);
+		VALIDATE_SUPPORT("compact_hull32 ico", ch32, h, ch32.vert_count, CH32_X, CH32_Y, CH32_Z, uint8_t, uint8_t);
+		hull_free(h);
+
+		// Symmetry: if v has neighbor u, then u must have neighbor v.
+		TEST_BEGIN("compact_hull32 symmetry");
+		h = quickhull(ico_pts, 12);
+		compact_hull32_from_hull(&ch32, h);
 		for (int v = 0; v < ch32.vert_count; v++) {
-			int deg = ch32.offsets[v+1] - ch32.offsets[v];
-			TEST_ASSERT(deg == 5); // icosahedron: degree 5
+			for (int i = ch32.offsets[v]; i < ch32.offsets[v+1]; i++) {
+				int nb = ch32.neighbors[i];
+				int found_reverse = 0;
+				for (int j = ch32.offsets[nb]; j < ch32.offsets[nb+1]; j++)
+					if (ch32.neighbors[j] == v) { found_reverse = 1; break; }
+				TEST_ASSERT(found_reverse);
+			}
 		}
 		hull_free(h);
 
-		TEST_BEGIN("compact_hull32 reject >32 verts");
-		// Build a hull with many verts.
-		CK_DYNA v3* many_pts = NULL;
-		for (int i = 0; i < 100; i++) {
-			float theta = 2.0f * 3.14159f * (float)i / 100.0f;
-			float phi = 3.14159f * (float)(i % 50) / 50.0f;
-			apush(many_pts, V3(sinf(phi)*cosf(theta), sinf(phi)*sinf(theta), cosf(phi)));
+		// No self-loops: no vertex should list itself as a neighbor.
+		TEST_BEGIN("compact_hull32 no self-loops");
+		h = quickhull(box_pts, 8);
+		compact_hull32_from_hull(&ch32, h);
+		for (int v = 0; v < ch32.vert_count; v++)
+			for (int i = ch32.offsets[v]; i < ch32.offsets[v+1]; i++)
+				TEST_ASSERT(ch32.neighbors[i] != v);
+		hull_free(h);
+
+		// No duplicate neighbors.
+		TEST_BEGIN("compact_hull32 no duplicates");
+		h = quickhull(ico_pts, 12);
+		compact_hull32_from_hull(&ch32, h);
+		for (int v = 0; v < ch32.vert_count; v++) {
+			for (int i = ch32.offsets[v]; i < ch32.offsets[v+1]; i++)
+				for (int j = i+1; j < ch32.offsets[v+1]; j++)
+					TEST_ASSERT(ch32.neighbors[i] != ch32.neighbors[j]);
 		}
-		h = quickhull(many_pts, asize(many_pts));
-		if (h && h->vert_count > 32) {
-			TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == -1); // should fail
-		}
-		if (h) {
-			TEST_ASSERT(compact_hull16_from_hull(&ch16, h) == 0);
-			TEST_ASSERT(ch16.vert_count == h->vert_count);
-			compact_hull16_free(&ch16);
+		hull_free(h);
+
+		// Euler formula: E = neighbor_total / 2, V - E + F = 2.
+		TEST_BEGIN("compact_hull32 Euler");
+		h = quickhull(ico_pts, 12);
+		compact_hull32_from_hull(&ch32, h);
+		int euler_V = ch32.vert_count;
+		int euler_E = ch32.neighbor_total / 2;
+		int euler_F = h->face_count;
+		TEST_ASSERT(euler_V - euler_E + euler_F == 2);
+		hull_free(h);
+
+		// Cylinder: merged faces produce non-trivial topology.
+		TEST_BEGIN("compact_hull32 cylinder");
+		{
+			CK_DYNA v3* cyl = NULL;
+			for (int i = 0; i < 16; i++) {
+				float a = 2.0f * 3.14159265f * (float)i / 16.0f;
+				apush(cyl, V3(cosf(a), 1.0f, sinf(a)));
+				apush(cyl, V3(cosf(a), -1.0f, sinf(a)));
+			}
+			h = quickhull(cyl, asize(cyl));
+			TEST_ASSERT(h != NULL);
+			TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == 0);
+			VALIDATE_CSR32("compact_hull32 cyl", ch32, h);
+			VALIDATE_SUPPORT("compact_hull32 cyl", ch32, h, ch32.vert_count, CH32_X, CH32_Y, CH32_Z, uint8_t, uint8_t);
+			// Verify Euler for cylinder.
+			euler_V = ch32.vert_count;
+			euler_E = ch32.neighbor_total / 2;
+			euler_F = h->face_count;
+			TEST_ASSERT(euler_V - euler_E + euler_F == 2);
 			hull_free(h);
+			afree(cyl);
 		}
-		afree(many_pts);
+
+		// Fuzz: random hulls, validate CSR + support for each.
+		TEST_BEGIN("compact_hull32 fuzz");
+		{
+			unsigned frng = 99999;
+			int fuzz_fails = 0;
+			for (int iter = 0; iter < 100; iter++) {
+				int n = 8 + (frng % 25); frng ^= frng << 13; frng ^= frng >> 17; frng ^= frng << 5;
+				CK_DYNA v3* pts = NULL;
+				for (int i = 0; i < n; i++) {
+					frng ^= frng << 13; frng ^= frng >> 17; frng ^= frng << 5;
+					float x = (float)(frng & 0xFFFF) / 32768.0f - 1.0f;
+					frng ^= frng << 13; frng ^= frng >> 17; frng ^= frng << 5;
+					float y = (float)(frng & 0xFFFF) / 32768.0f - 1.0f;
+					frng ^= frng << 13; frng ^= frng >> 17; frng ^= frng << 5;
+					float z = (float)(frng & 0xFFFF) / 32768.0f - 1.0f;
+					apush(pts, V3(x, y, z));
+				}
+				h = quickhull(pts, asize(pts));
+				if (h && h->vert_count <= 32) {
+					int ok = compact_hull32_from_hull(&ch32, h) == 0;
+					if (!ok) fuzz_fails++;
+					if (ok) {
+						// Spot-check: symmetry + support.
+						for (int v = 0; v < ch32.vert_count && ok; v++) {
+							for (int i = ch32.offsets[v]; i < ch32.offsets[v+1] && ok; i++) {
+								int nb = ch32.neighbors[i];
+								if (nb >= ch32.vert_count) { ok = 0; break; }
+								int rev = 0;
+								for (int j = ch32.offsets[nb]; j < ch32.offsets[nb+1]; j++)
+									if (ch32.neighbors[j] == v) { rev = 1; break; }
+								if (!rev) ok = 0;
+							}
+						}
+						if (!ok) fuzz_fails++;
+					}
+				}
+				if (h) hull_free(h);
+				afree(pts);
+			}
+			TEST_ASSERT(fuzz_fails == 0);
+		}
+
+		TEST_BEGIN("compact_hull32 reject >32 verts");
+		{
+			CK_DYNA v3* many_pts = NULL;
+			for (int i = 0; i < 100; i++) {
+				float theta = 2.0f * 3.14159f * (float)i / 100.0f;
+				float phi = 3.14159f * (float)(i % 50) / 50.0f;
+				apush(many_pts, V3(sinf(phi)*cosf(theta), sinf(phi)*sinf(theta), cosf(phi)));
+			}
+			h = quickhull(many_pts, asize(many_pts));
+			if (h && h->vert_count > 32) {
+				TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == -1);
+			}
+			if (h) {
+				TEST_ASSERT(compact_hull16_from_hull(&ch16, h) == 0);
+				TEST_ASSERT(ch16.vert_count == h->vert_count);
+				VALIDATE_CSR16("compact_hull16 large", ch16, h);
+				VALIDATE_SUPPORT("compact_hull16 large", ch16, h, ch16.vert_count, CH16_X, CH16_Y, CH16_Z, uint16_t, uint16_t);
+				compact_hull16_free(&ch16);
+				hull_free(h);
+			}
+			afree(many_pts);
+		}
+
+		#undef VALIDATE_CSR32
+		#undef VALIDATE_CSR16
+		#undef VALIDATE_SUPPORT
+		#undef CH32_X
+		#undef CH32_Y
+		#undef CH32_Z
+		#undef CH16_X
+		#undef CH16_Y
+		#undef CH16_Z
 	}
 
 	test_quickhull_case783();

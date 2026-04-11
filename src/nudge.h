@@ -179,7 +179,7 @@ const Hull* hull_unit_box();
 //   ~3.5x smaller than full Hull. SAT extension built lazily when needed.
 
 #define COMPACT_HULL32_MAX_VERTS 32
-#define COMPACT_HULL32_MAX_NEIGHBORS 90 // Euler bound: 3V-6 undirected edges * 2 neighbor refs
+#define COMPACT_HULL32_MAX_NEIGHBORS 186 // Euler bound: 2*(3V-6) = 2*90 = 180 neighbor refs, +6 padding
 
 typedef struct CompactHull32
 {
