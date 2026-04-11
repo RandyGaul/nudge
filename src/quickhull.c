@@ -1,5 +1,4 @@
 // See LICENSE for licensing info.
-#include <float.h>
 // quickhull.c -- 3D Quickhull convex hull algorithm.
 //
 // Builds a convex hull from a point cloud using conflict lists,
@@ -11,8 +10,6 @@
 //
 // Edge convention: each half-edge stores its ORIGIN vertex (= tail).
 // The head of edge e is edges[edges[e].next].origin.
-// We use ORIGIN (tail) vertex convention for half-edges.
-// for a triangle created with createTriangle(v0, v1, v2).
 
 #define QH_INVALID    (~0)
 #define QH_VISIBLE    1
@@ -103,7 +100,6 @@ typedef struct QH_FaceList
 {
 	int first, last;
 } QH_FaceList;
-
 
 // -----------------------------------------------------------------------------
 // SoA edge management.
@@ -322,7 +318,6 @@ static float qh_face_dist(QH_State* s, int fi, v3 pt)
 	return qh_plane_dist(s->faces[fi].plane, pt);
 }
 
-
 // Distance of the adjacent face's centroid to this edge's face plane.
 static float qh_opp_face_dist(QH_State* s, int ei)
 {
@@ -363,9 +358,9 @@ static int qh_create_triangle(QH_State* s, int v0, int v1, int v2)
 	int fi = qh_alloc_face(s);
 	int e0 = qh_alloc_edge(s), e1 = qh_alloc_edge(s), e2 = qh_alloc_edge(s);
 	QH_Edges* E = &s->edges;
-	E->enext[e0]=e1; E->eprev[e0]=e2; E->etwin[e0]=QH_INVALID; E->eorigin[e0]=v0; E->eface[e0]=fi;
-	E->enext[e1]=e2; E->eprev[e1]=e0; E->etwin[e1]=QH_INVALID; E->eorigin[e1]=v1; E->eface[e1]=fi;
-	E->enext[e2]=e0; E->eprev[e2]=e1; E->etwin[e2]=QH_INVALID; E->eorigin[e2]=v2; E->eface[e2]=fi;
+	E->enext[e0] = e1; E->eprev[e0] = e2; E->etwin[e0] = QH_INVALID; E->eorigin[e0] = v0; E->eface[e0] = fi;
+	E->enext[e1] = e2; E->eprev[e1] = e0; E->etwin[e1] = QH_INVALID; E->eorigin[e1] = v1; E->eface[e1] = fi;
+	E->enext[e2] = e0; E->eprev[e2] = e1; E->etwin[e2] = QH_INVALID; E->eorigin[e2] = v2; E->eface[e2] = fi;
 	s->faces[fi].edge = e0;
 	s->faces[fi].next = fi;
 	s->faces[fi].prev = fi;
@@ -402,7 +397,7 @@ static int qh_build_simplex(QH_State* s, int nv)
 	float best = 0; int imax = 0;
 	for (int i = 0; i < 3; i++) {
 		v3 a = qh_vert_pos(&s->verts, maxV[i]), b = qh_vert_pos(&s->verts, minV[i]);
-		float d = (i==0) ? a.x-b.x : (i==1) ? a.y-b.y : a.z-b.z;
+		float d = (i == 0) ? a.x - b.x : (i == 1) ? a.y - b.y : a.z - b.z;
 		if (d > best) { best = d; imax = i; }
 	}
 	if (best <= s->epsilon) return 0;
@@ -412,13 +407,13 @@ static int qh_build_simplex(QH_State* s, int nv)
 
 	// Find vertex farthest from line vtx[0]-vtx[1].
 	v3 u01 = norm(sub(qh_vert_pos(&s->verts, vtx[1]), qh_vert_pos(&s->verts, vtx[0])));
-	float maxSqr = 0; v3 nrml = V3(0,0,0); vtx[2] = -1;
+	float maxSqr = 0; v3 nrml = V3(0, 0, 0); vtx[2] = -1;
 	for (int i = 0; i < nv; i++) {
 		v3 xp = cross(u01, sub(qh_vert_pos(&s->verts, i), qh_vert_pos(&s->verts, vtx[0])));
 		float ls = len2(xp);
 		if (ls > maxSqr && i != vtx[0] && i != vtx[1]) { maxSqr = ls; vtx[2] = i; nrml = xp; }
 	}
-	if (vtx[2] < 0 || sqrtf(maxSqr) <= 100*s->epsilon) return 0;
+	if (vtx[2] < 0 || sqrtf(maxSqr) <= 100 * s->epsilon) return 0;
 	nrml = norm(nrml);
 	nrml = norm(sub(nrml, scale(u01, dot(nrml, u01)))); // orthogonalize
 
@@ -429,7 +424,7 @@ static int qh_build_simplex(QH_State* s, int nv)
 		float d = fabsf(dot(qh_vert_pos(&s->verts, i), nrml) - d0);
 		if (d > maxDist && i != vtx[0] && i != vtx[1] && i != vtx[2]) { maxDist = d; vtx[3] = i; }
 	}
-	if (vtx[3] < 0 || maxDist <= 100*s->epsilon) return 0;
+	if (vtx[3] < 0 || maxDist <= 100 * s->epsilon) return 0;
 
 	// Build 4 triangle faces with correct winding.
 	// With origin-vertex convention, edge indices within a triangle: e0, e1, e2.
@@ -440,10 +435,10 @@ static int qh_build_simplex(QH_State* s, int nv)
 		tris[2] = qh_create_triangle(s, vtx[3], vtx[2], vtx[1]);
 		tris[3] = qh_create_triangle(s, vtx[3], vtx[0], vtx[2]);
 		for (int i = 0; i < 3; i++) {
-			int k = (i+1)%3;
-			qh_set_opposite(s, qh_get_edge(s,tris[i+1],0), qh_get_edge(s,tris[k+1],2));
-			int our_k = (k==0)?2:(k==1)?0:1;
-			qh_set_opposite(s, qh_get_edge(s,tris[i+1],1), qh_get_edge(s,tris[0],our_k));
+			int k = (i + 1) % 3;
+			qh_set_opposite(s, qh_get_edge(s, tris[i+1], 0), qh_get_edge(s, tris[k+1], 2));
+			int our_k = (k == 0) ? 2 : (k == 1) ? 0 : 1;
+			qh_set_opposite(s, qh_get_edge(s, tris[i+1], 1), qh_get_edge(s, tris[0], our_k));
 		}
 	} else {
 		tris[0] = qh_create_triangle(s, vtx[0], vtx[2], vtx[1]);
@@ -451,10 +446,10 @@ static int qh_build_simplex(QH_State* s, int nv)
 		tris[2] = qh_create_triangle(s, vtx[3], vtx[1], vtx[2]);
 		tris[3] = qh_create_triangle(s, vtx[3], vtx[2], vtx[0]);
 		for (int i = 0; i < 3; i++) {
-			int k = (i+1)%3;
-			qh_set_opposite(s, qh_get_edge(s,tris[i+1],2), qh_get_edge(s,tris[k+1],0));
-			int j = (3-i)%3, our_j = (j==0)?2:(j==1)?0:1;
-			qh_set_opposite(s, qh_get_edge(s,tris[i+1],1), qh_get_edge(s,tris[0],our_j));
+			int k = (i + 1) % 3;
+			qh_set_opposite(s, qh_get_edge(s, tris[i+1], 2), qh_get_edge(s, tris[k+1], 0));
+			int j = (3 - i) % 3, our_j = (j == 0) ? 2 : (j == 1) ? 0 : 1;
+			qh_set_opposite(s, qh_get_edge(s, tris[i+1], 1), qh_get_edge(s, tris[0], our_j));
 		}
 	}
 
@@ -469,7 +464,7 @@ static int qh_build_simplex(QH_State* s, int nv)
 		simd4f toff = simd_set(tp[0].offset, tp[1].offset, tp[2].offset, tp[3].offset);
 		simd4f veps = simd_set1(s->epsilon);
 		for (int i = 0; i < nv; i++) {
-			if (i==vtx[0]||i==vtx[1]||i==vtx[2]||i==vtx[3]) continue;
+			if (i == vtx[0] || i == vtx[1] || i == vtx[2] || i == vtx[3]) continue;
 			v3 p = qh_vert_pos(&s->verts, i);
 			simd4f d = simd_sub(simd_add(simd_add(simd_mul(tnx, simd_set1(p.x)), simd_mul(tny, simd_set1(p.y))), simd_mul(tnz, simd_set1(p.z))), toff);
 			// Find lane with max distance above epsilon.
@@ -590,9 +585,9 @@ static void qh_horizon_and_cone(QH_State* s, int eye, int eye_face, QH_FaceList*
 				int fi = qh_alloc_face(s);
 				int ce0 = qh_alloc_edge(s), ce1 = qh_alloc_edge(s), ce2 = qh_alloc_edge(s);
 				E = &s->edges; // re-fetch after potential realloc in qh_alloc_edge
-				E->enext[ce0]=ce1; E->eprev[ce0]=ce2; E->etwin[ce0]=QH_INVALID; E->eorigin[ce0]=eye; E->eface[ce0]=fi;
-				E->enext[ce1]=ce2; E->eprev[ce1]=ce0; E->etwin[ce1]=QH_INVALID; E->eorigin[ce1]=tail; E->eface[ce1]=fi;
-				E->enext[ce2]=ce0; E->eprev[ce2]=ce1; E->etwin[ce2]=QH_INVALID; E->eorigin[ce2]=head; E->eface[ce2]=fi;
+				E->enext[ce0] = ce1; E->eprev[ce0] = ce2; E->etwin[ce0] = QH_INVALID; E->eorigin[ce0] = eye; E->eface[ce0] = fi;
+				E->enext[ce1] = ce2; E->eprev[ce1] = ce0; E->etwin[ce1] = QH_INVALID; E->eorigin[ce1] = tail; E->eface[ce1] = fi;
+				E->enext[ce2] = ce0; E->eprev[ce2] = ce1; E->etwin[ce2] = QH_INVALID; E->eorigin[ce2] = head; E->eface[ce2] = fi;
 				s->faces[fi].edge = ce0;
 				s->faces[fi].next = fi;
 				s->faces[fi].prev = fi;
@@ -733,7 +728,6 @@ static int qh_merge_adjacent_face(QH_State* s, int hedge_adj, int discarded[], i
 	df = qh_connect_half_edges(s, ap, on);
 	if (df != QH_INVALID) discarded[nd++] = df;
 
-
 	// Inherit maxoutside from absorbed face.
 	if (s->faces[ofi].maxoutside > s->faces[tfi].maxoutside)
 		s->faces[tfi].maxoutside = s->faces[ofi].maxoutside;
@@ -776,7 +770,6 @@ static int qh_merge_adjacent_face(QH_State* s, int hedge_adj, int discarded[], i
 				} while (e != start);
 			}
 		}
-
 
 		QH_DEBUG({
 			e = s->faces[tfi].edge; start = e; n = 0;
@@ -1054,19 +1047,19 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 // hull_face_extension_build for bitwise-deterministic planes.
 static HullPlane hull_newell_plane(const uint16_t* edge_next, const uint16_t* edge_origin, const float* vx, const float* vy, const float* vz, int start_edge, v3 hull_centroid)
 {
-	float fnx=0,fny=0,fnz=0,fcx=0,fcy=0,fcz=0; int cnt=0;
+	float fnx = 0, fny = 0, fnz = 0, fcx = 0, fcy = 0, fcz = 0; int cnt = 0;
 	int e = start_edge;
 	do {
 		int vi = edge_origin[e], vn = edge_origin[edge_next[e]];
-		float curx=vx[vi],cury=vy[vi],curz=vz[vi], nxtx=vx[vn],nxty=vy[vn],nxtz=vz[vn];
-		fnx+=(cury-nxty)*(curz+nxtz); fny+=(curz-nxtz)*(curx+nxtx); fnz+=(curx-nxtx)*(cury+nxty);
-		fcx+=curx; fcy+=cury; fcz+=curz; cnt++;
+		float curx = vx[vi], cury = vy[vi], curz = vz[vi], nxtx = vx[vn], nxty = vy[vn], nxtz = vz[vn];
+		fnx += (cury - nxty) * (curz + nxtz); fny += (curz - nxtz) * (curx + nxtx); fnz += (curx - nxtx) * (cury + nxty);
+		fcx += curx; fcy += cury; fcz += curz; cnt++;
 		e = edge_next[e];
 	} while (e != start_edge);
-	float a = sqrtf(fnx*fnx+fny*fny+fnz*fnz);
-	if (a > 0) { float inv=1.0f/a; fnx*=inv; fny*=inv; fnz*=inv; }
-	float inv_c = 1.0f/cnt; fcx*=inv_c; fcy*=inv_c; fcz*=inv_c;
-	v3 fn = V3(fnx,fny,fnz), fc = V3(fcx,fcy,fcz);
+	float a = sqrtf(fnx*fnx + fny*fny + fnz*fnz);
+	if (a > 0) { float inv = 1.0f / a; fnx *= inv; fny *= inv; fnz *= inv; }
+	float inv_c = 1.0f / cnt; fcx *= inv_c; fcy *= inv_c; fcz *= inv_c;
+	v3 fn = V3(fnx, fny, fnz), fc = V3(fcx, fcy, fcz);
 	if (dot(fn, sub(fc, hull_centroid)) < 0) fn = neg(fn);
 	return (HullPlane){ fn, dot(fn, fc) };
 }
@@ -1121,13 +1114,13 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	Hull* h = CK_ALLOC(sizeof(Hull));
 	h->vert_count = vc; h->edge_count = ec; h->face_count = nlive;
 	h->epsilon = s->epsilon;
-	v3* vcp = CK_ALLOC(sizeof(v3)*vc); h->verts = vcp;
-	uint16_t* et = CK_ALLOC(sizeof(uint16_t)*ec); h->edge_twin = et;
-	uint16_t* en = CK_ALLOC(sizeof(uint16_t)*ec); h->edge_next = en;
-	uint16_t* eo = CK_ALLOC(sizeof(uint16_t)*ec); h->edge_origin = eo;
-	uint16_t* ef = CK_ALLOC(sizeof(uint16_t)*ec); h->edge_face = ef;
-	HullFace* fcp = CK_ALLOC(sizeof(HullFace)*nlive); h->faces = fcp;
-	HullPlane* pcp = CK_ALLOC(sizeof(HullPlane)*nlive); h->planes = pcp;
+	v3* vcp = CK_ALLOC(sizeof(v3) * vc); h->verts = vcp;
+	uint16_t* et = CK_ALLOC(sizeof(uint16_t) * ec); h->edge_twin = et;
+	uint16_t* en = CK_ALLOC(sizeof(uint16_t) * ec); h->edge_next = en;
+	uint16_t* eo = CK_ALLOC(sizeof(uint16_t) * ec); h->edge_origin = eo;
+	uint16_t* ef = CK_ALLOC(sizeof(uint16_t) * ec); h->edge_face = ef;
+	HullFace* fcp = CK_ALLOC(sizeof(HullFace) * nlive); h->faces = fcp;
+	HullPlane* pcp = CK_ALLOC(sizeof(HullPlane) * nlive); h->planes = pcp;
 
 	// Fill vertex positions (second pass over vremap to fill only assigned slots).
 	memset(vremap, -1, s->verts.count * sizeof(int));
@@ -1154,7 +1147,8 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	// Fill edges and faces directly.
 	for (int i = 0; i < nlive; i++) {
 		int e = s->faces[live[i]].edge, start = e;
-		do { int o = eremap[e];
+		do {
+			int o = eremap[e];
 			en[o] = (uint16_t)eremap[s->edges.enext[e]];
 			et[o] = (uint16_t)eremap[s->edges.etwin[e]];
 			eo[o] = (uint16_t)vremap[s->edges.eorigin[e]];
@@ -1165,7 +1159,7 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 		pcp[i] = s->faces[live[i]].plane;
 	}
 
-	v3 centroid = V3(0,0,0);
+	v3 centroid = V3(0, 0, 0);
 	for (int i = 0; i < h->vert_count; i++) centroid = add(centroid, vcp[i]);
 	centroid = scale(centroid, 1.0f / h->vert_count);
 	h->centroid = centroid;
@@ -1199,7 +1193,7 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 			simd_store(max_ds + i, simd_max(simd_load(max_ds + i), d));
 		}
 		for (; i < fc; i++) {
-			float d = nx[i]*all_points[pi].x + ny[i]*all_points[pi].y + nz[i]*all_points[pi].z;
+			float d = nx[i] * all_points[pi].x + ny[i] * all_points[pi].y + nz[i] * all_points[pi].z;
 			if (d > max_ds[i]) max_ds[i] = d;
 		}
 	}
@@ -1284,4 +1278,315 @@ Hull* quickhull(const v3* points, int count)
 	Hull* result = qh_build_output(&state, points, count);
 	qh_verts_free(&state.verts); qh_edges_free(&state.edges); afree(state.faces); afree(state.conflict_faces);
 	return result;
+}
+// Build CSR vertex adjacency from half-edge SoA arrays.
+// For each vertex, collects all neighbor vertices reachable via edges.
+// vert_edge[v] = first edge originating from v (or -1).
+// Walk: twin of that edge gives neighbor, then edge_next[twin] gives next
+// edge around v, repeat until back to start.
+static int hull_build_csr(const Hull* hull, int max_verts, void* offsets_out, int offset_size, void* neighbors_out, int neighbor_size, int* out_neighbor_total)
+{
+	int nv = hull->vert_count;
+	if (nv > max_verts) return -1;
+
+	// Build vert_edge: first edge index for each vertex.
+	int vert_edge[1024];
+	assert(nv <= 1024);
+	for (int i = 0; i < nv; i++) vert_edge[i] = -1;
+	for (int i = 0; i < hull->edge_count; i++)
+		if (vert_edge[hull->edge_origin[i]] < 0) vert_edge[hull->edge_origin[i]] = i;
+
+	// Count neighbors per vertex, then fill CSR.
+	int total = 0;
+	for (int v = 0; v < nv; v++) {
+		if (offset_size == 1) ((uint8_t*)offsets_out)[v] = (uint8_t)total;
+		else ((uint16_t*)offsets_out)[v] = (uint16_t)total;
+
+		int e = vert_edge[v];
+		if (e < 0) continue;
+		int start = e;
+		do {
+			int nb = hull->edge_origin[hull->edge_twin[e]];
+			if (neighbor_size == 1) ((uint8_t*)neighbors_out)[total] = (uint8_t)nb;
+			else ((uint16_t*)neighbors_out)[total] = (uint16_t)nb;
+			total++;
+			e = hull->edge_next[hull->edge_twin[e]];
+		} while (e != start);
+	}
+	if (offset_size == 1) ((uint8_t*)offsets_out)[nv] = (uint8_t)total;
+	else ((uint16_t*)offsets_out)[nv] = (uint16_t)total;
+	*out_neighbor_total = total;
+	return 0;
+}
+
+// -----------------------------------------------------------------------------
+// Compact hull converters.
+// CompactHull32: fixed-size (<=32 verts), suitable for stack/inline storage.
+// CompactHull: heap-allocated, supports arbitrary vert counts.
+
+// Convert a full Hull to a CompactHull32 (fixed-size, <=32 verts).
+int compact_hull32_from_hull(CompactHull32* out, const Hull* hull)
+{
+	if (hull->vert_count > COMPACT_HULL32_MAX_VERTS) return -1;
+	*out = (CompactHull32){0};
+	out->vert_count = (uint8_t)hull->vert_count;
+	out->centroid = hull->centroid;
+
+	// Copy vertex positions into SoA.
+	for (int i = 0; i < hull->vert_count; i++) {
+		out->verts_x[i] = hull->verts[i].x;
+		out->verts_y[i] = hull->verts[i].y;
+		out->verts_z[i] = hull->verts[i].z;
+	}
+
+	int total = 0;
+	if (hull_build_csr(hull, COMPACT_HULL32_MAX_VERTS, out->offsets, 1, out->neighbors, 1, &total) < 0) return -1;
+	if (total > COMPACT_HULL32_MAX_NEIGHBORS) return -1;
+	out->neighbor_total = (uint8_t)total;
+
+	// Copy face planes for bitwise-deterministic reconstruction.
+	if (hull->face_count > COMPACT_HULL32_MAX_FACES) return -1;
+	out->face_count = (uint8_t)hull->face_count;
+	memcpy(out->planes, hull->planes, hull->face_count * sizeof(HullPlane));
+	return 0;
+}
+
+// Convert a full Hull to a CompactHull (heap-allocated, arbitrary vert count).
+int compact_hull_from_hull(CompactHull* out, const Hull* hull)
+{
+	*out = (CompactHull){0};
+	int nv = hull->vert_count;
+	out->vert_count = (uint16_t)nv;
+	out->centroid = hull->centroid;
+
+	out->offsets = (uint16_t*)CK_ALLOC((nv + 1) * sizeof(uint16_t));
+	// Allocate neighbors conservatively (edge_count = total half-edges = 2 * undirected edges).
+	out->neighbors = (uint16_t*)CK_ALLOC(hull->edge_count * sizeof(uint16_t));
+
+	int padded = (nv + 3) & ~3;
+	out->verts_x = (float*)CK_ALLOC_ALIGNED(padded * sizeof(float), 16);
+	out->verts_y = (float*)CK_ALLOC_ALIGNED(padded * sizeof(float), 16);
+	out->verts_z = (float*)CK_ALLOC_ALIGNED(padded * sizeof(float), 16);
+	for (int i = 0; i < nv; i++) { out->verts_x[i] = hull->verts[i].x; out->verts_y[i] = hull->verts[i].y; out->verts_z[i] = hull->verts[i].z; }
+	for (int i = nv; i < padded; i++) { out->verts_x[i] = out->verts_x[0]; out->verts_y[i] = out->verts_y[0]; out->verts_z[i] = out->verts_z[0]; }
+
+	int total = 0;
+	hull_build_csr(hull, 65535, out->offsets, 2, out->neighbors, 2, &total);
+	out->neighbor_total = (uint16_t)total;
+	// Planes left NULL -- caller uses compact_hull_attach_planes() on demand.
+	return 0;
+}
+
+void compact_hull_attach_planes(CompactHull* ch, const Hull* hull)
+{
+	if (ch->planes) CK_FREE(ch->planes);
+	ch->face_count = (uint16_t)hull->face_count;
+	ch->planes = (HullPlane*)CK_ALLOC(hull->face_count * sizeof(HullPlane));
+	memcpy(ch->planes, hull->planes, hull->face_count * sizeof(HullPlane));
+}
+
+void compact_hull_free(CompactHull* ch)
+{
+	if (!ch) return;
+	CK_FREE(ch->offsets);
+	CK_FREE(ch->neighbors);
+	if (ch->planes) CK_FREE(ch->planes);
+	CK_FREE_ALIGNED(ch->verts_x);
+	CK_FREE_ALIGNED(ch->verts_y);
+	CK_FREE_ALIGNED(ch->verts_z);
+	*ch = (CompactHull){0};
+}
+
+// Validate compact hull round-trip: build face extension, check Euler formula,
+// twin reciprocity, plane identity, and face loop closure.
+int compact_hull_validate_roundtrip(const CompactHull* ch)
+{
+	HullFaceExtension ext;
+	if (hull_face_extension_build(&ext, ch) != 0) {
+		fprintf(stderr, "compact_hull_validate: extension build failed\n");
+		return -1;
+	}
+	int ok = 1;
+
+	// Euler: V - E/2 + F = 2.
+	if (ch->vert_count - ext.edge_count / 2 + ext.face_count != 2) {
+		fprintf(stderr, "compact_hull_validate: Euler FAIL V=%d E=%d F=%d\n", ch->vert_count, ext.edge_count, ext.face_count);
+		ok = 0;
+	}
+
+	// Twin reciprocity.
+	for (int e = 0; e < ext.edge_count && ok; e++) {
+		if (ext.edge_twin[ext.edge_twin[e]] != e) {
+			fprintf(stderr, "compact_hull_validate: twin reciprocity FAIL at edge %d\n", e);
+			ok = 0;
+		}
+	}
+
+	// If planes are attached, check bitwise identity.
+	if (ch->planes && ch->face_count > 0) {
+		if (ext.face_count != ch->face_count) {
+			fprintf(stderr, "compact_hull_validate: face count mismatch ext=%d stored=%d\n", ext.face_count, ch->face_count);
+			ok = 0;
+		}
+		for (int f = 0; f < ext.face_count && ok; f++) {
+			int found = 0;
+			for (int g = 0; g < ch->face_count; g++) {
+				if (memcmp(&ext.planes[f], &ch->planes[g], sizeof(HullPlane)) == 0) { found = 1; break; }
+			}
+			if (!found) {
+				fprintf(stderr, "compact_hull_validate: plane %d has no bitwise match\n", f);
+				ok = 0;
+			}
+		}
+	}
+
+	// Face loops close.
+	for (int f = 0; f < ext.face_count && ok; f++) {
+		int e = ext.faces[f].edge, n = 0;
+		do { n++; e = ext.edge_next[e]; if (n > 1000) break; } while (e != ext.faces[f].edge);
+		if (n > 1000 || n < 3) {
+			fprintf(stderr, "compact_hull_validate: face %d loop FAIL (%d edges)\n", f, n);
+			ok = 0;
+		}
+	}
+
+	hull_face_extension_free(&ext);
+	return ok ? 0 : -1;
+}
+
+// -----------------------------------------------------------------------------
+// Face extension: reconstruct half-edge mesh from CompactHull CSR adjacency.
+//
+// Algorithm: each directed edge (u,v) in the CSR becomes a half-edge.
+// The "next" half-edge around a face is found by: for edge (u,v), the next
+// edge on the same face starts at v and goes to the neighbor of v that comes
+// AFTER u in v's neighbor list (cyclically). This reconstructs the face loops.
+//
+// Uses hull_newell_plane() (defined in quickhull.c) for plane recomputation.
+int hull_face_extension_build(HullFaceExtension* out, const CompactHull* ch)
+{
+	*out = (HullFaceExtension){0};
+	int nv = ch->vert_count;
+	int ne = ch->neighbor_total; // total half-edges
+
+	out->edge_count = (uint16_t)ne;
+	out->edge_twin = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
+	out->edge_next = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
+	out->edge_origin = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
+	out->edge_face = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
+
+	// Each CSR entry neighbors[i] at offset i is half-edge i: origin = v where offsets[v] <= i < offsets[v+1].
+	// Set edge origins.
+	for (int v = 0; v < nv; v++)
+		for (int i = ch->offsets[v]; i < ch->offsets[v+1]; i++)
+			out->edge_origin[i] = (uint16_t)v;
+
+	// Build twin map: edge i goes from origin[i] to neighbors[i].
+	// Its twin goes from neighbors[i] back to origin[i].
+	// Find twin by scanning the neighbor list of neighbors[i] for origin[i].
+	for (int i = 0; i < ne; i++) {
+		int u = out->edge_origin[i];
+		int v = ch->neighbors[i];
+		int twin = -1;
+		for (int j = ch->offsets[v]; j < ch->offsets[v+1]; j++) {
+			if (ch->neighbors[j] == u) { twin = j; break; }
+		}
+		assert(twin >= 0);
+		out->edge_twin[i] = (uint16_t)twin;
+	}
+
+	// Build next: for edge (u,v), next edge is (v, w) where w is the neighbor
+	// of v that comes BEFORE u in v's cyclic neighbor list.
+	// This gives the CCW face traversal matching quickhull's winding.
+	for (int i = 0; i < ne; i++) {
+		int v = ch->neighbors[i]; // head of this edge
+		int u = out->edge_origin[i]; // tail of this edge
+		// Find u in v's neighbor list, take the PREVIOUS entry cyclically.
+		int deg = ch->offsets[v+1] - ch->offsets[v];
+		int base = ch->offsets[v];
+		for (int k = 0; k < deg; k++) {
+			if (ch->neighbors[base + k] == u) {
+				int next_k = (k + 1 < deg) ? k + 1 : 0;
+				// next edge goes from v to w: find that edge index.
+				out->edge_next[i] = (uint16_t)(base + next_k);
+				(void)next_k;
+				break;
+			}
+		}
+	}
+
+	// Extract faces: walk edge loops, assign face indices.
+	// Each unvisited edge starts a new face.
+	for (int i = 0; i < ne; i++) out->edge_face[i] = 0xFFFF;
+	int face_count = 0;
+	CK_DYNA HullFace* faces_arr = NULL;
+	CK_DYNA HullPlane* planes_arr = NULL;
+	for (int i = 0; i < ne; i++) {
+		if (out->edge_face[i] != 0xFFFF) continue;
+		int fi = face_count++;
+
+		// First pass: assign face index and find lowest-origin vertex for normalized start.
+		int best_start = i;
+		uint16_t best_origin = out->edge_origin[i];
+		int e = i;
+		do {
+			out->edge_face[e] = (uint16_t)fi;
+			if (out->edge_origin[e] < best_origin) { best_origin = out->edge_origin[e]; best_start = e; }
+			e = out->edge_next[e];
+		} while (e != i);
+		apush(faces_arr, ((HullFace){ .edge = (uint16_t)best_start }));
+
+		if (ch->planes && ch->face_count > 0) {
+			// Planes attached: match by Newell normal direction for bitwise determinism.
+			HullPlane recomputed = hull_newell_plane(out->edge_next, out->edge_origin, ch->verts_x, ch->verts_y, ch->verts_z, best_start, ch->centroid);
+			float best_dot = -2; int best_match = fi;
+			for (int g = 0; g < ch->face_count; g++) {
+				float d = dot(recomputed.normal, ch->planes[g].normal);
+				if (d > best_dot) { best_dot = d; best_match = g; }
+			}
+			apush(planes_arr, ch->planes[best_match]);
+		} else {
+			// No planes attached: recompute from Newell method.
+			apush(planes_arr, hull_newell_plane(out->edge_next, out->edge_origin, ch->verts_x, ch->verts_y, ch->verts_z, best_start, ch->centroid));
+		}
+	}
+
+	out->face_count = (uint16_t)face_count;
+	out->faces = faces_arr;
+	out->planes = planes_arr;
+	return 0;
+}
+
+void hull_face_extension_free(HullFaceExtension* ext)
+{
+	if (!ext) return;
+	CK_FREE(ext->edge_twin);
+	CK_FREE(ext->edge_next);
+	CK_FREE(ext->edge_origin);
+	CK_FREE(ext->edge_face);
+	afree(ext->faces);
+	afree(ext->planes);
+	*ext = (HullFaceExtension){0};
+}
+
+// Build a (non-owning) Hull view from a CompactHull + its face extension.
+Hull hull_from_compact(const CompactHull* ch, const HullFaceExtension* ext)
+{
+	int padded = (ch->vert_count + 3) & ~3;
+	Hull h = {0};
+	h.centroid = ch->centroid;
+	// Build AoS verts from SoA (stack or temp alloc -- caller must manage lifetime).
+	// For now, return a Hull that points to NULL verts (caller fills or uses SoA directly).
+	h.verts = NULL; // caller should set this if AoS access is needed
+	h.soa_verts = ch->verts_x; // contiguous x,y,z (padded layout matches)
+	h.edge_twin = ext->edge_twin;
+	h.edge_next = ext->edge_next;
+	h.edge_origin = ext->edge_origin;
+	h.edge_face = ext->edge_face;
+	h.faces = ext->faces;
+	h.planes = ext->planes;
+	h.vert_count = ch->vert_count;
+	h.edge_count = ext->edge_count;
+	h.face_count = ext->face_count;
+	return h;
 }
