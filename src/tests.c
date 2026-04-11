@@ -11117,6 +11117,146 @@ static void run_tests()
 		#undef CH16_X
 		#undef CH16_Y
 		#undef CH16_Z
+
+		// Face extension tests: verify reconstructed face planes match quickhull output.
+		TEST_BEGIN("face extension box topology");
+		{
+			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
+			Hull* fh = quickhull(bpts, 8);
+			CompactHull fc;
+			compact_hull_from_hull(&fc, fh);
+			HullFaceExtension ext;
+			TEST_ASSERT(hull_face_extension_build(&ext, &fc) == 0);
+			TEST_ASSERT(ext.face_count == fh->face_count);
+			TEST_ASSERT(ext.edge_count == fh->edge_count);
+
+			// Euler: V - E/2 + F = 2.
+			TEST_ASSERT(fc.vert_count - ext.edge_count / 2 + ext.face_count == 2);
+
+			// Twin reciprocity.
+			for (int e = 0; e < ext.edge_count; e++)
+				TEST_ASSERT(ext.edge_twin[ext.edge_twin[e]] == e);
+
+			// Each face loop closes.
+			for (int f = 0; f < ext.face_count; f++) {
+				int e = ext.faces[f].edge, start = e, n = 0;
+				do { n++; e = ext.edge_next[e]; TEST_ASSERT(n < 100); } while (e != start);
+				TEST_ASSERT(n >= 3);
+			}
+
+			// Face planes: each plane normal should be unit length.
+			for (int f = 0; f < ext.face_count; f++) {
+				float l = len(ext.planes[f].normal);
+				TEST_ASSERT_FLOAT(l, 1.0f, 1e-4f);
+			}
+
+			// Face planes should match quickhull output (same normals, same offsets).
+			// Since face ordering may differ, match by closest normal.
+			for (int f = 0; f < ext.face_count; f++) {
+				int found = 0;
+				for (int g = 0; g < fh->face_count; g++) {
+					float d = dot(ext.planes[f].normal, fh->planes[g].normal);
+					if (d > 0.99f && fabsf(ext.planes[f].offset - fh->planes[g].offset) < 0.1f) {
+						found = 1; break;
+					}
+				}
+				TEST_ASSERT(found);
+			}
+
+			hull_face_extension_free(&ext);
+			compact_hull_free(&fc);
+			hull_free(fh);
+		}
+
+		TEST_BEGIN("face extension icosahedron");
+		{
+			static const v3 ico[] = {
+				{-1,1.618f,0},{1,1.618f,0},{-1,-1.618f,0},{1,-1.618f,0},
+				{0,-1,1.618f},{0,1,1.618f},{0,-1,-1.618f},{0,1,-1.618f},
+				{1.618f,0,-1},{1.618f,0,1},{-1.618f,0,1},{-1.618f,0,-1},
+			};
+			Hull* fh = quickhull(ico, 12);
+			CompactHull fc;
+			compact_hull_from_hull(&fc, fh);
+			HullFaceExtension ext;
+			TEST_ASSERT(hull_face_extension_build(&ext, &fc) == 0);
+			TEST_ASSERT(ext.face_count == 20); // icosahedron has 20 faces
+			TEST_ASSERT(fc.vert_count - ext.edge_count / 2 + ext.face_count == 2);
+
+			// All faces should be triangles.
+			for (int f = 0; f < ext.face_count; f++) {
+				int e = ext.faces[f].edge, n = 0;
+				do { n++; e = ext.edge_next[e]; } while (e != ext.faces[f].edge);
+				TEST_ASSERT(n == 3);
+			}
+
+			// Plane normals match quickhull output.
+			for (int f = 0; f < ext.face_count; f++) {
+				int found = 0;
+				for (int g = 0; g < fh->face_count; g++) {
+					if (dot(ext.planes[f].normal, fh->planes[g].normal) > 0.99f) { found = 1; break; }
+				}
+				TEST_ASSERT(found);
+			}
+
+			hull_face_extension_free(&ext);
+			compact_hull_free(&fc);
+			hull_free(fh);
+		}
+
+		TEST_BEGIN("face extension cylinder (merged faces)");
+		{
+			CK_DYNA v3* cpts = NULL;
+			for (int i = 0; i < 12; i++) {
+				float a = 2.0f * 3.14159265f * (float)i / 12.0f;
+				apush(cpts, V3(cosf(a), 1.0f, sinf(a)));
+				apush(cpts, V3(cosf(a), -1.0f, sinf(a)));
+			}
+			Hull* fh = quickhull(cpts, asize(cpts));
+			CompactHull fc;
+			compact_hull_from_hull(&fc, fh);
+			HullFaceExtension ext;
+			TEST_ASSERT(hull_face_extension_build(&ext, &fc) == 0);
+			TEST_ASSERT(fc.vert_count - ext.edge_count / 2 + ext.face_count == 2);
+
+			// Twin reciprocity.
+			for (int e = 0; e < ext.edge_count; e++)
+				TEST_ASSERT(ext.edge_twin[ext.edge_twin[e]] == e);
+
+			// Plane normals match quickhull (order-independent).
+			for (int f = 0; f < ext.face_count; f++) {
+				int found = 0;
+				for (int g = 0; g < fh->face_count; g++) {
+					if (dot(ext.planes[f].normal, fh->planes[g].normal) > 0.99f &&
+					    fabsf(ext.planes[f].offset - fh->planes[g].offset) < 0.1f) { found = 1; break; }
+				}
+				TEST_ASSERT(found);
+			}
+
+			hull_face_extension_free(&ext);
+			compact_hull_free(&fc);
+			hull_free(fh);
+			afree(cpts);
+		}
+
+		TEST_BEGIN("hull_from_compact roundtrip");
+		{
+			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
+			Hull* fh = quickhull(bpts, 8);
+			CompactHull fc;
+			compact_hull_from_hull(&fc, fh);
+			HullFaceExtension ext;
+			hull_face_extension_build(&ext, &fc);
+			Hull reassembled = hull_from_compact(&fc, &ext);
+			TEST_ASSERT(reassembled.vert_count == fh->vert_count);
+			TEST_ASSERT(reassembled.edge_count == fh->edge_count);
+			TEST_ASSERT(reassembled.face_count == fh->face_count);
+			TEST_ASSERT(reassembled.soa_verts != NULL);
+			TEST_ASSERT(reassembled.planes != NULL);
+			hull_face_extension_free(&ext);
+			compact_hull_free(&fc);
+			hull_free(fh);
+		}
 	}
 
 	test_quickhull_case783();

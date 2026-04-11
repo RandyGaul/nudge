@@ -1637,6 +1637,145 @@ void compact_hull_free(CompactHull* ch)
 	*ch = (CompactHull){0};
 }
 
+// Build face extension from CompactHull CSR adjacency.
+// Reconstructs half-edge mesh and face planes from vertex positions + neighbor lists.
+//
+// Algorithm: each directed edge (u,v) in the CSR becomes a half-edge.
+// The "next" half-edge around a face is found by: for edge (u,v), the next
+// edge on the same face starts at v and goes to the neighbor of v that comes
+// AFTER u in v's neighbor list (cyclically). This reconstructs the face loops.
+int hull_face_extension_build(HullFaceExtension* out, const CompactHull* ch)
+{
+	*out = (HullFaceExtension){0};
+	int nv = ch->vert_count;
+	int ne = ch->neighbor_total; // total half-edges
+
+	out->edge_count = (uint16_t)ne;
+	out->edge_twin = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
+	out->edge_next = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
+	out->edge_origin = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
+	out->edge_face = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
+
+	// Each CSR entry neighbors[i] at offset i is half-edge i: origin = v where offsets[v] <= i < offsets[v+1].
+	// Set edge origins.
+	for (int v = 0; v < nv; v++)
+		for (int i = ch->offsets[v]; i < ch->offsets[v+1]; i++)
+			out->edge_origin[i] = (uint16_t)v;
+
+	// Build twin map: edge i goes from origin[i] to neighbors[i].
+	// Its twin goes from neighbors[i] back to origin[i].
+	// Find twin by scanning the neighbor list of neighbors[i] for origin[i].
+	for (int i = 0; i < ne; i++) {
+		int u = out->edge_origin[i];
+		int v = ch->neighbors[i];
+		int twin = -1;
+		for (int j = ch->offsets[v]; j < ch->offsets[v+1]; j++) {
+			if (ch->neighbors[j] == u) { twin = j; break; }
+		}
+		assert(twin >= 0);
+		out->edge_twin[i] = (uint16_t)twin;
+	}
+
+	// Build next: for edge (u,v), next edge is (v, w) where w is the neighbor
+	// of v that comes BEFORE u in v's cyclic neighbor list.
+	// This gives the CCW face traversal matching quickhull's winding.
+	for (int i = 0; i < ne; i++) {
+		int v = ch->neighbors[i]; // head of this edge
+		int u = out->edge_origin[i]; // tail of this edge
+		// Find u in v's neighbor list, take the PREVIOUS entry cyclically.
+		int deg = ch->offsets[v+1] - ch->offsets[v];
+		int base = ch->offsets[v];
+		for (int k = 0; k < deg; k++) {
+			if (ch->neighbors[base + k] == u) {
+				int prev_k = (k == 0) ? deg - 1 : k - 1;
+				int w = ch->neighbors[base + prev_k];
+				// next edge goes from v to w: find that edge index.
+				out->edge_next[i] = (uint16_t)(base + prev_k);
+				(void)w;
+				break;
+			}
+		}
+	}
+
+	// Extract faces: walk edge loops, assign face indices.
+	// Each unvisited edge starts a new face.
+	for (int i = 0; i < ne; i++) out->edge_face[i] = 0xFFFF;
+	int face_count = 0;
+	CK_DYNA HullFace* faces_arr = NULL;
+	CK_DYNA HullPlane* planes_arr = NULL;
+	for (int i = 0; i < ne; i++) {
+		if (out->edge_face[i] != 0xFFFF) continue;
+		int fi = face_count++;
+		apush(faces_arr, ((HullFace){ .edge = (uint16_t)i }));
+
+		// Walk the face loop, assign face index, compute Newell normal.
+		v3 normal = V3(0,0,0), centroid = V3(0,0,0);
+		int count = 0;
+		int e = i;
+		do {
+			out->edge_face[e] = (uint16_t)fi;
+			int vi = out->edge_origin[e];
+			int vn = out->edge_origin[out->edge_next[e]];
+			float cx = ch->verts_x[vi], cy = ch->verts_y[vi], cz = ch->verts_z[vi];
+			float nx = ch->verts_x[vn], ny = ch->verts_y[vn], nz = ch->verts_z[vn];
+			normal.x += (cy - ny) * (cz + nz);
+			normal.y += (cz - nz) * (cx + nx);
+			normal.z += (cx - nx) * (cy + ny);
+			centroid = add(centroid, V3(cx, cy, cz));
+			count++;
+			e = out->edge_next[e];
+			assert(count < 1000);
+		} while (e != i);
+
+		float a = len(normal);
+		if (a > 0) normal = scale(normal, 1.0f / a);
+		centroid = scale(centroid, 1.0f / count);
+
+		// Orient normal outward (away from hull centroid).
+		if (dot(normal, sub(centroid, ch->centroid)) < 0) normal = neg(normal);
+
+		apush(planes_arr, ((HullPlane){ normal, dot(normal, centroid) }));
+	}
+
+	out->face_count = (uint16_t)face_count;
+	out->faces = faces_arr;
+	out->planes = planes_arr;
+	return 0;
+}
+
+void hull_face_extension_free(HullFaceExtension* ext)
+{
+	if (!ext) return;
+	CK_FREE(ext->edge_twin);
+	CK_FREE(ext->edge_next);
+	CK_FREE(ext->edge_origin);
+	CK_FREE(ext->edge_face);
+	afree(ext->faces);
+	afree(ext->planes);
+	*ext = (HullFaceExtension){0};
+}
+
+Hull hull_from_compact(const CompactHull* ch, const HullFaceExtension* ext)
+{
+	int padded = (ch->vert_count + 3) & ~3;
+	Hull h = {0};
+	h.centroid = ch->centroid;
+	// Build AoS verts from SoA (stack or temp alloc -- caller must manage lifetime).
+	// For now, return a Hull that points to NULL verts (caller fills or uses SoA directly).
+	h.verts = NULL; // caller should set this if AoS access is needed
+	h.soa_verts = ch->verts_x; // contiguous x,y,z (padded layout matches)
+	h.edge_twin = ext->edge_twin;
+	h.edge_next = ext->edge_next;
+	h.edge_origin = ext->edge_origin;
+	h.edge_face = ext->edge_face;
+	h.faces = ext->faces;
+	h.planes = ext->planes;
+	h.vert_count = ch->vert_count;
+	h.edge_count = ext->edge_count;
+	h.face_count = ext->face_count;
+	return h;
+}
+
 // -----------------------------------------------------------------------------
 // N^2 broadphase + narrowphase dispatch.
 

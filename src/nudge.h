@@ -210,6 +210,31 @@ int compact_hull32_from_hull(CompactHull32* out, const Hull* hull);
 int compact_hull_from_hull(CompactHull* out, const Hull* hull);
 void compact_hull_free(CompactHull* ch);
 
+// On-demand face plane extension for SAT contact generation.
+// Built from compact hull CSR adjacency + vertex positions.
+// Produces the same half-edge topology and face planes as quickhull output.
+typedef struct HullFaceExtension
+{
+	uint16_t  face_count;
+	uint16_t  edge_count;   // total half-edges
+	uint16_t* edge_twin;    // [edge_count]
+	uint16_t* edge_next;    // [edge_count]
+	uint16_t* edge_origin;  // [edge_count]
+	uint16_t* edge_face;    // [edge_count]
+	HullFace* faces;        // [face_count] -- first edge per face
+	HullPlane* planes;      // [face_count] -- normal + offset
+} HullFaceExtension;
+
+// Build face extension from a CompactHull. Caller frees with hull_face_extension_free().
+// Reconstructs half-edge mesh and face planes from CSR adjacency.
+int hull_face_extension_build(HullFaceExtension* out, const CompactHull* ch);
+void hull_face_extension_free(HullFaceExtension* ext);
+
+// Build a full Hull referencing CompactHull vertex data + face extension.
+// The returned Hull points into ch and ext memory (does NOT copy).
+// Caller must keep ch and ext alive while using the Hull.
+Hull hull_from_compact(const CompactHull* ch, const HullFaceExtension* ext);
+
 // -----------------------------------------------------------------------------
 // Quickhull -- build a convex hull from a point cloud.
 //
