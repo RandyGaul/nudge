@@ -440,6 +440,34 @@ void world_step(World world, float dt)
 
 	int manifold_count = asize(manifolds);
 
+	// Fast path: skip entire solver when nothing to solve (all sleeping, no contacts, no joints).
+	// Only safe when no islands are awake — free-falling bodies with 0 contacts still need integration.
+	int any_awake_island = 0;
+	for (int ii = 0; ii < asize(w->islands) && !any_awake_island; ii++)
+		if ((w->island_gen[ii] & 1) && w->islands[ii].awake) any_awake_island = 1;
+	int any_active_joints = 0;
+	for (int ji = 0; ji < asize(w->joints) && !any_active_joints; ji++)
+		if (split_alive(w->joint_gen, ji)) any_active_joints = 1;
+	// Also check for bodies with no island (newly created, free-falling)
+	int any_unisland_dynamic = 0;
+	for (int bi2 = 0; bi2 < body_count && !any_unisland_dynamic; bi2++)
+		if (split_alive(w->body_gen, bi2) && w->body_hot[bi2].inv_mass > 0.0f && w->body_cold[bi2].island_id < 0) any_unisland_dynamic = 1;
+	if (manifold_count == 0 && !any_awake_island && !any_active_joints && !any_unisland_dynamic) {
+		w->perf.pre_solve = 0;
+		w->perf.pgs_solve = 0;
+		w->perf.position_correct = 0;
+		w->perf.pgs = (PGSTimers){0};
+		// No post-step bvh_refit needed — bodies didn't move (solver skipped).
+		// The broadphase already refitted at start of this frame.
+		double t4 = perf_now();
+		islands_try_splits(w);
+		if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
+		w->perf.islands = perf_now() - t4;
+		afree(manifolds);
+		w->perf.total = perf_now() - t_total;
+		return;
+	}
+
 	// --- Pre-solve (once per frame, using sub_dt for softness/bias) ---
 	double t2 = perf_now();
 	SolverManifold* sm = NULL;
