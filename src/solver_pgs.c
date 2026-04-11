@@ -120,7 +120,8 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 
 		for (int c = 0; c < im->m.count; c++) {
 			Contact* ct = &im->m.contacts[c];
-			SolverContact s = {0};
+			SolverContact s;
+			s.lambda_n = 0; s.lambda_t1 = 0; s.lambda_t2 = 0; // warm start defaults
 
 			s.r_a = sub(ct->point, a->position);
 			s.r_b = sub(ct->point, b->position);
