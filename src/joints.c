@@ -4,8 +4,7 @@
 // Accumulates one body's contribution to the packed symmetric K block:
 //   K[BTRI(r,c)] += J_r * M^{-1} * J_c  (for the given side: 0=A, 1=B).
 // Call twice (side=0, side=1) to get the full K = J M^{-1} J^T.
-static void block_K_body_f(const JacobianRow* rows, int dof, int side,
-                            const BodyHot* body, float* K_packed)
+static void block_K_body_f(const JacobianRow* rows, int dof, int side, const BodyHot* body, float* K_packed)
 {
 	float im = body->inv_mass;
 	float W[6 * BLOCK_MAX_DOF]; // W[6][dof]: M^{-1} * J^T columns
