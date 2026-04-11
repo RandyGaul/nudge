@@ -10935,20 +10935,20 @@ static void run_tests()
 		#define CH32_Z(i) ch32.verts_z[i]
 		VALIDATE_SUPPORT("compact_hull32 box", ch32, h, ch32.vert_count, CH32_X, CH32_Y, CH32_Z, uint8_t, uint8_t);
 
-		TEST_BEGIN("compact_hull16 box");
-		CompactHull16 ch16;
-		TEST_ASSERT(compact_hull16_from_hull(&ch16, h) == 0);
+		TEST_BEGIN("compact_hull box");
+		CompactHull ch16;
+		TEST_ASSERT(compact_hull_from_hull(&ch16, h) == 0);
 		TEST_ASSERT(ch16.vert_count == h->vert_count);
 		for (int v = 0; v < ch16.vert_count; v++) {
 			int deg = ch16.offsets[v+1] - ch16.offsets[v];
 			TEST_ASSERT(deg == 3);
 		}
-		VALIDATE_CSR16("compact_hull16 box", ch16, h);
+		VALIDATE_CSR16("compact_hull box", ch16, h);
 		#define CH16_X(i) ch16.verts_x[i]
 		#define CH16_Y(i) ch16.verts_y[i]
 		#define CH16_Z(i) ch16.verts_z[i]
-		VALIDATE_SUPPORT("compact_hull16 box", ch16, h, ch16.vert_count, CH16_X, CH16_Y, CH16_Z, uint16_t, uint16_t);
-		compact_hull16_free(&ch16);
+		VALIDATE_SUPPORT("compact_hull box", ch16, h, ch16.vert_count, CH16_X, CH16_Y, CH16_Z, uint16_t, uint16_t);
+		compact_hull_free(&ch16);
 		hull_free(h);
 
 		TEST_BEGIN("compact_hull32 tetrahedron");
@@ -11098,11 +11098,11 @@ static void run_tests()
 				TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == -1);
 			}
 			if (h) {
-				TEST_ASSERT(compact_hull16_from_hull(&ch16, h) == 0);
+				TEST_ASSERT(compact_hull_from_hull(&ch16, h) == 0);
 				TEST_ASSERT(ch16.vert_count == h->vert_count);
-				VALIDATE_CSR16("compact_hull16 large", ch16, h);
-				VALIDATE_SUPPORT("compact_hull16 large", ch16, h, ch16.vert_count, CH16_X, CH16_Y, CH16_Z, uint16_t, uint16_t);
-				compact_hull16_free(&ch16);
+				VALIDATE_CSR16("compact_hull large", ch16, h);
+				VALIDATE_SUPPORT("compact_hull large", ch16, h, ch16.vert_count, CH16_X, CH16_Y, CH16_Z, uint16_t, uint16_t);
+				compact_hull_free(&ch16);
 				hull_free(h);
 			}
 			afree(many_pts);

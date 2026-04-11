@@ -175,7 +175,7 @@ const Hull* hull_unit_box();
 // CompactHull32: fixed-size, no heap, for hulls <= 32 verts (e.g. Roblox decomp).
 //   CSR adjacency for O(sqrt(n)) hill-climbing GJK support. ~400 bytes typical.
 //
-// CompactHull16: heap-allocated CSR, for hulls <= 65535 verts.
+// CompactHull: heap-allocated CSR, for hulls <= 65535 verts.
 //   ~3.5x smaller than full Hull. SAT extension built lazily when needed.
 
 #define COMPACT_HULL32_MAX_VERTS 32
@@ -193,7 +193,7 @@ typedef struct CompactHull32
 	v3       centroid;
 } CompactHull32;
 
-typedef struct CompactHull16
+typedef struct CompactHull
 {
 	uint16_t  vert_count;
 	uint16_t  neighbor_total;
@@ -203,12 +203,12 @@ typedef struct CompactHull16
 	float*    verts_y;
 	float*    verts_z;
 	v3        centroid;
-} CompactHull16;
+} CompactHull;
 
 // Convert a full Hull to compact form. Returns 0 on success, -1 if too many verts.
 int compact_hull32_from_hull(CompactHull32* out, const Hull* hull);
-int compact_hull16_from_hull(CompactHull16* out, const Hull* hull);
-void compact_hull16_free(CompactHull16* ch);
+int compact_hull_from_hull(CompactHull* out, const Hull* hull);
+void compact_hull_free(CompactHull* ch);
 
 // -----------------------------------------------------------------------------
 // Quickhull -- build a convex hull from a point cloud.

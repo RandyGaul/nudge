@@ -1602,9 +1602,9 @@ int compact_hull32_from_hull(CompactHull32* out, const Hull* hull)
 	return 0;
 }
 
-int compact_hull16_from_hull(CompactHull16* out, const Hull* hull)
+int compact_hull_from_hull(CompactHull* out, const Hull* hull)
 {
-	*out = (CompactHull16){0};
+	*out = (CompactHull){0};
 	int nv = hull->vert_count;
 	out->vert_count = (uint16_t)nv;
 	out->centroid = hull->centroid;
@@ -1626,7 +1626,7 @@ int compact_hull16_from_hull(CompactHull16* out, const Hull* hull)
 	return 0;
 }
 
-void compact_hull16_free(CompactHull16* ch)
+void compact_hull_free(CompactHull* ch)
 {
 	if (!ch) return;
 	CK_FREE(ch->offsets);
@@ -1634,7 +1634,7 @@ void compact_hull16_free(CompactHull16* ch)
 	CK_FREE_ALIGNED(ch->verts_x);
 	CK_FREE_ALIGNED(ch->verts_y);
 	CK_FREE_ALIGNED(ch->verts_z);
-	*ch = (CompactHull16){0};
+	*ch = (CompactHull){0};
 }
 
 // -----------------------------------------------------------------------------
