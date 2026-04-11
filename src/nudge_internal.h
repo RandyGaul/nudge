@@ -279,6 +279,7 @@ typedef struct WorldInternal
 	BroadphaseType broadphase_type;
 	BVHTree* bvh_static;
 	BVHTree* bvh_dynamic;
+	BVHTree* bvh_sleeping; // sleeping dynamic bodies (no refit, no SAP)
 	// Islands
 	CK_DYNA Island*     islands;
 	CK_DYNA uint32_t*   island_gen;

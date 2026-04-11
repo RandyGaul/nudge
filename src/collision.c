@@ -1712,8 +1712,8 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	bvh_refit(w->bvh_dynamic, w);
 	bp_refit_acc += perf_now() - t0;
 
-	// Build tight AABBs + sweep-and-prune entries for all dynamic bodies.
-	// Pick the axis with the most spread to maximize SAP pruning.
+	// Build tight AABBs + sweep-and-prune entries for awake dynamic bodies only.
+	// Sleeping bodies live in bvh_sleeping and are excluded from SAP.
 	double t1 = perf_now();
 	int body_count = asize(w->body_hot);
 	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
@@ -1728,36 +1728,34 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	int axis = (extent.y > extent.x && extent.y > extent.z) ? 1 : (extent.z > extent.x) ? 2 : 0;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) continue;
-		if (w->body_hot[i].inv_mass > 0.0f) apush(sap, ((SAP_Entry){ i, ((float*)&tight[i].min)[axis], ((float*)&tight[i].max)[axis] }));
+		if (w->body_hot[i].inv_mass == 0.0f) continue;
+		// Skip sleeping bodies -- they're in bvh_sleeping, not SAP
+		int isl = w->body_cold[i].island_id;
+		if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) continue;
+		apush(sap, ((SAP_Entry){ i, ((float*)&tight[i].min)[axis], ((float*)&tight[i].max)[axis] }));
 	}
 
-	// Sort dynamic bodies by chosen axis AABB min.
+	// Sort awake dynamic bodies by chosen axis AABB min.
 	int sap_count = asize(sap);
 	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAP_Entry), sap_cmp);
 	bp_precomp_acc += perf_now() - t1;
 
 	// Sweep: test overlapping pairs along chosen axis, then full 3D AABB overlap (SIMD branchless).
-	// Phase 1: collect broadphase pairs (no narrowphase yet — just AABB overlap test).
 	double t2 = perf_now();
 	CK_DYNA BroadPair* dd_pairs = NULL;
 	for (int i = 0; i < sap_count; i++) {
 		float max_val = sap[i].max_val;
 		int a = sap[i].body_idx;
 		AABB ta = tight[a];
-		int isl_a = w->body_cold[a].island_id;
 		for (int j = i + 1; j < sap_count && sap[j].min_val <= max_val; j++) {
 			int b = sap[j].body_idx;
 			if (!aabb_overlaps(ta, tight[b])) continue;
-			// Skip pair if both bodies are inactive (sleeping dynamic-dynamic)
-			// Note: SAP only contains dynamic bodies (inv_mass > 0), so no static check needed
-			int isl_b = w->body_cold[b].island_id;
-			if (isl_a >= 0 && isl_b >= 0 && (w->island_gen[isl_a] & 1) && (w->island_gen[isl_b] & 1) && !w->islands[isl_a].awake && !w->islands[isl_b].awake) continue;
 			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
 			apush(dd_pairs, ((BroadPair){ a, b }));
 		}
 	}
 
-	// Collect d-s pairs too.
+	// Collect awake-dynamic vs static pairs.
 	bp_sweep_acc += perf_now() - t2;
 	double t3 = perf_now();
 	CK_DYNA BroadPair* pairs = NULL;
@@ -1765,9 +1763,15 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	for (int i = 0; i < asize(pairs); i++) {
 		int a = pairs[i].a, b = pairs[i].b;
 		if (!aabb_overlaps(tight[a], tight[b])) continue;
-		// Skip sleeping dynamic vs static (static is always inactive)
-		int isl_a = w->body_cold[a].island_id;
-		if (isl_a >= 0 && (w->island_gen[isl_a] & 1) && !w->islands[isl_a].awake) continue;
+		apush(dd_pairs, ((BroadPair){ a, b }));
+	}
+	afree(pairs);
+	// Collect awake-dynamic vs sleeping pairs (for wake detection).
+	pairs = NULL;
+	bvh_cross_test(w->bvh_dynamic, w->bvh_sleeping, &pairs);
+	for (int i = 0; i < asize(pairs); i++) {
+		int a = pairs[i].a, b = pairs[i].b;
+		if (!aabb_overlaps(tight[a], tight[b])) continue;
 		apush(dd_pairs, ((BroadPair){ a, b }));
 	}
 	afree(pairs);

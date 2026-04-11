@@ -37,8 +37,10 @@ World create_world(WorldParams params)
 	w->ldl_correction_iter = -2; // -2 = auto: velocity_iters/2 (mid-loop, PGS can recover after LDL)
 	w->bvh_static = CK_ALLOC(sizeof(BVHTree));
 	w->bvh_dynamic = CK_ALLOC(sizeof(BVHTree));
+	w->bvh_sleeping = CK_ALLOC(sizeof(BVHTree));
 	bvh_init(w->bvh_static);
 	bvh_init(w->bvh_dynamic);
+	bvh_init(w->bvh_sleeping);
 	return (World){ (uint64_t)w };
 }
 
@@ -53,6 +55,7 @@ void destroy_world(World world)
 	map_free(w->warm_cache);
 	bvh_free(w->bvh_static); CK_FREE(w->bvh_static);
 	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
+	bvh_free(w->bvh_sleeping); CK_FREE(w->bvh_sleeping);
 	split_free(w->body_cold, w->body_hot, w->body_gen, w->body_free);
 	afree(w->joints); afree(w->joint_gen); afree(w->joint_free);
 	for (int i = 0; i < asize(w->islands); i++) ldl_cache_free(&w->islands[i].ldl);
@@ -815,7 +818,10 @@ void destroy_body(World world, Body body)
 		w->islands[isl].constraint_remove_count++;
 	}
 	if (w->body_cold[idx].bvh_leaf >= 0) {
-		BVHTree* tree = w->body_hot[idx].inv_mass == 0.0f ? w->bvh_static : w->bvh_dynamic;
+		BVHTree* tree;
+		if (w->body_hot[idx].inv_mass == 0.0f) tree = w->bvh_static;
+		else if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake) tree = w->bvh_sleeping;
+		else tree = w->bvh_dynamic;
 		int moved_body = bvh_remove(tree, w->body_cold[idx].bvh_leaf);
 		if (moved_body >= 0) w->body_cold[moved_body].bvh_leaf = w->body_cold[idx].bvh_leaf;
 	}
@@ -1224,6 +1230,7 @@ void world_debug_bvh(World world, BVHDebugFn fn, void* user)
 	WorldInternal* w = (WorldInternal*)world.id;
 	if (w->bvh_dynamic->root >= 0) bvh_debug_walk(w->bvh_dynamic, w->bvh_dynamic->root, 0, fn, user);
 	if (w->bvh_static->root >= 0) bvh_debug_walk(w->bvh_static, w->bvh_static->root, 0, fn, user);
+	if (w->bvh_sleeping->root >= 0) bvh_debug_walk(w->bvh_sleeping, w->bvh_sleeping->root, 0, fn, user);
 }
 
 void world_debug_joints(World world, JointDebugFn fn, void* user)
@@ -1293,6 +1300,7 @@ int world_query_aabb(World world, v3 lo, v3 hi, Body* results, int max_results)
 	if (w->broadphase_type == BROADPHASE_BVH) {
 		bvh_query_aabb(w->bvh_dynamic, query, &candidates);
 		bvh_query_aabb(w->bvh_static, query, &candidates);
+		bvh_query_aabb(w->bvh_sleeping, query, &candidates);
 	} else {
 		int count = asize(w->body_hot);
 		for (int i = 0; i < count; i++) {
@@ -1326,6 +1334,7 @@ int world_raycast(World world, v3 origin, v3 direction, float max_distance, RayH
 	if (w->broadphase_type == BROADPHASE_BVH) {
 		bvh_query_ray(w->bvh_dynamic, origin, inv_dir, max_distance, &candidates);
 		bvh_query_ray(w->bvh_static, origin, inv_dir, max_distance, &candidates);
+		bvh_query_ray(w->bvh_sleeping, origin, inv_dir, max_distance, &candidates);
 	} else {
 		int count = asize(w->body_hot);
 		for (int i = 0; i < count; i++) {

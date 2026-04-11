@@ -153,6 +153,17 @@ static int island_merge(WorldInternal* w, int id_a, int id_b)
 	return id_a;
 }
 
+// Transfer a body's BVH leaf from one tree to another.
+static void bvh_transfer_body(WorldInternal* w, int body_idx, BVHTree* from, BVHTree* to)
+{
+	int leaf = w->body_cold[body_idx].bvh_leaf;
+	if (leaf < 0) return;
+	int moved = bvh_remove(from, leaf);
+	if (moved >= 0) w->body_cold[moved].bvh_leaf = leaf;
+	AABB box = aabb_expand(body_aabb(&w->body_hot[body_idx], &w->body_cold[body_idx]), BVH_AABB_MARGIN);
+	w->body_cold[body_idx].bvh_leaf = bvh_insert(to, body_idx, box);
+}
+
 static void island_wake(WorldInternal* w, int island_id)
 {
 	Island* isl = &w->islands[island_id];
@@ -160,6 +171,8 @@ static void island_wake(WorldInternal* w, int island_id)
 	int bi = isl->head_body;
 	while (bi >= 0) {
 		w->body_hot[bi].sleep_time = 0.0f;
+		if (w->broadphase_type == BROADPHASE_BVH)
+			bvh_transfer_body(w, bi, w->bvh_sleeping, w->bvh_dynamic);
 		bi = w->body_cold[bi].island_next;
 	}
 }
@@ -173,6 +186,8 @@ static void island_sleep(WorldInternal* w, int island_id)
 	while (bi >= 0) {
 		w->body_hot[bi].velocity = V3(0, 0, 0);
 		w->body_hot[bi].angular_velocity = V3(0, 0, 0);
+		if (w->broadphase_type == BROADPHASE_BVH)
+			bvh_transfer_body(w, bi, w->bvh_dynamic, w->bvh_sleeping);
 		bi = w->body_cold[bi].island_next;
 	}
 }
