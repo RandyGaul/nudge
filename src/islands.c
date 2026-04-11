@@ -272,9 +272,23 @@ static void islands_update_contacts(WorldInternal* w, InternalManifold* manifold
 		}
 	}
 
-	// TODO: detect lost contacts to update island constraint_remove_count.
-	// Needs proper map iteration (map_keys/map_size) instead of the broken
-	// asize() call that was here (asize on a CK_MAP reads garbage).
+	// Detect lost contacts: pairs in prev_touching but not in curr_touching.
+	// Increment constraint_remove_count on their island so island_try_split fires.
+	int prev_n = map_size(w->prev_touching);
+	if (prev_n > 0) {
+		uint64_t* prev_keys = map_keys(w->prev_touching);
+		for (int i = 0; i < prev_n; i++) {
+			uint64_t pk = prev_keys[i];
+			if (map_get_ptr(curr_touching, pk)) continue; // still touching
+			// Contact lost. Find which island this pair belongs to.
+			int pa = (int)(pk >> 32), pb = (int)(pk & 0xFFFFFFFF);
+			if (pa >= asize(w->body_hot) || pb >= asize(w->body_hot)) continue;
+			if (!split_alive(w->body_gen, pa) || !split_alive(w->body_gen, pb)) continue;
+			int isl = w->body_cold[pa].island_id;
+			if (isl < 0) isl = w->body_cold[pb].island_id;
+			if (isl >= 0 && (w->island_gen[isl] & 1)) w->islands[isl].constraint_remove_count++;
+		}
+	}
 
 	// Swap: prev_touching = curr_touching
 	map_free(w->prev_touching);
