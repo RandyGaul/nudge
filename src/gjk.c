@@ -114,9 +114,8 @@ static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius)
 // -----------------------------------------------------------------------------
 // Rotation helpers.
 
-// Aliases for vmath.h mat3 operations (used throughout GJK dispatch).
-#define gjk_mat_rotate_t mat3_tmul_v
-#define gjk_mat_rotate   mat3_mul_v
+#define mat3_tmul_v mat3_tmul_v
+#define mat3_mul_v   mat3_mul_v
 
 // -----------------------------------------------------------------------------
 // Hull convenience constructor with vert-edge table caching.
@@ -272,11 +271,11 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 
 static v3 gjk_box_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict feat)
 {
-	v3 ld = gjk_mat_rotate(sp->box.col0, sp->box.col1, sp->box.col2, sd);
+	v3 ld = mat3_mul_v(sp->box.col0, sp->box.col1, sp->box.col2, sd);
 	simd4f sign_bits = simd_and(ld.m, simd_sign_mask());
 	v3 lc = { .m = simd_xor(sp->box.half_extents.m, sign_bits) };
 	*feat = simd_movemask(simd_cmpge(ld.m, simd_zero())) & 7;
-	return add(sp->box.center, gjk_mat_rotate_t(sp->box.col0, sp->box.col1, sp->box.col2, lc));
+	return add(sp->box.center, mat3_tmul_v(sp->box.col0, sp->box.col1, sp->box.col2, lc));
 }
 
 static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict feat)
@@ -315,14 +314,14 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	}                                                                                                                     \
 	case GJK_BOX: (out_point) = gjk_box_support(sp, sd, (out_feat)); break;                                                \
 	case GJK_HULL: {                                                                                                      \
-		v3 ld = gjk_mat_rotate(sp->hull.col0, sp->hull.col1, sp->hull.col2, sd);                                          \
+		v3 ld = mat3_mul_v(sp->hull.col0, sp->hull.col1, sp->hull.col2, sd);                                          \
 		v3 sld = hmul(ld, sp->hull.scale);                                                                                \
 		int hbi = (sp->hull.vert_edge && sp->hull.count > 0)                                                              \
 			? gjk_hull_support_climb(sp->hull.verts, sp->hull.edge_twin, sp->hull.edge_next, sp->hull.edge_origin, sp->hull.vert_edge, sld, sp->hull.hint)               \
 			: gjk_hull_support_scan(sp->hull.verts, sp->hull.count, sp->hull.soa, sld);                                   \
 		sp->hull.hint = hbi;                                                                                               \
 		*(out_feat) = hbi;                                                                                                \
-		(out_point) = add(sp->hull.center, gjk_mat_rotate_t(sp->hull.col0, sp->hull.col1, sp->hull.col2,                  \
+		(out_point) = add(sp->hull.center, mat3_tmul_v(sp->hull.col0, sp->hull.col1, sp->hull.col2,                  \
 		                  hmul(sp->hull.verts[hbi], sp->hull.scale)));                                                     \
 		break;                                                                                                            \
 	}                                                                                                                     \
@@ -342,7 +341,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 		break;                                                                                                            \
 	}                                                                                                                     \
 	case GJK_COMPACT_HULL32: {                                                                                            \
-		v3 ld = gjk_mat_rotate(sp->compact32.col0, sp->compact32.col1, sp->compact32.col2, sd);                           \
+		v3 ld = mat3_mul_v(sp->compact32.col0, sp->compact32.col1, sp->compact32.col2, sd);                           \
 		v3 sld = hmul(ld, sp->compact32.scale);                                                                           \
 		/* <=32 verts: branchless SIMD linear scan. */                                                                    \
 		int padded = (sp->compact32.count + 3) & ~3;                                                                      \
@@ -364,12 +363,12 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 		if (hbi >= sp->compact32.count) hbi = 0;                                                                          \
 		*(out_feat) = hbi;                                                                                                \
 		v3 lv = V3(sx[hbi]*sp->compact32.scale.x, sy[hbi]*sp->compact32.scale.y, sz[hbi]*sp->compact32.scale.z);         \
-		(out_point) = add(sp->compact32.center, gjk_mat_rotate_t(sp->compact32.col0, sp->compact32.col1,                  \
+		(out_point) = add(sp->compact32.center, mat3_tmul_v(sp->compact32.col0, sp->compact32.col1,                  \
 		              sp->compact32.col2, lv));                                                                            \
 		break;                                                                                                            \
 	}                                                                                                                     \
 	case GJK_COMPACT_HULL: {                                                                                              \
-		v3 ld = gjk_mat_rotate(sp->compact.col0, sp->compact.col1, sp->compact.col2, sd);                                \
+		v3 ld = mat3_mul_v(sp->compact.col0, sp->compact.col1, sp->compact.col2, sd);                                \
 		v3 sld = hmul(ld, sp->compact.scale);                                                                             \
 		int hbi = gjk_compact_support_climb(sp->compact.vx, sp->compact.vy, sp->compact.vz,                              \
 			sp->compact.offsets, sp->compact.neighbors, sld, sp->compact.hint);                                           \
@@ -377,7 +376,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 		*(out_feat) = hbi;                                                                                                \
 		v3 lv = V3(sp->compact.vx[hbi]*sp->compact.scale.x, sp->compact.vy[hbi]*sp->compact.scale.y,                     \
 		           sp->compact.vz[hbi]*sp->compact.scale.z);                                                              \
-		(out_point) = add(sp->compact.center, gjk_mat_rotate_t(sp->compact.col0, sp->compact.col1,                        \
+		(out_point) = add(sp->compact.center, mat3_tmul_v(sp->compact.col0, sp->compact.col1,                        \
 		              sp->compact.col2, lv));                                                                              \
 		break;                                                                                                            \
 	}                                                                                                                     \
@@ -394,10 +393,10 @@ static inline v3 gjk_support_feature(const GJK_Shape* sp, int feat)
 	case GJK_BOX: {
 		v3 he = sp->box.half_extents;
 		v3 lc = V3((feat & 1) ? he.x : -he.x, (feat & 2) ? he.y : -he.y, (feat & 4) ? he.z : -he.z);
-		return add(sp->box.center, gjk_mat_rotate_t(sp->box.col0, sp->box.col1, sp->box.col2, lc));
+		return add(sp->box.center, mat3_tmul_v(sp->box.col0, sp->box.col1, sp->box.col2, lc));
 	}
 	case GJK_HULL:
-		return add(sp->hull.center, gjk_mat_rotate_t(sp->hull.col0, sp->hull.col1, sp->hull.col2, hmul(sp->hull.verts[feat], sp->hull.scale)));
+		return add(sp->hull.center, mat3_tmul_v(sp->hull.col0, sp->hull.col1, sp->hull.col2, hmul(sp->hull.verts[feat], sp->hull.scale)));
 	case GJK_CYLINDER: {
 		int cap = feat & 1;
 		simd4f sign = cap ? simd_zero() : simd_sign_mask();

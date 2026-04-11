@@ -16,12 +16,9 @@ typedef union v3
 	simd4f m;
 } v3;
 
-typedef struct quat
-{ float x, y, z, w; } quat;
-typedef struct mat4
-{ float m[16]; } mat4; // column-major
-typedef struct Transform
-{ v3 position; quat rotation; } Transform;
+typedef struct quat { float x, y, z, w; } quat;
+typedef struct mat4 { float m[16]; } mat4; // column-major
+typedef struct Transform { v3 position; quat rotation; } Transform;
 
 // Constructors.
 #define V3(vx, vy, vz) ((v3){ .m = simd_set(vx, vy, vz, 0) })
