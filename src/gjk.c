@@ -285,7 +285,8 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	float inv_cpl = 1.0f / cplf;
 	int ix = (int)(cdp.x * inv_cpl * 511.0f), iy = (int)(cdp.y * inv_cpl * 511.0f), iz = (int)(cdp.z * inv_cpl * 511.0f);
 	*feat = cap | ((ix & 0x3FF) << 1) | ((iy & 0x3FF) << 11) | ((iz & 0x3FF) << 21);
-	return add(cbase, v3_scale_m(cdp, simd_div_ss(simd_set_ss(sp->cylinder.radius), cpl)));
+	simd4f ratio = simd_div_ss(simd_set_ss(sp->cylinder.radius), cpl);
+	return add(cbase, scale(cdp, simd_get_x(ratio)));
 }
 
 // Support dispatch macro. Box/cylinder/hull use separate functions to control inlining.
