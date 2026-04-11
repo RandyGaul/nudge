@@ -1599,7 +1599,6 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 
 	// Upper-triangle dispatch: simple pairs first, then warm-cached SAT pairs.
 	int hit = 0;
-	double t0 = perf_now();
 
 	if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE)
 		hit = collide_sphere_sphere(make_sphere(h0, s0), make_sphere(h1, s1), &im.m);
@@ -1639,11 +1638,8 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		if (wm) wm->sat_axis = hint;
 	}
 
-	double dt = perf_now() - t0;
 	int idx = np_pair_idx(s0->type, s1->type);
-	np_time_acc[idx] += dt;
 	np_call_acc[idx]++;
-
 	if (hit) apush(*manifolds, im);
 }
 
