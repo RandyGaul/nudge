@@ -1618,7 +1618,6 @@ static uint64_t body_pair_key(int a, int b);
 
 static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** manifolds)
 {
-	double np_start = perf_now();
 	g_sat_hillclimb_enabled = w->sat_hillclimb_enabled;
 	// Canonical ordering: lower type first for upper-triangle dispatch,
 	// lower body index first for same-type pairs (deterministic shape A).
@@ -1679,9 +1678,7 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	// Store SAT hint back to warm cache
 	if (hp && wm) wm->sat_axis = hint;
 
-	double np_end = perf_now();
 	int idx = np_pair_idx(s0->type, s1->type);
-	np_time_acc[idx] += np_end - np_start;
 	np_call_acc[idx]++;
 	if (hit) apush(*manifolds, im);
 }
