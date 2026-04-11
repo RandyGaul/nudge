@@ -1531,6 +1531,112 @@ static const Hull* hull_unit_cylinder()
 }
 
 // -----------------------------------------------------------------------------
+// Cylinder Voronoi region classification.
+//
+// Used by native cylinder narrowphase routines. Takes a world-space point
+// (typically the witness on the other shape from GJK on the cylinder's axis
+// segment) and returns the true nearest point on the cylinder surface, plus
+// its outward normal and signed distance.
+//
+// The four regions partition space outside the cylinder into distinct feature
+// owners, plus INSIDE for the interior:
+//   SIDE:   |axial| <= hh && rad >= r   -- curved wall owns the witness
+//   CAP:    |axial| >  hh && rad <= r   -- flat top/bottom owns the witness
+//   RIM:    |axial| >  hh && rad >  r   -- the circular edge owns the witness
+//   INSIDE: |axial| <  hh && rad <  r   -- escape via nearest side or cap face
+//
+// Distance is positive outside, negative inside (value = -escape_depth).
+
+typedef enum
+{
+	CYL_REGION_SIDE,
+	CYL_REGION_CAP,
+	CYL_REGION_RIM,
+	CYL_REGION_INSIDE,
+} CylRegion;
+
+typedef struct CylFeature
+{
+	CylRegion region;
+	float distance;      // signed: >0 outside, <0 inside (-escape_depth)
+	v3 surface_pt;       // world-space point on cylinder surface
+	v3 normal;           // unit outward cylinder normal at surface_pt (world)
+} CylFeature;
+
+static CylFeature cyl_classify_point(v3 x_world, v3 cyl_pos, quat cyl_rot, float half_height, float radius)
+{
+	// Transform witness into cylinder-local space.
+	v3 lp = rotate(inv(cyl_rot), sub(x_world, cyl_pos));
+	float rad2 = lp.x * lp.x + lp.z * lp.z;
+	float rad = sqrtf(rad2);
+	float axial = lp.y;
+	float abs_axial = fabsf(axial);
+	float sign_y = axial >= 0.0f ? 1.0f : -1.0f;
+
+	CylFeature feat;
+	v3 sp_local, n_local;
+
+	if (abs_axial <= half_height) {
+		if (rad >= radius) {
+			// SIDE: perpendicular distance to the curved wall.
+			feat.region = CYL_REGION_SIDE;
+			feat.distance = rad - radius;
+			// rad is >= radius > 0 so inv_rad is finite.
+			float inv_rad = 1.0f / rad;
+			float rx = lp.x * inv_rad, rz = lp.z * inv_rad;
+			sp_local = V3(rx * radius, axial, rz * radius);
+			n_local = V3(rx, 0.0f, rz);
+		} else {
+			// INSIDE: pick the nearest escape face (side vs cap).
+			feat.region = CYL_REGION_INSIDE;
+			float side_esc = radius - rad;
+			float cap_esc = half_height - abs_axial;
+			if (cap_esc < side_esc) {
+				feat.distance = -cap_esc;
+				sp_local = V3(lp.x, sign_y * half_height, lp.z);
+				n_local = V3(0.0f, sign_y, 0.0f);
+			} else {
+				feat.distance = -side_esc;
+				if (rad > 1e-12f) {
+					float inv_rad = 1.0f / rad;
+					float rx = lp.x * inv_rad, rz = lp.z * inv_rad;
+					sp_local = V3(rx * radius, axial, rz * radius);
+					n_local = V3(rx, 0.0f, rz);
+				} else {
+					// Exactly on the axis -- arbitrary radial (+X).
+					sp_local = V3(radius, axial, 0.0f);
+					n_local = V3(1.0f, 0.0f, 0.0f);
+				}
+			}
+		}
+	} else {
+		if (rad <= radius) {
+			// CAP: perpendicular distance to the flat disk.
+			feat.region = CYL_REGION_CAP;
+			feat.distance = abs_axial - half_height;
+			sp_local = V3(lp.x, sign_y * half_height, lp.z);
+			n_local = V3(0.0f, sign_y, 0.0f);
+		} else {
+			// RIM: closest feature is the circular edge at (rad=r, axial=+/-hh).
+			feat.region = CYL_REGION_RIM;
+			float dr = rad - radius;
+			float da = abs_axial - half_height;
+			feat.distance = sqrtf(dr * dr + da * da);
+			float inv_rad = 1.0f / rad; // rad > radius > 0
+			float rx = lp.x * inv_rad, rz = lp.z * inv_rad;
+			sp_local = V3(rx * radius, sign_y * half_height, rz * radius);
+			// Outward normal along the direction from the rim point to the witness.
+			float inv_d = feat.distance > 1e-12f ? 1.0f / feat.distance : 0.0f;
+			n_local = V3(rx * dr * inv_d, sign_y * da * inv_d, rz * dr * inv_d);
+		}
+	}
+
+	feat.surface_pt = add(cyl_pos, rotate(cyl_rot, sp_local));
+	feat.normal = rotate(cyl_rot, n_local);
+	return feat;
+}
+
+// -----------------------------------------------------------------------------
 // Hull lifecycle. Quickhull implemented in quickhull.c.
 
 void hull_free(Hull* hull)
@@ -1580,6 +1686,69 @@ static ConvexHull make_convex_hull(BodyHot* h, ShapeInternal* s)
 static ConvexHull make_cylinder_hull(BodyHot* h, ShapeInternal* s)
 {
 	return (ConvexHull){ hull_unit_cylinder(), h->position, h->rotation, V3(s->cylinder.radius, s->cylinder.half_height, s->cylinder.radius) };
+}
+
+// Build a Cylinder from an internal body+shape (mirror of make_box/make_sphere).
+static Cylinder make_cylinder(BodyHot* h, ShapeInternal* s)
+{
+	return (Cylinder){ h->position, h->rotation, s->cylinder.half_height, s->cylinder.radius };
+}
+
+// Convert a Cylinder to the shared unit-cylinder ConvexHull view (for hull-backed fallback).
+static ConvexHull cylinder_to_convex_hull(Cylinder c)
+{
+	return (ConvexHull){ hull_unit_cylinder(), c.center, c.rotation, V3(c.radius, c.half_height, c.radius) };
+}
+
+// -----------------------------------------------------------------------------
+// Native cylinder narrowphase.
+//
+// Each routine currently delegates to the hull-backed fallback. Phases 1-5
+// replace the bodies one at a time with native geometric implementations that
+// produce analytically-correct surface contacts using cyl_classify_point.
+
+int collide_cylinder_sphere(Cylinder a, Sphere b, Manifold* manifold)
+{
+	// Shape-A-first convention: sphere on the B side, so normal from cyl to sphere.
+	Manifold tmp = {0};
+	int hit = collide_sphere_hull(b, cylinder_to_convex_hull(a), &tmp);
+	if (!hit) return 0;
+	if (manifold) {
+		*manifold = tmp;
+		// collide_sphere_hull reports normal B->A (i.e. cyl->sphere is A side in the
+		// swapped call = sphere->cyl as reported). Flip to get cyl->sphere.
+		for (int i = 0; i < manifold->count; i++) manifold->contacts[i].normal = neg(manifold->contacts[i].normal);
+	}
+	return 1;
+}
+
+int collide_cylinder_capsule(Cylinder a, Capsule b, Manifold* manifold)
+{
+	Manifold tmp = {0};
+	int hit = collide_capsule_hull(b, cylinder_to_convex_hull(a), &tmp);
+	if (!hit) return 0;
+	if (manifold) {
+		*manifold = tmp;
+		for (int i = 0; i < manifold->count; i++) manifold->contacts[i].normal = neg(manifold->contacts[i].normal);
+	}
+	return 1;
+}
+
+int collide_cylinder_box(Cylinder a, Box b, Manifold* manifold)
+{
+	// Cyl is A, box is B. Route through hull-hull with a-side = unit cylinder.
+	ConvexHull cb = { &s_unit_box_hull, b.center, b.rotation, b.half_extents };
+	return collide_hull_hull(cylinder_to_convex_hull(a), cb, manifold);
+}
+
+int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold)
+{
+	return collide_hull_hull(cylinder_to_convex_hull(a), b, manifold);
+}
+
+int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold)
+{
+	return collide_hull_hull(cylinder_to_convex_hull(a), cylinder_to_convex_hull(b), manifold);
 }
 
 // Narrowphase dispatch for a single body pair.

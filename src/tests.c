@@ -934,6 +934,256 @@ static void test_normal_convention()
 }
 
 // ============================================================================
+// Cylinder native narrowphase -- Voronoi-region classification + per-pair table
+// harness. Individual pair tests landed in phases 1-5.
+
+// cyl_classify_point lives in collision.c. It takes a world-space witness
+// point, classifies it into a Voronoi region of the cylinder (SIDE / CAP /
+// RIM / INSIDE), and returns the true closest point on the cylinder surface
+// plus the outward normal and signed distance. Every native cyl pair uses it
+// to convert a GJK segment witness into a real cylinder-surface contact.
+
+// Double-precision brute-force distance for reference. Places the witness in
+// cylinder-local space and computes analytically, matching the float code's
+// region decomposition but with tighter math.
+static double d_cyl_surface_distance(v3 x_world, v3 cyl_pos, quat cyl_rot, float hh, float r)
+{
+	v3 lp = rotate(inv(cyl_rot), sub(x_world, cyl_pos));
+	double rad = sqrt((double)lp.x*(double)lp.x + (double)lp.z*(double)lp.z);
+	double axial = (double)lp.y;
+	double abs_ax = fabs(axial);
+	if (abs_ax <= (double)hh) {
+		if (rad >= (double)r) return rad - (double)r;
+		// INSIDE: -(nearest escape)
+		double side_esc = (double)r - rad;
+		double cap_esc = (double)hh - abs_ax;
+		return -(side_esc < cap_esc ? side_esc : cap_esc);
+	} else {
+		if (rad <= (double)r) return abs_ax - (double)hh;
+		double dr = rad - (double)r;
+		double da = abs_ax - (double)hh;
+		return sqrt(dr*dr + da*da);
+	}
+}
+
+// Deterministic small RNG for classification fuzz (separate from other tests).
+static uint32_t cyl_rng = 0x1234abcdu;
+static float cyl_randf() { cyl_rng = cyl_rng * 1103515245u + 12345u; return (float)((cyl_rng >> 16) & 0x7fff) / 32767.0f; }
+static float cyl_randr(float lo, float hi) { return lo + cyl_randf() * (hi - lo); }
+static v3 cyl_rand_v3(float lo, float hi) { return V3(cyl_randr(lo,hi), cyl_randr(lo,hi), cyl_randr(lo,hi)); }
+static quat cyl_rand_quat()
+{
+	float u1 = cyl_randf(), u2 = cyl_randf(), u3 = cyl_randf();
+	float s1 = sqrtf(1.0f - u1), s2 = sqrtf(u1);
+	const float TAU = 6.2831853f;
+	return (quat){ s1 * sinf(TAU * u2), s1 * cosf(TAU * u2), s2 * sinf(TAU * u3), s2 * cosf(TAU * u3) };
+}
+
+static void test_cyl_classify_point()
+{
+	// Canonical axis-aligned cylinder at the origin: hh=1, r=0.5.
+	v3 cp = V3(0,0,0); quat cq = quat_identity(); float hh = 1.0f, r = 0.5f;
+
+	// SIDE region: witness just outside the curved wall, axial in band.
+	TEST_BEGIN("cyl classify SIDE exterior");
+	{
+		CylFeature f = cyl_classify_point(V3(0.8f, 0.3f, 0.0f), cp, cq, hh, r);
+		TEST_ASSERT(f.region == CYL_REGION_SIDE);
+		TEST_ASSERT_FLOAT(f.distance, 0.3f, 1e-5f);
+		TEST_ASSERT_FLOAT(f.surface_pt.x, 0.5f, 1e-5f);
+		TEST_ASSERT_FLOAT(f.surface_pt.y, 0.3f, 1e-5f);
+		TEST_ASSERT_FLOAT(f.surface_pt.z, 0.0f, 1e-5f);
+		TEST_ASSERT_FLOAT(f.normal.x, 1.0f, 1e-5f);
+	}
+
+	// CAP region: witness above top cap, within radius.
+	TEST_BEGIN("cyl classify CAP top");
+	{
+		CylFeature f = cyl_classify_point(V3(0.2f, 1.6f, 0.1f), cp, cq, hh, r);
+		TEST_ASSERT(f.region == CYL_REGION_CAP);
+		TEST_ASSERT_FLOAT(f.distance, 0.6f, 1e-5f);
+		TEST_ASSERT_FLOAT(f.surface_pt.y, 1.0f, 1e-5f);
+		TEST_ASSERT_FLOAT(f.normal.y, 1.0f, 1e-5f);
+	}
+
+	TEST_BEGIN("cyl classify CAP bottom");
+	{
+		CylFeature f = cyl_classify_point(V3(0.0f, -1.4f, 0.0f), cp, cq, hh, r);
+		TEST_ASSERT(f.region == CYL_REGION_CAP);
+		TEST_ASSERT_FLOAT(f.distance, 0.4f, 1e-5f);
+		TEST_ASSERT_FLOAT(f.surface_pt.y, -1.0f, 1e-5f);
+		TEST_ASSERT_FLOAT(f.normal.y, -1.0f, 1e-5f);
+	}
+
+	// RIM region: witness past top cap AND outside radius.
+	TEST_BEGIN("cyl classify RIM top");
+	{
+		CylFeature f = cyl_classify_point(V3(0.9f, 1.3f, 0.0f), cp, cq, hh, r);
+		TEST_ASSERT(f.region == CYL_REGION_RIM);
+		float dr = 0.9f - 0.5f, da = 1.3f - 1.0f;
+		TEST_ASSERT_FLOAT(f.distance, sqrtf(dr*dr + da*da), 1e-5f);
+		TEST_ASSERT_FLOAT(f.surface_pt.x, 0.5f, 1e-5f);
+		TEST_ASSERT_FLOAT(f.surface_pt.y, 1.0f, 1e-5f);
+	}
+
+	// INSIDE region: witness inside cylinder, nearest escape is side.
+	TEST_BEGIN("cyl classify INSIDE side-escape");
+	{
+		CylFeature f = cyl_classify_point(V3(0.4f, 0.0f, 0.0f), cp, cq, hh, r);
+		TEST_ASSERT(f.region == CYL_REGION_INSIDE);
+		TEST_ASSERT_FLOAT(f.distance, -0.1f, 1e-5f);
+		TEST_ASSERT_FLOAT(f.surface_pt.x, 0.5f, 1e-5f);
+	}
+
+	// INSIDE region: witness inside cylinder, nearest escape is cap.
+	TEST_BEGIN("cyl classify INSIDE cap-escape");
+	{
+		CylFeature f = cyl_classify_point(V3(0.0f, 0.9f, 0.0f), cp, cq, hh, r);
+		TEST_ASSERT(f.region == CYL_REGION_INSIDE);
+		TEST_ASSERT_FLOAT(f.distance, -0.1f, 1e-5f);
+		TEST_ASSERT_FLOAT(f.surface_pt.y, 1.0f, 1e-5f);
+	}
+
+	// Point exactly on axis: should pick +X arbitrarily for side escape.
+	TEST_BEGIN("cyl classify axis-centered INSIDE");
+	{
+		CylFeature f = cyl_classify_point(V3(0.0f, 0.0f, 0.0f), cp, cq, hh, r);
+		TEST_ASSERT(f.region == CYL_REGION_INSIDE);
+		// Tied at side-escape=0.5 vs cap-escape=1.0, side wins.
+		TEST_ASSERT_FLOAT(f.distance, -0.5f, 1e-5f);
+	}
+
+	// Rotated cylinder: rotate 90deg around Z so axis points along world +X.
+	TEST_BEGIN("cyl classify rotated SIDE");
+	{
+		quat rz = { 0, 0, sinf(3.14159265f * 0.25f), cosf(3.14159265f * 0.25f) };
+		// Pick a world point that is "above" the rotated cylinder radially.
+		// Local would be (0, 0.3, 0) + side offset radially.
+		// After rotation (Z by +90), local Y maps to world -X? Let's check via classify.
+		CylFeature f = cyl_classify_point(V3(0.0f, 0.0f, 0.8f), cp, rz, hh, r);
+		// Local Y (axis) maps to some rotated direction; the witness should be
+		// on the SIDE region because it is perpendicular to the cylinder axis.
+		TEST_ASSERT(f.region == CYL_REGION_SIDE);
+		TEST_ASSERT_FLOAT(f.distance, 0.3f, 1e-5f);
+	}
+
+	// Translated cylinder.
+	TEST_BEGIN("cyl classify translated CAP");
+	{
+		v3 cp2 = V3(5.0f, 10.0f, -3.0f);
+		CylFeature f = cyl_classify_point(V3(5.0f, 11.7f, -3.0f), cp2, cq, hh, r);
+		TEST_ASSERT(f.region == CYL_REGION_CAP);
+		TEST_ASSERT_FLOAT(f.distance, 0.7f, 1e-5f);
+	}
+
+	// Normals are unit length for every region.
+	TEST_BEGIN("cyl classify normals unit-length");
+	{
+		v3 probes[] = { V3(0.8f,0.3f,0), V3(0.2f,1.6f,0.1f), V3(0.9f,1.3f,0), V3(0.4f,0,0), V3(0,0.9f,0) };
+		for (int i = 0; i < 5; i++) {
+			CylFeature f = cyl_classify_point(probes[i], cp, cq, hh, r);
+			float L = sqrtf(f.normal.x*f.normal.x + f.normal.y*f.normal.y + f.normal.z*f.normal.z);
+			TEST_ASSERT_FLOAT(L, 1.0f, 1e-4f);
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// Fuzz: 10000 random configs, compare distance against double-precision reference.
+	TEST_BEGIN("cyl classify fuzz 10000 random");
+	cyl_rng = 0x51c357u;
+	int worst_bucket = 0;
+	double max_err = 0.0;
+	for (int i = 0; i < 10000; i++) {
+		// Random cylinder
+		v3 cpos = cyl_rand_v3(-5.0f, 5.0f);
+		quat crot = cyl_rand_quat();
+		float chh = cyl_randr(0.1f, 3.0f);
+		float crad = cyl_randr(0.05f, 2.0f);
+
+		// Random witness point in a box around the cylinder, biased to cover all regions.
+		v3 local_pt;
+		int bucket = i % 4;
+		switch (bucket) {
+		case 0: // SIDE
+			local_pt = V3(cyl_randr(crad, crad*3.0f), cyl_randr(-chh*0.9f, chh*0.9f), 0);
+			{ float ang = cyl_randf() * 6.28f; float L = sqrtf(local_pt.x*local_pt.x); local_pt.x = cosf(ang)*L; local_pt.z = sinf(ang)*L; }
+			break;
+		case 1: // CAP
+			local_pt = V3(cyl_randr(-crad*0.8f, crad*0.8f), (cyl_randf() > 0.5f ? 1.0f : -1.0f) * cyl_randr(chh*1.1f, chh*2.0f), cyl_randr(-crad*0.8f, crad*0.8f));
+			break;
+		case 2: // RIM
+			local_pt = V3(cyl_randr(crad*1.1f, crad*2.0f), (cyl_randf() > 0.5f ? 1.0f : -1.0f) * cyl_randr(chh*1.1f, chh*2.0f), 0);
+			{ float ang = cyl_randf() * 6.28f; float L = local_pt.x; local_pt.x = cosf(ang)*L; local_pt.z = sinf(ang)*L; }
+			break;
+		case 3: // INSIDE
+			local_pt = V3(cyl_randr(-crad*0.7f, crad*0.7f), cyl_randr(-chh*0.7f, chh*0.7f), cyl_randr(-crad*0.7f, crad*0.7f));
+			break;
+		}
+		v3 x_world = add(cpos, rotate(crot, local_pt));
+		CylFeature f = cyl_classify_point(x_world, cpos, crot, chh, crad);
+		double ref = d_cyl_surface_distance(x_world, cpos, crot, chh, crad);
+		double err = fabs((double)f.distance - ref);
+		if (err > max_err) { max_err = err; worst_bucket = bucket; }
+	}
+	TEST_ASSERT(max_err < 1e-4);
+	if (max_err > 1e-5) printf("  [cyl classify fuzz] max_err=%g (bucket=%d)\n", max_err, worst_bucket);
+}
+
+// ----------------------------------------------------------------------------
+// Test harness for cylinder-pair table entries (shared by Phases 1-5).
+//
+// Each CylCase is a hand-placed geometric configuration with a known-good
+// expected normal direction and contact count. run_cyl_case dispatches to the
+// appropriate collide_cylinder_* function (cylinder is always shape A in the
+// public API) and asserts the result matches.
+
+typedef enum { CYL_OTHER_SPHERE, CYL_OTHER_CAPSULE, CYL_OTHER_BOX, CYL_OTHER_HULL, CYL_OTHER_CYL } CylOtherType;
+
+typedef struct CylCase
+{
+	const char* name;
+	// Cylinder under test (shape A)
+	v3 cyl_pos;
+	quat cyl_rot;
+	float cyl_hh, cyl_radius;
+	// Other shape (shape B)
+	CylOtherType other_type;
+	Sphere sphere;
+	Capsule capsule;
+	Box box;
+	ConvexHull hull;
+	Cylinder cyl_b;
+	// Expected outcome (normal points from cyl toward other)
+	int is_deep;
+	v3 expected_normal;
+	int expected_contact_count;
+} CylCase;
+
+static void run_cyl_case(CylCase t)
+{
+	Cylinder a = { t.cyl_pos, t.cyl_rot, t.cyl_hh, t.cyl_radius };
+	Manifold m = {0};
+	int hit = 0;
+	switch (t.other_type) {
+	case CYL_OTHER_SPHERE:  hit = collide_cylinder_sphere(a, t.sphere, &m); break;
+	case CYL_OTHER_CAPSULE: hit = collide_cylinder_capsule(a, t.capsule, &m); break;
+	case CYL_OTHER_BOX:     hit = collide_cylinder_box(a, t.box, &m); break;
+	case CYL_OTHER_HULL:    hit = collide_cylinder_hull(a, t.hull, &m); break;
+	case CYL_OTHER_CYL:     hit = collide_cylinder_cylinder(a, t.cyl_b, &m); break;
+	}
+	TEST_BEGIN(t.name);
+	TEST_ASSERT(hit);
+	if (!hit) return;
+	TEST_ASSERT(m.count == t.expected_contact_count);
+	// Normal direction: within 1 deg for shallow, 5 deg for deep (plan decision).
+	v3 exp_n = norm(t.expected_normal);
+	float tol_deg = t.is_deep ? 5.0f : 1.0f;
+	float cos_tol = cosf(tol_deg * 3.14159265f / 180.0f);
+	float dp = dot(m.contacts[0].normal, exp_n);
+	TEST_ASSERT(dp > cos_tol);
+}
+
+// ============================================================================
 // Entry point.
 
 // ============================================================================
@@ -10953,6 +11203,7 @@ static void run_tests()
 	test_contact_sanity();
 	test_box_box();
 	test_normal_convention();
+	test_cyl_classify_point();
 	test_quickhull();
 
 	// Compact hull converters -- thorough correctness tests.
