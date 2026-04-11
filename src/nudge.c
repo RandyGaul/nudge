@@ -100,7 +100,9 @@ static void integrate_positions(WorldInternal* w, float dt)
 
 		h->position = add(h->position, scale(h->velocity, dt));
 
-		h->angular_velocity = solve_gyroscopic(h->rotation, h->inv_inertia_local, h->angular_velocity, dt);
+		// Skip gyroscopic for uniform inertia (cubes/spheres: cross(w,I*w)=0) or negligible angular vel.
+		if (av2 > 0.01f && !(h->inv_inertia_local.x == h->inv_inertia_local.y && h->inv_inertia_local.y == h->inv_inertia_local.z))
+			h->angular_velocity = solve_gyroscopic(h->rotation, h->inv_inertia_local, h->angular_velocity, dt);
 
 		v3 ww = h->angular_velocity;
 		quat spin = { ww.x, ww.y, ww.z, 0.0f };
@@ -261,7 +263,9 @@ static void integrate_pos_work_fn(void* ctx, int start, int count)
 		float av2 = len2(h->angular_velocity);
 		if (av2 > SOLVER_MAX_ANGULAR_VEL * SOLVER_MAX_ANGULAR_VEL) h->angular_velocity = scale(h->angular_velocity, SOLVER_MAX_ANGULAR_VEL / sqrtf(av2));
 		h->position = add(h->position, scale(h->velocity, dt));
-		h->angular_velocity = solve_gyroscopic(h->rotation, h->inv_inertia_local, h->angular_velocity, dt);
+		// Skip gyroscopic for uniform inertia (cubes/spheres: cross(w,I*w)=0) or negligible angular vel.
+		if (av2 > 0.01f && !(h->inv_inertia_local.x == h->inv_inertia_local.y && h->inv_inertia_local.y == h->inv_inertia_local.z))
+			h->angular_velocity = solve_gyroscopic(h->rotation, h->inv_inertia_local, h->angular_velocity, dt);
 		v3 ww = h->angular_velocity;
 		quat spin = { ww.x, ww.y, ww.z, 0.0f };
 		quat dq = mul(spin, h->rotation);
