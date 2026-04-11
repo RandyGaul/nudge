@@ -893,8 +893,6 @@ static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b)
 	wb_x=_mm_add_ps(wb_x,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_b_x,dt1),_mm_mul_ps(b->w_t2_b_x,dt2)),_mm_mul_ps(b->w_tw_b_x,dtw)));
 	wb_y=_mm_add_ps(wb_y,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_b_y,dt1),_mm_mul_ps(b->w_t2_b_y,dt2)),_mm_mul_ps(b->w_tw_b_y,dtw)));
 	wb_z=_mm_add_ps(wb_z,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_b_z,dt1),_mm_mul_ps(b->w_t2_b_z,dt2)),_mm_mul_ps(b->w_tw_b_z,dtw)));
-	wa_x=_mm_sub_ps(wa_x,_mm_mul_ps(b->w_tw_a_x,dtw)); wa_y=_mm_sub_ps(wa_y,_mm_mul_ps(b->w_tw_a_y,dtw)); wa_z=_mm_sub_ps(wa_z,_mm_mul_ps(b->w_tw_a_z,dtw));
-	wb_x=_mm_add_ps(wb_x,_mm_mul_ps(b->w_tw_b_x,dtw)); wb_y=_mm_add_ps(wb_y,_mm_mul_ps(b->w_tw_b_y,dtw)); wb_z=_mm_add_ps(wb_z,_mm_mul_ps(b->w_tw_b_z,dtw));
 
 	// Scatter velocities back
 	{ float t[4];
