@@ -26,9 +26,6 @@ World create_world(WorldParams params)
 	w->friction_model = params.friction_model;
 	w->solver_type = params.solver_type;
 	w->sleep_enabled = 1;
-#ifdef _WIN32
-	{ SYSTEM_INFO si; GetSystemInfo(&si); w->thread_count = si.dwNumberOfProcessors > 1 ? si.dwNumberOfProcessors : 1; }
-#endif
 	w->velocity_iters = params.velocity_iters > 0 ? params.velocity_iters : SOLVER_VELOCITY_ITERS;
 	w->position_iters = params.position_iters > 0 ? params.position_iters : SOLVER_POSITION_ITERS;
 	w->contact_hertz = params.contact_hertz > 0.0f ? params.contact_hertz : 60.0f;
