@@ -1632,7 +1632,15 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	BodyHot* h1 = &w->body_hot[j];
 	InternalManifold im = { .body_a = i, .body_b = j };
 
-	// Upper-triangle dispatch: simple pairs first, then warm-cached SAT pairs.
+	// Warm cache: single lookup for SAT hint (shared across all SAT-based pairs).
+	int* hp = NULL;
+	int hint = -1;
+	uint64_t pkey = 0;
+	WarmManifold* wm = NULL;
+	int uses_sat = (s0->type >= SHAPE_BOX && s1->type >= SHAPE_BOX); // box/hull/cylinder pairs use SAT
+	if (uses_sat && w->sat_hint_enabled) { pkey = body_pair_key(i, j); wm = map_get_ptr(w->warm_cache, pkey); if (wm) hint = wm->sat_axis; hp = &hint; }
+
+	// Upper-triangle dispatch: simple pairs first, then SAT-based pairs.
 	int hit = 0;
 
 	if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE)
@@ -1645,68 +1653,31 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		hit = collide_capsule_capsule(make_capsule(h0, s0), make_capsule(h1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX)
 		hit = collide_capsule_box(make_capsule(h0, s0), make_box(h1, s1), &im.m);
-
-	// SAT-based pairs use warm-cache for face hint persistence across frames.
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) {
-		if (w->box_use_hull) {
-			int* hp = NULL;
-			int hint;
-			if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
-			hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, (ConvexHull){ &s_unit_box_hull, h1->position, h1->rotation, s1->box.half_extents }, &im.m, hp);
-			if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
-		} else {
-			int* hp = NULL;
-			int hint;
-			if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
-			hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, hp);
-			if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
-		}
+		if (w->box_use_hull) hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, (ConvexHull){ &s_unit_box_hull, h1->position, h1->rotation, s1->box.half_extents }, &im.m, hp);
+		else hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, hp);
 	}
-	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL) {
-		int* hp = NULL;
-		int hint;
-		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL)
 		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m, hp);
-		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
-	}
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL)
 		hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL)
 		hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
-	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL) {
-		int* hp = NULL;
-		int hint;
-		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL)
 		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m, hp);
-		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
-	}
-
-	// Cylinder pairs: route through hull-hull using the shared unit cylinder hull.
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER)
 		hit = collide_sphere_hull(make_sphere(h0, s0), make_cylinder_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER)
 		hit = collide_capsule_hull(make_capsule(h0, s0), make_cylinder_hull(h1, s1), &im.m);
-	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER) {
-		int* hp = NULL;
-		int hint;
-		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER)
 		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_cylinder_hull(h1, s1), &im.m, hp);
-		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
-	}
-	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER) {
-		int* hp = NULL;
-		int hint;
-		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER)
 		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m, hp);
-		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
-	}
-	else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) {
-		int* hp = NULL;
-		int hint;
-		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+	else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER)
 		hit = collide_hull_hull_ex(make_cylinder_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m, hp);
-		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
-	}
+
+	// Store SAT hint back to warm cache
+	if (hp && wm) wm->sat_axis = hint;
 
 	double np_end = perf_now();
 	int idx = np_pair_idx(s0->type, s1->type);
