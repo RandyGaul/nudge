@@ -84,7 +84,7 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	smf.w_tw_a = inv_inertia_world_mul(a, n); smf.w_tw_b = inv_inertia_world_mul(b, n);
 
 	// Warm start matching
-	if (wm) {
+	if (wm && w->warm_start_enabled) {
 		int old_matched[MAX_CONTACTS] = {0}, new_matched[MAX_CONTACTS] = {0};
 		for (int c = 0; c < smf.contact_count; c++) { SolverContact* s = &sc[contact_base+c]; if (s->feature_id == 0) continue; int match = warm_match(wm, s->feature_id); if (match >= 0) { s->lambda_n = wm->contacts[match].lambda_n; old_matched[match] = 1; new_matched[c] = 1; } }
 		for (int c = 0; c < smf.contact_count; c++) { if (new_matched[c]) continue; SolverContact* s = &sc[contact_base+c]; float best_d2 = 0.01f; int best = -1; for (int j = 0; j < wm->count; j++) { if (old_matched[j]) continue; float d2 = len2(sub(s->r_a, wm->contacts[j].r_a)); if (d2 < best_d2) { best_d2 = d2; best = j; } } if (best >= 0) { s->lambda_n = wm->contacts[best].lambda_n; old_matched[best] = 1; new_matched[c] = 1; } }

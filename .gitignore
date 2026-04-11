@@ -11,7 +11,7 @@ CLAUDE.md
 *.lib
 *.exp
 *.ilk
-autoresearch-results.tsv
+*.tsv
 *.txt
 !CMakeLists.txt
 *.bat
@@ -20,4 +20,3 @@ autoresearch-results.tsv
 coverage/
 STABILITY_NOTES.md
 note.txt
-autoresearch-results.tsv

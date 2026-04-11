@@ -287,6 +287,10 @@ typedef struct WorldInternal
 	CK_MAP(uint8_t)     joint_pairs;   // body_pair_key -> 1 for bodies connected by joints (skip collisions)
 	int joint_pairs_version;           // ldl_topo_version when joint_pairs was last built
 	int sleep_enabled;       // 1 = island sleep active (default)
+	int sat_hint_enabled;    // 1 = warm-cache SAT axis hints fed to narrowphase
+	int sat_hillclimb_enabled; // 1 = hill-climb face search for hulls (vs brute force)
+	int box_use_hull;          // 1 = route box-box through hull-hull path (debug)
+	int warm_start_enabled;    // 1 = warm-start contact impulses from cache
 	int thread_count;        // 0 or 1 = single-threaded, >1 = parallel PGS solver
 	void* np_pairs_out; // CK_DYNA BroadPair** — when set, broadphase outputs pairs here instead of running narrowphase
 	int ldl_enabled;         // 1 = LDL direct correction for joints (dual solvers only)

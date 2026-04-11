@@ -25,6 +25,9 @@ World create_world(WorldParams params)
 	w->broadphase_type = params.broadphase;
 	w->solver_type = params.solver_type;
 	w->sleep_enabled = 1;
+	w->sat_hint_enabled = 1;
+	w->sat_hillclimb_enabled = 1;
+	w->warm_start_enabled = 1;
 	w->velocity_iters = params.velocity_iters > 0 ? params.velocity_iters : SOLVER_VELOCITY_ITERS;
 	w->position_iters = params.position_iters > 0 ? params.position_iters : SOLVER_POSITION_ITERS;
 	w->contact_hertz = params.contact_hertz > 0.0f ? params.contact_hertz : 60.0f;
@@ -730,6 +733,7 @@ void world_step(World world, float dt)
 	bvh_refit(w->bvh_dynamic, w);
 
 	double t4 = perf_now();
+	islands_try_splits(w);
 	if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
 	w->perf.islands = perf_now() - t4;
 

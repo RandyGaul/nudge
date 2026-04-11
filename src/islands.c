@@ -293,6 +293,20 @@ static void islands_update_contacts(WorldInternal* w, InternalManifold* manifold
 
 static void island_try_split(WorldInternal* w, int island_id); // forward decl
 
+// Split islands that lost contacts. Must run every frame regardless of sleep.
+static void islands_try_splits(WorldInternal* w)
+{
+	int island_count = asize(w->islands);
+	for (int i = 0; i < island_count; i++) {
+		if (!(w->island_gen[i] & 1)) continue;
+		if (!w->islands[i].awake) continue;
+		if (w->islands[i].constraint_remove_count > 0)
+			island_try_split(w, i);
+		// Re-index after split (island_create may realloc w->islands)
+		w->islands[i].constraint_remove_count = 0;
+	}
+}
+
 // Evaluate sleep for all awake islands after post-solve.
 static void islands_evaluate_sleep(WorldInternal* w, float dt)
 {
@@ -318,13 +332,8 @@ static void islands_evaluate_sleep(WorldInternal* w, float dt)
 			bi = w->body_cold[bi].island_next;
 		}
 
-		if (all_sleepy) {
-			if (isl->constraint_remove_count > 0)
-				island_try_split(w, i);
-			else
-				island_sleep(w, i);
-		}
-		isl->constraint_remove_count = 0;
+		if (all_sleepy)
+			island_sleep(w, i);
 	}
 }
 
@@ -341,7 +350,7 @@ static void island_try_split(WorldInternal* w, int island_id)
 		bi = w->body_cold[bi].island_next;
 	}
 	int n = asize(bodies);
-	if (n <= 1) { afree(bodies); island_sleep(w, island_id); return; }
+	if (n <= 1) { afree(bodies); return; } // single body, nothing to split
 
 	// Visited array and component assignment
 	CK_DYNA int* component = NULL;
@@ -401,8 +410,7 @@ static void island_try_split(WorldInternal* w, int island_id)
 	}
 
 	if (num_components <= 1) {
-		// Still one island, just sleep it
-		island_sleep(w, island_id);
+		// Still one connected component, no split needed
 	} else {
 		// First component keeps the original island. Remove all bodies/joints,
 		// then re-add per component.
@@ -445,18 +453,6 @@ static void island_try_split(WorldInternal* w, int island_id)
 			int* loc = map_get_ptr(body_to_local, (uint64_t)ba);
 			int comp = loc ? component[*loc] : 0;
 			island_add_joint(w, comp_islands[comp], jidx);
-		}
-
-		// Evaluate sleep for each sub-island
-		for (int c = 0; c < num_components; c++) {
-			int cisl = comp_islands[c];
-			int all_sleepy = 1;
-			int b = w->islands[cisl].head_body;
-			while (b >= 0) {
-				if (w->body_hot[b].sleep_time < SLEEP_TIME_THRESHOLD) { all_sleepy = 0; break; }
-				b = w->body_cold[b].island_next;
-			}
-			if (all_sleepy) island_sleep(w, cisl);
 		}
 
 		afree(comp_islands);

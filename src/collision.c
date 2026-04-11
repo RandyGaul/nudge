@@ -671,6 +671,8 @@ static float sat_eval_face_ex(const Hull* hull1, int face_idx, v3 pos1, quat rot
 }
 
 // face_hint: if >= 0, hill-climb from this face (for temporal coherence). -1 = full scan.
+static int g_sat_hillclimb_enabled = 1; // toggled from WorldInternal before narrowphase
+
 static FaceQuery sat_query_faces_hint(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2, int face_hint)
 {
 	FaceQuery best = { .index = -1, .separation = -1e18f };
@@ -698,7 +700,7 @@ static FaceQuery sat_query_faces_hint(const Hull* hull1, v3 pos1, quat rot1, v3 
 	// Hill-climb from cached face: walk to topological neighbors with better separation.
 	// Precompute inv(rot2) once for all face evaluations.
 	quat inv2_pre = inv(rot2);
-	if (face_hint >= 0 && face_hint < hull1->face_count && hull1->face_count > 8) {
+	if (g_sat_hillclimb_enabled && face_hint >= 0 && face_hint < hull1->face_count && hull1->face_count > 8) {
 		int cur = face_hint;
 		float cur_sep = sat_eval_face_ex(hull1, cur, pos1, rot1, scale1, hull2, pos2, rot2, inv2_pre, scale2);
 		best.index = cur; best.separation = cur_sep;
@@ -1194,9 +1196,7 @@ int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sa
 
 	// Bias toward face contacts over edge contacts
 	const float k_tol = 0.05f;
-	float max_face_sep = face_a.separation > face_b.separation
-		? face_a.separation : face_b.separation;
-
+	float max_face_sep = face_a.separation > face_b.separation ? face_a.separation : face_b.separation;
 	if (edge_q.separation > max_face_sep + k_tol) {
 		// --- Edge-edge contact ---
 		v3 p1 = add(pos_a, rotate(rot_a, hull_vert_scaled(hull_a, hull_a->edge_origin[edge_q.index1], scale_a)));
@@ -1421,7 +1421,12 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint)
 		}
 		int la = best_axis < 3 ? best_axis : best_axis - 3;
 		float proj_sign = best_axis < 3 ? (&((v3){ta, tb, tc}).x)[la] : (&((v3){ta*R00+tb*R10+tc*R20, ta*R01+tb*R11+tc*R21, ta*R02+tb*R12+tc*R22}).x)[la];
+		// nsign selects which face of the ref box is the contact face.
+		// For A-ref (flip=0): positive proj means B is in + direction, A's + face faces B → nsign=+1.
+		// For B-ref (flip=1): positive proj means B is in + direction of its own axis,
+		// so B's - face faces A → nsign must be -1. Negate for flip.
 		float nsign = proj_sign >= 0.0f ? 1.0f : -1.0f;
+		if (flip) nsign = -nsign;
 		v3 ref_n = scale(ref_cols[la], nsign);
 		float ref_off = dot(ref_n, ref_pos) + (&ref_he.x)[la];
 		int u = (la + 1) % 3, v_ax = (la + 2) % 3;
@@ -1585,6 +1590,7 @@ static uint64_t body_pair_key(int a, int b);
 
 static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** manifolds)
 {
+	g_sat_hillclimb_enabled = w->sat_hillclimb_enabled;
 	// Canonical ordering: lower type first for upper-triangle dispatch,
 	// lower body index first for same-type pairs (deterministic shape A).
 	if (w->body_cold[i].shapes[0].type > w->body_cold[j].shapes[0].type || (w->body_cold[i].shapes[0].type == w->body_cold[j].shapes[0].type && i > j)) {
@@ -1613,29 +1619,37 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 
 	// SAT-based pairs use warm-cache for face hint persistence across frames.
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) {
-		uint64_t pkey = body_pair_key(i, j);
-		WarmManifold* wm = map_get_ptr(w->warm_cache, pkey);
-		int hint = wm ? wm->sat_axis : -1;
-		hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, &hint);
-		if (wm) wm->sat_axis = hint;
+		if (w->box_use_hull) {
+			int* hp = NULL;
+			int hint;
+			if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+			hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, (ConvexHull){ &s_unit_box_hull, h1->position, h1->rotation, s1->box.half_extents }, &im.m, hp);
+			if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
+		} else {
+			int* hp = NULL;
+			int hint;
+			if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+			hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, hp);
+			if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
+		}
 	}
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL) {
-		uint64_t pkey = body_pair_key(i, j);
-		WarmManifold* wm = map_get_ptr(w->warm_cache, pkey);
-		int hint = wm ? wm->sat_axis : -1;
-		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m, &hint);
-		if (wm) wm->sat_axis = hint;
+		int* hp = NULL;
+		int hint;
+		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m, hp);
+		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
 	}
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL)
 		hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL)
 		hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL) {
-		uint64_t pkey = body_pair_key(i, j);
-		WarmManifold* wm = map_get_ptr(w->warm_cache, pkey);
-		int hint = wm ? wm->sat_axis : -1;
-		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m, &hint);
-		if (wm) wm->sat_axis = hint;
+		int* hp = NULL;
+		int hint;
+		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m, hp);
+		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
 	}
 
 	int idx = np_pair_idx(s0->type, s1->type);

@@ -183,6 +183,37 @@ static void scene_pyramid_setup()
 }
 
 // ---------------------------------------------------------------------------
+// Scene: 2D Pyramid (single row deep, easier to debug contact normals)
+// ---------------------------------------------------------------------------
+static void scene_pyramid_2d_setup()
+{
+	add_floor();
+
+	float half = 0.5f;
+	int base = 15;
+	v3 colors[] = { V3(0.9f, 0.3f, 0.2f), V3(0.9f, 0.6f, 0.2f), V3(0.9f, 0.9f, 0.3f), V3(0.3f, 0.8f, 0.3f), V3(0.3f, 0.5f, 0.9f) };
+
+	for (int row = 0; row < base; row++) {
+		int count = base - row;
+		float startX = -(count - 1) * 0.5f;
+		v3 col = colors[row % 5];
+		for (int i = 0; i < count; i++) {
+			Body b = create_body(g_world, (BodyParams){
+				.position = V3(startX + i, half + row, 0),
+				.rotation = quat_identity(),
+				.mass = 1.0f,
+				.friction = 0.6f,
+			});
+			body_add_shape(g_world, b, (ShapeParams){
+				.type = SHAPE_BOX,
+				.box.half_extents = V3(half, half, half),
+			});
+			apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(half, half, half), col }));
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Scene: Varied Stacks (columns of boxes with different heights)
 // ---------------------------------------------------------------------------
 static void scene_stacks_setup()

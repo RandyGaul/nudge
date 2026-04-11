@@ -827,6 +827,113 @@ static void test_box_box()
 }
 
 // ============================================================================
+// Normal direction convention: all narrowphase routines must produce
+// contact normals pointing from body A toward body B.
+// For each shape pair, place A on the left, B on the right, verify n.x > 0.
+
+static void test_normal_convention()
+{
+	Manifold m;
+	quat id = quat_identity();
+
+	// sphere-sphere: A left, B right
+	TEST_BEGIN("normal A->B: sphere-sphere");
+	m = (Manifold){0};
+	collide_sphere_sphere((Sphere){V3(-0.5f,0,0), 1}, (Sphere){V3(0.5f,0,0), 1}, &m);
+	TEST_ASSERT_HIT(m); TEST_ASSERT(m.contacts[0].normal.x > 0.5f);
+
+	// sphere-capsule
+	TEST_BEGIN("normal A->B: sphere-capsule");
+	m = (Manifold){0};
+	collide_sphere_capsule((Sphere){V3(0,0,0), 0.5f}, (Capsule){V3(0.8f,0,0), V3(0.8f,1,0), 0.5f}, &m);
+	TEST_ASSERT_HIT(m); TEST_ASSERT(m.contacts[0].normal.x > 0.5f);
+
+	// capsule-capsule
+	TEST_BEGIN("normal A->B: capsule-capsule");
+	m = (Manifold){0};
+	collide_capsule_capsule((Capsule){V3(0,0,0), V3(0,1,0), 0.5f}, (Capsule){V3(0.8f,0,0), V3(0.8f,1,0), 0.5f}, &m);
+	TEST_ASSERT_HIT(m); TEST_ASSERT(m.contacts[0].normal.x > 0.5f);
+
+	// sphere-box
+	TEST_BEGIN("normal A->B: sphere-box");
+	m = (Manifold){0};
+	collide_sphere_box((Sphere){V3(0,0,0), 0.5f}, (Box){V3(1.2f,0,0), id, V3(1,1,1)}, &m);
+	TEST_ASSERT_HIT(m); TEST_ASSERT(m.contacts[0].normal.x > 0.5f);
+
+	// capsule-box
+	TEST_BEGIN("normal A->B: capsule-box");
+	m = (Manifold){0};
+	collide_capsule_box((Capsule){V3(0,0,0), V3(0,1,0), 0.3f}, (Box){V3(1.0f,0.5f,0), id, V3(1,1,1)}, &m);
+	TEST_ASSERT_HIT(m); TEST_ASSERT(m.contacts[0].normal.x > 0.5f);
+
+	// box-box: A-ref (axis 0-2 wins, A's face)
+	TEST_BEGIN("normal A->B: box-box A-ref");
+	m = (Manifold){0};
+	collide_box_box((Box){V3(0,0,0), id, V3(1,1,1)}, (Box){V3(1.5f,0,0), id, V3(1,1,1)}, &m);
+	TEST_ASSERT_HIT(m); TEST_ASSERT(m.contacts[0].normal.x > 0.5f);
+
+	// box-box: B-ref (axis 3-5 wins, B's face).
+	// Rotate B 5 deg around Z so B's axes differ from A's; use asymmetric
+	// extents so B's X axis has strictly less penetration than A's X axis.
+	TEST_BEGIN("normal A->B: box-box B-ref");
+	{
+		float ang = 5.0f * 3.14159265f / 180.0f;
+		quat rot5z = { 0, 0, sinf(ang * 0.5f), cosf(ang * 0.5f) };
+		// A wide, B narrow: forces B's X axis to have less penetration
+		m = (Manifold){0};
+		collide_box_box((Box){V3(0,0,0), id, V3(2,1,1)}, (Box){V3(2.8f,0.2f,0), rot5z, V3(1,2,1)}, &m);
+		TEST_ASSERT_HIT(m); TEST_ASSERT(m.contacts[0].normal.x > 0.3f);
+	}
+
+	// box-box: B-ref negative direction (B to the left of A)
+	TEST_BEGIN("normal A->B: box-box B-ref neg");
+	{
+		float ang = 5.0f * 3.14159265f / 180.0f;
+		quat rot5z = { 0, 0, sinf(ang * 0.5f), cosf(ang * 0.5f) };
+		m = (Manifold){0};
+		collide_box_box((Box){V3(0,0,0), id, V3(2,1,1)}, (Box){V3(-2.8f,-0.2f,0), rot5z, V3(1,2,1)}, &m);
+		TEST_ASSERT_HIT(m); TEST_ASSERT(m.contacts[0].normal.x < -0.3f);
+	}
+
+	// hull-hull (boxes through hull path)
+	TEST_BEGIN("normal A->B: hull-hull face");
+	{
+		const Hull* bh = hull_unit_box();
+		m = (Manifold){0};
+		int hit = collide_hull_hull((ConvexHull){bh, V3(0,0,0), id, V3(1,1,1)}, (ConvexHull){bh, V3(1.5f,0,0), id, V3(1,1,1)}, &m);
+		TEST_ASSERT(hit); TEST_ASSERT(m.contacts[0].normal.x > 0.5f);
+	}
+
+	// hull-hull: B-ref (face_bias lets B win)
+	TEST_BEGIN("normal A->B: hull-hull B-ref");
+	{
+		const Hull* bh = hull_unit_box();
+		m = (Manifold){0};
+		// Offset in Y so B's Y face has less penetration → B becomes reference
+		int hit = collide_hull_hull((ConvexHull){bh, V3(0,0,0), id, V3(1,2,1)}, (ConvexHull){bh, V3(0,2.5f,0), id, V3(1,1,1)}, &m);
+		TEST_ASSERT(hit); TEST_ASSERT(m.contacts[0].normal.y > 0.5f);
+	}
+
+	// sphere-hull
+	TEST_BEGIN("normal A->B: sphere-hull");
+	{
+		const Hull* bh = hull_unit_box();
+		m = (Manifold){0};
+		int hit = collide_sphere_hull((Sphere){V3(0,0,0), 0.5f}, (ConvexHull){bh, V3(1.2f,0,0), id, V3(1,1,1)}, &m);
+		TEST_ASSERT(hit); TEST_ASSERT(m.contacts[0].normal.x > 0.5f);
+	}
+
+	// capsule-hull
+	TEST_BEGIN("normal A->B: capsule-hull");
+	{
+		const Hull* bh = hull_unit_box();
+		m = (Manifold){0};
+		int hit = collide_capsule_hull((Capsule){V3(0,0,0), V3(0,1,0), 0.3f}, (ConvexHull){bh, V3(1.0f,0.5f,0), id, V3(1,1,1)}, &m);
+		TEST_ASSERT(hit); TEST_ASSERT(m.contacts[0].normal.x > 0.5f);
+	}
+}
+
+// ============================================================================
 // Entry point.
 
 // ============================================================================
@@ -10845,6 +10952,7 @@ static void run_tests()
 	test_gjk_distance();
 	test_contact_sanity();
 	test_box_box();
+	test_normal_convention();
 	test_quickhull();
 
 	// Compact hull converters -- thorough correctness tests.
@@ -12371,7 +12479,7 @@ static void test_pyramid_yank(int base, int frames)
 	int anchor_idx = handle_index(anchor);
 
 	v3 start_pos = wi->body_hot[yanked_idx].position;
-	v3 end_pos = add(start_pos, V3(5, 2, 5));
+	v3 end_pos = add(start_pos, V3(3, 0, 3)); // slow horizontal pull
 	int total_stale = 0;
 	for (int f = 0; f < 120; f++) {
 		// Move anchor (app does this in update() before world_step)
@@ -12387,6 +12495,17 @@ static void test_pyramid_yank(int base, int frames)
 
 		world_step(w, dt);
 
+		// Track island state
+		if (f % 10 == 0) {
+			int yanked_isl = wi->body_cold[yanked_idx].island_id;
+			int isl_awake = (yanked_isl >= 0 && (wi->island_gen[yanked_isl] & 1)) ? wi->islands[yanked_isl].awake : -1;
+			int isl_bodies = (yanked_isl >= 0 && (wi->island_gen[yanked_isl] & 1)) ? wi->islands[yanked_isl].body_count : 0;
+			int num_islands = 0;
+			for (int i = 0; i < asize(wi->islands); i++)
+				if ((wi->island_gen[i] & 1) && wi->islands[i].awake) num_islands++;
+			v3 pos = wi->body_hot[yanked_idx].position;
+			printf("    drag f=%d pos=(%.2f,%.2f,%.2f) island=%d bodies_in_isl=%d awake=%d total_awake_islands=%d\n", f, pos.x, pos.y, pos.z, yanked_isl, isl_bodies, isl_awake, num_islands);
+		}
 		// Validate ALL dynamic body BVH leaves
 		int stale = bvh_validate_leaves(wi->bvh_dynamic, wi);
 		if (stale > 0) {
@@ -12414,8 +12533,20 @@ static void test_pyramid_yank(int base, int frames)
 	printf("  phase 3: aftermath...\n");
 	float prev_max = 0;
 	int stale_reported = 0;
+	int floor_pen_count = 0;
 	for (int f = 0; f < frames; f++) {
 		world_step(w, dt);
+		// Check if any body penetrated the floor (floor surface at y=0, body half_extent=0.5)
+		if (floor_pen_count < 10) {
+			for (int i = 0; i < asize(wi->body_hot); i++) {
+				if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
+				float y = wi->body_hot[i].position.y;
+				if (y < -0.1f) {
+					printf("    FLOOR PEN f=%d body %d y=%.3f vy=%.2f\n", f, i, y, wi->body_hot[i].velocity.y);
+					floor_pen_count++;
+				}
+			}
+		}
 		// Validate BVH leaves every frame for first 60 frames after yank
 		if (f < 60 && stale_reported < 10) {
 			for (int i = 0; i < asize(wi->body_hot); i++) {

@@ -107,6 +107,10 @@ static bool g_show_bvh = true;
 static bool g_show_sleep = true;
 static bool g_show_shadows = true;
 static bool g_sleep_enabled = true;
+static bool g_sat_hint = true;
+static bool g_sat_hillclimb = true;
+static bool g_box_use_hull = false;
+static bool g_warm_start = true;
 // Coulomb friction removed -- patch friction is the only mode.
 static int g_solver_type = SOLVER_SOFT_STEP;
 static bool g_ldl_enabled = true;
@@ -129,7 +133,7 @@ typedef struct Scene {
 	void (*setup)();
 } Scene;
 
-static int g_scene_index = 0;
+static int g_scene_index = 1; // Box Pyramid
 
 // Mouse constraint state (right-click drag to interact with bodies)
 static Body g_mouse_body;         // body being dragged ({0} if none)
@@ -166,6 +170,7 @@ static void setup_scene();
 static Scene g_scenes[] = {
 	{ "Shape Showcase",  scene_showcase_setup },
 	{ "Box Pyramid",     scene_pyramid_setup },
+	{ "Pyramid 2D",      scene_pyramid_2d_setup },
 	{ "Varied Stacks",   scene_stacks_setup },
 	{ "Friction Test",   scene_friction_setup },
 	{ "Mass Ratio",      scene_mass_ratio_setup },
@@ -422,6 +427,10 @@ static void setup_scene()
 
 	((WorldInternal*)g_world.id)->sleep_enabled = g_sleep_enabled;
 	((WorldInternal*)g_world.id)->ldl_enabled = g_ldl_enabled;
+	((WorldInternal*)g_world.id)->sat_hint_enabled = g_sat_hint;
+	((WorldInternal*)g_world.id)->sat_hillclimb_enabled = g_sat_hillclimb;
+	((WorldInternal*)g_world.id)->box_use_hull = g_box_use_hull;
+	((WorldInternal*)g_world.id)->warm_start_enabled = g_warm_start;
 	world_set_solver_type(g_world, (SolverType)g_solver_type);
 	g_scenes[g_scene_index].setup();
 }
@@ -623,6 +632,10 @@ void update()
 	if (ImGui_Checkbox("LDL Joints", &g_ldl_enabled)) {
 		dbg_w->ldl_enabled = g_ldl_enabled;
 	}
+	if (ImGui_Checkbox("SAT Axis Hints", &g_sat_hint)) dbg_w->sat_hint_enabled = g_sat_hint;
+	if (ImGui_Checkbox("SAT Hill-Climb", &g_sat_hillclimb)) dbg_w->sat_hillclimb_enabled = g_sat_hillclimb;
+	if (ImGui_Checkbox("Box via Hull", &g_box_use_hull)) dbg_w->box_use_hull = g_box_use_hull;
+	if (ImGui_Checkbox("Warm Start", &g_warm_start)) dbg_w->warm_start_enabled = g_warm_start;
 	if (!g_ldl_enabled) {
 		g_ldl_inspect_island = -1;
 	}
