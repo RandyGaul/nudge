@@ -79,6 +79,15 @@ static v3 shape_inertia(ShapeInternal* s, float mass)
 		float sx = hi_x-lo_x, sy = hi_y-lo_y, sz = hi_z-lo_z;
 		return V3(mass*(sy*sy+sz*sz)/12.0f, mass*(sx*sx+sz*sz)/12.0f, mass*(sx*sx+sy*sy)/12.0f);
 	}
+	case SHAPE_CYLINDER: {
+		// Solid cylinder along Y: I_y = m*r^2/2, I_x=I_z = m*(3r^2 + H^2)/12
+		float r = s->cylinder.radius, hh = s->cylinder.half_height;
+		float r2 = r*r;
+		float H = 2.0f * hh;
+		float iy = 0.5f * mass * r2;
+		float ix = mass * (3.0f * r2 + H*H) / 12.0f;
+		return V3(ix, iy, ix);
+	}
 	}
 	return V3(0, 0, 0);
 }
@@ -138,6 +147,10 @@ static float shape_volume(ShapeInternal* s)
 			if (z < lo_z) lo_z = z; if (z > hi_z) hi_z = z;
 		}
 		return (hi_x-lo_x) * (hi_y-lo_y) * (hi_z-lo_z);
+	}
+	case SHAPE_CYLINDER: {
+		float r = s->cylinder.radius, h = s->cylinder.half_height;
+		return PI * r * r * (2.0f * h);
 	}
 	}
 	return 0.0f;

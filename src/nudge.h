@@ -271,6 +271,7 @@ typedef enum ShapeType
 	SHAPE_CAPSULE,
 	SHAPE_BOX,
 	SHAPE_HULL,
+	SHAPE_CYLINDER,
 } ShapeType;
 
 typedef struct ShapeParams
@@ -282,6 +283,7 @@ typedef struct ShapeParams
 		struct { float half_height; float radius; } capsule; // segment along local Y
 		struct { v3 half_extents; } box;
 		struct { const Hull* hull; v3 scale; } hull;
+		struct { float half_height; float radius; } cylinder; // segment along local Y, flat caps
 	};
 } ShapeParams;
 

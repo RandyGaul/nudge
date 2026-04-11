@@ -85,6 +85,19 @@ static void scene_showcase_setup()
 	});
 	apush(g_draw_list, ((DrawEntry){ hull_body, g_mesh_hull, V3(1, 1, 1), V3(0.9f, 0.7f, 0.2f) }));
 
+	// Dynamic cylinder
+	Body cyl = create_body(g_world, (BodyParams){
+		.position = V3(5, 9, 0),
+		.rotation = quat_identity(),
+		.mass = 1.0f,
+		.restitution = 0.5f,
+	});
+	body_add_shape(g_world, cyl, (ShapeParams){
+		.type = SHAPE_CYLINDER,
+		.cylinder = { .half_height = CYL_HALF_H, .radius = CYL_RADIUS },
+	});
+	apush(g_draw_list, ((DrawEntry){ cyl, g_mesh_cylinder, V3(1, 1, 1), V3(0.8f, 0.4f, 0.6f) }));
+
 	// --- Pendulum chain (ball sockets) ---
 	g_chain_anchor = create_body(g_world, (BodyParams){
 		.position = V3(0, 8, -4),

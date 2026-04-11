@@ -478,6 +478,77 @@ static void mesh_generate_capsule(Mesh* mesh, float radius, float half_height)
 }
 
 // -----------------------------------------------------------------------------
+// Cylinder mesh: flat end caps + smooth cylindrical side.
+
+static void mesh_generate_cylinder(Mesh* mesh, float radius, float half_height)
+{
+	const int slices = 32;
+	const float PI = 3.14159265f;
+
+	MeshVertex* verts = NULL;
+	uint16_t* tris = NULL;
+
+	// Side: two rings with outward cylindrical normals.
+	int side_bot = asize(verts);
+	for (int s = 0; s < slices; s++) {
+		float lon = 2 * PI * s / slices;
+		float cx = cosf(lon), sz = sinf(lon);
+		apush(verts, ((MeshVertex){ V3(radius*cx, -half_height, radius*sz), V3(cx, 0, sz) }));
+	}
+	int side_top = asize(verts);
+	for (int s = 0; s < slices; s++) {
+		float lon = 2 * PI * s / slices;
+		float cx = cosf(lon), sz = sinf(lon);
+		apush(verts, ((MeshVertex){ V3(radius*cx, half_height, radius*sz), V3(cx, 0, sz) }));
+	}
+	for (int s = 0; s < slices; s++) {
+		int sn = (s + 1) % slices;
+		apush(tris, (uint16_t)(side_bot + s));
+		apush(tris, (uint16_t)(side_top + sn));
+		apush(tris, (uint16_t)(side_bot + sn));
+		apush(tris, (uint16_t)(side_bot + s));
+		apush(tris, (uint16_t)(side_top + s));
+		apush(tris, (uint16_t)(side_top + sn));
+	}
+
+	// Bottom cap: center + ring with down-facing normals, CCW from below.
+	int cap_bot_center = asize(verts);
+	apush(verts, ((MeshVertex){ V3(0, -half_height, 0), V3(0, -1, 0) }));
+	int cap_bot_ring = asize(verts);
+	for (int s = 0; s < slices; s++) {
+		float lon = 2 * PI * s / slices;
+		float cx = cosf(lon), sz = sinf(lon);
+		apush(verts, ((MeshVertex){ V3(radius*cx, -half_height, radius*sz), V3(0, -1, 0) }));
+	}
+	for (int s = 0; s < slices; s++) {
+		int sn = (s + 1) % slices;
+		apush(tris, (uint16_t)cap_bot_center);
+		apush(tris, (uint16_t)(cap_bot_ring + s));
+		apush(tris, (uint16_t)(cap_bot_ring + sn));
+	}
+
+	// Top cap: center + ring with up-facing normals, CCW from above.
+	int cap_top_center = asize(verts);
+	apush(verts, ((MeshVertex){ V3(0, half_height, 0), V3(0, 1, 0) }));
+	int cap_top_ring = asize(verts);
+	for (int s = 0; s < slices; s++) {
+		float lon = 2 * PI * s / slices;
+		float cx = cosf(lon), sz = sinf(lon);
+		apush(verts, ((MeshVertex){ V3(radius*cx, half_height, radius*sz), V3(0, 1, 0) }));
+	}
+	for (int s = 0; s < slices; s++) {
+		int sn = (s + 1) % slices;
+		apush(tris, (uint16_t)cap_top_center);
+		apush(tris, (uint16_t)(cap_top_ring + sn));
+		apush(tris, (uint16_t)(cap_top_ring + s));
+	}
+
+	mesh_upload(mesh, verts, asize(verts), tris, asize(tris));
+	afree(verts);
+	afree(tris);
+}
+
+// -----------------------------------------------------------------------------
 // Hull mesh: triangulate faces as fans, bake scale into vertices.
 
 static void mesh_generate_hull(Mesh* mesh, const Hull* hull, v3 sc)
@@ -649,6 +720,15 @@ int render_create_capsule_mesh(float radius, float half_height)
 	assert(r_mesh_count < MAX_MESH_TYPES);
 	int idx = r_mesh_count++;
 	mesh_generate_capsule(&r_meshes[idx], radius, half_height);
+	r_mesh_ready[idx] = 1;
+	return idx;
+}
+
+int render_create_cylinder_mesh(float radius, float half_height)
+{
+	assert(r_mesh_count < MAX_MESH_TYPES);
+	int idx = r_mesh_count++;
+	mesh_generate_cylinder(&r_meshes[idx], radius, half_height);
 	r_mesh_ready[idx] = 1;
 	return idx;
 }

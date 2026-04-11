@@ -53,6 +53,16 @@ static AABB shape_aabb(BodyHot* h, ShapeInternal* s)
 		}
 		return box;
 	}
+	case SHAPE_CYLINDER: {
+		// Tight AABB for cylinder along local Y: half_extent[k] = |ay.k|*hh + sqrt(1 - ay.k^2)*r
+		float hh = s->cylinder.half_height, r = s->cylinder.radius;
+		v3 ay = rotate(h->rotation, V3(0, 1, 0));
+		float ex2 = 1.0f - ay.x*ay.x; if (ex2 < 0.0f) ex2 = 0.0f;
+		float ey2 = 1.0f - ay.y*ay.y; if (ey2 < 0.0f) ey2 = 0.0f;
+		float ez2 = 1.0f - ay.z*ay.z; if (ez2 < 0.0f) ez2 = 0.0f;
+		v3 half = V3(fabsf(ay.x)*hh + sqrtf(ex2)*r, fabsf(ay.y)*hh + sqrtf(ey2)*r, fabsf(ay.z)*hh + sqrtf(ez2)*r);
+		return (AABB){ sub(world_pos, half), add(world_pos, half) };
+	}
 	}
 	return aabb_empty();
 }
