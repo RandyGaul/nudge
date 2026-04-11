@@ -390,8 +390,9 @@ int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 
 	if (dist2 > 1e-12f) {
 		// Sphere center outside box — contact on box surface.
+		// diff points from box toward sphere (B->A). Negate for A->B convention.
 		float dist = sqrtf(dist2);
-		v3 local_n = scale(diff, 1.0f / dist);
+		v3 local_n = scale(diff, -1.0f / dist);
 		v3 world_n = rotate(b.rotation, local_n);
 		v3 world_pt = add(b.center, rotate(b.rotation, clamped));
 		manifold->count = 1;
@@ -407,10 +408,11 @@ int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 	float dz = he.z - fabsf(local_center.z);
 	if (dz < best_depth) { best_depth = dz; best_face = local_center.z > 0 ? 1 : 0; }
 
+	// face_sign gives outward box normal. Negate for A->B (sphere->box) convention.
 	v3 local_n = V3(0, 0, 0);
 	static const int face_axis[6] = {2, 2, 0, 0, 1, 1};
 	static const float face_sign[6] = {-1, 1, -1, 1, -1, 1};
-	(&local_n.x)[face_axis[best_face]] = face_sign[best_face];
+	(&local_n.x)[face_axis[best_face]] = -face_sign[best_face];
 	v3 world_n = rotate(b.rotation, local_n);
 	v3 world_pt = sub(a.center, scale(world_n, a.radius));
 	manifold->count = 1;
@@ -595,8 +597,9 @@ int collide_capsule_box(Capsule a, Box b, Manifold* manifold)
 	if (dist2 > a.radius * a.radius && dist2 > 1e-12f) return 0;
 
 	if (dist2 > 1e-12f) {
+		// diff points from box toward capsule (B->A). Negate for A->B convention.
 		float dist = sqrtf(dist2);
-		v3 local_n = scale(diff, 1.0f / dist);
+		v3 local_n = scale(diff, -1.0f / dist);
 		v3 world_n = rotate(b.rotation, local_n);
 		v3 world_pt = add(b.center, rotate(b.rotation, box_pt2));
 		manifold->count = 1;
@@ -604,7 +607,7 @@ int collide_capsule_box(Capsule a, Box b, Manifold* manifold)
 		return 1;
 	}
 
-	// Deep penetration: capsule segment inside box. Use face search like sphere-box.
+	// Deep penetration: capsule segment inside box. Negate face normal for A->B convention.
 	float best_depth = he.x - fabsf(seg_pt2.x);
 	int best_face = seg_pt2.x > 0 ? 3 : 2;
 	float dy = he.y - fabsf(seg_pt2.y);
@@ -615,10 +618,10 @@ int collide_capsule_box(Capsule a, Box b, Manifold* manifold)
 	v3 local_n = V3(0, 0, 0);
 	static const int face_axis[6] = {2, 2, 0, 0, 1, 1};
 	static const float face_sign[6] = {-1, 1, -1, 1, -1, 1};
-	(&local_n.x)[face_axis[best_face]] = face_sign[best_face];
+	(&local_n.x)[face_axis[best_face]] = -face_sign[best_face];
 	v3 world_n = rotate(b.rotation, local_n);
 	v3 world_seg = add(b.center, rotate(b.rotation, seg_pt2));
-	v3 world_pt = sub(world_seg, scale(world_n, a.radius));
+	v3 world_pt = add(world_seg, scale(world_n, a.radius));
 	manifold->count = 1;
 	manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius + best_depth, .feature_id = 0 };
 	return 1;
