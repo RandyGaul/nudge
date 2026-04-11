@@ -858,9 +858,9 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 
 	double t_fill_start = perf_now();
 
-	// Lazy allocation of solve scratch buffers. The top-level ldl_position_correct
-	// preallocates these, but direct callers (tests, ldl_island_solve standalone)
-	// pass through numeric_factor first, so ensure they're ready.
+	// Lazy allocation of solve scratch buffers. Ensures direct callers (tests,
+	// ldl_island_solve standalone) have them ready since they pass through
+	// numeric_factor first.
 	if (!c->solve_rhs && c->n > 0) {
 		afit(c->solve_rhs, c->n);
 		asetlen(c->solve_rhs, c->n);
@@ -1400,8 +1400,12 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 }
 
 // Position correction using factored K. Called AFTER integrate_positions to correct
-// drift from velocity/rotation coupling. Reuses the K factored in ldl_numeric_factor.
-static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_joints, float sub_dt, dv3* pos_delta, dv3* ang_delta)
+// drift from velocity/rotation coupling. K is refactored with compressed masses
+// and post-integrate Jacobians by ldl_position_solve; this function solves and
+// applies the deltas. Delta apply MUST use comp_bodies masses (not real) to stay
+// consistent with the K that produced lambda -- otherwise heavy bodies get
+// under-corrected by (sqrt(M_real)/M_real) and the chain fails to hold weight.
+static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_joints, float sub_dt, dv3* pos_delta, dv3* ang_delta, LDL_CompBody* comp_bodies)
 {
 	int jc = c->joint_count;
 	int n = c->n;
@@ -1413,8 +1417,8 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 	double beta = SOLVER_POS_BAUMGARTE;
 	double ptv = beta / sub_dt;
 
-	// pos_error[] was computed by joint_fill_rows() during ldl_refresh_lever_arms(),
-	// which runs at the start of ldl_position_correct() with current body state.
+	// pos_error[] was refreshed by ldl_refresh_lever_arms() in ldl_position_solve
+	// from post-integrate body state.
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
 		if (con->is_synthetic) continue;
@@ -1441,17 +1445,18 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 			LDL_JacobianRow* jac = &c->jacobians[con->jacobian_start];
 			int real_a = sol_joints[con->solver_idx].body_a;
 			int real_b = sol_joints[con->solver_idx].body_b;
-			double inv_ma = (double)w->body_hot[real_a].inv_mass;
-			double inv_mb = (double)w->body_hot[real_b].inv_mass;
+			// Compressed masses: must match the K that produced pos_lambda.
+			double inv_ma = (double)comp_bodies[real_a].inv_mass;
+			double inv_mb = (double)comp_bodies[real_b].inv_mass;
 			for (int d = 0; d < con->dof; d++) {
 				double lam = pos_lambda[oi + d] * (double)sub_dt;
 				pos_delta[real_a] = dv3_add(pos_delta[real_a], DV3(inv_ma * jac[d].J_a[0] * lam, inv_ma * jac[d].J_a[1] * lam, inv_ma * jac[d].J_a[2] * lam));
 				dv3 j_ang_a = DV3(jac[d].J_a[3] * lam, jac[d].J_a[4] * lam, jac[d].J_a[5] * lam);
-				dv3 dwa = dinv_inertia_world_mul(&w->body_hot[real_a], j_ang_a);
+				dv3 dwa = ldl_comp_iw_mul(&comp_bodies[real_a], j_ang_a);
 				ang_delta[real_a] = dv3_add(ang_delta[real_a], dwa);
 				pos_delta[real_b] = dv3_add(pos_delta[real_b], DV3(inv_mb * jac[d].J_b[0] * lam, inv_mb * jac[d].J_b[1] * lam, inv_mb * jac[d].J_b[2] * lam));
 				dv3 j_ang_b = DV3(jac[d].J_b[3] * lam, jac[d].J_b[4] * lam, jac[d].J_b[5] * lam);
-				dv3 dwb = dinv_inertia_world_mul(&w->body_hot[real_b], j_ang_b);
+				dv3 dwb = ldl_comp_iw_mul(&comp_bodies[real_b], j_ang_b);
 				ang_delta[real_b] = dv3_add(ang_delta[real_b], dwb);
 			}
 		}
@@ -1645,82 +1650,41 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 // 0.5 = sqrt compression (100:1 → 10:1). 1.0 = no compression (real masses).
 #define LDL_POS_MASS_EXP 0.5f
 
-// Lightweight position error refresh: only recompute pos_error[] from current body state.
-// Skips full joint_fill_rows (Jacobian recomputation, spring params, memsets) since
-// position solve only needs pos_error for the RHS. ~3x faster than ldl_refresh_lever_arms.
-static void ldl_refresh_pos_errors(WorldInternal* w, SolverJoint* sol_joints, int joint_count)
-{
-	for (int i = 0; i < joint_count; i++) {
-		SolverJoint* s = &sol_joints[i];
-		BodyHot* a = &w->body_hot[s->body_a];
-		BodyHot* b = &w->body_hot[s->body_b];
-		JointInternal* j = &w->joints[s->joint_idx];
-		if (s->type == JOINT_DISTANCE) {
-			v3 ra = rotate(a->rotation, j->distance.local_a);
-			v3 rb = rotate(b->rotation, j->distance.local_b);
-			v3 delta = sub(add(b->position, rb), add(a->position, ra));
-			float dist_val = len(delta);
-			s->pos_error[0] = dist_val - j->distance.rest_length;
-			float dmin = j->distance.limit_min, dmax = j->distance.limit_max;
-			if (dmin > 0 || dmax > 0) {
-				if (dmin > 0 && dist_val < dmin) s->pos_error[0] = dist_val - dmin;
-				else if (dmax > 0 && dist_val > dmax) s->pos_error[0] = dist_val - dmax;
-				else s->pos_error[0] = 0;
-			}
-		} else if (s->type == JOINT_BALL_SOCKET) {
-			v3 ra = rotate(a->rotation, j->ball_socket.local_a);
-			v3 rb = rotate(b->rotation, j->ball_socket.local_b);
-			v3 err = sub(add(b->position, rb), add(a->position, ra));
-			s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
-		} else if (s->type == JOINT_HINGE) {
-			v3 ra = rotate(a->rotation, j->hinge.local_a);
-			v3 rb = rotate(b->rotation, j->hinge.local_b);
-			v3 err = sub(add(b->position, rb), add(a->position, ra));
-			s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
-			v3 axis_a = norm(rotate(a->rotation, j->hinge.local_axis_a));
-			v3 axis_b = norm(rotate(b->rotation, j->hinge.local_axis_b));
-			v3 t1, t2;
-			hinge_tangent_basis(axis_a, &t1, &t2);
-			s->pos_error[3] = dot(t1, axis_b);
-			s->pos_error[4] = dot(t2, axis_b);
-		} else if (s->type == JOINT_FIXED) {
-			v3 ra = rotate(a->rotation, j->fixed.local_a);
-			v3 rb = rotate(b->rotation, j->fixed.local_b);
-			v3 err = sub(add(b->position, rb), add(a->position, ra));
-			s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
-			quat q_diff = mul(inv(a->rotation), b->rotation);
-			quat q_target = j->fixed.local_rel_quat;
-			quat q_err = mul(inv(q_target), q_diff);
-			if (q_err.w < 0) { q_err.x = -q_err.x; q_err.y = -q_err.y; q_err.z = -q_err.z; q_err.w = -q_err.w; }
-			s->pos_error[3] = 2.0f * q_err.x; s->pos_error[4] = 2.0f * q_err.y; s->pos_error[5] = 2.0f * q_err.z;
-		} else if (s->type == JOINT_PRISMATIC) {
-			v3 ra = rotate(a->rotation, j->prismatic.local_a);
-			v3 rb = rotate(b->rotation, j->prismatic.local_b);
-			v3 err = sub(add(b->position, rb), add(a->position, ra));
-			v3 axis_a = norm(rotate(a->rotation, j->prismatic.local_axis_a));
-			v3 t1, t2;
-			hinge_tangent_basis(axis_a, &t1, &t2);
-			s->pos_error[0] = dot(t1, err); s->pos_error[1] = dot(t2, err);
-			v3 axis_b = norm(rotate(b->rotation, j->prismatic.local_axis_b));
-			v3 u1 = cross(t1, axis_b), u2 = cross(t2, axis_b);
-			s->pos_error[2] = dot(t1, axis_b); s->pos_error[3] = dot(t2, axis_b);
-			s->pos_error[4] = dot(axis_a, err);
-		}
-	}
-}
-
-// Lightweight position correction: solve through the already-factored K (from ldl_factor).
-// No refactorization, no mass compression — K was factored with compressed masses in ldl_factor,
-// and position deltas are applied with real masses. This unified approach eliminates the
-// second fill_K + factorize pass that the old ldl_position_correct required.
+// Position correction pass. Refreshes lever arms from post-integrate state,
+// refactors K with compressed masses, solves per-island, applies deltas with
+// compressed masses (consistent with the factorization). This is the pre-908f0ed
+// two-pass flow adapted to the current comp_bodies API. The velocity-stage K in
+// ldl_factor stays unchanged; overwriting it here is fine because the next
+// substep's ldl_factor rebuilds from scratch.
 static void ldl_position_solve(WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt)
 {
 	double t_pos_start = perf_now();
 
-	// Only refresh position errors from current body state — skip full Jacobian recompute.
-	ldl_refresh_pos_errors(w, sol_joints, joint_count);
+	// Full lever-arm refresh (not pos-error only): J, pos_error, bias all reflect
+	// post-integrate body state. Position correction with stale pre-integrate J
+	// points the correction in the wrong direction for stretched chains.
+	ldl_refresh_lever_arms(w, sol_joints, joint_count, sub_dt);
 
+	// Build compressed masses for position-stage K. Delta apply in
+	// ldl_island_position_correct uses these same compressed masses, keeping
+	// lambda (solved via K_comp^-1) consistent with the M^-1 in the apply.
 	int body_count = asize(w->body_hot);
+	LDL_CompBody* comp_bodies = CK_ALLOC(body_count * sizeof(LDL_CompBody));
+	for (int i = 0; i < body_count; i++) {
+		float inv_m = w->body_hot[i].inv_mass;
+		if (inv_m > 0.0f) {
+			float inv_m_comp = sqrtf(inv_m);
+			float comp_ratio = inv_m_comp / inv_m;
+			comp_bodies[i].inv_mass = inv_m_comp;
+			comp_bodies[i].iw_diag = scale(w->body_hot[i].iw_diag, comp_ratio);
+			comp_bodies[i].iw_off  = scale(w->body_hot[i].iw_off,  comp_ratio);
+		} else {
+			comp_bodies[i].inv_mass = 0.0f;
+			comp_bodies[i].iw_diag = V3(0, 0, 0);
+			comp_bodies[i].iw_off  = V3(0, 0, 0);
+		}
+	}
+
 	dv3* pos_delta = CK_ALLOC(body_count * sizeof(dv3));
 	dv3* ang_delta = CK_ALLOC(body_count * sizeof(dv3));
 
@@ -1732,9 +1696,15 @@ static void ldl_position_solve(WorldInternal* w, SolverJoint* sol_joints, int jo
 		if (isl->joint_count == 0) continue;
 		LDL_Cache* c = &isl->ldl;
 		if (c->n == 0 || !c->topo) continue;
-		ldl_island_position_correct(c, w, sol_joints, sub_dt, pos_delta, ang_delta);
+
+		// Refactorize every substep with post-integrate J + compressed masses.
+		// Overwrites velocity-stage factorization; next substep's ldl_factor
+		// rebuilds K from scratch so this is safe.
+		ldl_numeric_factor(c, w, sol_joints, comp_bodies);
+		ldl_island_position_correct(c, w, sol_joints, sub_dt, pos_delta, ang_delta, comp_bodies);
 	}
 
+	CK_FREE(comp_bodies);
 	CK_FREE(pos_delta);
 	CK_FREE(ang_delta);
 

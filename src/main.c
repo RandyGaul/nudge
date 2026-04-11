@@ -639,7 +639,8 @@ void update()
 	ImGui_SeparatorText("Stats");
 	const Contact* contacts;
 	int ncontacts = world_get_contacts(g_world, &contacts);
-	ImGui_Text("Broadphase: %s", dbg_w->broadphase_type == BROADPHASE_BVH ? "BVH" : "N^2");
+	{ int bp = dbg_w->broadphase_type;
+	  if (ImGui_Combo("Broadphase", &bp, "N^2\0BVH\0")) dbg_w->broadphase_type = bp; }
 	ImGui_Text("Contacts: %d", ncontacts);
 	{
 		int n_islands = 0, n_sleeping = 0;
@@ -792,7 +793,13 @@ void draw()
 		}
 	}
 
-	if (g_show_bvh) world_debug_bvh(g_world, bvh_debug_draw_cb, NULL);
+	if (g_show_bvh) {
+		world_debug_bvh(g_world, bvh_debug_draw_cb, NULL);
+		// Validate BVH leaves every frame when debug draw is on
+		WorldInternal* vw = (WorldInternal*)g_world.id;
+		int stale = bvh_validate_leaves(vw->bvh_dynamic, vw);
+		if (stale > 0) printf("[BVH] %d stale dynamic leaves at draw time (frame %d)\n", stale, vw->frame);
+	}
 
 	render_end();
 }

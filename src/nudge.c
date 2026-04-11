@@ -724,6 +724,11 @@ void world_step(World world, float dt)
 	joints_post_solve(w, sol_joints, asize(sol_joints));
 	w->perf.pgs.post_solve = perf_now() - t_ps;
 
+	// Post-step BVH refit: update leaves after all substeps so they're correct
+	// for next frame's broadphase. Without this, bodies accelerated by the solver
+	// can escape their fat AABBs between frames.
+	bvh_refit(w->bvh_dynamic, w);
+
 	double t4 = perf_now();
 	if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
 	w->perf.islands = perf_now() - t4;

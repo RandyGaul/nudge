@@ -739,13 +739,6 @@ static BVHChild bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int p
 		if (!bvh_body_sleeping(r->world, bi)) {
 			all_sleeping = 0;
 			AABB tight = aabb_expand(body_aabb(&r->world->body_hot[bi], &r->world->body_cold[bi]), BVH_AABB_MARGIN);
-			// Velocity-expand: predict motion over the full frame (all substeps).
-			// This ensures the fat AABB covers where the body will be after integration.
-			v3 vel = r->world->body_hot[bi].velocity;
-			float vdt = r->world->sub_steps * (1.0f / 60.0f); // approximate full frame dt
-			v3 motion = V3(fabsf(vel.x)*vdt, fabsf(vel.y)*vdt, fabsf(vel.z)*vdt);
-			tight.min = sub(tight.min, motion);
-			tight.max = add(tight.max, motion);
 			v3 fmin = r->tree->leaves[li].fat_min, fmax = r->tree->leaves[li].fat_max;
 			if (!(tight.min.x >= fmin.x && tight.min.y >= fmin.y && tight.min.z >= fmin.z && tight.max.x <= fmax.x && tight.max.y <= fmax.y && tight.max.z <= fmax.z)) {
 				AABB fat = aabb_expand(tight, BVH_FAT_MARGIN);
@@ -775,11 +768,6 @@ static BVHChild bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int p
 		if (!bvh_body_sleeping(r->world, bi)) {
 			all_sleeping = 0;
 			AABB tight = aabb_expand(body_aabb(&r->world->body_hot[bi], &r->world->body_cold[bi]), BVH_AABB_MARGIN);
-			v3 vel = r->world->body_hot[bi].velocity;
-			float vdt = r->world->sub_steps * (1.0f / 60.0f);
-			v3 motion = V3(fabsf(vel.x)*vdt, fabsf(vel.y)*vdt, fabsf(vel.z)*vdt);
-			tight.min = sub(tight.min, motion);
-			tight.max = add(tight.max, motion);
 			v3 fmin = r->tree->leaves[li].fat_min, fmax = r->tree->leaves[li].fat_max;
 			if (!(tight.min.x >= fmin.x && tight.min.y >= fmin.y && tight.min.z >= fmin.z && tight.max.x <= fmax.x && tight.max.y <= fmax.y && tight.max.z <= fmax.z)) {
 				AABB fat = aabb_expand(tight, BVH_FAT_MARGIN);
@@ -838,6 +826,23 @@ static void bvh_refit(BVHTree* t, WorldInternal* w)
 }
 
 // -----------------------------------------------------------------------------
+// Validate all leaves enclose their body AABBs. Returns count of stale leaves.
+static int bvh_validate_leaves(BVHTree* t, WorldInternal* w)
+{
+	int stale = 0;
+	for (int i = 0; i < asize(t->leaves); i++) {
+		if (t->leaves[i].body_idx < 0) continue;
+		int bi = t->leaves[i].body_idx;
+		if (!split_alive(w->body_gen, bi)) continue;
+		if (asize(w->body_cold[bi].shapes) == 0) continue;
+		AABB bb = body_aabb(&w->body_hot[bi], &w->body_cold[bi]);
+		v3 fmin = t->leaves[i].fat_min, fmax = t->leaves[i].fat_max;
+		if (bb.min.x < fmin.x || bb.min.y < fmin.y || bb.min.z < fmin.z || bb.max.x > fmax.x || bb.max.y > fmax.y || bb.max.z > fmax.z)
+			stale++;
+	}
+	return stale;
+}
+
 // Self-test: find all overlapping leaf pairs within a single tree.
 // Split dispatch: leaf-vs-node, node-vs-node with 4-pair batching.
 

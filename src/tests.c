@@ -12261,3 +12261,211 @@ static void test_quickhull_soak()
 		}
 	}
 }
+
+// Create a 3D box pyramid (shared between app, testbed, and tests).
+// If bodies_out is non-NULL, appends Body handles to it.
+static int setup_pyramid(World w, int base, float box_size, float spacing, CK_DYNA Body** bodies_out)
+{
+	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	int count = 1;
+	for (int layer = 0; layer < base; layer++) {
+		int n = base - layer;
+		float offset = -(n - 1) * 0.5f * spacing;
+		float y = box_size + layer * spacing;
+		for (int r = 0; r < n; r++) {
+			for (int c = 0; c < n; c++) {
+				Body b = create_body(w, (BodyParams){ .position = V3(offset + c * spacing, y, offset + r * spacing), .rotation = quat_identity(), .mass = 1.0f, .friction = 0.6f });
+				body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(box_size, box_size, box_size) });
+				if (bodies_out) apush(*bodies_out, b);
+				count++;
+			}
+		}
+	}
+	return count;
+}
+
+// Create a 2D (flat) box pyramid -- single row deep, like the testbed PyramidBoxes scene.
+static int setup_pyramid_2d(World w, int base, float box_size, float spacing)
+{
+	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50) });
+	int count = 1;
+	for (int row = 0; row < base; row++) {
+		int n = base - row;
+		float startX = -(n - 1) * spacing * 0.5f;
+		float y = box_size + row * spacing;
+		for (int i = 0; i < n; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3(startX + i * spacing, y, 0), .rotation = quat_identity(), .mass = 1.0f, .friction = 0.6f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(box_size, box_size, box_size) });
+			count++;
+		}
+	}
+	return count;
+}
+
+static void pyramid_report(WorldInternal* wi, int body_count, float t)
+{
+	float max_v2 = 0;
+	int awake = 0, max_body = -1;
+	for (int i = 0; i < asize(wi->body_hot); i++) {
+		if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
+		int isl = wi->body_cold[i].island_id;
+		if (isl >= 0 && (wi->island_gen[isl] & 1) && wi->islands[isl].awake) awake++;
+		float v2 = len2(wi->body_hot[i].velocity) + len2(wi->body_hot[i].angular_velocity);
+		if (v2 > max_v2) { max_v2 = v2; max_body = i; }
+	}
+	printf("  t=%.1fs  awake=%d/%d  max_v2=%.6f (body %d)\n", t, awake, body_count - 1, max_v2, max_body);
+}
+
+// Test A: 2D flat pyramid -- does it settle and sleep?
+static void test_pyramid_2d_jiggle(int base, int frames)
+{
+	printf("--- 2D pyramid jiggle (base=%d, %d frames) ---\n", base, frames);
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+	int body_count = setup_pyramid_2d(w, base, 0.5f, 1.0f);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	printf("  bodies: %d\n", body_count);
+
+	float dt = 1.0f / 60.0f;
+	for (int f = 0; f < frames; f++) {
+		world_step(w, dt);
+		if ((f + 1) % 60 == 0) pyramid_report(wi, body_count, (f + 1) * dt);
+	}
+	destroy_world(w);
+}
+
+// Test B: 3D pyramid -- let it sleep, then yank a corner box out.
+static void test_pyramid_yank(int base, int frames)
+{
+	printf("--- 3D pyramid yank test (base=%d) ---\n", base);
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+	CK_DYNA Body* bodies = NULL;
+	int body_count = setup_pyramid(w, base, 0.5f, 1.05f, &bodies);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	printf("  bodies: %d\n", body_count);
+
+	float dt = 1.0f / 60.0f;
+
+	// Phase 1: let it settle and sleep (5 seconds)
+	printf("  phase 1: settling...\n");
+	for (int f = 0; f < 300; f++) {
+		world_step(w, dt);
+		if ((f + 1) % 60 == 0) pyramid_report(wi, body_count, (f + 1) * dt);
+	}
+
+	// Phase 2: yank first body (bottom corner)
+	printf("  phase 2: yanking bottom corner body...\n");
+	Body yanked = bodies[0];
+	int yanked_idx = handle_index(yanked);
+	body_set_velocity(w, yanked, V3(20, 10, 20));
+	body_wake(w, yanked);
+
+	// Simulate mouse drag exactly as the app does:
+	// 1. Create static anchor body + ball-socket joint with spring
+	// 2. Each frame BEFORE world_step: move anchor position, wake island
+	// 3. Validate BVH after each world_step
+	Body anchor = create_body(w, (BodyParams){ .position = wi->body_hot[yanked_idx].position, .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.01f });
+	Joint drag_joint = create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = yanked, .spring = { .frequency = 30.0f, .damping_ratio = 1.0f } });
+	int anchor_idx = handle_index(anchor);
+
+	v3 start_pos = wi->body_hot[yanked_idx].position;
+	v3 end_pos = add(start_pos, V3(5, 2, 5));
+	int total_stale = 0;
+	for (int f = 0; f < 120; f++) {
+		// Move anchor (app does this in update() before world_step)
+		float t = (float)f / 59.0f;
+		if (t > 1.0f) t = 1.0f;
+		wi->body_hot[anchor_idx].position = add(scale(start_pos, 1-t), scale(end_pos, t));
+
+		// Wake island (app does this in mouse_update_drag)
+		int ji = handle_index(drag_joint);
+		int island_id = wi->joints[ji].island_id;
+		if (island_id >= 0 && (wi->island_gen[island_id] & 1) && !wi->islands[island_id].awake)
+			island_wake(wi, island_id);
+
+		world_step(w, dt);
+
+		// Validate ALL dynamic body BVH leaves
+		int stale = bvh_validate_leaves(wi->bvh_dynamic, wi);
+		if (stale > 0) {
+			total_stale++;
+			if (total_stale <= 5) {
+				printf("    f=%d: %d stale leaves", f, stale);
+				// Find which body
+				for (int i = 0; i < asize(wi->bvh_dynamic->leaves); i++) {
+					int bi = wi->bvh_dynamic->leaves[i].body_idx;
+					if (bi < 0 || !split_alive(wi->body_gen, bi) || asize(wi->body_cold[bi].shapes) == 0) continue;
+					AABB bb = body_aabb(&wi->body_hot[bi], &wi->body_cold[bi]);
+					v3 lmin = wi->bvh_dynamic->leaves[i].fat_min, lmax = wi->bvh_dynamic->leaves[i].fat_max;
+					if (bb.min.x < lmin.x || bb.min.y < lmin.y || bb.min.z < lmin.z || bb.max.x > lmax.x || bb.max.y > lmax.y || bb.max.z > lmax.z)
+						printf(" [body %d pos=(%.2f,%.2f,%.2f)]", bi, wi->body_hot[bi].position.x, wi->body_hot[bi].position.y, wi->body_hot[bi].position.z);
+				}
+				printf("\n");
+			}
+		}
+	}
+	printf("  drag: %d/%d frames had stale leaves\n", total_stale, 120);
+	destroy_joint(w, drag_joint);
+	destroy_body(w, anchor);
+
+	// Phase 3: observe aftermath (report every 0.5s)
+	printf("  phase 3: aftermath...\n");
+	float prev_max = 0;
+	int stale_reported = 0;
+	for (int f = 0; f < frames; f++) {
+		world_step(w, dt);
+		// Validate BVH leaves every frame for first 60 frames after yank
+		if (f < 60 && stale_reported < 10) {
+			for (int i = 0; i < asize(wi->body_hot); i++) {
+				if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
+				if (asize(wi->body_cold[i].shapes) == 0) continue;
+				int leaf = wi->body_cold[i].bvh_leaf;
+				AABB bb = body_aabb(&wi->body_hot[i], &wi->body_cold[i]);
+				v3 lmin = wi->bvh_dynamic->leaves[leaf].fat_min;
+				v3 lmax = wi->bvh_dynamic->leaves[leaf].fat_max;
+				if (bb.min.x < lmin.x || bb.min.y < lmin.y || bb.min.z < lmin.z || bb.max.x > lmax.x || bb.max.y > lmax.y || bb.max.z > lmax.z) {
+					printf("    BVH STALE f=%d body %d pos=(%.2f,%.2f,%.2f) outside leaf\n", f, i, wi->body_hot[i].position.x, wi->body_hot[i].position.y, wi->body_hot[i].position.z);
+					stale_reported++;
+				}
+			}
+		}
+		if ((f + 1) % 30 == 0) {
+			pyramid_report(wi, body_count, 5.0f + (f + 1) * dt);
+			float max_v2 = 0; int mb = -1;
+			for (int i = 0; i < asize(wi->body_hot); i++) {
+				if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
+				float v2 = len2(wi->body_hot[i].velocity) + len2(wi->body_hot[i].angular_velocity);
+				if (v2 > max_v2) { max_v2 = v2; mb = i; }
+			}
+			// Track energy in non-yanked bodies only
+			float pile_max_v2 = 0; int pile_mb = -1;
+			for (int i = 0; i < asize(wi->body_hot); i++) {
+				if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
+				if (i == yanked_idx) continue;
+				float v2 = len2(wi->body_hot[i].velocity) + len2(wi->body_hot[i].angular_velocity);
+				if (v2 > pile_max_v2) { pile_max_v2 = v2; pile_mb = i; }
+			}
+			if (pile_max_v2 > 5.0f) {
+				v3 v = wi->body_hot[pile_mb].velocity, p = wi->body_hot[pile_mb].position;
+				printf("    PILE body %d v2=%.1f v=(%.2f,%.2f,%.2f) pos=(%.2f,%.2f,%.2f)\n", pile_mb, pile_max_v2, v.x, v.y, v.z, p.x, p.y, p.z);
+			}
+			// Validate every dynamic body is inside its BVH leaf
+			for (int i = 0; i < asize(wi->body_hot); i++) {
+				if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
+				if (asize(wi->body_cold[i].shapes) == 0) continue;
+				int leaf = wi->body_cold[i].bvh_leaf;
+				if (leaf < 0 || leaf >= asize(wi->bvh_dynamic->leaves)) { printf("    BVH MISSING leaf for body %d\n", i); continue; }
+				AABB body_box = body_aabb(&wi->body_hot[i], &wi->body_cold[i]);
+				v3 lmin = wi->bvh_dynamic->leaves[leaf].fat_min;
+				v3 lmax = wi->bvh_dynamic->leaves[leaf].fat_max;
+				if (body_box.min.x < lmin.x || body_box.min.y < lmin.y || body_box.min.z < lmin.z || body_box.max.x > lmax.x || body_box.max.y > lmax.y || body_box.max.z > lmax.z)
+					printf("    BVH STALE body %d pos=(%.2f,%.2f,%.2f) body_min=(%.2f,%.2f,%.2f) body_max=(%.2f,%.2f,%.2f) leaf_min=(%.2f,%.2f,%.2f) leaf_max=(%.2f,%.2f,%.2f)\n", i, wi->body_hot[i].position.x, wi->body_hot[i].position.y, wi->body_hot[i].position.z, body_box.min.x, body_box.min.y, body_box.min.z, body_box.max.x, body_box.max.y, body_box.max.z, lmin.x, lmin.y, lmin.z, lmax.x, lmax.y, lmax.z);
+			}
+			prev_max = max_v2;
+		}
+	}
+	afree(bodies);
+	destroy_world(w);
+}

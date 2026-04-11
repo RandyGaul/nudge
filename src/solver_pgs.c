@@ -87,7 +87,6 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 		pre_solve_manifold(w, &manifolds[i], i, sm, sc, pc, dt);
 
 	// Apply warm start impulses
-	int patch_warm = 1;
 	for (int i = 0; i < asize(sm); i++) {
 		SolverManifold* m = &sm[i];
 		if (m->contact_count == 0) continue; // skip empty (static-static filtered)
@@ -95,23 +94,16 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 		BodyHot* b = &w->body_hot[m->body_b];
 		for (int ci = 0; ci < m->contact_count; ci++) {
 			SolverContact* s = &sc[m->contact_start + ci];
-			if (patch_warm) {
-				if (s->lambda_n == 0.0f) continue;
-				apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n));
-			} else {
-				if (s->lambda_n == 0.0f && s->lambda_t1 == 0.0f && s->lambda_t2 == 0.0f)
-					continue;
-				v3 P = add(add(scale(s->normal, s->lambda_n), scale(s->tangent1, s->lambda_t1)), scale(s->tangent2, s->lambda_t2));
-				apply_impulse(a, b, s->r_a, s->r_b, P);
-			}
+			if (s->lambda_n == 0.0f) continue;
+			apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n));
 		}
 		// Warm start manifold-level friction
-		if (patch_warm && (m->lambda_t1 != 0.0f || m->lambda_t2 != 0.0f)) {
+		if ((m->lambda_t1 != 0.0f || m->lambda_t2 != 0.0f)) {
 			v3 P = add(scale(m->tangent1, m->lambda_t1), scale(m->tangent2, m->lambda_t2));
 			apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, P);
 		}
 		// Warm start torsional friction (pure angular impulse along normal)
-		if (patch_warm && m->lambda_twist != 0.0f) {
+		if (m->lambda_twist != 0.0f) {
 			v3 twist_impulse = scale(m->normal, m->lambda_twist);
 			a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, twist_impulse));
 			b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, twist_impulse));

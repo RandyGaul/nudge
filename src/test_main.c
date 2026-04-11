@@ -43,6 +43,9 @@ int main(int argc, char* argv[])
 	int bench_pile_grid = 10;
 	int bench_pile_height = 5;
 	int bench_pile_frames = 300;
+	int pyramid_test = 0;
+	int pyramid_base = 5;
+	int pyramid_frames = 600;
 	int sub_steps = 0;
 	int vel_iters = 0;
 	int threads = 0;
@@ -83,6 +86,12 @@ int main(int argc, char* argv[])
 			damping = (float)atof(argv[++i]);
 		else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc)
 			threads = atoi(argv[++i]);
+		else if (strcmp(argv[i], "--pyramid") == 0)
+			pyramid_test = 1;
+		else if (strcmp(argv[i], "--pyramid-base") == 0 && i + 1 < argc)
+			pyramid_base = atoi(argv[++i]);
+		else if (strcmp(argv[i], "--pyramid-frames") == 0 && i + 1 < argc)
+			pyramid_frames = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--bench-qh") == 0)
 			bench_qh = 1;
 		else if (strcmp(argv[i], "--bench-ldl") == 0)
@@ -97,6 +106,13 @@ int main(int argc, char* argv[])
 
 	extern int bench_thread_count;
 	bench_thread_count = threads;
+
+	if (pyramid_test) {
+		test_pyramid_2d_jiggle(pyramid_base, pyramid_frames);
+		printf("\n");
+		test_pyramid_yank(pyramid_base, pyramid_frames);
+		return 0;
+	}
 
 	if (bench_qh) {
 		bench_quickhull();
