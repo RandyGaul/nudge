@@ -11163,6 +11163,23 @@ static void run_tests()
 				TEST_ASSERT(found);
 			}
 
+			// Bitwise plane comparison: each extension plane must match a quickhull plane exactly.
+			{
+				int bitwise_ok = 1;
+				for (int f = 0; f < ext.face_count; f++) {
+					int found = 0;
+					for (int g = 0; g < fh->face_count; g++) {
+						if (memcmp(&ext.planes[f], &fh->planes[g], sizeof(HullPlane)) == 0) { found = 1; break; }
+					}
+					if (!found) {
+						printf("  FACE %d: ext=(%g,%g,%g d=%g) no bitwise match\n", f, ext.planes[f].normal.x, ext.planes[f].normal.y, ext.planes[f].normal.z, ext.planes[f].offset);
+						bitwise_ok = 0;
+					}
+				}
+				TEST_BEGIN("face extension box bitwise planes");
+				TEST_ASSERT(bitwise_ok);
+			}
+
 			hull_face_extension_free(&ext);
 			compact_hull_free(&fc);
 			hull_free(fh);
@@ -11197,6 +11214,26 @@ static void run_tests()
 					if (dot(ext.planes[f].normal, fh->planes[g].normal) > 0.99f) { found = 1; break; }
 				}
 				TEST_ASSERT(found);
+			}
+
+			// Bitwise plane comparison for icosahedron.
+			{
+				int bitwise_ok = 1;
+				for (int f = 0; f < ext.face_count; f++) {
+					int found = 0;
+					for (int g = 0; g < fh->face_count; g++) {
+						if (memcmp(&ext.planes[f], &fh->planes[g], sizeof(HullPlane)) == 0) { found = 1; break; }
+					}
+					// Also check flipped normal (same plane, opposite orientation).
+					if (!found) {
+						HullPlane flipped = { neg(ext.planes[f].normal), -ext.planes[f].offset };
+						for (int g = 0; g < fh->face_count; g++)
+							if (memcmp(&flipped, &fh->planes[g], sizeof(HullPlane)) == 0) { found = 1; break; }
+					}
+					if (!found) bitwise_ok = 0;
+				}
+				TEST_BEGIN("face extension ico bitwise planes");
+				TEST_ASSERT(bitwise_ok);
 			}
 
 			hull_face_extension_free(&ext);

@@ -1623,6 +1623,11 @@ int compact_hull_from_hull(CompactHull* out, const Hull* hull)
 	int total = 0;
 	hull_build_csr(hull, 65535, out->offsets, 2, out->neighbors, 2, &total);
 	out->neighbor_total = (uint16_t)total;
+
+	// Cache face planes from quickhull for bitwise-deterministic reconstruction.
+	out->face_count = (uint16_t)hull->face_count;
+	out->planes = (HullPlane*)CK_ALLOC(hull->face_count * sizeof(HullPlane));
+	memcpy(out->planes, hull->planes, hull->face_count * sizeof(HullPlane));
 	return 0;
 }
 
@@ -1631,6 +1636,7 @@ void compact_hull_free(CompactHull* ch)
 	if (!ch) return;
 	CK_FREE(ch->offsets);
 	CK_FREE(ch->neighbors);
+	if (ch->planes) CK_FREE(ch->planes);
 	CK_FREE_ALIGNED(ch->verts_x);
 	CK_FREE_ALIGNED(ch->verts_y);
 	CK_FREE_ALIGNED(ch->verts_z);
@@ -1687,11 +1693,10 @@ int hull_face_extension_build(HullFaceExtension* out, const CompactHull* ch)
 		int base = ch->offsets[v];
 		for (int k = 0; k < deg; k++) {
 			if (ch->neighbors[base + k] == u) {
-				int prev_k = (k == 0) ? deg - 1 : k - 1;
-				int w = ch->neighbors[base + prev_k];
+				int next_k = (k + 1 < deg) ? k + 1 : 0;
 				// next edge goes from v to w: find that edge index.
-				out->edge_next[i] = (uint16_t)(base + prev_k);
-				(void)w;
+				out->edge_next[i] = (uint16_t)(base + next_k);
+				(void)next_k;
 				break;
 			}
 		}
@@ -1706,35 +1711,27 @@ int hull_face_extension_build(HullFaceExtension* out, const CompactHull* ch)
 	for (int i = 0; i < ne; i++) {
 		if (out->edge_face[i] != 0xFFFF) continue;
 		int fi = face_count++;
-		apush(faces_arr, ((HullFace){ .edge = (uint16_t)i }));
 
-		// Walk the face loop, assign face index, compute Newell normal.
-		v3 normal = V3(0,0,0), centroid = V3(0,0,0);
-		int count = 0;
+		// First pass: assign face index and find lowest-origin vertex for normalized start.
+		int best_start = i;
+		uint16_t best_origin = out->edge_origin[i];
 		int e = i;
 		do {
 			out->edge_face[e] = (uint16_t)fi;
-			int vi = out->edge_origin[e];
-			int vn = out->edge_origin[out->edge_next[e]];
-			float cx = ch->verts_x[vi], cy = ch->verts_y[vi], cz = ch->verts_z[vi];
-			float nx = ch->verts_x[vn], ny = ch->verts_y[vn], nz = ch->verts_z[vn];
-			normal.x += (cy - ny) * (cz + nz);
-			normal.y += (cz - nz) * (cx + nx);
-			normal.z += (cx - nx) * (cy + ny);
-			centroid = add(centroid, V3(cx, cy, cz));
-			count++;
+			if (out->edge_origin[e] < best_origin) { best_origin = out->edge_origin[e]; best_start = e; }
 			e = out->edge_next[e];
-			assert(count < 1000);
 		} while (e != i);
+		apush(faces_arr, ((HullFace){ .edge = (uint16_t)best_start }));
 
-		float a = len(normal);
-		if (a > 0) normal = scale(normal, 1.0f / a);
-		centroid = scale(centroid, 1.0f / count);
-
-		// Orient normal outward (away from hull centroid).
-		if (dot(normal, sub(centroid, ch->centroid)) < 0) normal = neg(normal);
-
-		apush(planes_arr, ((HullPlane){ normal, dot(normal, centroid) }));
+		// Use planes stored in the compact hull (captured from quickhull for bitwise determinism).
+		// Match by Newell normal direction since face ordering may differ.
+		HullPlane recomputed = hull_newell_plane(out->edge_next, out->edge_origin, ch->verts_x, ch->verts_y, ch->verts_z, best_start, ch->centroid);
+		float best_dot = -2; int best_match = fi;
+		for (int g = 0; g < ch->face_count; g++) {
+			float d = dot(recomputed.normal, ch->planes[g].normal);
+			if (d > best_dot) { best_dot = d; best_match = g; }
+		}
+		apush(planes_arr, ch->planes[best_match]);
 	}
 
 	out->face_count = (uint16_t)face_count;

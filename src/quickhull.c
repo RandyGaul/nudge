@@ -1044,6 +1044,28 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 	qh_resolve_unclaimed(s, &nf, &unclaimed);
 }
 
+// Shared Newell plane computation: walks a half-edge face loop starting from `start_edge`,
+// reading vertex positions from SoA float arrays. Used by both quickhull output and
+// hull_face_extension_build for bitwise-deterministic planes.
+static HullPlane hull_newell_plane(const uint16_t* edge_next, const uint16_t* edge_origin, const float* vx, const float* vy, const float* vz, int start_edge, v3 hull_centroid)
+{
+	float fnx=0,fny=0,fnz=0,fcx=0,fcy=0,fcz=0; int cnt=0;
+	int e = start_edge;
+	do {
+		int vi = edge_origin[e], vn = edge_origin[edge_next[e]];
+		float curx=vx[vi],cury=vy[vi],curz=vz[vi], nxtx=vx[vn],nxty=vy[vn],nxtz=vz[vn];
+		fnx+=(cury-nxty)*(curz+nxtz); fny+=(curz-nxtz)*(curx+nxtx); fnz+=(curx-nxtx)*(cury+nxty);
+		fcx+=curx; fcy+=cury; fcz+=curz; cnt++;
+		e = edge_next[e];
+	} while (e != start_edge);
+	float a = sqrtf(fnx*fnx+fny*fny+fnz*fnz);
+	if (a > 0) { float inv=1.0f/a; fnx*=inv; fny*=inv; fnz*=inv; }
+	float inv_c = 1.0f/cnt; fcx*=inv_c; fcy*=inv_c; fcz*=inv_c;
+	v3 fn = V3(fnx,fny,fnz), fc = V3(fcx,fcy,fcz);
+	if (dot(fn, sub(fc, hull_centroid)) < 0) fn = neg(fn);
+	return (HullPlane){ fn, dot(fn, fc) };
+}
+
 // -----------------------------------------------------------------------------
 // Convert internal state to output Hull with uint16_t-indexed arrays.
 

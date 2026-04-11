@@ -197,11 +197,14 @@ typedef struct CompactHull
 {
 	uint16_t  vert_count;
 	uint16_t  neighbor_total;
+	uint16_t  face_count;
+	uint16_t  _pad;
 	uint16_t* offsets;   // [vert_count + 1]
 	uint16_t* neighbors; // [neighbor_total]
 	float*    verts_x;   // SoA vertex positions
 	float*    verts_y;
 	float*    verts_z;
+	HullPlane* planes;   // [face_count] -- cached from quickhull for bitwise determinism
 	v3        centroid;
 } CompactHull;
 
