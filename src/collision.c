@@ -1683,13 +1683,13 @@ static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
 // bvh_build_lut() moved to bvh.c.
 
 // Sweep-and-prune entry for axis-sorted broadphase.
-typedef struct SAPEntry
+typedef struct SAP_Entry
 {
 	int body_idx;
 	float min_val, max_val; // along chosen axis
-} SAPEntry;
+} SAP_Entry;
 
-static int sap_cmp(const void* a, const void* b) { float d = ((SAPEntry*)a)->min_val - ((SAPEntry*)b)->min_val; return (d > 0) - (d < 0); }
+static int sap_cmp(const void* a, const void* b) { float d = ((SAP_Entry*)a)->min_val - ((SAP_Entry*)b)->min_val; return (d > 0) - (d < 0); }
 
 // Broadphase sub-phase timing accumulators (seconds, summed across frames).
 double bp_refit_acc, bp_precomp_acc, bp_sweep_acc, bp_cross_acc;
@@ -1707,7 +1707,7 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	int body_count = asize(w->body_hot);
 	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
 	AABB scene_bounds = aabb_empty();
-	CK_DYNA SAPEntry* sap = NULL;
+	CK_DYNA SAP_Entry* sap = NULL;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
 		tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]);
@@ -1717,12 +1717,12 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	int axis = (extent.y > extent.x && extent.y > extent.z) ? 1 : (extent.z > extent.x) ? 2 : 0;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) continue;
-		if (w->body_hot[i].inv_mass > 0.0f) apush(sap, ((SAPEntry){ i, ((float*)&tight[i].min)[axis], ((float*)&tight[i].max)[axis] }));
+		if (w->body_hot[i].inv_mass > 0.0f) apush(sap, ((SAP_Entry){ i, ((float*)&tight[i].min)[axis], ((float*)&tight[i].max)[axis] }));
 	}
 
 	// Sort dynamic bodies by chosen axis AABB min.
 	int sap_count = asize(sap);
-	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAPEntry), sap_cmp);
+	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAP_Entry), sap_cmp);
 	bp_precomp_acc += perf_now() - t1;
 
 	// Sweep: test overlapping pairs along chosen axis, then full 3D AABB overlap (SIMD branchless).
