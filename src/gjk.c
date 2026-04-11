@@ -197,10 +197,11 @@ static int gjk_hull_support_climb(const v3* __restrict verts, const uint16_t* __
 		int start = e;
 		int improved = 0;
 		do {
-			int neighbor = edge_origin[e ^ 1];
+			int twin = edge_twin[e];
+			int neighbor = edge_origin[twin];
 			float nd = dot(verts[neighbor], ld);
 			if (nd > best_d) { best_d = nd; best = neighbor; improved = 1; }
-			e = edge_next[e ^ 1];
+			e = edge_next[twin];
 		} while (e != start);
 		if (!improved) break;
 	}
