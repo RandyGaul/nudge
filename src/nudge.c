@@ -23,7 +23,7 @@ World create_world(WorldParams params)
 	memset(w, 0, sizeof(*w));
 	w->gravity = params.gravity;
 	w->broadphase_type = params.broadphase;
-	w->friction_model = params.friction_model;
+	w->friction_model = params.friction_model ? params.friction_model : FRICTION_PATCH;
 	w->solver_type = params.solver_type;
 	w->sleep_enabled = 1;
 	w->velocity_iters = params.velocity_iters > 0 ? params.velocity_iters : SOLVER_VELOCITY_ITERS;
@@ -31,7 +31,7 @@ World create_world(WorldParams params)
 	w->contact_hertz = params.contact_hertz > 0.0f ? params.contact_hertz : 60.0f;
 	w->contact_damping_ratio = params.contact_damping_ratio > 0.0f ? params.contact_damping_ratio : 3.0f;
 	w->max_push_velocity = params.max_push_velocity > 0.0f ? params.max_push_velocity : 3.0f;
-	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 4;
+	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 1;
 	w->ldl_correction_iter = -2; // -2 = auto: velocity_iters/2 (mid-loop, PGS can recover after LDL)
 	w->bvh_static = CK_ALLOC(sizeof(BVHTree));
 	w->bvh_dynamic = CK_ALLOC(sizeof(BVHTree));
