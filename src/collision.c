@@ -1721,14 +1721,8 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	}
 
 	// Sort dynamic bodies by chosen axis AABB min.
-	// Insertion sort: O(n) on nearly-sorted data (positions barely change between frames).
 	int sap_count = asize(sap);
-	for (int i = 1; i < sap_count; i++) {
-		SAPEntry key = sap[i];
-		int j = i - 1;
-		while (j >= 0 && sap[j].min_val > key.min_val) { sap[j + 1] = sap[j]; j--; }
-		sap[j + 1] = key;
-	}
+	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAPEntry), sap_cmp);
 	bp_precomp_acc += perf_now() - t1;
 
 	// Sweep: test overlapping pairs along chosen axis, then full 3D AABB overlap (SIMD branchless).
