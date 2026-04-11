@@ -44,7 +44,8 @@ static int        qh_dbg_count;
 
 // Vertex data in SoA layout for SIMD-friendly access.
 // Positions in aligned float arrays, conflict links in separate int arrays.
-typedef struct QH_Verts {
+typedef struct QH_Verts
+{
 	float* x;   // aligned position arrays
 	float* y;
 	float* z;
@@ -56,7 +57,8 @@ typedef struct QH_Verts {
 
 // Edge data in SoA layout. Topology walks only touch enext[]/etwin[]
 // (4 bytes/step) instead of striding through 24-byte structs.
-typedef struct QH_Edges {
+typedef struct QH_Edges
+{
 	int* enext;
 	int* eprev;
 	int* etwin;
@@ -70,7 +72,8 @@ typedef struct QH_Edges {
 // Hot/cold face split: hot fields (scanned by qh_next_conflict + merge)
 // are packed together; cold fields (topology, metadata) accessed only
 // during cone creation, merge splicing, and output.
-typedef struct QH_Face {
+typedef struct QH_Face
+{
 	// --- hot: conflict scanning + merge distance checks ---
 	HullPlane plane;     // 16 bytes
 	v3 centroid;         // 12 bytes
@@ -85,7 +88,8 @@ typedef struct QH_Face {
 	float area;          // 4 bytes
 } QH_Face;               // 64 bytes total, hot fields in first 40
 
-typedef struct QH_State {
+typedef struct QH_State
+{
 	QH_Verts verts;
 	QH_Edges edges;
 	CK_DYNA QH_Face*   faces;
@@ -95,7 +99,8 @@ typedef struct QH_State {
 	float epsilon;
 } QH_State;
 
-typedef struct QH_FaceList {
+typedef struct QH_FaceList
+{
 	int first, last;
 } QH_FaceList;
 
