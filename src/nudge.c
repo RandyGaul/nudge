@@ -403,6 +403,26 @@ void world_step(World world, float dt)
 		integrate_velocities_and_inertia(w, sub_dt);
 	w->perf.integrate = perf_now() - t0;
 
+	// Ultra-fast path: skip broadphase + solver when all islands sleeping and no free bodies.
+	// Check BEFORE broadphase to avoid BVH refit and SAP overhead.
+	{
+		int any_awake = 0;
+		for (int ii = 0; ii < asize(w->islands) && !any_awake; ii++)
+			if ((w->island_gen[ii] & 1) && w->islands[ii].awake) any_awake = 1;
+		for (int bi2 = 0; bi2 < body_count && !any_awake; bi2++)
+			if (split_alive(w->body_gen, bi2) && w->body_hot[bi2].inv_mass > 0.0f && w->body_cold[bi2].island_id < 0) any_awake = 1;
+		if (!any_awake) {
+			w->perf.broadphase = 0;
+			w->perf.pre_solve = 0;
+			w->perf.pgs_solve = 0;
+			w->perf.position_correct = 0;
+			w->perf.pgs = (PGSTimers){0};
+			w->perf.islands = 0;
+			w->perf.total = perf_now() - t_total;
+			return;
+		}
+	}
+
 	double t1 = perf_now();
 	CK_DYNA InternalManifold* manifolds = NULL;
 	// Parallel narrowphase: broadphase outputs pair list, we dispatch narrowphase here.
