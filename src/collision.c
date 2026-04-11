@@ -815,13 +815,47 @@ static float sat_edge_project_full(v3 e1, v3 e2, v3 c1,
 		return min2 - max1;
 	}
 
+	// Reformulate: dot(n, c1 + rot(rel, v*sc)) = dot(n,c1) + dot(rot(inv_rel,n)*sc, v)
+	// Precompute scaled direction in each hull's local space for SoA SIMD scan.
+	float bias1 = dot(n, c1);
+	quat inv_rel = inv(rel_rot);
+	v3 nd1 = rotate(inv_rel, n);
+	float d1x = nd1.x * scale1.x, d1y = nd1.y * scale1.y, d1z = nd1.z * scale1.z;
+	float d2x = -n.x * scale2.x, d2y = -n.y * scale2.y, d2z = -n.z * scale2.z; // neg for min
+
+	int nv1 = hull1->vert_count, nv2 = hull2->vert_count;
+	if (hull1->soa_verts && hull2->soa_verts) {
+		int p1 = (nv1 + 3) & ~3, p2 = (nv2 + 3) & ~3;
+		const float* s1x = hull1->soa_verts, *s1y = s1x + p1, *s1z = s1y + p1;
+		const float* s2x = hull2->soa_verts, *s2y = s2x + p2, *s2z = s2y + p2;
+		simd4f vd1x = simd_set1(d1x), vd1y = simd_set1(d1y), vd1z = simd_set1(d1z);
+		simd4f max4 = simd_set1(-1e18f);
+		for (int i = 0; i < p1; i += 4) {
+			simd4f d = simd_add(simd_add(simd_mul(vd1x, simd_load(s1x+i)), simd_mul(vd1y, simd_load(s1y+i))), simd_mul(vd1z, simd_load(s1z+i)));
+			max4 = simd_max(max4, d);
+		}
+		float ds[4]; simd_store(ds, max4);
+		float max1 = ds[0]; for (int k = 1; k < 4; k++) if (ds[k] > max1) max1 = ds[k];
+		max1 += bias1;
+
+		simd4f vd2x = simd_set1(d2x), vd2y = simd_set1(d2y), vd2z = simd_set1(d2z);
+		simd4f max4b = simd_set1(-1e18f);
+		for (int i = 0; i < p2; i += 4) {
+			simd4f d = simd_add(simd_add(simd_mul(vd2x, simd_load(s2x+i)), simd_mul(vd2y, simd_load(s2y+i))), simd_mul(vd2z, simd_load(s2z+i)));
+			max4b = simd_max(max4b, d);
+		}
+		simd_store(ds, max4b);
+		float max_neg2 = ds[0]; for (int k = 1; k < 4; k++) if (ds[k] > max_neg2) max_neg2 = ds[k];
+		return -max_neg2 - max1;
+	}
+
 	float max1 = -1e18f, min2 = 1e18f;
-	for (int i = 0; i < hull1->vert_count; i++) {
+	for (int i = 0; i < nv1; i++) {
 		v3 v = add(c1, rotate(rel_rot, hull_vert_scaled(hull1, i, scale1)));
 		float d = dot(n, v);
 		if (d > max1) max1 = d;
 	}
-	for (int i = 0; i < hull2->vert_count; i++) {
+	for (int i = 0; i < nv2; i++) {
 		v3 v = hull_vert_scaled(hull2, i, scale2);
 		float d = dot(n, v);
 		if (d < min2) min2 = d;
