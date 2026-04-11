@@ -19,8 +19,8 @@ EXPORT uint64_t nudge_create_world(float gx, float gy, float gz, int solver_type
 	p.gravity = V3(gx, gy, gz);
 	p.broadphase = BROADPHASE_BVH;
 	p.solver_type = solver_type;
-	p.sub_steps = sub_steps;
-	p.velocity_iters = velocity_iters;
+	p.sub_steps = sub_steps > 0 ? sub_steps : 2;
+	p.velocity_iters = velocity_iters > 0 ? velocity_iters : 8;
 	return create_world(p).id;
 }
 
