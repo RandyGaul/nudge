@@ -1520,6 +1520,14 @@ static void test_quickhull_fuzz(int iterations)
 				}
 			}
 
+			// Compact hull round-trip validation on every fuzz hull.
+			if (h->vert_count <= 65535) {
+				CompactHull ch_fuzz;
+				compact_hull_from_hull(&ch_fuzz, h);
+				if (compact_hull_validate_roundtrip(&ch_fuzz) != 0) total_fails++;
+				compact_hull_free(&ch_fuzz);
+			}
+
 			hull_free(h);
 			afree(pts);
 		}

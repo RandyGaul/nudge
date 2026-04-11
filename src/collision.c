@@ -1599,6 +1599,11 @@ int compact_hull32_from_hull(CompactHull32* out, const Hull* hull)
 	if (hull_build_csr(hull, COMPACT_HULL32_MAX_VERTS, out->offsets, 1, out->neighbors, 1, &total) < 0) return -1;
 	if (total > COMPACT_HULL32_MAX_NEIGHBORS) return -1;
 	out->neighbor_total = (uint8_t)total;
+
+	// Copy face planes for bitwise-deterministic reconstruction.
+	if (hull->face_count > COMPACT_HULL32_MAX_FACES) return -1;
+	out->face_count = (uint8_t)hull->face_count;
+	memcpy(out->planes, hull->planes, hull->face_count * sizeof(HullPlane));
 	return 0;
 }
 
@@ -1641,6 +1646,58 @@ void compact_hull_free(CompactHull* ch)
 	CK_FREE_ALIGNED(ch->verts_y);
 	CK_FREE_ALIGNED(ch->verts_z);
 	*ch = (CompactHull){0};
+}
+
+int compact_hull_validate_roundtrip(const CompactHull* ch)
+{
+	HullFaceExtension ext;
+	if (hull_face_extension_build(&ext, ch) != 0) { fprintf(stderr, "compact_hull_validate: extension build failed\n"); return -1; }
+	int ok = 1;
+
+	// Euler: V - E/2 + F = 2.
+	if (ch->vert_count - ext.edge_count / 2 + ext.face_count != 2) {
+		fprintf(stderr, "compact_hull_validate: Euler FAIL V=%d E=%d F=%d\n", ch->vert_count, ext.edge_count, ext.face_count);
+		ok = 0;
+	}
+
+	// Twin reciprocity.
+	for (int e = 0; e < ext.edge_count && ok; e++) {
+		if (ext.edge_twin[ext.edge_twin[e]] != e) {
+			fprintf(stderr, "compact_hull_validate: twin reciprocity FAIL at edge %d\n", e);
+			ok = 0;
+		}
+	}
+
+	// Face count matches stored planes.
+	if (ext.face_count != ch->face_count) {
+		fprintf(stderr, "compact_hull_validate: face count mismatch ext=%d stored=%d\n", ext.face_count, ch->face_count);
+		ok = 0;
+	}
+
+	// Bitwise plane identity: every extension plane must match a stored plane exactly.
+	for (int f = 0; f < ext.face_count && ok; f++) {
+		int found = 0;
+		for (int g = 0; g < ch->face_count; g++) {
+			if (memcmp(&ext.planes[f], &ch->planes[g], sizeof(HullPlane)) == 0) { found = 1; break; }
+		}
+		if (!found) {
+			fprintf(stderr, "compact_hull_validate: plane %d has no bitwise match (n=%g,%g,%g d=%g)\n", f, ext.planes[f].normal.x, ext.planes[f].normal.y, ext.planes[f].normal.z, ext.planes[f].offset);
+			ok = 0;
+		}
+	}
+
+	// Face loops close.
+	for (int f = 0; f < ext.face_count && ok; f++) {
+		int e = ext.faces[f].edge, n = 0;
+		do { n++; e = ext.edge_next[e]; if (n > 1000) break; } while (e != ext.faces[f].edge);
+		if (n > 1000 || n < 3) {
+			fprintf(stderr, "compact_hull_validate: face %d loop FAIL (%d edges)\n", f, n);
+			ok = 0;
+		}
+	}
+
+	hull_face_extension_free(&ext);
+	return ok ? 0 : -1;
 }
 
 // Build face extension from CompactHull CSR adjacency.

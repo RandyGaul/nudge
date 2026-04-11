@@ -179,18 +179,22 @@ const Hull* hull_unit_box();
 //   ~3.5x smaller than full Hull. SAT extension built lazily when needed.
 
 #define COMPACT_HULL32_MAX_VERTS 32
-#define COMPACT_HULL32_MAX_NEIGHBORS 186 // Euler bound: 2*(3V-6) = 2*90 = 180 neighbor refs, +6 padding
+#define COMPACT_HULL32_MAX_NEIGHBORS 186 // Euler bound: 2*(3V-6) = 180 half-edge neighbor refs, +6 padding
+#define COMPACT_HULL32_MAX_FACES 60     // Euler bound: 2V-4 = 60
 
 typedef struct CompactHull32
 {
-	uint8_t  vert_count;
-	uint8_t  neighbor_total;
-	uint8_t  offsets[COMPACT_HULL32_MAX_VERTS + 1]; // CSR: offsets[vert_count+1]
-	uint8_t  neighbors[COMPACT_HULL32_MAX_NEIGHBORS]; // CSR: neighbor vertex indices
-	float    verts_x[COMPACT_HULL32_MAX_VERTS]; // SoA vertex positions
-	float    verts_y[COMPACT_HULL32_MAX_VERTS];
-	float    verts_z[COMPACT_HULL32_MAX_VERTS];
-	v3       centroid;
+	uint8_t   vert_count;
+	uint8_t   face_count;
+	uint8_t   neighbor_total;
+	uint8_t   _pad;
+	uint8_t   offsets[COMPACT_HULL32_MAX_VERTS + 1]; // CSR: offsets[vert_count+1]
+	uint8_t   neighbors[COMPACT_HULL32_MAX_NEIGHBORS]; // CSR: neighbor vertex indices
+	float     verts_x[COMPACT_HULL32_MAX_VERTS]; // SoA vertex positions
+	float     verts_y[COMPACT_HULL32_MAX_VERTS];
+	float     verts_z[COMPACT_HULL32_MAX_VERTS];
+	HullPlane planes[COMPACT_HULL32_MAX_FACES]; // face planes (captured from quickhull)
+	v3        centroid;
 } CompactHull32;
 
 typedef struct CompactHull
@@ -237,6 +241,12 @@ void hull_face_extension_free(HullFaceExtension* ext);
 // The returned Hull points into ch and ext memory (does NOT copy).
 // Caller must keep ch and ext alive while using the Hull.
 Hull hull_from_compact(const CompactHull* ch, const HullFaceExtension* ext);
+
+// Validate compact hull round-trip: builds face extension, checks bitwise plane
+// identity with stored planes, verifies Euler/twin/loop invariants.
+// Returns 0 on success, -1 on failure (prints diagnostics to stderr).
+// Call this from tests to guard against code rot in hull reconstruction.
+int compact_hull_validate_roundtrip(const CompactHull* ch);
 
 // -----------------------------------------------------------------------------
 // Quickhull -- build a convex hull from a point cloud.
