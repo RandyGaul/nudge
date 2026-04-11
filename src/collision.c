@@ -1151,24 +1151,32 @@ static int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot,
 // -----------------------------------------------------------------------------
 // Full SAT hull vs hull with Sutherland-Hodgman face clipping.
 
-int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
+int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint)
 {
 	const Hull* hull_a = a.hull;
 	v3 pos_a = a.center; quat rot_a = a.rotation; v3 scale_a = a.scale;
 	const Hull* hull_b = b.hull;
 	v3 pos_b = b.center; quat rot_b = b.rotation; v3 scale_b = b.scale;
 
-	FaceQuery face_a = sat_query_faces(hull_a, pos_a, rot_a, scale_a, hull_b, pos_b, rot_b, scale_b);
-	if (face_a.separation > 0.0f) return 0;
+	// Pass cached face hints to the face queries for hill-climb warm-start.
+	int face_hint_a = -1, face_hint_b = -1;
+	if (sat_hint && *sat_hint >= 0) {
+		int h = *sat_hint;
+		if (h < hull_a->face_count) face_hint_a = h;
+		else { int fi = h - hull_a->face_count; if (fi < hull_b->face_count) face_hint_b = fi; }
+	}
 
-	FaceQuery face_b = sat_query_faces(hull_b, pos_b, rot_b, scale_b, hull_a, pos_a, rot_a, scale_a);
-	if (face_b.separation > 0.0f) return 0;
+	FaceQuery face_a = sat_query_faces_hint(hull_a, pos_a, rot_a, scale_a, hull_b, pos_b, rot_b, scale_b, face_hint_a);
+	if (face_a.separation > 0.0f) { if (sat_hint) *sat_hint = face_a.index; return 0; }
+
+	FaceQuery face_b = sat_query_faces_hint(hull_b, pos_b, rot_b, scale_b, hull_a, pos_a, rot_a, scale_a, face_hint_b);
+	if (face_b.separation > 0.0f) { if (sat_hint) *sat_hint = hull_a->face_count + face_b.index; return 0; }
 
 	// NaN transforms cause face_index to stay -1 (NaN comparisons always false)
 	if (face_a.index < 0 || face_b.index < 0) return 0;
 
 	EdgeQuery edge_q = sat_query_edges(hull_a, pos_a, rot_a, scale_a, hull_b, pos_b, rot_b, scale_b);
-	if (edge_q.separation > 0.0f) return 0;
+	if (edge_q.separation > 0.0f) { if (sat_hint) *sat_hint = -1; return 0; }
 
 	if (!manifold) return 1;
 
@@ -1311,7 +1319,14 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 	manifold->count = cp;
 	for (int i = 0; i < cp; i++)
 		manifold->contacts[i] = tmp_contacts[i];
+	// Cache the winning axis for next-frame warm-start.
+	if (sat_hint) *sat_hint = flip ? hull_a->face_count + ref_face : ref_face;
 	return 1;
+}
+
+int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
+{
+	return collide_hull_hull_ex(a, b, manifold, NULL);
 }
 
 // -----------------------------------------------------------------------------
@@ -1587,14 +1602,24 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, &hint);
 		if (wm) wm->sat_axis = hint;
 	}
-	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL)
-		hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m);
+	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL) {
+		uint64_t pkey = body_pair_key(i, j);
+		WarmManifold* wm = map_get_ptr(w->warm_cache, pkey);
+		int hint = wm ? wm->sat_axis : -1;
+		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m, &hint);
+		if (wm) wm->sat_axis = hint;
+	}
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL)
 		hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL)
 		hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
-	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL)
-		hit = collide_hull_hull(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m);
+	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL) {
+		uint64_t pkey = body_pair_key(i, j);
+		WarmManifold* wm = map_get_ptr(w->warm_cache, pkey);
+		int hint = wm ? wm->sat_axis : -1;
+		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m, &hint);
+		if (wm) wm->sat_axis = hint;
+	}
 
 	double dt = perf_now() - t0;
 	int idx = np_pair_idx(s0->type, s1->type);
