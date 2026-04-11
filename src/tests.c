@@ -9083,7 +9083,7 @@ static void test_bvh_aabb_helpers()
 
 static void test_bvh_insert_remove()
 {
-	BVHTree t; bvh_init(&t);
+	BVH_Tree t; bvh_init(&t);
 
 	TEST_BEGIN("bvh empty tree");
 	TEST_ASSERT(t.root == -1);
@@ -9130,7 +9130,7 @@ static void test_bvh_insert_remove()
 
 static void test_bvh_self_test()
 {
-	BVHTree t; bvh_init(&t);
+	BVH_Tree t; bvh_init(&t);
 
 	// Insert overlapping AABBs
 	AABB b0 = { V3(0,0,0), V3(2,2,2) };
@@ -9165,7 +9165,7 @@ static void test_bvh_self_test()
 
 static void test_bvh_cross_test()
 {
-	BVHTree ta, tb; bvh_init(&ta); bvh_init(&tb);
+	BVH_Tree ta, tb; bvh_init(&ta); bvh_init(&tb);
 
 	AABB a0 = { V3(0,0,0), V3(2,2,2) };
 	AABB b0 = { V3(1,1,1), V3(3,3,3) }; // overlaps a0
@@ -9268,7 +9268,7 @@ static void test_bvh_vs_n2()
 
 static void test_bvh_empty_trees()
 {
-	BVHTree t; bvh_init(&t);
+	BVH_Tree t; bvh_init(&t);
 
 	TEST_BEGIN("bvh self test empty tree");
 	CK_DYNA BroadPair* pairs = NULL;
@@ -9285,7 +9285,7 @@ static void test_bvh_empty_trees()
 
 static void test_bvh_single_body()
 {
-	BVHTree t; bvh_init(&t);
+	BVH_Tree t; bvh_init(&t);
 	AABB b0 = { V3(0,0,0), V3(1,1,1) };
 	int l0 = bvh_insert(&t, 0, b0);
 
@@ -9308,7 +9308,7 @@ static void test_bvh_single_body()
 
 static void test_bvh_many_overlapping()
 {
-	BVHTree t; bvh_init(&t);
+	BVH_Tree t; bvh_init(&t);
 
 	// Insert N bodies all at the origin -- all overlap each other.
 	int N = 20;
@@ -9333,7 +9333,7 @@ static void test_bvh_many_overlapping()
 
 static void test_bvh_no_overlaps()
 {
-	BVHTree t; bvh_init(&t);
+	BVH_Tree t; bvh_init(&t);
 
 	// Insert 10 well-separated bodies
 	for (int i = 0; i < 10; i++) {
@@ -9353,7 +9353,7 @@ static void test_bvh_no_overlaps()
 
 static void test_bvh_cache_reorder()
 {
-	BVHTree t; bvh_init(&t);
+	BVH_Tree t; bvh_init(&t);
 
 	// Insert 15 bodies with overlapping and separated AABBs.
 	for (int i = 0; i < 15; i++) {
@@ -9404,7 +9404,7 @@ static void test_bvh_cache_reorder()
 }
 
 // Validate all leaf back-pointers in a tree.
-static int bvh_validate_backpointers(BVHTree* t)
+static int bvh_validate_backpointers(BVH_Tree* t)
 {
 	for (int i = 0; i < asize(t->leaves); i++) {
 		// Skip freed leaves (check if on freelist -- simple: just verify node_idx is in range)
@@ -9417,7 +9417,7 @@ static int bvh_validate_backpointers(BVHTree* t)
 }
 
 // Compute total SAH cost of the tree (sum of all internal node child SAs).
-static float bvh_total_sah(BVHTree* t, int ni)
+static float bvh_total_sah(BVH_Tree* t, int ni)
 {
 	BVHNode* n = &t->nodes[ni];
 	float cost = 0;
@@ -9432,7 +9432,7 @@ static void test_bvh_rotations()
 {
 	// Insert bodies in a pathological linear order (sorted along X).
 	// Each body overlaps its neighbor (width 1.5, spacing 1.0).
-	BVHTree t; bvh_init(&t);
+	BVH_Tree t; bvh_init(&t);
 	for (int i = 0; i < 20; i++) {
 		AABB b = { V3((float)i, 0, 0), V3((float)i + 1.5f, 1, 1) };
 		bvh_insert(&t, i, b);
@@ -9482,7 +9482,7 @@ static void test_bvh_rotations()
 
 static void test_bvh_binned_build()
 {
-	BVHTree t; bvh_init(&t);
+	BVH_Tree t; bvh_init(&t);
 
 	// Create 30 leaves manually and build with binned SAH.
 	int leaf_count = 30;
@@ -9521,7 +9521,7 @@ static void test_bvh_binned_build()
 
 static void test_bvh_refine_subtree()
 {
-	BVHTree t; bvh_init(&t);
+	BVH_Tree t; bvh_init(&t);
 
 	// Insert bodies via normal insertion (which uses SAH + rotations).
 	for (int i = 0; i < 20; i++) {

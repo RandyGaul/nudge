@@ -35,9 +35,9 @@ World create_world(WorldParams params)
 	w->max_push_velocity = params.max_push_velocity > 0.0f ? params.max_push_velocity : 3.0f;
 	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 4;
 	w->ldl_correction_iter = -2; // -2 = auto: velocity_iters/2 (mid-loop, PGS can recover after LDL)
-	w->bvh_static = CK_ALLOC(sizeof(BVHTree));
-	w->bvh_dynamic = CK_ALLOC(sizeof(BVHTree));
-	w->bvh_sleeping = CK_ALLOC(sizeof(BVHTree));
+	w->bvh_static = CK_ALLOC(sizeof(BVH_Tree));
+	w->bvh_dynamic = CK_ALLOC(sizeof(BVH_Tree));
+	w->bvh_sleeping = CK_ALLOC(sizeof(BVH_Tree));
 	bvh_init(w->bvh_static);
 	bvh_init(w->bvh_dynamic);
 	bvh_init(w->bvh_sleeping);
@@ -818,7 +818,7 @@ void destroy_body(World world, Body body)
 		w->islands[isl].constraint_remove_count++;
 	}
 	if (w->body_cold[idx].bvh_leaf >= 0) {
-		BVHTree* tree;
+		BVH_Tree* tree;
 		if (w->body_hot[idx].inv_mass == 0.0f) tree = w->bvh_static;
 		else if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake) tree = w->bvh_sleeping;
 		else tree = w->bvh_dynamic;
@@ -854,7 +854,7 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	// Insert into BVH on first shape add.
 	if (w->broadphase_type == BROADPHASE_BVH && asize(w->body_cold[idx].shapes) == 1) {
 		AABB box = aabb_expand(body_aabb(&w->body_hot[idx], &w->body_cold[idx]), BVH_AABB_MARGIN);
-		BVHTree* tree = w->body_hot[idx].inv_mass == 0.0f ? w->bvh_static : w->bvh_dynamic;
+		BVH_Tree* tree = w->body_hot[idx].inv_mass == 0.0f ? w->bvh_static : w->bvh_dynamic;
 		w->body_cold[idx].bvh_leaf = bvh_insert(tree, idx, box);
 	}
 }
@@ -1214,7 +1214,7 @@ void joint_set_prismatic_motor(World world, Joint joint, float speed, float max_
 	w->joints[idx].prismatic.motor_max_impulse = max_impulse;
 }
 
-static void bvh_debug_walk(BVHTree* t, int ni, int depth, BVHDebugFn fn, void* user)
+static void bvh_debug_walk(BVH_Tree* t, int ni, int depth, BVHDebugFn fn, void* user)
 {
 	BVHNode* n = &t->nodes[ni];
 	for (int s = 0; s < 2; s++) {

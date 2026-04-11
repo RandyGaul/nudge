@@ -154,7 +154,7 @@ static int island_merge(WorldInternal* w, int id_a, int id_b)
 }
 
 // Transfer a body's BVH leaf from one tree to another.
-static void bvh_transfer_body(WorldInternal* w, int body_idx, BVHTree* from, BVHTree* to)
+static void bvh_transfer_body(WorldInternal* w, int body_idx, BVH_Tree* from, BVH_Tree* to)
 {
 	int leaf = w->body_cold[body_idx].bvh_leaf;
 	if (leaf < 0) return;

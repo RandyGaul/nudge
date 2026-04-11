@@ -96,7 +96,7 @@ typedef struct JointInternal
 	int island_next;  // -1 = tail
 } JointInternal;
 
-typedef struct BVHTree BVHTree; // forward decl, defined in bvh.c
+typedef struct BVH_Tree BVH_Tree; // forward decl, defined in bvh.c
 
 // LDL direct solver types (used by solver_ldl.c).
 // Per-DOF Jacobian row: J_a and J_b each have 6 components [lin_x, lin_y, lin_z, ang_x, ang_y, ang_z].
@@ -277,9 +277,9 @@ typedef struct WorldInternal
 	CK_DYNA int*           joint_free;
 	// Broadphase
 	BroadphaseType broadphase_type;
-	BVHTree* bvh_static;
-	BVHTree* bvh_dynamic;
-	BVHTree* bvh_sleeping; // sleeping dynamic bodies (no refit, no SAP)
+	BVH_Tree* bvh_static;
+	BVH_Tree* bvh_dynamic;
+	BVH_Tree* bvh_sleeping; // sleeping dynamic bodies (no refit, no SAP)
 	// Islands
 	CK_DYNA Island*     islands;
 	CK_DYNA uint32_t*   island_gen;
