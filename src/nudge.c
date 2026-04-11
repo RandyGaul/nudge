@@ -100,7 +100,10 @@ static void integrate_positions(WorldInternal* w, float dt)
 
 		h->position = add(h->position, scale(h->velocity, dt));
 
-		h->angular_velocity = solve_gyroscopic(h->rotation, h->inv_inertia_local, h->angular_velocity, dt);
+		// Skip gyroscopic correction for uniform inertia (cubes/spheres: cross(w,I*w)=0)
+		// or negligible angular velocity (correction ~ |omega|^2).
+		if (av2 > 0.01f && !(h->inv_inertia_local.x == h->inv_inertia_local.y && h->inv_inertia_local.y == h->inv_inertia_local.z))
+			h->angular_velocity = solve_gyroscopic(h->rotation, h->inv_inertia_local, h->angular_velocity, dt);
 
 		v3 ww = h->angular_velocity;
 		quat spin = { ww.x, ww.y, ww.z, 0.0f };
@@ -291,8 +294,10 @@ void world_step(World world, float dt)
 
 	double t0 = perf_now();
 	warm_cache_age_and_evict(w);
+	double t0b = perf_now();
 	integrate_velocities_and_inertia(w, sub_dt);
 	w->perf.integrate = perf_now() - t0;
+	(void)t0b;
 
 	double t1 = perf_now();
 	CK_DYNA InternalManifold* manifolds = NULL;
