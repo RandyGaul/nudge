@@ -277,6 +277,15 @@ static void integrate_pos_work_fn(void* ctx, int start, int count)
 	}
 }
 
+// --- Pre-solve work function (parallel manifold setup) ---
+typedef struct PreSolveCtx { WorldInternal* w; InternalManifold* manifolds; SolverManifold* sm; SolverContact* sc; PatchContact* pc; float dt; } PreSolveCtx;
+static void pre_solve_work_fn(void* ctx, int start, int count)
+{
+	PreSolveCtx* ps = (PreSolveCtx*)ctx;
+	for (int i = start; i < start + count; i++)
+		pre_solve_one_manifold(ps->w, &ps->manifolds[i], i, ps->sm, ps->sc, ps->pc, ps->dt);
+}
+
 // --- Narrowphase work function ---
 typedef struct NP_WorkCtx
 {
@@ -429,6 +438,7 @@ void world_step(World world, float dt)
 	CK_DYNA ConstraintRef* crefs = NULL;
 	int sm_count = asize(sm);
 	for (int i = 0; i < sm_count; i++) {
+		if (sm[i].contact_count == 0) continue; // skip empty manifolds (static-static filtered out)
 		ConstraintRef r = { .type = CTYPE_CONTACT, .index = i,
 			.body_a = sm[i].body_a, .body_b = sm[i].body_b };
 		apush(crefs, r);
