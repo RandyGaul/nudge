@@ -1022,3 +1022,17 @@ static void bvh_query_ray(BVHTree* t, v3 origin, v3 inv_dir, float max_t, CK_DYN
 	if (t->root == -1) return;
 	bvh_query_ray_node(t, t->root, origin, inv_dir, max_t, results);
 }
+
+// Build AABB lookup table indexed by leaf index from current node contents.
+static AABB* bvh_build_lut(BVHTree* t)
+{
+	int lcount = asize(t->leaves);
+	if (lcount == 0) return NULL;
+	AABB* lut = CK_ALLOC(sizeof(AABB) * lcount);
+	for (int i = 0; i < lcount; i++) {
+		BVHLeaf* lf = &t->leaves[i];
+		BVHChild* c = bvh_child(&t->nodes[lf->node_idx], lf->child_slot);
+		lut[i] = bvh_child_aabb(c);
+	}
+	return lut;
+}

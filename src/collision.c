@@ -187,64 +187,8 @@ int collide_sphere_sphere(Sphere a, Sphere b, Manifold* manifold)
 	return 1;
 }
 
-// -----------------------------------------------------------------------------
-// Segment helpers for capsule collisions.
-
-// Closest point on segment PQ to point X. Returns parametric t in [0,1].
-static float segment_closest_t(v3 P, v3 Q, v3 X)
-{
-	v3 d = sub(Q, P);
-	float d_len2 = len2(d);
-	if (d_len2 < 1e-12f) return 0.0f;
-	float t = dot(sub(X, P), d) / d_len2;
-	if (t < 0.0f) t = 0.0f;
-	if (t > 1.0f) t = 1.0f;
-	return t;
-}
-
-static v3 segment_closest_point(v3 P, v3 Q, v3 X)
-{
-	float t = segment_closest_t(P, Q, X);
-	return add(P, scale(sub(Q, P), t));
-}
-
-// Closest points between two segments P1Q1 and P2Q2.
-static void segments_closest_points(v3 P1, v3 Q1, v3 P2, v3 Q2, v3* out1, v3* out2)
-{
-	v3 d1 = sub(Q1, P1);
-	v3 d2 = sub(Q2, P2);
-	v3 r = sub(P1, P2);
-	float a = dot(d1, d1);
-	float e = dot(d2, d2);
-	float f = dot(d2, r);
-	float s, t;
-
-	if (a < 1e-12f && e < 1e-12f) {
-		*out1 = P1; *out2 = P2; return;
-	}
-	if (a < 1e-12f) {
-		s = 0.0f;
-		t = f / e;
-		if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
-	} else {
-		float c = dot(d1, r);
-		if (e < 1e-12f) {
-			t = 0.0f;
-			s = -c / a;
-			if (s < 0.0f) s = 0.0f; if (s > 1.0f) s = 1.0f;
-		} else {
-			float b = dot(d1, d2);
-			float denom = a * e - b * b;
-			s = denom > 1e-12f ? (b * f - c * e) / denom : 0.0f;
-			if (s < 0.0f) s = 0.0f; if (s > 1.0f) s = 1.0f;
-			t = (b * s + f) / e;
-			if (t < 0.0f) { t = 0.0f; s = -c / a; if (s < 0.0f) s = 0.0f; if (s > 1.0f) s = 1.0f; }
-			else if (t > 1.0f) { t = 1.0f; s = (b - c) / a; if (s < 0.0f) s = 0.0f; if (s > 1.0f) s = 1.0f; }
-		}
-	}
-	*out1 = add(P1, scale(d1, s));
-	*out2 = add(P2, scale(d2, t));
-}
+// Segment helpers (segment_closest_t, segment_closest_point, segments_closest_points)
+// now in vmath.h.
 
 // Get capsule segment endpoints in world space.
 static void capsule_world_segment(BodyHot* h, ShapeInternal* s, v3* P, v3* Q)
@@ -1567,8 +1511,7 @@ static Capsule make_capsule(BodyHot* h, ShapeInternal* s)
 {
 	v3 lp = add(s->local_pos, V3(0, -s->capsule.half_height, 0));
 	v3 lq = add(s->local_pos, V3(0,  s->capsule.half_height, 0));
-	return (Capsule){ add(h->position, rotate(h->rotation, lp)),
-	                  add(h->position, rotate(h->rotation, lq)), s->capsule.radius };
+	return (Capsule){ add(h->position, rotate(h->rotation, lp)), add(h->position, rotate(h->rotation, lq)), s->capsule.radius };
 }
 
 static Box make_box(BodyHot* h, ShapeInternal* s)
@@ -1712,19 +1655,7 @@ static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
 	}
 }
 
-// Build AABB lookup table indexed by leaf index from current node contents.
-static AABB* bvh_build_lut(BVHTree* t)
-{
-	int lcount = asize(t->leaves);
-	if (lcount == 0) return NULL;
-	AABB* lut = CK_ALLOC(sizeof(AABB) * lcount);
-	for (int i = 0; i < lcount; i++) {
-		BVHLeaf* lf = &t->leaves[i];
-		BVHChild* c = bvh_child(&t->nodes[lf->node_idx], lf->child_slot);
-		lut[i] = bvh_child_aabb(c);
-	}
-	return lut;
-}
+// bvh_build_lut() moved to bvh.c.
 
 // Sweep-and-prune entry for axis-sorted broadphase.
 typedef struct SAPEntry

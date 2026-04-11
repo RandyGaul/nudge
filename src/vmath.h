@@ -72,6 +72,56 @@ static inline v3 mat3_mul_v(v3 c0, v3 c1, v3 c2, v3 v)
 }
 
 // -----------------------------------------------------------------------------
+// Segment geometry.
+
+// Closest parametric t in [0,1] on segment PQ to point X.
+static float segment_closest_t(v3 P, v3 Q, v3 X)
+{
+	v3 d = v3_sub(Q, P);
+	float d_len2 = v3_len2(d);
+	if (d_len2 < 1e-12f) return 0.0f;
+	float t = v3_dot(v3_sub(X, P), d) / d_len2;
+	if (t < 0.0f) t = 0.0f;
+	if (t > 1.0f) t = 1.0f;
+	return t;
+}
+
+// Closest point on segment PQ to point X.
+static v3 segment_closest_point(v3 P, v3 Q, v3 X)
+{
+	return v3_add(P, v3_scale(v3_sub(Q, P), segment_closest_t(P, Q, X)));
+}
+
+// Closest points between two segments P1Q1 and P2Q2.
+static void segments_closest_points(v3 P1, v3 Q1, v3 P2, v3 Q2, v3* out1, v3* out2)
+{
+	v3 d1 = v3_sub(Q1, P1), d2 = v3_sub(Q2, P2), r = v3_sub(P1, P2);
+	float a = v3_dot(d1, d1), e = v3_dot(d2, d2), f = v3_dot(d2, r);
+	float s, t;
+	if (a < 1e-12f && e < 1e-12f) { *out1 = P1; *out2 = P2; return; }
+	if (a < 1e-12f) {
+		s = 0.0f; t = f / e;
+		if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
+	} else {
+		float c = v3_dot(d1, r);
+		if (e < 1e-12f) {
+			t = 0.0f; s = -c / a;
+			if (s < 0.0f) s = 0.0f; if (s > 1.0f) s = 1.0f;
+		} else {
+			float b = v3_dot(d1, d2);
+			float denom = a * e - b * b;
+			s = denom > 1e-12f ? (b * f - c * e) / denom : 0.0f;
+			if (s < 0.0f) s = 0.0f; if (s > 1.0f) s = 1.0f;
+			t = (b * s + f) / e;
+			if (t < 0.0f) { t = 0.0f; s = -c / a; if (s < 0.0f) s = 0.0f; if (s > 1.0f) s = 1.0f; }
+			else if (t > 1.0f) { t = 1.0f; s = (b - c) / a; if (s < 0.0f) s = 0.0f; if (s > 1.0f) s = 1.0f; }
+		}
+	}
+	*out1 = v3_add(P1, v3_scale(d1, s));
+	*out2 = v3_add(P2, v3_scale(d2, t));
+}
+
+// -----------------------------------------------------------------------------
 // quat implementation.
 
 static inline quat quat_identity() { return (quat){ 0, 0, 0, 1 }; }
