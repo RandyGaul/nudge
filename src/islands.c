@@ -272,19 +272,9 @@ static void islands_update_contacts(WorldInternal* w, InternalManifold* manifold
 		}
 	}
 
-	// Detect lost contacts: iterate prev_touching, find keys not in curr_touching
-	if (w->prev_touching) {
-		// Walk prev_touching map entries -- use ckit map iteration
-		int prev_cap = asize(w->prev_touching);
-		for (int i = 0; i < prev_cap; i++) {
-			// ckit maps store keys in a parallel array accessible via the header
-			// We need to iterate differently -- scan body pairs
-		}
-		// Simpler approach: we don't have ckit map iteration exposed easily.
-		// Instead, mark constraint_remove_count when a contact pair vanishes.
-		// We can detect this by checking prev entries against curr.
-		// For now, just use a brute-force approach: track via body pair keys.
-	}
+	// TODO: detect lost contacts to update island constraint_remove_count.
+	// Needs proper map iteration (map_keys/map_size) instead of the broken
+	// asize() call that was here (asize on a CK_MAP reads garbage).
 
 	// Swap: prev_touching = curr_touching
 	map_free(w->prev_touching);
