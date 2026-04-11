@@ -433,6 +433,16 @@
 #define map_key(m, i)  (map_keys(m)[i])
 #define map_val(m, i)  (map_items(m)[i])
 
+// map_each: Iterate all entries. `idx` is the loop variable (int), scoped to the block.
+// Usage:
+//     map_each(my_map, i) {
+//         uint64_t key = map_key(my_map, i);
+//         MyVal val = map_val(my_map, i);
+//     }
+// WARNING: do NOT insert/delete from the map inside the loop body.
+// WARNING: do NOT use asize() on a CK_MAP -- it reads the wrong header. Use map_size().
+#define map_each(m, idx) for (int idx = 0, idx##_n = map_size(m); idx < idx##_n; idx++)
+
 // map_sort: Sort entries by values. Comparator receives pointers to values.
 //     int cmp(const void* a, const void* b) { return *(int*)a - *(int*)b; }
 //     map_sort(m, cmp);
