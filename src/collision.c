@@ -1541,6 +1541,102 @@ void hull_free(Hull* hull)
 	CK_FREE(hull);
 }
 
+// Build CSR vertex adjacency from half-edge SoA arrays.
+// For each vertex, collects all neighbor vertices reachable via edges.
+// vert_edge[v] = first edge originating from v (or -1).
+// Walk: twin of that edge gives neighbor, then edge_next[twin] gives next
+// edge around v, repeat until back to start.
+static int hull_build_csr(const Hull* hull, int max_verts, void* offsets_out, int offset_size, void* neighbors_out, int neighbor_size, int* out_neighbor_total)
+{
+	int nv = hull->vert_count;
+	if (nv > max_verts) return -1;
+
+	// Build vert_edge: first edge index for each vertex.
+	int vert_edge[1024];
+	assert(nv <= 1024);
+	for (int i = 0; i < nv; i++) vert_edge[i] = -1;
+	for (int i = 0; i < hull->edge_count; i++)
+		if (vert_edge[hull->edge_origin[i]] < 0) vert_edge[hull->edge_origin[i]] = i;
+
+	// Count neighbors per vertex, then fill CSR.
+	int total = 0;
+	for (int v = 0; v < nv; v++) {
+		if (offset_size == 1) ((uint8_t*)offsets_out)[v] = (uint8_t)total;
+		else ((uint16_t*)offsets_out)[v] = (uint16_t)total;
+
+		int e = vert_edge[v];
+		if (e < 0) continue;
+		int start = e;
+		do {
+			int nb = hull->edge_origin[hull->edge_twin[e]];
+			if (neighbor_size == 1) ((uint8_t*)neighbors_out)[total] = (uint8_t)nb;
+			else ((uint16_t*)neighbors_out)[total] = (uint16_t)nb;
+			total++;
+			e = hull->edge_next[hull->edge_twin[e]];
+		} while (e != start);
+	}
+	if (offset_size == 1) ((uint8_t*)offsets_out)[nv] = (uint8_t)total;
+	else ((uint16_t*)offsets_out)[nv] = (uint16_t)total;
+	*out_neighbor_total = total;
+	return 0;
+}
+
+int compact_hull32_from_hull(CompactHull32* out, const Hull* hull)
+{
+	if (hull->vert_count > COMPACT_HULL32_MAX_VERTS) return -1;
+	*out = (CompactHull32){0};
+	out->vert_count = (uint8_t)hull->vert_count;
+	out->centroid = hull->centroid;
+
+	// Copy vertex positions into SoA.
+	for (int i = 0; i < hull->vert_count; i++) {
+		out->verts_x[i] = hull->verts[i].x;
+		out->verts_y[i] = hull->verts[i].y;
+		out->verts_z[i] = hull->verts[i].z;
+	}
+
+	int total = 0;
+	if (hull_build_csr(hull, COMPACT_HULL32_MAX_VERTS, out->offsets, 1, out->neighbors, 1, &total) < 0) return -1;
+	if (total > COMPACT_HULL32_MAX_NEIGHBORS) return -1;
+	out->neighbor_total = (uint8_t)total;
+	return 0;
+}
+
+int compact_hull16_from_hull(CompactHull16* out, const Hull* hull)
+{
+	*out = (CompactHull16){0};
+	int nv = hull->vert_count;
+	out->vert_count = (uint16_t)nv;
+	out->centroid = hull->centroid;
+
+	out->offsets = (uint16_t*)CK_ALLOC((nv + 1) * sizeof(uint16_t));
+	// Allocate neighbors conservatively (edge_count = total half-edges = 2 * undirected edges).
+	out->neighbors = (uint16_t*)CK_ALLOC(hull->edge_count * sizeof(uint16_t));
+
+	int padded = (nv + 3) & ~3;
+	out->verts_x = (float*)CK_ALLOC_ALIGNED(padded * sizeof(float), 16);
+	out->verts_y = (float*)CK_ALLOC_ALIGNED(padded * sizeof(float), 16);
+	out->verts_z = (float*)CK_ALLOC_ALIGNED(padded * sizeof(float), 16);
+	for (int i = 0; i < nv; i++) { out->verts_x[i] = hull->verts[i].x; out->verts_y[i] = hull->verts[i].y; out->verts_z[i] = hull->verts[i].z; }
+	for (int i = nv; i < padded; i++) { out->verts_x[i] = out->verts_x[0]; out->verts_y[i] = out->verts_y[0]; out->verts_z[i] = out->verts_z[0]; }
+
+	int total = 0;
+	hull_build_csr(hull, 65535, out->offsets, 2, out->neighbors, 2, &total);
+	out->neighbor_total = (uint16_t)total;
+	return 0;
+}
+
+void compact_hull16_free(CompactHull16* ch)
+{
+	if (!ch) return;
+	CK_FREE(ch->offsets);
+	CK_FREE(ch->neighbors);
+	CK_FREE_ALIGNED(ch->verts_x);
+	CK_FREE_ALIGNED(ch->verts_y);
+	CK_FREE_ALIGNED(ch->verts_z);
+	*ch = (CompactHull16){0};
+}
+
 // -----------------------------------------------------------------------------
 // N^2 broadphase + narrowphase dispatch.
 

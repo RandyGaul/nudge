@@ -170,6 +170,47 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold);
 const Hull* hull_unit_box();
 
 // -----------------------------------------------------------------------------
+// Compact hull representations.
+//
+// CompactHull32: fixed-size, no heap, for hulls <= 32 verts (e.g. Roblox decomp).
+//   CSR adjacency for O(sqrt(n)) hill-climbing GJK support. ~400 bytes typical.
+//
+// CompactHull16: heap-allocated CSR, for hulls <= 65535 verts.
+//   ~3.5x smaller than full Hull. SAT extension built lazily when needed.
+
+#define COMPACT_HULL32_MAX_VERTS 32
+#define COMPACT_HULL32_MAX_NEIGHBORS 90 // Euler bound: 3V-6 undirected edges * 2 neighbor refs
+
+typedef struct CompactHull32
+{
+	uint8_t  vert_count;
+	uint8_t  neighbor_total;
+	uint8_t  offsets[COMPACT_HULL32_MAX_VERTS + 1]; // CSR: offsets[vert_count+1]
+	uint8_t  neighbors[COMPACT_HULL32_MAX_NEIGHBORS]; // CSR: neighbor vertex indices
+	float    verts_x[COMPACT_HULL32_MAX_VERTS]; // SoA vertex positions
+	float    verts_y[COMPACT_HULL32_MAX_VERTS];
+	float    verts_z[COMPACT_HULL32_MAX_VERTS];
+	v3       centroid;
+} CompactHull32;
+
+typedef struct CompactHull16
+{
+	uint16_t  vert_count;
+	uint16_t  neighbor_total;
+	uint16_t* offsets;   // [vert_count + 1]
+	uint16_t* neighbors; // [neighbor_total]
+	float*    verts_x;   // SoA vertex positions
+	float*    verts_y;
+	float*    verts_z;
+	v3        centroid;
+} CompactHull16;
+
+// Convert a full Hull to compact form. Returns 0 on success, -1 if too many verts.
+int compact_hull32_from_hull(CompactHull32* out, const Hull* hull);
+int compact_hull16_from_hull(CompactHull16* out, const Hull* hull);
+void compact_hull16_free(CompactHull16* ch);
+
+// -----------------------------------------------------------------------------
 // Quickhull -- build a convex hull from a point cloud.
 //
 // Returns a heap-allocated Hull. Caller frees with hull_free().

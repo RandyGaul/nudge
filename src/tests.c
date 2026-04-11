@@ -10830,6 +10830,86 @@ static void run_tests()
 	test_box_box();
 	test_quickhull();
 
+	// Compact hull converters.
+	{
+		TEST_BEGIN("compact_hull32 box");
+		v3 box_pts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
+		Hull* h = quickhull(box_pts, 8);
+		CompactHull32 ch32;
+		TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == 0);
+		TEST_ASSERT(ch32.vert_count == h->vert_count);
+		TEST_ASSERT(ch32.neighbor_total > 0);
+		// Verify CSR: each vertex should have 3 neighbors (cube).
+		for (int v = 0; v < ch32.vert_count; v++) {
+			int deg = ch32.offsets[v+1] - ch32.offsets[v];
+			TEST_ASSERT(deg == 3);
+		}
+		// Verify SoA positions match.
+		for (int v = 0; v < ch32.vert_count; v++) {
+			TEST_ASSERT_FLOAT(ch32.verts_x[v], h->verts[v].x, 1e-6f);
+			TEST_ASSERT_FLOAT(ch32.verts_y[v], h->verts[v].y, 1e-6f);
+			TEST_ASSERT_FLOAT(ch32.verts_z[v], h->verts[v].z, 1e-6f);
+		}
+
+		TEST_BEGIN("compact_hull16 box");
+		CompactHull16 ch16;
+		TEST_ASSERT(compact_hull16_from_hull(&ch16, h) == 0);
+		TEST_ASSERT(ch16.vert_count == h->vert_count);
+		for (int v = 0; v < ch16.vert_count; v++) {
+			int deg = ch16.offsets[v+1] - ch16.offsets[v];
+			TEST_ASSERT(deg == 3);
+		}
+		compact_hull16_free(&ch16);
+		hull_free(h);
+
+		TEST_BEGIN("compact_hull32 tetrahedron");
+		v3 tet_pts[] = { {0,1,0},{-1,-1,1},{1,-1,1},{0,-1,-1} };
+		h = quickhull(tet_pts, 4);
+		TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == 0);
+		TEST_ASSERT(ch32.vert_count == 4);
+		for (int v = 0; v < ch32.vert_count; v++) {
+			int deg = ch32.offsets[v+1] - ch32.offsets[v];
+			TEST_ASSERT(deg == 3); // tetrahedron: each vertex connects to 3 others
+		}
+		hull_free(h);
+
+		TEST_BEGIN("compact_hull32 icosahedron");
+		// 12-vert hull, each vertex has degree 5.
+		static const v3 ico_pts[] = {
+			{-1,1.618f,0},{1,1.618f,0},{-1,-1.618f,0},{1,-1.618f,0},
+			{0,-1,1.618f},{0,1,1.618f},{0,-1,-1.618f},{0,1,-1.618f},
+			{1.618f,0,-1},{1.618f,0,1},{-1.618f,0,1},{-1.618f,0,-1},
+		};
+		h = quickhull(ico_pts, 12);
+		TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == 0);
+		TEST_ASSERT(ch32.vert_count == 12);
+		for (int v = 0; v < ch32.vert_count; v++) {
+			int deg = ch32.offsets[v+1] - ch32.offsets[v];
+			TEST_ASSERT(deg == 5); // icosahedron: degree 5
+		}
+		hull_free(h);
+
+		TEST_BEGIN("compact_hull32 reject >32 verts");
+		// Build a hull with many verts.
+		CK_DYNA v3* many_pts = NULL;
+		for (int i = 0; i < 100; i++) {
+			float theta = 2.0f * 3.14159f * (float)i / 100.0f;
+			float phi = 3.14159f * (float)(i % 50) / 50.0f;
+			apush(many_pts, V3(sinf(phi)*cosf(theta), sinf(phi)*sinf(theta), cosf(phi)));
+		}
+		h = quickhull(many_pts, asize(many_pts));
+		if (h && h->vert_count > 32) {
+			TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == -1); // should fail
+		}
+		if (h) {
+			TEST_ASSERT(compact_hull16_from_hull(&ch16, h) == 0);
+			TEST_ASSERT(ch16.vert_count == h->vert_count);
+			compact_hull16_free(&ch16);
+			hull_free(h);
+		}
+		afree(many_pts);
+	}
+
 	test_quickhull_case783();
 	test_quickhull_ico7037();
 	test_quickhull_tet8098();
