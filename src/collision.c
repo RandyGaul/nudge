@@ -1772,16 +1772,100 @@ int collide_cylinder_sphere(Cylinder a, Sphere b, Manifold* manifold)
 	return collide_cylinder_sphere_ana(a, b, manifold);
 }
 
+// Cyl axis in world space as a segment (helper used by several pairs).
+static void cylinder_axis_segment(Cylinder c, v3* p, v3* q)
+{
+	v3 axis = rotate(c.rotation, V3(0, 1, 0));
+	*p = sub(c.center, scale(axis, c.half_height));
+	*q = add(c.center, scale(axis, c.half_height));
+}
+
+// Analytical cyl-capsule: closest-points between cyl axis segment and capsule segment,
+// classify the capsule-side witness, inflate by capsule radius. Detects the parallel
+// SIDE-SIDE / CAP-CAP case by classifying both capsule endpoints -- when both land in
+// the same region with matching normals, emit a 2-point manifold.
+static int collide_cylinder_capsule_ana(Cylinder a, Capsule b, Manifold* manifold)
+{
+	v3 cyl_p, cyl_q;
+	cylinder_axis_segment(a, &cyl_p, &cyl_q);
+
+	v3 cpa, cpb;
+	segments_closest_points(cyl_p, cyl_q, b.p, b.q, &cpa, &cpb);
+
+	CylFeature feat = cyl_classify_point(cpb, a.center, a.rotation, a.half_height, a.radius);
+	float gap = feat.distance - b.radius;
+	if (gap > 0.0f) return 0;
+	if (!manifold) return 1;
+
+	// Check for parallel 2-point manifold: both capsule endpoints land in the same
+	// SIDE or CAP region with matching normals (dot > 0.99 ~ 8 degrees).
+	CylFeature feat_p = cyl_classify_point(b.p, a.center, a.rotation, a.half_height, a.radius);
+	CylFeature feat_q = cyl_classify_point(b.q, a.center, a.rotation, a.half_height, a.radius);
+	int parallel =
+		feat_p.region == feat_q.region
+		&& (feat_p.region == CYL_REGION_SIDE || feat_p.region == CYL_REGION_CAP)
+		&& feat_p.distance - b.radius <= 0.0f
+		&& feat_q.distance - b.radius <= 0.0f
+		&& dot(feat_p.normal, feat_q.normal) > 0.99f;
+
+	if (parallel) {
+		manifold->count = 2;
+		manifold->contacts[0] = (Contact){
+			.point = feat_p.surface_pt,
+			.normal = feat_p.normal,
+			.penetration = b.radius - feat_p.distance,
+		};
+		manifold->contacts[1] = (Contact){
+			.point = feat_q.surface_pt,
+			.normal = feat_q.normal,
+			.penetration = b.radius - feat_q.distance,
+		};
+		return 1;
+	}
+
+	// Single contact at the closest-approach witness.
+	v3 normal = feat.region == CYL_REGION_INSIDE ? neg(feat.normal) : feat.normal;
+	manifold->count = 1;
+	manifold->contacts[0] = (Contact){
+		.point = feat.surface_pt,
+		.normal = normal,
+		.penetration = b.radius - feat.distance,
+	};
+	return 1;
+}
+
+// GJK variant: gjk_cylinder vs gjk_capsule interior segment. Benchmarked
+// against the analytical path; kept as a reference implementation.
+static int collide_cylinder_capsule_gjk(Cylinder a, Capsule b, Manifold* manifold)
+{
+	v3 cyl_p, cyl_q;
+	cylinder_axis_segment(a, &cyl_p, &cyl_q);
+	GJK_Shape ga = gjk_cylinder(cyl_p, cyl_q, a.radius);
+	GJK_Shape gb = gjk_capsule(b.p, b.q, 0.0f);
+	GJK_Result r = gjk_distance(&ga, &gb, NULL);
+
+	if (r.distance > b.radius) return 0;
+	if (!manifold) return 1;
+
+	if (r.distance > 1e-5f) {
+		v3 diff = sub(r.point2, r.point1);
+		float inv_d = 1.0f / r.distance;
+		manifold->count = 1;
+		manifold->contacts[0] = (Contact){
+			.point = r.point1,
+			.normal = scale(diff, inv_d),
+			.penetration = b.radius - r.distance,
+		};
+		return 1;
+	}
+
+	// Deep fallback: analytical handles INSIDE region and touching contacts.
+	return collide_cylinder_capsule_ana(a, b, manifold);
+}
+
 int collide_cylinder_capsule(Cylinder a, Capsule b, Manifold* manifold)
 {
-	Manifold tmp = {0};
-	int hit = collide_capsule_hull(b, cylinder_to_convex_hull(a), &tmp);
-	if (!hit) return 0;
-	if (manifold) {
-		*manifold = tmp;
-		for (int i = 0; i < manifold->count; i++) manifold->contacts[i].normal = neg(manifold->contacts[i].normal);
-	}
-	return 1;
+	return collide_cylinder_capsule_ana(a, b, manifold);
 }
 
 int collide_cylinder_box(Cylinder a, Box b, Manifold* manifold)

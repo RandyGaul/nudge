@@ -1325,6 +1325,174 @@ static void test_cyl_sphere_fuzz()
 }
 
 // ============================================================================
+// Phase 2: cyl-capsule (analytical). Hand-written Voronoi coverage table.
+//
+// Cases cover capsule END_P/END_Q/MID touching cylinder SIDE/CAP/RIM/INSIDE,
+// with shallow and deep variants where applicable. 2-point manifold cases
+// test the parallel-axis branch.
+
+static void test_cyl_capsule_native()
+{
+	const float hh = 1.0f, r = 0.5f;
+	const quat I = quat_identity();
+	const v3 O = V3(0,0,0);
+
+	CylCase cases[] = {
+		// --- cyl SIDE x capsule END (capsule tip grazing curved wall) ---
+		// Tip at (0.6, 0, 0), other end far away, so closest is at the tip.
+		{ "cyl-cap SIDE/END shallow",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(0.6f, 0, 0), V3(3, 3, 3), 0.15f }, // feat.distance=0.1, gap=-0.05
+		  .is_deep = 0, .expected_normal = V3(1,0,0), .expected_contact_count = 1 },
+
+		{ "cyl-cap SIDE/END deep",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(0.55f, 0, 0), V3(3, 3, 3), 0.25f }, // feat.distance=0.05, gap=-0.2
+		  .is_deep = 1, .expected_normal = V3(1,0,0), .expected_contact_count = 1 },
+
+		// --- cyl SIDE x capsule MID parallel (2-point manifold) ---
+		// Capsule along local Y axis, offset in X so both endpoints land in SIDE.
+		{ "cyl-cap SIDE/MID parallel shallow 2-pt",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(0.65f, -0.6f, 0), V3(0.65f, 0.6f, 0), 0.2f },
+		  .is_deep = 0, .expected_normal = V3(1,0,0), .expected_contact_count = 2 },
+
+		{ "cyl-cap SIDE/MID parallel deep 2-pt",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(0.55f, -0.6f, 0), V3(0.55f, 0.6f, 0), 0.3f },
+		  .is_deep = 1, .expected_normal = V3(1,0,0), .expected_contact_count = 2 },
+
+		// --- cyl SIDE x capsule MID skew (1-point manifold) ---
+		// Capsule along world +X axis, offset in Z so it crosses perpendicular to cyl axis.
+		{ "cyl-cap SIDE/MID skew shallow 1-pt",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(-0.8f, 0.2f, 0.65f), V3(0.8f, 0.2f, 0.65f), 0.2f },
+		  .is_deep = 0, .expected_normal = V3(0,0,1), .expected_contact_count = 1 },
+
+		// --- cyl CAP x capsule END (capsule tip on flat cap) ---
+		{ "cyl-cap CAP+/END shallow",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(0.1f, 1.15f, 0), V3(0.1f, 2.0f, 0), 0.2f },
+		  .is_deep = 0, .expected_normal = V3(0,1,0), .expected_contact_count = 1 },
+
+		{ "cyl-cap CAP+/END deep",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(0.0f, 1.05f, 0), V3(0.0f, 2.0f, 0), 0.35f },
+		  .is_deep = 1, .expected_normal = V3(0,1,0), .expected_contact_count = 1 },
+
+		{ "cyl-cap CAP-/END shallow",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(-0.1f, -2.0f, 0), V3(-0.1f, -1.15f, 0), 0.2f },
+		  .is_deep = 0, .expected_normal = V3(0,-1,0), .expected_contact_count = 1 },
+
+		// --- cyl CAP x capsule MID (capsule laid flat parallel to cap plane) ---
+		// 2-point manifold case: both capsule endpoints above top cap within disk radius.
+		{ "cyl-cap CAP+/MID parallel shallow 2-pt",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(-0.3f, 1.15f, 0), V3(0.3f, 1.15f, 0), 0.2f },
+		  .is_deep = 0, .expected_normal = V3(0,1,0), .expected_contact_count = 2 },
+
+		// --- cyl RIM x capsule END (capsule tip on rim circle) ---
+		{ "cyl-cap RIM+/END shallow",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(0.65f, 1.15f, 0), V3(1.5f, 2.0f, 0), 0.25f },
+		  .is_deep = 0, .expected_normal = norm(V3(0.15f, 0.15f, 0)), .expected_contact_count = 1 },
+
+		{ "cyl-cap RIM+/END deep",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(0.58f, 1.08f, 0), V3(1.5f, 2.0f, 0), 0.35f },
+		  .is_deep = 1, .expected_normal = norm(V3(0.08f, 0.08f, 0)), .expected_contact_count = 1 },
+
+		// --- cyl RIM x capsule MID (segment grazing rim circle) ---
+		{ "cyl-cap RIM+/MID shallow",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  // Capsule horizontal at y=1.15, across the rim at +X
+		  .capsule = { V3(0.2f, 1.15f, 0), V3(1.5f, 1.15f, 0), 0.2f },
+		  .is_deep = 0, .expected_normal = V3(0,1,0), .expected_contact_count = 1 },
+
+		// --- cyl INSIDE x capsule END ---
+		// Capsule endpoint deeply inside cylinder (avoid boundary: not at axial=hh).
+		{ "cyl-cap INSIDE/END side-escape deep",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(0.35f, 0, 0), V3(3, 3, 3), 0.3f }, // tip at (0.35,0,0) inside, far end away
+		  .is_deep = 1, .expected_normal = V3(-1,0,0), .expected_contact_count = 1 },
+
+		// --- cyl INSIDE x capsule MID (capsule perpendicular to cyl axis, through center) ---
+		{ "cyl-cap INSIDE/MID deep",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(-1, 0, 0), V3(1, 0, 0), 0.15f }, // along X through center; cpb=(0,0,0)
+		  .is_deep = 1, .expected_normal = V3(-1,0,0), .expected_contact_count = 1 },
+
+		// --- Separated (miss) ---
+		{ "cyl-cap separated (miss)",
+		  O, I, hh, r, CYL_OTHER_CAPSULE,
+		  .capsule = { V3(2.0f, 0, 0), V3(2.0f, 1.5f, 0), 0.2f },
+		  .is_deep = 0, .expected_normal = V3(1,0,0), .expected_contact_count = 0 },
+
+		// --- Translated + rotated cylinder sanity (Z+90 so local Y -> world -X) ---
+		{ "cyl-cap SIDE/END shallow (translated + rotated Z 90)",
+		  V3(2, 3, -1),
+		  { 0, 0, sinf(3.14159265f * 0.25f), cosf(3.14159265f * 0.25f) },
+		  hh, r, CYL_OTHER_CAPSULE,
+		  // Capsule tip at cyl_pos + (0, 0, 0.6), perpendicular to rotated axis.
+		  .capsule = { V3(2, 3, -1 + 0.6f), V3(2, 3, -1 + 3.0f), 0.15f },
+		  .is_deep = 0, .expected_normal = V3(0, 0, 1), .expected_contact_count = 1 },
+	};
+
+	int n = (int)(sizeof(cases) / sizeof(cases[0]));
+	for (int i = 0; i < n; i++) {
+		if (cases[i].expected_contact_count == 0) {
+			Cylinder a = { cases[i].cyl_pos, cases[i].cyl_rot, cases[i].cyl_hh, cases[i].cyl_radius };
+			Manifold m = {0};
+			int hit = collide_cylinder_capsule(a, cases[i].capsule, &m);
+			TEST_BEGIN(cases[i].name);
+			TEST_ASSERT(!hit);
+			continue;
+		}
+		run_cyl_case(cases[i]);
+	}
+}
+
+// Fuzz: compare native cyl-capsule against a reference that uses the capsule segment's
+// closest-approach + classify. This catches drift between the implementation and its
+// conceptual basis, not geometric correctness. 2000 random configs.
+static void test_cyl_capsule_fuzz()
+{
+	TEST_BEGIN("cyl-capsule fuzz 2000");
+	cyl_rng = 0xcab501u;
+	int hits = 0, misses = 0;
+	for (int i = 0; i < 2000; i++) {
+		Cylinder cyl = { cyl_rand_v3(-3,3), cyl_rand_quat(), cyl_randr(0.2f, 2.0f), cyl_randr(0.1f, 1.5f) };
+		v3 cp = add(cyl.center, cyl_rand_v3(-3,3));
+		v3 cq = add(cp, cyl_rand_v3(-2,2));
+		Capsule cap = { cp, cq, cyl_randr(0.05f, 0.5f) };
+
+		// Reference: do the same segment-segment + classify as the native routine.
+		v3 cyl_p_w, cyl_q_w;
+		cylinder_axis_segment(cyl, &cyl_p_w, &cyl_q_w);
+		v3 cpa, cpb;
+		segments_closest_points(cyl_p_w, cyl_q_w, cap.p, cap.q, &cpa, &cpb);
+		CylFeature ref = cyl_classify_point(cpb, cyl.center, cyl.rotation, cyl.half_height, cyl.radius);
+		int expect_hit = ref.distance <= cap.radius;
+
+		Manifold m = {0};
+		int hit = collide_cylinder_capsule(cyl, cap, &m);
+		TEST_ASSERT(hit == expect_hit);
+		if (hit) {
+			hits++;
+			for (int c = 0; c < m.count; c++) {
+				float nl = sqrtf(len2(m.contacts[c].normal));
+				TEST_ASSERT_FLOAT(nl, 1.0f, 1e-3f);
+			}
+		} else {
+			misses++;
+		}
+	}
+	TEST_ASSERT(hits > 100);
+	TEST_ASSERT(misses > 100);
+}
+
+// ============================================================================
 // Entry point.
 
 // ============================================================================
@@ -11347,6 +11515,8 @@ static void run_tests()
 	test_cyl_classify_point();
 	test_cyl_sphere_native();
 	test_cyl_sphere_fuzz();
+	test_cyl_capsule_native();
+	test_cyl_capsule_fuzz();
 	test_quickhull();
 
 	// Compact hull converters -- thorough correctness tests.
