@@ -430,7 +430,9 @@ void world_step(World world, float dt)
 	}
 	afree(np_pairs);
 #endif
+	double t_iuc = perf_now();
 	islands_update_contacts(w, manifolds, asize(manifolds));
+	w->perf.pgs.pos_joints = perf_now() - t_iuc; // hijack: store islands_update_contacts time
 	w->perf.broadphase = perf_now() - t1;
 
 	aclear(w->debug_contacts);
