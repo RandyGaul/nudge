@@ -618,8 +618,30 @@ int collide_capsule_box(Capsule a, Box b, Manifold* manifold)
 	v3 local_n = V3(0, 0, 0);
 	static const int face_axis[6] = {2, 2, 0, 0, 1, 1};
 	static const float face_sign[6] = {-1, 1, -1, 1, -1, 1};
-	(&local_n.x)[face_axis[best_face]] = -face_sign[best_face];
+	int axis = face_axis[best_face];
+	float sign = face_sign[best_face];
+	(&local_n.x)[axis] = -sign;
 	v3 world_n = rotate(b.rotation, local_n);
+
+	// 2-contact manifold: if both capsule endpoints lie inside the box on the same
+	// best face (segment parallel to face), emit a contact per endpoint. Prevents
+	// a capsule resting on a surface from pivoting around a single midpoint contact.
+	int inside_p = fabsf(lp.x) <= he.x && fabsf(lp.y) <= he.y && fabsf(lp.z) <= he.z;
+	int inside_q = fabsf(lq.x) <= he.x && fabsf(lq.y) <= he.y && fabsf(lq.z) <= he.z;
+	if (inside_p && inside_q) {
+		float he_axis = (&he.x)[axis];
+		float dp = he_axis - (&lp.x)[axis] * sign;
+		float dq = he_axis - (&lq.x)[axis] * sign;
+		if (dp >= 0.0f && dq >= 0.0f) {
+			v3 world_p = add(b.center, rotate(b.rotation, lp));
+			v3 world_q = add(b.center, rotate(b.rotation, lq));
+			manifold->count = 2;
+			manifold->contacts[0] = (Contact){ .point = add(world_p, scale(world_n, a.radius)), .normal = world_n, .penetration = a.radius + dp, .feature_id = 0 };
+			manifold->contacts[1] = (Contact){ .point = add(world_q, scale(world_n, a.radius)), .normal = world_n, .penetration = a.radius + dq, .feature_id = 1 };
+			return 1;
+		}
+	}
+
 	v3 world_seg = add(b.center, rotate(b.rotation, seg_pt2));
 	v3 world_pt = add(world_seg, scale(world_n, a.radius));
 	manifold->count = 1;
@@ -1664,10 +1686,10 @@ static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
 typedef struct SAPEntry
 {
 	int body_idx;
-	float min_x, max_x;
+	float min_val, max_val; // along chosen axis
 } SAPEntry;
 
-static int sap_cmp(const void* a, const void* b) { float d = ((SAPEntry*)a)->min_x - ((SAPEntry*)b)->min_x; return (d > 0) - (d < 0); }
+static int sap_cmp(const void* a, const void* b) { float d = ((SAPEntry*)a)->min_val - ((SAPEntry*)b)->min_val; return (d > 0) - (d < 0); }
 
 // Broadphase sub-phase timing accumulators (seconds, summed across frames).
 double bp_refit_acc, bp_precomp_acc, bp_sweep_acc, bp_cross_acc;
@@ -1680,31 +1702,39 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	bp_refit_acc += perf_now() - t0;
 
 	// Build tight AABBs + sweep-and-prune entries for all dynamic bodies.
+	// Pick the axis with the most spread to maximize SAP pruning.
 	double t1 = perf_now();
 	int body_count = asize(w->body_hot);
 	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
+	AABB scene_bounds = aabb_empty();
 	CK_DYNA SAPEntry* sap = NULL;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
 		tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]);
-		if (w->body_hot[i].inv_mass > 0.0f) apush(sap, ((SAPEntry){ i, tight[i].min.x, tight[i].max.x }));
+		if (w->body_hot[i].inv_mass > 0.0f) { scene_bounds = aabb_merge(scene_bounds, tight[i]); }
+	}
+	v3 extent = sub(scene_bounds.max, scene_bounds.min);
+	int axis = (extent.y > extent.x && extent.y > extent.z) ? 1 : (extent.z > extent.x) ? 2 : 0;
+	for (int i = 0; i < body_count; i++) {
+		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) continue;
+		if (w->body_hot[i].inv_mass > 0.0f) apush(sap, ((SAPEntry){ i, ((float*)&tight[i].min)[axis], ((float*)&tight[i].max)[axis] }));
 	}
 
-	// Sort dynamic bodies by x-axis AABB min.
+	// Sort dynamic bodies by chosen axis AABB min.
 	int sap_count = asize(sap);
 	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAPEntry), sap_cmp);
 	bp_precomp_acc += perf_now() - t1;
 
-	// Sweep: test overlapping pairs along x-axis, then full 3D AABB overlap (SIMD branchless).
+	// Sweep: test overlapping pairs along chosen axis, then full 3D AABB overlap (SIMD branchless).
 	// Phase 1: collect broadphase pairs (no narrowphase yet — just AABB overlap test).
 	double t2 = perf_now();
 	CK_DYNA BroadPair* dd_pairs = NULL;
 	for (int i = 0; i < sap_count; i++) {
-		float max_x = sap[i].max_x;
+		float max_val = sap[i].max_val;
 		int a = sap[i].body_idx;
 		AABB ta = tight[a];
 		int isl_a = w->body_cold[a].island_id;
-		for (int j = i + 1; j < sap_count && sap[j].min_x <= max_x; j++) {
+		for (int j = i + 1; j < sap_count && sap[j].min_val <= max_val; j++) {
 			int b = sap[j].body_idx;
 			if (!aabb_overlaps(ta, tight[b])) continue;
 			int isl_b = w->body_cold[b].island_id;
