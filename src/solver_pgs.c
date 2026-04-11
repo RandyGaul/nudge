@@ -68,21 +68,28 @@ static int warm_match(WarmManifold* wm, uint32_t feature_id)
 	return -1;
 }
 
+#include "pre_solve_manifold.inc"
+
 static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, CK_DYNA PatchContact** out_pc, float dt)
 {
 	CK_DYNA SolverManifold* sm = NULL;
 	CK_DYNA SolverContact*  sc = NULL;
 	CK_DYNA PatchContact*   pc = NULL;
-	// Pre-allocate: each manifold has up to MAX_CONTACTS contacts.
-	afit(sm, manifold_count);
-	afit(sc, manifold_count * MAX_CONTACTS);
-	afit(pc, manifold_count * MAX_CONTACTS);
-	float inv_dt = dt > 0.0f ? 1.0f / dt : 0.0f;
+	// Fixed-stride: each manifold gets MAX_CONTACTS slots. Enables parallel dispatch.
+	if (manifold_count == 0) { *out_sm = sm; *out_sc = sc; if (out_pc) *out_pc = pc; else afree(pc); return; }
+	afit(sm, manifold_count); asetlen(sm, manifold_count);
+	int total_contacts = manifold_count * MAX_CONTACTS;
+	afit(sc, total_contacts); asetlen(sc, total_contacts);
+	afit(pc, total_contacts); asetlen(pc, total_contacts);
+	memset(sm, 0, manifold_count * sizeof(SolverManifold));
+	memset(sc, 0, total_contacts * sizeof(SolverContact));
+	memset(pc, 0, total_contacts * sizeof(PatchContact));
 
-	for (int i = 0; i < manifold_count; i++) {
-		InternalManifold* im = &manifolds[i];
-		BodyHot* a = &w->body_hot[im->body_a];
-		BodyHot* b = &w->body_hot[im->body_b];
+	for (int i = 0; i < manifold_count; i++)
+		pre_solve_manifold(w, &manifolds[i], i, sm, sc, pc, dt);
+
+	// --- Old inline body removed, now in pre_solve_manifold.inc ---
+#if 0
 		float inv_mass_sum = a->inv_mass + b->inv_mass;
 		if (inv_mass_sum == 0.0f) continue;
 
@@ -298,11 +305,13 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 
 		apush(sm, smf);
 	}
+#endif
 
 	// Apply warm start impulses
 	int patch_warm = (w->friction_model == FRICTION_PATCH);
 	for (int i = 0; i < asize(sm); i++) {
 		SolverManifold* m = &sm[i];
+		if (m->contact_count == 0) continue; // skip empty (static-static filtered)
 		BodyHot* a = &w->body_hot[m->body_a];
 		BodyHot* b = &w->body_hot[m->body_b];
 		for (int ci = 0; ci < m->contact_count; ci++) {
@@ -383,6 +392,7 @@ static void solver_position_correct(WorldInternal* w, SolverManifold* sm, int sm
 	for (int iter = 0; iter < w->position_iters; iter++) {
 		for (int i = 0; i < sm_count; i++) {
 			SolverManifold* m = &sm[i];
+			if (m->contact_count == 0) continue;
 			BodyHot* a = &w->body_hot[m->body_a];
 			BodyHot* b = &w->body_hot[m->body_b];
 			float inv_mass_sum = a->inv_mass + b->inv_mass;
@@ -423,6 +433,7 @@ static void solver_relax_contacts(WorldInternal* w, SolverManifold* sm, int sm_c
 {
 	for (int i = 0; i < sm_count; i++) {
 		SolverManifold* m = &sm[i];
+		if (m->contact_count == 0) continue;
 		BodyHot* a = &w->body_hot[m->body_a];
 		BodyHot* b = &w->body_hot[m->body_b];
 
@@ -459,6 +470,7 @@ static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count
 	// Update active pairs (per sub-step)
 	for (int i = 0; i < sm_count; i++) {
 		SolverManifold* m = &sm[i];
+		if (m->contact_count == 0) continue; // skip empty (fixed-stride padding)
 		uint64_t key = body_pair_key(m->body_a, m->body_b);
 
 		WarmManifold wm = {0};

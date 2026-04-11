@@ -283,7 +283,36 @@ static void pre_solve_work_fn(void* ctx, int start, int count)
 {
 	PreSolveCtx* ps = (PreSolveCtx*)ctx;
 	for (int i = start; i < start + count; i++)
-		pre_solve_one_manifold(ps->w, &ps->manifolds[i], i, ps->sm, ps->sc, ps->pc, ps->dt);
+		pre_solve_manifold(ps->w, &ps->manifolds[i], i, ps->sm, ps->sc, ps->pc, ps->dt);
+}
+
+// Parallel pre_solve: alloc fixed-stride → dispatch → sequential warm start.
+static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, CK_DYNA PatchContact** out_pc, float dt, WorkFn work_fn)
+{
+	CK_DYNA SolverManifold* sm = NULL;
+	CK_DYNA SolverContact*  sc = NULL;
+	CK_DYNA PatchContact*   pc = NULL;
+	afit(sm, manifold_count); asetlen(sm, manifold_count);
+	int total_contacts = manifold_count * MAX_CONTACTS;
+	afit(sc, total_contacts); asetlen(sc, total_contacts);
+	afit(pc, total_contacts); asetlen(pc, total_contacts);
+	memset(sm, 0, manifold_count * sizeof(SolverManifold));
+	memset(sc, 0, total_contacts * sizeof(SolverContact));
+	memset(pc, 0, total_contacts * sizeof(PatchContact));
+	PreSolveCtx ps_ctx = { .w = w, .manifolds = manifolds, .sm = sm, .sc = sc, .pc = pc, .dt = dt };
+	pool_dispatch(work_fn, &ps_ctx, manifold_count, 32, w->thread_count);
+	// Warm start (sequential — modifies shared body velocities)
+	int patch_warm = (w->friction_model == FRICTION_PATCH);
+	for (int i = 0; i < manifold_count; i++) {
+		SolverManifold* m = &sm[i];
+		if (m->contact_count == 0) continue;
+		BodyHot* a = &w->body_hot[m->body_a]; BodyHot* b = &w->body_hot[m->body_b];
+		for (int ci = 0; ci < m->contact_count; ci++) { SolverContact* s = &sc[m->contact_start + ci]; if (patch_warm) { if (s->lambda_n == 0.0f) continue; apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n)); } else { if (s->lambda_n == 0.0f && s->lambda_t1 == 0.0f && s->lambda_t2 == 0.0f) continue; apply_impulse(a, b, s->r_a, s->r_b, add(add(scale(s->normal, s->lambda_n), scale(s->tangent1, s->lambda_t1)), scale(s->tangent2, s->lambda_t2))); } }
+		if (patch_warm && (m->lambda_t1 != 0.0f || m->lambda_t2 != 0.0f)) apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, add(scale(m->tangent1, m->lambda_t1), scale(m->tangent2, m->lambda_t2)));
+		if (patch_warm && m->lambda_twist != 0.0f) { v3 tw = scale(m->normal, m->lambda_twist); a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, tw)); b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, tw)); }
+	}
+	*out_sm = sm; *out_sc = sc;
+	if (out_pc) *out_pc = pc; else afree(pc);
 }
 
 // --- Narrowphase work function ---
@@ -406,7 +435,13 @@ void world_step(World world, float dt)
 	SolverManifold* sm = NULL;
 	SolverContact*  sc = NULL;
 	CK_DYNA PatchContact* pc = NULL;
-	solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, &pc, sub_dt);
+	// Pre-solve: parallel when threading enabled (each manifold writes to fixed-stride slots).
+#ifdef _WIN32
+	if (n_workers > 1 && manifold_count >= 64)
+		solver_pre_solve_dispatch(w, manifolds, manifold_count, &sm, &sc, &pc, sub_dt, pre_solve_work_fn);
+	else
+#endif
+		solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, &pc, sub_dt);
 
 	SolverJoint* sol_joints = NULL;
 	joints_pre_solve(w, sub_dt, &sol_joints);
