@@ -87,7 +87,7 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 		pre_solve_manifold(w, &manifolds[i], i, sm, sc, pc, dt);
 
 	// Apply warm start impulses
-	int patch_warm = (w->friction_model == FRICTION_PATCH);
+	int patch_warm = 1;
 	for (int i = 0; i < asize(sm); i++) {
 		SolverManifold* m = &sm[i];
 		if (m->contact_count == 0) continue; // skip empty (static-static filtered)
@@ -265,7 +265,7 @@ static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count
 				.lambda_t2 = s->lambda_t2,
 			};
 		}
-		if (w->friction_model == FRICTION_PATCH) {
+		{
 			wm.manifold_lambda_t1 = m->lambda_t1;
 			wm.manifold_lambda_t2 = m->lambda_t2;
 			wm.manifold_lambda_twist = m->lambda_twist;
@@ -360,7 +360,7 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 		BodyHot* a = &w->body_hot[m->body_a];
 		BodyHot* b = &w->body_hot[m->body_b];
 
-		if (w->friction_model == FRICTION_PATCH) {
+		{
 			float total_lambda_n = 0.0f;
 			for (int ci = 0; ci < m->contact_count; ci++) {
 				SolverContact* s = &sc[m->contact_start + ci];
@@ -393,33 +393,6 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 			float delta_tw = m->lambda_twist - old_tw;
 			a->angular_velocity = sub(a->angular_velocity, scale(m->w_tw_a, delta_tw));
 			b->angular_velocity = add(b->angular_velocity, scale(m->w_tw_b, delta_tw));
-		} else {
-			// Per-point Coulomb friction
-			for (int ci = 0; ci < m->contact_count; ci++) {
-				SolverContact* s = &sc[m->contact_start + ci];
-				v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-				float vn = dot(dv, s->normal);
-				float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce) - s->softness * s->lambda_n);
-				float old_n = s->lambda_n;
-				s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
-				apply_impulse_row(a, b, s->normal, s->w_n_a, s->w_n_b, s->lambda_n - old_n);
-			}
-			// Per-contact friction (uses normal impulse from above)
-			for (int ci = 0; ci < m->contact_count; ci++) {
-				SolverContact* s = &sc[m->contact_start + ci];
-				v3 dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-				float max_f = m->friction * s->lambda_n;
-				float vt1 = dot(dv, s->tangent1);
-				float old_t1 = s->lambda_t1;
-				s->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + s->eff_mass_t1*(-vt1), max_f));
-				apply_impulse_row(a, b, s->tangent1, s->w_t1_a, s->w_t1_b, s->lambda_t1 - old_t1);
-
-				dv = sub(add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-				float vt2 = dot(dv, s->tangent2);
-				float old_t2 = s->lambda_t2;
-				s->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + s->eff_mass_t2*(-vt2), max_f));
-				apply_impulse_row(a, b, s->tangent2, s->w_t2_a, s->w_t2_b, s->lambda_t2 - old_t2);
-			}
 		}
 		break;
 	}

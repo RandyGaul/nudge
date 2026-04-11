@@ -292,7 +292,6 @@ typedef struct WorldInternal
 	int ldl_enabled;         // 1 = LDL direct correction for joints (dual solvers only)
 	int ldl_topo_version;    // incremented on joint create/destroy
 	int ldl_correction_iter; // which PGS iter triggers LDL correction (-1 = after all PGS iters)
-	FrictionModel friction_model;
 	SolverType solver_type;
 	int velocity_iters;
 	int position_iters;
@@ -363,7 +362,7 @@ typedef struct SolverManifold
 	int contact_count;
 	float friction;
 	float inv_mass_a, inv_mass_b; // cached from body (avoids body array lookup during iteration)
-	// Manifold-level patch friction data (FRICTION_PATCH only)
+	// Manifold-level patch friction data (patch friction)
 	v3 centroid_r_a;
 	v3 centroid_r_b;
 	v3 tangent1, tangent2;
@@ -398,7 +397,7 @@ struct WarmManifold
 	WarmContact contacts[MAX_CONTACTS];
 	int count;
 	int stale; // 0 = updated this frame, incremented each frame not touched, evicted at >1
-	// Manifold-level friction warm data (FRICTION_PATCH)
+	// Manifold-level friction warm data (patch friction)
 	float manifold_lambda_t1;
 	float manifold_lambda_t2;
 	float manifold_lambda_twist;

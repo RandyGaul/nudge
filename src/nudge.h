@@ -298,12 +298,6 @@ typedef struct BodyParams
 
 typedef enum BroadphaseType { BROADPHASE_N2, BROADPHASE_BVH } BroadphaseType;
 
-typedef enum FrictionModel
-{
-	FRICTION_COULOMB,  // per-point Coulomb (2 tangent rows per contact)
-	FRICTION_PATCH,    // manifold-level 2D friction using patch area estimate
-} FrictionModel;
-
 typedef enum SolverType
 {
 	SOLVER_SOFT_STEP,  // soft contacts, relax each substep (default)
@@ -315,7 +309,6 @@ typedef struct WorldParams
 {
 	v3 gravity;
 	BroadphaseType broadphase;
-	FrictionModel friction_model;
 	SolverType solver_type;
 	int velocity_iters;  // 0 = default (10)
 	int position_iters;  // 0 = default (4)
@@ -331,7 +324,6 @@ typedef struct WorldParams
 World create_world(WorldParams params);
 void destroy_world(World world);
 void world_step(World world, float dt);
-void world_set_friction_model(World world, FrictionModel model);
 void world_set_solver_type(World world, SolverType type);
 
 Body create_body(World world, BodyParams params);

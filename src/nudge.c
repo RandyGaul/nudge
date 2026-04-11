@@ -23,7 +23,6 @@ World create_world(WorldParams params)
 	memset(w, 0, sizeof(*w));
 	w->gravity = params.gravity;
 	w->broadphase_type = params.broadphase;
-	w->friction_model = params.friction_model ? params.friction_model : FRICTION_PATCH;
 	w->solver_type = params.solver_type;
 	w->sleep_enabled = 1;
 	w->velocity_iters = params.velocity_iters > 0 ? params.velocity_iters : SOLVER_VELOCITY_ITERS;
@@ -302,7 +301,7 @@ static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifo
 	PreSolveCtx ps_ctx = { .w = w, .manifolds = manifolds, .sm = sm, .sc = sc, .pc = pc, .dt = dt };
 	pool_dispatch(work_fn, &ps_ctx, manifold_count, 32, w->thread_count);
 	// Warm start (sequential — modifies shared body velocities)
-	int patch_warm = (w->friction_model == FRICTION_PATCH);
+	int patch_warm = 1;
 	for (int i = 0; i < manifold_count; i++) {
 		SolverManifold* m = &sm[i];
 		if (m->contact_count == 0) continue;
@@ -543,9 +542,9 @@ void world_step(World world, float dt)
 		t_ldl += perf_now() - tl0;
 
 		// PGS: iterate all constraints (contacts, and joints when LDL is off).
-		// Fast path: patch friction contacts with no joints use compact SolverBodyVel
+		// Fast path: contacts with no joints use compact SolverBodyVel
 		// (32 bytes/body instead of 120 bytes — fits more bodies in cache).
-		int use_body_vel = (w->friction_model == FRICTION_PATCH && asize(sol_joints) == 0);
+		int use_body_vel = (asize(sol_joints) == 0);
 		if (use_body_vel) solver_sync_vel_in(w);
 
 		double tp = perf_now();
@@ -740,11 +739,7 @@ PerfTimers world_get_perf(World world)
 	return w->perf;
 }
 
-void world_set_friction_model(World world, FrictionModel model)
-{
-	WorldInternal* w = (WorldInternal*)world.id;
-	w->friction_model = model;
-}
+
 
 void world_set_solver_type(World world, SolverType type)
 {

@@ -107,7 +107,7 @@ static bool g_show_bvh = true;
 static bool g_show_sleep = true;
 static bool g_show_shadows = true;
 static bool g_sleep_enabled = true;
-static int g_friction_model = FRICTION_PATCH;
+// Coulomb friction removed -- patch friction is the only mode.
 static int g_solver_type = SOLVER_SOFT_STEP;
 static bool g_ldl_enabled = true;
 static int g_ldl_inspect_island = -1;   // selected island for LDL inspector (-1 = none)
@@ -422,7 +422,6 @@ static void setup_scene()
 
 	((WorldInternal*)g_world.id)->sleep_enabled = g_sleep_enabled;
 	((WorldInternal*)g_world.id)->ldl_enabled = g_ldl_enabled;
-	world_set_friction_model(g_world, (FrictionModel)g_friction_model);
 	world_set_solver_type(g_world, (SolverType)g_solver_type);
 	g_scenes[g_scene_index].setup();
 }
@@ -618,8 +617,7 @@ void update()
 			}
 		}
 	}
-	if (ImGui_Combo("Friction", &g_friction_model, "Coulomb\0Patch\0"))
-		world_set_friction_model(g_world, (FrictionModel)g_friction_model);
+	// Friction model: patch friction only (Coulomb removed).
 	if (ImGui_Combo("Solver", &g_solver_type, "Soft Step\0SI Soft\0SI\0"))
 		world_set_solver_type(g_world, (SolverType)g_solver_type);
 	if (ImGui_Checkbox("LDL Joints", &g_ldl_enabled)) {
