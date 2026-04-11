@@ -25,6 +25,7 @@ typedef struct ShapeInternal
 		struct { float half_height; float radius; } capsule;
 		struct { v3 half_extents; } box;
 		struct { const Hull* hull; v3 scale; } hull;
+		struct { float half_height; float radius; } cylinder;
 	};
 } ShapeInternal;
 

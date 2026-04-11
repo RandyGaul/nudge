@@ -1508,6 +1508,28 @@ int collide_box_box(Box a, Box b, Manifold* manifold) { return collide_box_box_e
 
 const Hull* hull_unit_box() { return &s_unit_box_hull; }
 
+// Unit cylinder hull: half_height=1, radius=1 along local Y.
+// Built lazily from quickhull on first use; faceted by CYL_SEGMENTS.
+// Scale in queries: (radius, half_height, radius).
+#define CYL_SEGMENTS 16
+static const Hull* hull_unit_cylinder()
+{
+	static Hull* cached = NULL;
+	if (!cached) {
+		v3 verts[CYL_SEGMENTS * 2];
+		int n = 0;
+		for (int cap = 0; cap < 2; cap++) {
+			float y = cap == 0 ? -1.0f : 1.0f;
+			for (int i = 0; i < CYL_SEGMENTS; i++) {
+				float a = (float)i * 6.28318530718f / (float)CYL_SEGMENTS;
+				verts[n++] = V3(cosf(a), y, sinf(a));
+			}
+		}
+		cached = quickhull(verts, n);
+	}
+	return cached;
+}
+
 // -----------------------------------------------------------------------------
 // Hull lifecycle. Quickhull implemented in quickhull.c.
 
@@ -1554,6 +1576,12 @@ static ConvexHull make_convex_hull(BodyHot* h, ShapeInternal* s)
 	return (ConvexHull){ s->hull.hull, h->position, h->rotation, s->hull.scale };
 }
 
+// Build a ConvexHull view of a cylinder shape, backed by the shared unit cylinder hull.
+static ConvexHull make_cylinder_hull(BodyHot* h, ShapeInternal* s)
+{
+	return (ConvexHull){ hull_unit_cylinder(), h->position, h->rotation, V3(s->cylinder.radius, s->cylinder.half_height, s->cylinder.radius) };
+}
+
 // Narrowphase dispatch for a single body pair.
 // Narrowphase timing accumulators (indexed by shape pair type).
 // Pair encoding: type_a * 5 + type_b (upper triangle, type_a <= type_b).
@@ -1570,11 +1598,11 @@ void narrowphase_print_timers()
 {
 	if (np_frame_count == 0) return;
 	double n = (double)np_frame_count;
-	const char* names[] = {"sphere", "capsule", "box", "hull", "?"};
+	const char* names[] = {"sphere", "capsule", "box", "hull", "cylinder"};
 	printf("  --- narrowphase breakdown ---\n");
 	double total = 0;
 	int total_calls = 0;
-	for (int a = 0; a < 4; a++) for (int b = a; b < 4; b++) {
+	for (int a = 0; a < 5; a++) for (int b = a; b < 5; b++) {
 		int idx = np_pair_idx(a, b);
 		if (np_call_acc[idx] == 0) continue;
 		double avg_us = np_time_acc[idx] / n * 1e6;
@@ -1649,6 +1677,33 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		int hint;
 		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
 		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m, hp);
+		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
+	}
+
+	// Cylinder pairs: route through hull-hull using the shared unit cylinder hull.
+	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER)
+		hit = collide_sphere_hull(make_sphere(h0, s0), make_cylinder_hull(h1, s1), &im.m);
+	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER)
+		hit = collide_capsule_hull(make_capsule(h0, s0), make_cylinder_hull(h1, s1), &im.m);
+	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER) {
+		int* hp = NULL;
+		int hint;
+		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_cylinder_hull(h1, s1), &im.m, hp);
+		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
+	}
+	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER) {
+		int* hp = NULL;
+		int hint;
+		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m, hp);
+		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
+	}
+	else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) {
+		int* hp = NULL;
+		int hint;
+		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
+		hit = collide_hull_hull_ex(make_cylinder_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m, hp);
 		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
 	}
 
@@ -1760,15 +1815,6 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	double t3 = perf_now();
 	CK_DYNA BroadPair* pairs = NULL;
 	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
-	for (int i = 0; i < asize(pairs); i++) {
-		int a = pairs[i].a, b = pairs[i].b;
-		if (!aabb_overlaps(tight[a], tight[b])) continue;
-		apush(dd_pairs, ((BroadPair){ a, b }));
-	}
-	afree(pairs);
-	// Collect awake-dynamic vs sleeping pairs (for wake detection).
-	pairs = NULL;
-	bvh_cross_test(w->bvh_dynamic, w->bvh_sleeping, &pairs);
 	for (int i = 0; i < asize(pairs); i++) {
 		int a = pairs[i].a, b = pairs[i].b;
 		if (!aabb_overlaps(tight[a], tight[b])) continue;
@@ -1974,10 +2020,11 @@ static int ray_body(WorldInternal* w, int body_idx, v3 origin, v3 dir, float max
 		float t; v3 n;
 		int hit = 0;
 		switch (s->type) {
-		case SHAPE_SPHERE:  hit = ray_sphere(origin, dir, make_sphere(bh, s), best_t, &t, &n); break;
-		case SHAPE_CAPSULE: hit = ray_capsule(origin, dir, make_capsule(bh, s), best_t, &t, &n); break;
-		case SHAPE_BOX:     hit = ray_box(origin, dir, make_box(bh, s), best_t, &t, &n); break;
-		case SHAPE_HULL:    hit = ray_hull(origin, dir, make_convex_hull(bh, s), best_t, &t, &n); break;
+		case SHAPE_SPHERE:   hit = ray_sphere(origin, dir, make_sphere(bh, s), best_t, &t, &n); break;
+		case SHAPE_CAPSULE:  hit = ray_capsule(origin, dir, make_capsule(bh, s), best_t, &t, &n); break;
+		case SHAPE_BOX:      hit = ray_box(origin, dir, make_box(bh, s), best_t, &t, &n); break;
+		case SHAPE_HULL:     hit = ray_hull(origin, dir, make_convex_hull(bh, s), best_t, &t, &n); break;
+		case SHAPE_CYLINDER: hit = ray_hull(origin, dir, make_cylinder_hull(bh, s), best_t, &t, &n); break;
 		}
 		if (hit && t < best_t) { best_t = t; best_n = n; found = 1; }
 	}

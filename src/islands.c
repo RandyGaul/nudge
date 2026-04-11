@@ -158,6 +158,8 @@ static void bvh_transfer_body(WorldInternal* w, int body_idx, BVH_Tree* from, BV
 {
 	int leaf = w->body_cold[body_idx].bvh_leaf;
 	if (leaf < 0) return;
+	assert(leaf < asize(from->leaves) && "bvh_transfer: leaf index out of range");
+	assert(from->leaves[leaf].body_idx == body_idx && "bvh_transfer: leaf doesn't belong to this body");
 	int moved = bvh_remove(from, leaf);
 	if (moved >= 0) w->body_cold[moved].bvh_leaf = leaf;
 	AABB box = aabb_expand(body_aabb(&w->body_hot[body_idx], &w->body_cold[body_idx]), BVH_AABB_MARGIN);
@@ -171,8 +173,6 @@ static void island_wake(WorldInternal* w, int island_id)
 	int bi = isl->head_body;
 	while (bi >= 0) {
 		w->body_hot[bi].sleep_time = 0.0f;
-		if (w->broadphase_type == BROADPHASE_BVH)
-			bvh_transfer_body(w, bi, w->bvh_sleeping, w->bvh_dynamic);
 		bi = w->body_cold[bi].island_next;
 	}
 }
@@ -186,8 +186,6 @@ static void island_sleep(WorldInternal* w, int island_id)
 	while (bi >= 0) {
 		w->body_hot[bi].velocity = V3(0, 0, 0);
 		w->body_hot[bi].angular_velocity = V3(0, 0, 0);
-		if (w->broadphase_type == BROADPHASE_BVH)
-			bvh_transfer_body(w, bi, w->bvh_dynamic, w->bvh_sleeping);
 		bi = w->body_cold[bi].island_next;
 	}
 }
@@ -254,6 +252,9 @@ static void islands_update_contacts(WorldInternal* w, InternalManifold* manifold
 		// Static bodies never get island_id
 		int isl_a = is_static_a ? -1 : w->body_cold[a].island_id;
 		int isl_b = is_static_b ? -1 : w->body_cold[b].island_id;
+		// Capture awake state before merge may destroy the source island
+		int was_awake_a = isl_a >= 0 && w->islands[isl_a].awake;
+		int was_awake_b = isl_b >= 0 && w->islands[isl_b].awake;
 
 		int target;
 		if (isl_a >= 0 && isl_b >= 0) {
@@ -274,14 +275,15 @@ static void islands_update_contacts(WorldInternal* w, InternalManifold* manifold
 			island_add_body(w, target, b);
 			added_b = 1;
 		}
-		// Wake sleeping island only if a newly added or awake body touches it.
-		// Sleeping-vs-static contacts should NOT wake the island.
+		// Only wake a sleeping island if an AWAKE body or NEW body joins.
+		// Sleeping bodies re-merging after a split should not wake the island.
 		if (!w->islands[target].awake) {
-			int should_wake = added_a || added_b; // new body joined
-			if (!should_wake) {
-				// Check if either side was in an awake island before merge
-				if (!is_static_a && isl_a >= 0 && isl_a != target) should_wake = 1; // merged from awake
-				if (!is_static_b && isl_b >= 0 && isl_b != target) should_wake = 1;
+			int should_wake = 0;
+			if (added_a && !is_static_a && (isl_a < 0 || was_awake_a)) should_wake = 1;
+			if (added_b && !is_static_b && (isl_b < 0 || was_awake_b)) should_wake = 1;
+			if (!added_a && !added_b) {
+				if (was_awake_a && isl_a != target) should_wake = 1;
+				if (was_awake_b && isl_b != target) should_wake = 1;
 			}
 			if (should_wake) island_wake(w, target);
 		}
@@ -337,7 +339,9 @@ static void islands_evaluate_sleep(WorldInternal* w, float dt)
 			BodyHot* h = &w->body_hot[bi];
 			float v2 = len2(h->velocity) + len2(h->angular_velocity);
 			if (v2 > SLEEP_VEL_THRESHOLD) {
-				h->sleep_time = 0.0f;
+				// Gradual decay: single solver spikes don't fully reset.
+				// A body needs sustained above-threshold motion to stay awake.
+				h->sleep_time = fmaxf(h->sleep_time - dt * 2.0f, 0.0f);
 				all_sleepy = 0;
 			} else {
 				h->sleep_time += dt;

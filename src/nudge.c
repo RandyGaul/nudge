@@ -357,6 +357,11 @@ static void np_work_fn(void* ctx, int start, int count)
 		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL) hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
 		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL) hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
 		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL) hit = collide_hull_hull(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m);
+		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER) hit = collide_sphere_hull(make_sphere(h0, s0), make_cylinder_hull(h1, s1), &im.m);
+		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER) hit = collide_capsule_hull(make_capsule(h0, s0), make_cylinder_hull(h1, s1), &im.m);
+		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER) hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_cylinder_hull(h1, s1), &im.m);
+		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER) hit = collide_hull_hull(make_convex_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m);
+		else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) hit = collide_hull_hull(make_cylinder_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m);
 		if (hit) apush(local, im);
 	}
 	// Merge local manifolds into per-thread output (we just push to the global array with a lock).
@@ -847,6 +852,8 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	case SHAPE_BOX:     s.box.half_extents = params.box.half_extents; break;
 	case SHAPE_HULL:    s.hull.hull = params.hull.hull;
 	                    s.hull.scale = params.hull.scale; break;
+	case SHAPE_CYLINDER: s.cylinder.half_height = params.cylinder.half_height;
+	                     s.cylinder.radius = params.cylinder.radius; break;
 	}
 	apush(w->body_cold[idx].shapes, s);
 	recompute_body_inertia(w, idx);
@@ -912,6 +919,7 @@ int body_is_asleep(World world, Body body)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
+	if (w->body_hot[idx].inv_mass == 0.0f) return 1; // static bodies are always "asleep"
 	int isl = w->body_cold[idx].island_id;
 	if (isl < 0 || !island_alive(w, isl)) return 0;
 	return !w->islands[isl].awake;

@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <None Include="..\..\native\build\bin\Release\nudge.dll" CopyToOutputDirectory="PreserveNewest" Link="nudge.dll" Condition="Exists('..\..\native\build\bin\Release\nudge.dll')" />
-    <None Include="..\..\native\build\bin\Release\jolt.dll" CopyToOutputDirectory="PreserveNewest" Link="jolt.dll" Condition="Exists('..\..\native\build\bin\Release\jolt.dll')" />
+    <None Include="..\..\native\build\bin\Release\nudge.dll" CopyToOutputDirectory="Always" Link="nudge.dll" Condition="Exists('..\..\native\build\bin\Release\nudge.dll')" />
+    <None Include="..\..\native\build\bin\Release\jolt.dll" CopyToOutputDirectory="Always" Link="jolt.dll" Condition="Exists('..\..\native\build\bin\Release\jolt.dll')" />
   </ItemGroup>
 
   <ItemGroup>
