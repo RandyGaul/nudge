@@ -1095,7 +1095,10 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	h->vert_count = vc; h->edge_count = ec; h->face_count = nlive;
 	h->epsilon = s->epsilon;
 	v3* vcp = CK_ALLOC(sizeof(v3)*vc); h->verts = vcp;
-	HalfEdge* ecp = CK_ALLOC(sizeof(HalfEdge)*ec); h->edges = ecp;
+	uint16_t* et = CK_ALLOC(sizeof(uint16_t)*ec); h->edge_twin = et;
+	uint16_t* en = CK_ALLOC(sizeof(uint16_t)*ec); h->edge_next = en;
+	uint16_t* eo = CK_ALLOC(sizeof(uint16_t)*ec); h->edge_origin = eo;
+	uint16_t* ef = CK_ALLOC(sizeof(uint16_t)*ec); h->edge_face = ef;
 	HullFace* fcp = CK_ALLOC(sizeof(HullFace)*nlive); h->faces = fcp;
 	HullPlane* pcp = CK_ALLOC(sizeof(HullPlane)*nlive); h->planes = pcp;
 
@@ -1125,10 +1128,10 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	for (int i = 0; i < nlive; i++) {
 		int e = s->faces[live[i]].edge, start = e;
 		do { int o = eremap[e];
-			ecp[o].next = (uint16_t)eremap[s->edges.enext[e]];
-			ecp[o].twin = (uint16_t)eremap[s->edges.etwin[e]];
-			ecp[o].origin = (uint16_t)vremap[s->edges.eorigin[e]];
-			ecp[o].face = (uint16_t)i;
+			en[o] = (uint16_t)eremap[s->edges.enext[e]];
+			et[o] = (uint16_t)eremap[s->edges.etwin[e]];
+			eo[o] = (uint16_t)vremap[s->edges.eorigin[e]];
+			ef[o] = (uint16_t)i;
 			e = s->edges.enext[e];
 		} while (e != start);
 		fcp[i] = (HullFace){ .edge = (uint16_t)eremap[s->faces[live[i]].edge] };

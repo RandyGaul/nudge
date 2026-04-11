@@ -91,8 +91,8 @@ static dv3 bf_closest_on_hull(dv3 point, const dv3* verts, const Hull* hull)
 	}
 
 	for (int i = 0; i < hull->edge_count; i += 2) {
-		dv3 a = verts[hull->edges[i].origin];
-		dv3 b = verts[hull->edges[i ^ 1].origin];
+		dv3 a = verts[hull->edge_origin[i]];
+		dv3 b = verts[hull->edge_origin[i ^ 1]];
 		dv3 cp = bf_closest_on_segment(point, a, b);
 		double d2 = dv3_len2(dv3_sub(point, cp));
 		if (d2 < best2) { best2 = d2; best = cp; }
@@ -104,8 +104,8 @@ static dv3 bf_closest_on_hull(dv3 point, const dv3* verts, const Hull* hull)
 		int edge = hull->faces[fi].edge;
 		int first = edge;
 		do {
-			fv[fc++] = verts[hull->edges[edge].origin];
-			edge = hull->edges[edge].next;
+			fv[fc++] = verts[hull->edge_origin[edge]];
+			edge = hull->edge_next[edge];
 		} while (edge != first && fc < 32);
 		if (fc < 3) continue;
 
@@ -210,9 +210,9 @@ static BruteResult bf_hull_hull(const dv3* va, const Hull* ha, const dv3* vb, co
 	}
 	// Edge A x Edge B
 	for (int i = 0; i < ha->edge_count; i += 2) {
-		dv3 a1 = va[ha->edges[i].origin], a2 = va[ha->edges[i ^ 1].origin];
+		dv3 a1 = va[ha->edge_origin[i]], a2 = va[ha->edge_origin[i ^ 1]];
 		for (int j = 0; j < hb->edge_count; j += 2) {
-			dv3 b1 = vb[hb->edges[j].origin], b2 = vb[hb->edges[j ^ 1].origin];
+			dv3 b1 = vb[hb->edge_origin[j]], b2 = vb[hb->edge_origin[j ^ 1]];
 			dv3 ca, cb;
 			bf_closest_segments(a1, a2, b1, b2, &ca, &cb);
 			double d2 = dv3_len2(dv3_sub(ca, cb));
@@ -221,11 +221,11 @@ static BruteResult bf_hull_hull(const dv3* va, const Hull* ha, const dv3* vb, co
 	}
 	// Edge A -> face B
 	for (int i = 0; i < ha->edge_count; i += 2) {
-		dv3 a1 = va[ha->edges[i].origin], a2 = va[ha->edges[i ^ 1].origin];
+		dv3 a1 = va[ha->edge_origin[i]], a2 = va[ha->edge_origin[i ^ 1]];
 		for (int fi = 0; fi < hb->face_count; fi++) {
 			dv3 fv[32]; int fc = 0;
 			int edge = hb->faces[fi].edge; int first = edge;
-			do { fv[fc++] = vb[hb->edges[edge].origin]; edge = hb->edges[edge].next; } while (edge != first && fc < 32);
+			do { fv[fc++] = vb[hb->edge_origin[edge]]; edge = hb->edge_next[edge]; } while (edge != first && fc < 32);
 			if (fc < 3) continue;
 			dv3 fn = dv3_cross(dv3_sub(fv[1], fv[0]), dv3_sub(fv[2], fv[0]));
 			double fn_len = dv3_len(fn); if (fn_len < 1e-30) continue;
@@ -237,11 +237,11 @@ static BruteResult bf_hull_hull(const dv3* va, const Hull* ha, const dv3* vb, co
 	}
 	// Edge B -> face A
 	for (int i = 0; i < hb->edge_count; i += 2) {
-		dv3 b1 = vb[hb->edges[i].origin], b2 = vb[hb->edges[i ^ 1].origin];
+		dv3 b1 = vb[hb->edge_origin[i]], b2 = vb[hb->edge_origin[i ^ 1]];
 		for (int fi = 0; fi < ha->face_count; fi++) {
 			dv3 fv[32]; int fc = 0;
 			int edge = ha->faces[fi].edge; int first = edge;
-			do { fv[fc++] = va[ha->edges[edge].origin]; edge = ha->edges[edge].next; } while (edge != first && fc < 32);
+			do { fv[fc++] = va[ha->edge_origin[edge]]; edge = ha->edge_next[edge]; } while (edge != first && fc < 32);
 			if (fc < 3) continue;
 			dv3 fn = dv3_cross(dv3_sub(fv[1], fv[0]), dv3_sub(fv[2], fv[0]));
 			double fn_len = dv3_len(fn); if (fn_len < 1e-30) continue;
@@ -270,7 +270,7 @@ static BruteResult bf_segment_hull(dv3 seg_a, dv3 seg_b, const dv3* verts, const
 		if (d2 < best2) { best2 = d2; best_seg = cp; best_hull = verts[i]; }
 	}
 	for (int i = 0; i < hull->edge_count; i += 2) {
-		dv3 b1 = verts[hull->edges[i].origin], b2 = verts[hull->edges[i ^ 1].origin];
+		dv3 b1 = verts[hull->edge_origin[i]], b2 = verts[hull->edge_origin[i ^ 1]];
 		dv3 ca, cb;
 		bf_closest_segments(seg_a, seg_b, b1, b2, &ca, &cb);
 		double d2 = dv3_len2(dv3_sub(ca, cb));

@@ -98,7 +98,10 @@ typedef struct Hull
 	v3 centroid;
 	const v3*        verts;
 	const float*     soa_verts; // SoA: x[0..n-1], y[0..n-1], z[0..n-1], 16-byte aligned
-	const HalfEdge*  edges;
+	const uint16_t*  edge_twin;   // SoA half-edge arrays (cache-friendly vs AoS HalfEdge)
+	const uint16_t*  edge_next;
+	const uint16_t*  edge_origin;
+	const uint16_t*  edge_face;
 	const HullFace*  faces;
 	const HullPlane* planes;
 	int vert_count;

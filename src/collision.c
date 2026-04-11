@@ -75,44 +75,10 @@ static const v3 s_box_verts[8] = {
 //  pair 8: 0->4 / 4->0     pair 9: 1->5 / 5->1
 //  pair10: 2->6 / 6->2     pair11: 3->7 / 7->3
 
-static const HalfEdge s_box_edges[24] = {
-	// pair 0: 0->3 (face 0) / 3->0 (face 2)
-	{ .twin =  1, .next =  2, .origin = 0, .face = 0 },  // e0:  0->3
-	{ .twin =  0, .next = 16, .origin = 3, .face = 2 },  // e1:  3->0
-	// pair 1: 3->2 (face 0) / 2->3 (face 5)
-	{ .twin =  3, .next =  4, .origin = 3, .face = 0 },  // e2:  3->2
-	{ .twin =  2, .next = 22, .origin = 2, .face = 5 },  // e3:  2->3
-	// pair 2: 2->1 (face 0) / 1->2 (face 3)
-	{ .twin =  5, .next =  6, .origin = 2, .face = 0 },  // e4:  2->1
-	{ .twin =  4, .next = 20, .origin = 1, .face = 3 },  // e5:  1->2
-	// pair 3: 1->0 (face 0) / 0->1 (face 4)
-	{ .twin =  7, .next =  0, .origin = 1, .face = 0 },  // e6:  1->0
-	{ .twin =  6, .next = 18, .origin = 0, .face = 4 },  // e7:  0->1
-	// pair 4: 4->5 (face 1) / 5->4 (face 4)
-	{ .twin =  9, .next = 10, .origin = 4, .face = 1 },  // e8:  4->5
-	{ .twin =  8, .next = 17, .origin = 5, .face = 4 },  // e9:  5->4
-	// pair 5: 5->6 (face 1) / 6->5 (face 3)
-	{ .twin = 11, .next = 12, .origin = 5, .face = 1 },  // e10: 5->6
-	{ .twin = 10, .next = 19, .origin = 6, .face = 3 },  // e11: 6->5
-	// pair 6: 6->7 (face 1) / 7->6 (face 5)
-	{ .twin = 13, .next = 14, .origin = 6, .face = 1 },  // e12: 6->7
-	{ .twin = 12, .next = 21, .origin = 7, .face = 5 },  // e13: 7->6
-	// pair 7: 7->4 (face 1) / 4->7 (face 2)
-	{ .twin = 15, .next =  8, .origin = 7, .face = 1 },  // e14: 7->4
-	{ .twin = 14, .next = 23, .origin = 4, .face = 2 },  // e15: 4->7
-	// pair 8: 0->4 (face 2) / 4->0 (face 4)
-	{ .twin = 17, .next = 15, .origin = 0, .face = 2 },  // e16: 0->4
-	{ .twin = 16, .next =  7, .origin = 4, .face = 4 },  // e17: 4->0
-	// pair 9: 1->5 (face 4) / 5->1 (face 3)
-	{ .twin = 19, .next =  9, .origin = 1, .face = 4 },  // e18: 1->5
-	{ .twin = 18, .next =  5, .origin = 5, .face = 3 },  // e19: 5->1
-	// pair 10: 2->6 (face 3) / 6->2 (face 5)
-	{ .twin = 21, .next = 11, .origin = 2, .face = 3 },  // e20: 2->6
-	{ .twin = 20, .next =  3, .origin = 6, .face = 5 },  // e21: 6->2
-	// pair 11: 3->7 (face 5) / 7->3 (face 2)
-	{ .twin = 23, .next = 13, .origin = 3, .face = 5 },  // e22: 3->7
-	{ .twin = 22, .next =  1, .origin = 7, .face = 2 },  // e23: 7->3
-};
+static const uint16_t s_box_edge_twin[24] = { 1,0, 3,2, 5,4, 7,6, 9,8, 11,10, 13,12, 15,14, 17,16, 19,18, 21,20, 23,22 };
+static const uint16_t s_box_edge_next[24] = { 2,16, 4,22, 6,20, 0,18, 10,17, 12,19, 14,21, 8,23, 15,7, 9,5, 11,3, 13,1 };
+static const uint16_t s_box_edge_origin[24] = { 0,3, 3,2, 2,1, 1,0, 4,5, 5,6, 6,7, 7,4, 0,4, 1,5, 2,6, 3,7 };
+static const uint16_t s_box_edge_face[24] = { 0,2, 0,5, 0,3, 0,4, 1,4, 1,3, 1,5, 1,2, 2,4, 4,3, 3,5, 5,2 };
 
 static const HullFace s_box_faces[6] = {
 	{ .edge =  0 },  // face 0 (-Z): starts at e0 (0->3)
@@ -135,7 +101,10 @@ static const HullPlane s_box_planes[6] = {
 static const Hull s_unit_box_hull = {
 	.centroid = {0, 0, 0},
 	.verts = s_box_verts,
-	.edges = s_box_edges,
+	.edge_twin = s_box_edge_twin,
+	.edge_next = s_box_edge_next,
+	.edge_origin = s_box_edge_origin,
+	.edge_face = s_box_edge_face,
 	.faces = s_box_faces,
 	.planes = s_box_planes,
 	.vert_count = 8,
@@ -422,14 +391,14 @@ int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold)
 			int improved = 0;
 			int start_e = b.hull->faces[cur].edge, ei = start_e;
 			do {
-				int adj = b.hull->edges[b.hull->edges[ei].twin].face;
+				int adj = b.hull->edge_face[b.hull->edge_twin[ei]];
 				if (adj != cur) {
 					HullPlane awp = plane_transform(b.hull->planes[adj], b.center, b.rotation, b.scale);
 					float s = dot(a.center, awp.normal) - awp.offset;
 					if (s > a.radius) return 0;
 					if (s > best_sep) { best_sep = s; best_face = adj; best_plane = awp; improved = 1; }
 				}
-				ei = b.hull->edges[ei].next;
+				ei = b.hull->edge_next[ei];
 			} while (ei != start_e);
 			if (!improved) break;
 			cur = best_face;
@@ -542,14 +511,14 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 			int improved = 0;
 			int start_e = hull->faces[cur].edge, ei = start_e;
 			do {
-				int adj = hull->edges[hull->edges[ei].twin].face;
+				int adj = hull->edge_face[hull->edge_twin[ei]];
 				if (adj != cur) {
 					HullPlane awp = plane_transform(hull->planes[adj], b.center, b.rotation, b.scale);
 					float adp = dot(a.p, awp.normal) - awp.offset, adq = dot(a.q, awp.normal) - awp.offset;
 					float asup = adp < adq ? adp : adq;
 					if (asup > face_sep) { face_sep = asup; face_idx = adj; face_plane = awp; improved = 1; }
 				}
-				ei = hull->edges[ei].next;
+				ei = hull->edge_next[ei];
 			} while (ei != start_e);
 			if (!improved) break;
 			cur = face_idx;
@@ -572,8 +541,8 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 	if (cap_len2 > 1e-12f) {
 		v3 cd = scale(cap_dir, 1.0f / sqrtf(cap_len2));
 		for (int i = 0; i < hull->edge_count; i += 2) {
-			v3 ev0 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edges[i].origin], b.scale)));
-			v3 ev1 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edges[hull->edges[i].next].origin], b.scale)));
+			v3 ev0 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[i]], b.scale)));
+			v3 ev1 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[hull->edge_next[i]]], b.scale)));
 			v3 ed = sub(ev1, ev0);
 			v3 ax = cross(cd, ed);
 			float al = len2(ax);
@@ -765,13 +734,13 @@ static FaceQuery sat_query_faces_hint(const Hull* hull1, v3 pos1, quat rot1, v3 
 			int start_e = hull1->faces[cur].edge;
 			int ei = start_e;
 			do {
-				int twin = hull1->edges[ei].twin;
-				int adj_face = hull1->edges[twin].face;
+				int twin = hull1->edge_twin[ei];
+				int adj_face = hull1->edge_face[twin];
 				if (adj_face != cur) {
 					float adj_sep = sat_eval_face_ex(hull1, adj_face, pos1, rot1, scale1, hull2, pos2, rot2, inv2_pre, scale2);
 					if (adj_sep > best.separation) { best.separation = adj_sep; best.index = adj_face; improved = 1; }
 				}
-				ei = hull1->edges[ei].next;
+				ei = hull1->edge_next[ei];
 			} while (ei != start_e);
 			if (!improved) return best;
 			cur = best.index;
@@ -884,20 +853,20 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 	v3 e2_arr[128], nu2_arr[128], nv2_arr[128], ne2_arr[128];
 	for (int k = 0; k < n1; k++) {
 		int i = k * 2;
-		v3 p = add(c1_local, rotate(rel_rot, hull_vert_scaled(hull1, hull1->edges[i].origin, scale1)));
-		v3 q = add(c1_local, rotate(rel_rot, hull_vert_scaled(hull1, hull1->edges[i+1].origin, scale1)));
+		v3 p = add(c1_local, rotate(rel_rot, hull_vert_scaled(hull1, hull1->edge_origin[i], scale1)));
+		v3 q = add(c1_local, rotate(rel_rot, hull_vert_scaled(hull1, hull1->edge_origin[i+1], scale1)));
 		e1_arr[k] = sub(q, p);
-		u1_arr[k] = rotate(rel_rot, hull1->planes[hull1->edges[i].face].normal);
-		v1_arr[k] = rotate(rel_rot, hull1->planes[hull1->edges[i+1].face].normal);
+		u1_arr[k] = rotate(rel_rot, hull1->planes[hull1->edge_face[i]].normal);
+		v1_arr[k] = rotate(rel_rot, hull1->planes[hull1->edge_face[i+1]].normal);
 		ne1_arr[k] = neg(e1_arr[k]);
 	}
 	for (int k = 0; k < n2; k++) {
 		int i = k * 2;
-		v3 p = hull_vert_scaled(hull2, hull2->edges[i].origin, scale2);
-		v3 q = hull_vert_scaled(hull2, hull2->edges[i+1].origin, scale2);
+		v3 p = hull_vert_scaled(hull2, hull2->edge_origin[i], scale2);
+		v3 q = hull_vert_scaled(hull2, hull2->edge_origin[i+1], scale2);
 		e2_arr[k] = sub(q, p);
-		nu2_arr[k] = neg(hull2->planes[hull2->edges[i].face].normal);
-		nv2_arr[k] = neg(hull2->planes[hull2->edges[i+1].face].normal);
+		nu2_arr[k] = neg(hull2->planes[hull2->edge_face[i]].normal);
+		nv2_arr[k] = neg(hull2->planes[hull2->edge_face[i+1]].normal);
 		ne2_arr[k] = neg(e2_arr[k]);
 	}
 
@@ -970,9 +939,9 @@ static int hull_face_verts_world(const Hull* hull, int face_idx, v3 pos, quat ro
 		int e = start;
 		int count = 0;
 		do {
-			v3 lv = hull->verts[hull->edges[e].origin];
+			v3 lv = hull->verts[hull->edge_origin[e]];
 			out[count++] = add(pos, add(add(scale(cx, lv.x), scale(cy, lv.y)), scale(cz, lv.z)));
-			e = hull->edges[e].next;
+			e = hull->edge_next[e];
 		} while (e != start);
 		return count;
 	}
@@ -980,8 +949,8 @@ static int hull_face_verts_world(const Hull* hull, int face_idx, v3 pos, quat ro
 	int e = start;
 	int count = 0;
 	do {
-		out[count++] = add(pos, rotate(rot, hull_vert_scaled(hull, hull->edges[e].origin, sc)));
-		e = hull->edges[e].next;
+		out[count++] = add(pos, rotate(rot, hull_vert_scaled(hull, hull->edge_origin[e], sc)));
+		e = hull->edge_next[e];
 	} while (e != start && count < MAX_CLIP_VERTS);
 	return count;
 }
@@ -1137,16 +1106,15 @@ static int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot,
 	int guard = 0;
 	uint8_t clip_edge_idx = 0;
 	do {
-		const HalfEdge* edge = &ref_hull->edges[ei];
-		v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, edge->origin, ref_sc)));
-		v3 head = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[edge->twin].origin, ref_sc)));
+		v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edge_origin[ei], ref_sc)));
+		v3 head = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edge_origin[ref_hull->edge_twin[ei]], ref_sc)));
 		v3 side_n = norm(cross(sub(head, tail), ref_plane.normal));
 		float side_d = dot(side_n, tail);
 		clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n, side_d, clip_edge_idx, out_buf, out_fid);
 		v3* swap = in_buf; in_buf = out_buf; out_buf = swap;
 		uint8_t* fswap = in_fid; in_fid = out_fid; out_fid = fswap;
 		clip_edge_idx++;
-		ei = edge->next;
+		ei = ref_hull->edge_next[ei];
 		assert(++guard < MAX_CLIP_VERTS && "generate_face_contact: face edge loop didn't close");
 	} while (ei != start_e);
 
@@ -1154,7 +1122,7 @@ static int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot,
 		v3 corners[MAX_CLIP_VERTS];
 		int ncorners = 0;
 		int ce = start_e;
-		do { corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[ce].origin, ref_sc))); ce = ref_hull->edges[ce].next; } while (ce != start_e);
+		do { corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edge_origin[ce], ref_sc))); ce = ref_hull->edge_next[ce]; } while (ce != start_e);
 		float snap_tol2 = 1e-6f;
 		for (int i = 0; i < clip_count; i++)
 			for (int c = 0; c < ncorners; c++)
@@ -1211,15 +1179,11 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 
 	if (edge_q.separation > max_face_sep + k_tol) {
 		// --- Edge-edge contact ---
-		const HalfEdge* e1 = &hull_a->edges[edge_q.index1];
-		const HalfEdge* t1 = &hull_a->edges[edge_q.index1 + 1];
-		v3 p1 = add(pos_a, rotate(rot_a, hull_vert_scaled(hull_a, e1->origin, scale_a)));
-		v3 q1 = add(pos_a, rotate(rot_a, hull_vert_scaled(hull_a, t1->origin, scale_a)));
+		v3 p1 = add(pos_a, rotate(rot_a, hull_vert_scaled(hull_a, hull_a->edge_origin[edge_q.index1], scale_a)));
+		v3 q1 = add(pos_a, rotate(rot_a, hull_vert_scaled(hull_a, hull_a->edge_origin[edge_q.index1 + 1], scale_a)));
 
-		const HalfEdge* e2 = &hull_b->edges[edge_q.index2];
-		const HalfEdge* t2 = &hull_b->edges[edge_q.index2 + 1];
-		v3 p2 = add(pos_b, rotate(rot_b, hull_vert_scaled(hull_b, e2->origin, scale_b)));
-		v3 q2 = add(pos_b, rotate(rot_b, hull_vert_scaled(hull_b, t2->origin, scale_b)));
+		v3 p2 = add(pos_b, rotate(rot_b, hull_vert_scaled(hull_b, hull_b->edge_origin[edge_q.index2], scale_b)));
+		v3 q2 = add(pos_b, rotate(rot_b, hull_vert_scaled(hull_b, hull_b->edge_origin[edge_q.index2 + 1], scale_b)));
 
 		v3 ca, cb;
 		segments_closest_points(p1, q1, p2, q2, &ca, &cb);
@@ -1278,10 +1242,8 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 	int guard = 0;
 	uint8_t clip_edge_idx = 0;
 	do {
-		const HalfEdge* edge = &ref_hull->edges[ei];
-		v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, edge->origin, ref_sc)));
-		v3 head = add(ref_pos, rotate(ref_rot,
-			hull_vert_scaled(ref_hull, ref_hull->edges[edge->twin].origin, ref_sc)));
+		v3 tail = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edge_origin[ei], ref_sc)));
+		v3 head = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edge_origin[ref_hull->edge_twin[ei]], ref_sc)));
 		v3 side_n = norm(cross(sub(head, tail), ref_plane.normal));
 		float side_d = dot(side_n, tail);
 
@@ -1291,7 +1253,7 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 		uint8_t* fswap = in_fid; in_fid = out_fid; out_fid = fswap;
 
 		clip_edge_idx++;
-		ei = edge->next;
+		ei = ref_hull->edge_next[ei];
 		assert(++guard < MAX_CLIP_VERTS && "collide_hull_hull: face edge loop didn't close");
 	} while (ei != start_e);
 
@@ -1305,8 +1267,8 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 		int ncorners = 0;
 		int ce = start_e;
 		do {
-			corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edges[ce].origin, ref_sc)));
-			ce = ref_hull->edges[ce].next;
+			corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edge_origin[ce], ref_sc)));
+			ce = ref_hull->edge_next[ce];
 		} while (ce != start_e);
 		float snap_tol2 = 1e-6f;
 		for (int i = 0; i < clip_count; i++) {
@@ -1521,7 +1483,10 @@ void hull_free(Hull* hull)
 	if (!hull) return;
 	CK_FREE((void*)hull->verts);
 	if (hull->soa_verts) CK_FREE_ALIGNED((void*)hull->soa_verts);
-	CK_FREE((void*)hull->edges);
+	CK_FREE((void*)hull->edge_twin);
+	CK_FREE((void*)hull->edge_next);
+	CK_FREE((void*)hull->edge_origin);
+	CK_FREE((void*)hull->edge_face);
 	CK_FREE((void*)hull->faces);
 	CK_FREE((void*)hull->planes);
 	CK_FREE(hull);
