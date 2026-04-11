@@ -114,31 +114,9 @@ static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius)
 // -----------------------------------------------------------------------------
 // Rotation helpers.
 
-// Mat3x3 transpose rotate: R^T * v (column-wise multiply-add).
-// 3 broadcasts + 3 muls + 2 adds = 8 SIMD ops.
-static inline v3 gjk_mat_rotate_t(v3 r0, v3 r1, v3 r2, v3 v)
-{
-	return (v3){ .m = simd_add(simd_add(
-		simd_mul(r0.m, simd_splat(v.m, 0)),
-		simd_mul(r1.m, simd_splat(v.m, 1))),
-		simd_mul(r2.m, simd_splat(v.m, 2))) };
-}
-
-// Mat3x3 forward rotate: R * v. Transpose rows to columns, then broadcast-mul.
-static inline v3 gjk_mat_rotate(v3 r0, v3 r1, v3 r2, v3 v)
-{
-	simd4f t01lo = simd_unpacklo(r0.m, r1.m);
-	simd4f t01hi = simd_unpackhi(r0.m, r1.m);
-	simd4f t2lo  = simd_unpacklo(r2.m, simd_zero());
-	simd4f t2hi  = simd_unpackhi(r2.m, simd_zero());
-	simd4f col0 = simd_movelh(t01lo, t2lo);
-	simd4f col1 = simd_movehl(t2lo, t01lo);
-	simd4f col2 = simd_movelh(t01hi, t2hi);
-	return (v3){ .m = simd_add(simd_add(
-		simd_mul(col0, simd_splat(v.m, 0)),
-		simd_mul(col1, simd_splat(v.m, 1))),
-		simd_mul(col2, simd_splat(v.m, 2))) };
-}
+// Aliases for vmath.h mat3 operations (used throughout GJK dispatch).
+#define gjk_mat_rotate_t mat3_tmul_v
+#define gjk_mat_rotate   mat3_mul_v
 
 // -----------------------------------------------------------------------------
 // Hull convenience constructor with vert-edge table caching.
@@ -160,6 +138,7 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 	int n = hull->vert_count;
 	const v3* raw_verts = hull->verts;
 	(void)scaled_verts;
+	(void)soa_buf;
 	const float* soa = hull->soa_verts;
 
 	// Cache per-vertex first-edge lookup: topology-only, rebuild when hull pointer changes.
@@ -242,7 +221,7 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 		const float* sx = soa, *sy = sx + count, *sz = sy + count;
 		simd4f vbest2 = simd_set1(-1e18f);
 		simd4i ibest2 = simd_set1_i(0);
-		simd4i idx0 = { 0, 1, 2, 3 }, idx1 = { 4, 5, 6, 7 };
+		simd4i idx0 = _mm_set_epi32(3, 2, 1, 0), idx1 = _mm_set_epi32(7, 6, 5, 4);
 		simd4i eight = simd_set1_i(8);
 		for (; hi + 7 < count; hi += 8) {
 			simd4f d0 = simd_add(simd_add(simd_mul(simd_load(sx+hi), ldx), simd_mul(simd_load(sy+hi), ldy)), simd_mul(simd_load(sz+hi), ldz));
@@ -254,12 +233,13 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 			ibest2 = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest2), simd_cast_itof(idx1), m1));
 			idx0 = simd_add_i(idx0, eight); idx1 = simd_add_i(idx1, eight);
 		}
+
 		simd4f mg = simd_cmpgt(vbest2, vbest);
 		vbest = simd_blendv(vbest, vbest2, mg);
 		ibest = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest), simd_cast_itof(ibest2), mg));
 		for (; hi + 3 < count; hi += 4) {
 			simd4f dots = simd_add(simd_add(simd_mul(simd_load(sx+hi), ldx), simd_mul(simd_load(sy+hi), ldy)), simd_mul(simd_load(sz+hi), ldz));
-			simd4i idx = { hi, hi+1, hi+2, hi+3 };
+			simd4i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);
 			simd4f mask = simd_cmpgt(dots, vbest);
 			vbest = simd_blendv(vbest, dots, mask);
 			ibest = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest), simd_cast_itof(idx), mask));
@@ -271,7 +251,7 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 			simd4f t0 = simd_unpacklo(v0, v1), t1 = simd_unpacklo(v2, v3r);
 			simd4f t2 = simd_unpackhi(v0, v1), t3 = simd_unpackhi(v2, v3r);
 			simd4f dots = simd_add(simd_add(simd_mul(simd_movelh(t0, t1), ldx), simd_mul(simd_movehl(t1, t0), ldy)), simd_mul(simd_movelh(t2, t3), ldz));
-			simd4i idx = { hi, hi+1, hi+2, hi+3 };
+			simd4i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);
 			simd4f mask = simd_cmpgt(dots, vbest);
 			vbest = simd_blendv(vbest, dots, mask);
 			ibest = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest), simd_cast_itof(idx), mask));
@@ -524,8 +504,7 @@ static SIMD_NOINLINE int gjk_solve3(GJK_Simplex* s)
 	float uABC = dot(cross(b, c), n), vABC = dot(cross(c, a), n), wABC = dot(cross(a, b), n);
 
 	// Pack sign bits: bit=1 means value > 0
-	int signs = (uAB > 0) | ((vAB > 0) << 1) | ((uBC > 0) << 2) | ((vBC > 0) << 3) |
-	            ((uCA > 0) << 4) | ((vCA > 0) << 5) | ((uABC > 0) << 6) | ((vABC > 0) << 7) | ((wABC > 0) << 8);
+	int signs = (uAB > 0) | ((vAB > 0) << 1) | ((uBC > 0) << 2) | ((vBC > 0) << 3) | ((uCA > 0) << 4) | ((vCA > 0) << 5) | ((uABC > 0) << 6) | ((vABC > 0) << 7) | ((wABC > 0) << 8);
 
 	if ((signs & 0x12) == 0) { s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
 	if ((signs & 0x09) == 0) { s->v[0] = s->v[1]; s->v[0].u = 1.0f; s->divisor = 1.0f; s->count = 1; return 1; }
@@ -539,8 +518,6 @@ static SIMD_NOINLINE int gjk_solve3(GJK_Simplex* s)
 	s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = divABC; s->count = 3;
 	return 1;
 }
-
-#define stp(a, b, c) dot(a, cross(b, c))
 
 static SIMD_NOINLINE int gjk_solve4(GJK_Simplex* s)
 {

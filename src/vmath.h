@@ -57,6 +57,24 @@ static inline v3 v3_norm(v3 a) { float l = v3_len(a); return v3_scale(a, 1.0f/l)
 static inline v3 v3_neg(v3 a) { return (v3){ .m = simd_neg(a.m) }; }
 
 // -----------------------------------------------------------------------------
+// 3x3 rotation matrix (column vectors) * vector.
+
+// R^T * v: transpose-multiply (inverse rotate). 3 broadcasts + 3 muls + 2 adds.
+static inline v3 mat3_tmul_v(v3 c0, v3 c1, v3 c2, v3 v)
+{
+	return (v3){ .m = simd_add(simd_add(simd_mul(c0.m, simd_splat(v.m, 0)), simd_mul(c1.m, simd_splat(v.m, 1))), simd_mul(c2.m, simd_splat(v.m, 2))) };
+}
+
+// R * v: forward multiply. Transposes columns to rows, then broadcast-mul.
+static inline v3 mat3_mul_v(v3 c0, v3 c1, v3 c2, v3 v)
+{
+	simd4f t01lo = simd_unpacklo(c0.m, c1.m), t01hi = simd_unpackhi(c0.m, c1.m);
+	simd4f t2lo = simd_unpacklo(c2.m, simd_zero()), t2hi = simd_unpackhi(c2.m, simd_zero());
+	simd4f r0 = simd_movelh(t01lo, t2lo), r1 = simd_movehl(t2lo, t01lo), r2 = simd_movelh(t01hi, t2hi);
+	return (v3){ .m = simd_add(simd_add(simd_mul(r0, simd_splat(v.m, 0)), simd_mul(r1, simd_splat(v.m, 1))), simd_mul(r2, simd_splat(v.m, 2))) };
+}
+
+// -----------------------------------------------------------------------------
 // quat implementation.
 
 static inline quat quat_identity() { return (quat){ 0, 0, 0, 1 }; }
@@ -310,18 +328,6 @@ static inline v3 solve(m3x3 a, v3 b)
 
 // -----------------------------------------------------------------------------
 // _Generic polymorphic math API.
-//
-// add(a, b)     -- v3+v3
-// sub(a, b)     -- v3-v3
-// mul(a, b)     -- mat4*mat4, Transform*Transform, Transform*v3, quat*quat, quat*v3
-// scale(a, s)   -- v3*float
-// dot(a, b)     -- v3.v3
-// cross(a, b)   -- v3xv3
-// neg(a)        -- -v3
-// norm(a)       -- normalize v3
-// len(a)        -- length v3
-// len2(a)       -- squared length v3
-// inv(a)        -- inverse quat or Transform
 
 #define add(a, b)    _Generic((a), v3: v3_add, m3x3: m3x3_add)(a, b)
 #define sub(a, b)    _Generic((a), v3: v3_sub, m3x3: m3x3_sub)(a, b)
@@ -335,6 +341,9 @@ static inline v3 solve(m3x3 a, v3 b)
 #define norm(a)      _Generic((a), v3: v3_norm, quat: quat_norm)(a)
 #define len(a)       _Generic((a), v3: v3_len)(a)
 #define len2(a)      _Generic((a), v3: v3_len2)(a)
+
+// Scalar triple product: dot(a, cross(b, c)).
+#define stp(a, b, c) dot(a, cross(b, c))
 
 #define inv(a)       _Generic((a), quat: quat_inv, Transform: xform_inv)(a)
 
@@ -377,8 +386,7 @@ static inline int block_ldl_f(float* A, float* D, int n)
 }
 
 // Solve LDL^T x = b. L and D from block_ldl_f. b is not modified.
-static inline void block_solve_f(const float* L, const float* D,
-                                  const float* b, float* x, int n)
+static inline void block_solve_f(const float* L, const float* D, const float* b, float* x, int n)
 {
 	// Forward: L y = b
 	for (int i = 0; i < n; i++) {
