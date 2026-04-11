@@ -57,7 +57,7 @@ typedef struct GJK_Cache
 // -----------------------------------------------------------------------------
 // Shape types and constructors.
 
-enum { GJK_POINT, GJK_SEGMENT, GJK_BOX, GJK_HULL, GJK_CYLINDER, GJK_TRIANGLE };
+enum { GJK_POINT, GJK_SEGMENT, GJK_BOX, GJK_HULL, GJK_CYLINDER, GJK_TRIANGLE, GJK_COMPACT_HULL32, GJK_COMPACT_HULL };
 
 typedef struct GJK_Shape
 {
@@ -68,6 +68,8 @@ typedef struct GJK_Shape
 		struct { v3 p, q; } segment;
 		struct { v3 center; v3 col0, col1, col2; v3 half_extents; } box;
 		struct { v3 center; v3 col0, col1, col2; v3 scale; const v3* verts; const float* soa; const uint16_t* edge_twin; const uint16_t* edge_next; const uint16_t* edge_origin; const int* vert_edge; int count; int hint; } hull;
+		struct { v3 center; v3 col0, col1, col2; v3 scale; const float* vx; const float* vy; const float* vz; int count; } compact32; // CompactHull32: <=32 verts, SIMD scan only
+		struct { v3 center; v3 col0, col1, col2; v3 scale; const float* vx; const float* vy; const float* vz; const uint16_t* offsets; const uint16_t* neighbors; int count; int hint; } compact; // CompactHull: CSR hill-climb
 		struct { v3 mid; v3 half_axis; float radius; v3 axis; float inv_axis_len; } cylinder;
 		struct { v3 a, b, c; } tri;
 	};
@@ -141,6 +143,18 @@ static inline v3 gjk_mat_rotate(v3 r0, v3 r1, v3 r2, v3 v)
 // -----------------------------------------------------------------------------
 // Hull convenience constructor with vert-edge table caching.
 
+static GJK_Shape gjk_compact_hull32(v3 center, quat rot, v3 sc, const CompactHull32* ch)
+{
+	v3 c0 = quat_rotate(rot, V3(1,0,0)), c1 = quat_rotate(rot, V3(0,1,0)), c2 = quat_rotate(rot, V3(0,0,1));
+	return (GJK_Shape){ .type = GJK_COMPACT_HULL32, .compact32.center = center, .compact32.col0 = c0, .compact32.col1 = c1, .compact32.col2 = c2, .compact32.scale = sc, .compact32.vx = ch->verts_x, .compact32.vy = ch->verts_y, .compact32.vz = ch->verts_z, .compact32.count = ch->vert_count };
+}
+
+static GJK_Shape gjk_compact_hull_shape(v3 center, quat rot, v3 sc, const CompactHull* ch)
+{
+	v3 c0 = quat_rotate(rot, V3(1,0,0)), c1 = quat_rotate(rot, V3(0,1,0)), c2 = quat_rotate(rot, V3(0,0,1));
+	return (GJK_Shape){ .type = GJK_COMPACT_HULL, .compact.center = center, .compact.col0 = c0, .compact.col1 = c1, .compact.col2 = c2, .compact.scale = sc, .compact.vx = ch->verts_x, .compact.vy = ch->verts_y, .compact.vz = ch->verts_z, .compact.offsets = ch->offsets, .compact.neighbors = ch->neighbors, .compact.count = ch->vert_count, .compact.hint = 0 };
+}
+
 static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts, float* soa_buf)
 {
 	int n = hull->vert_count;
@@ -188,6 +202,25 @@ static int gjk_hull_support_climb(const v3* __restrict verts, const uint16_t* __
 			if (nd > best_d) { best_d = nd; best = neighbor; improved = 1; }
 			e = edge_next[e ^ 1];
 		} while (e != start);
+		if (!improved) break;
+	}
+	return best;
+}
+
+// CSR hill-climbing support for CompactHull (uint16_t indices).
+static int gjk_compact_support_climb(const float* __restrict vx, const float* __restrict vy, const float* __restrict vz, const uint16_t* __restrict offsets, const uint16_t* __restrict neighbors, v3 ld, int start)
+{
+	float sx = ld.x, sy = ld.y, sz = ld.z;
+	int best = start;
+	float best_d = vx[best]*sx + vy[best]*sy + vz[best]*sz;
+	for (;;) {
+		int o0 = offsets[best], o1 = offsets[best+1];
+		int improved = 0;
+		for (int i = o0; i < o1; i++) {
+			int nb = neighbors[i];
+			float nd = vx[nb]*sx + vy[nb]*sy + vz[nb]*sz;
+			if (nd > best_d) { best_d = nd; best = nb; improved = 1; }
+		}
 		if (!improved) break;
 	}
 	return best;
@@ -292,7 +325,7 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 // Support dispatch macro. Box/cylinder/hull use separate functions to control inlining.
 #define gjk_support(shape, dir, out_feat, out_point) do {                                                                 \
 	GJK_Shape* sp = (shape); v3 sd = (dir);                                                                               \
-	SIMD_ASSUME(sp->type >= GJK_POINT && sp->type <= GJK_TRIANGLE);                                                       \
+	SIMD_ASSUME(sp->type >= GJK_POINT && sp->type <= GJK_COMPACT_HULL);                                                     \
 	switch (sp->type) {                                                                                                   \
 	case GJK_POINT: *(out_feat) = 0; (out_point) = sp->point.center; break;                                               \
 	case GJK_SEGMENT: {                                                                                                   \
@@ -325,6 +358,46 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 		if (td[0] >= td[1] && td[0] >= td[2]) { *(out_feat) = 0; (out_point) = sp->tri.a; }                               \
 		else if (td[1] >= td[2]) { *(out_feat) = 1; (out_point) = sp->tri.b; }                                            \
 		else { *(out_feat) = 2; (out_point) = sp->tri.c; }                                                                \
+		break;                                                                                                            \
+	}                                                                                                                     \
+	case GJK_COMPACT_HULL32: {                                                                                            \
+		v3 ld = gjk_mat_rotate(sp->compact32.col0, sp->compact32.col1, sp->compact32.col2, sd);                           \
+		v3 sld = hmul(ld, sp->compact32.scale);                                                                           \
+		/* <=32 verts: branchless SIMD linear scan. */                                                                    \
+		int padded = (sp->compact32.count + 3) & ~3;                                                                      \
+		const float* sx = sp->compact32.vx, *sy = sp->compact32.vy, *sz = sp->compact32.vz;                              \
+		simd4f ldx = simd_splat(sld.m, 0), ldy = simd_splat(sld.m, 1), ldz = simd_splat(sld.m, 2);                       \
+		simd4f vb = simd_set1(-1e18f); simd4i ib = simd_set1_i(0);                                                       \
+		simd4i c32_idx = _mm_set_epi32(3, 2, 1, 0); simd4i c32_inc = simd_set1_i(4);                                     \
+		for (int _i = 0; _i < padded; _i += 4) {                                                                         \
+			simd4f d = simd_add(simd_add(simd_mul(simd_load(sx+_i), ldx), simd_mul(simd_load(sy+_i), ldy)),              \
+			           simd_mul(simd_load(sz+_i), ldz));                                                                  \
+			simd4f m = simd_cmpgt(d, vb);                                                                                 \
+			vb = simd_blendv(vb, d, m);                                                                                   \
+			ib = simd_cast_ftoi(simd_blendv(simd_cast_itof(ib), simd_cast_itof(c32_idx), m));                             \
+			c32_idx = simd_add_i(c32_idx, c32_inc);                                                                       \
+		}                                                                                                                 \
+		float hb[4]; int hi[4]; simd_store(hb, vb); simd_store_i(hi, ib);                                                \
+		int hbi = hi[0]; float hbd = hb[0];                                                                              \
+		for (int k = 1; k < 4; k++) if (hb[k] > hbd) { hbd = hb[k]; hbi = hi[k]; }                                      \
+		if (hbi >= sp->compact32.count) hbi = 0;                                                                          \
+		*(out_feat) = hbi;                                                                                                \
+		v3 lv = V3(sx[hbi]*sp->compact32.scale.x, sy[hbi]*sp->compact32.scale.y, sz[hbi]*sp->compact32.scale.z);         \
+		(out_point) = add(sp->compact32.center, gjk_mat_rotate_t(sp->compact32.col0, sp->compact32.col1,                  \
+		              sp->compact32.col2, lv));                                                                            \
+		break;                                                                                                            \
+	}                                                                                                                     \
+	case GJK_COMPACT_HULL: {                                                                                              \
+		v3 ld = gjk_mat_rotate(sp->compact.col0, sp->compact.col1, sp->compact.col2, sd);                                \
+		v3 sld = hmul(ld, sp->compact.scale);                                                                             \
+		int hbi = gjk_compact_support_climb(sp->compact.vx, sp->compact.vy, sp->compact.vz,                              \
+			sp->compact.offsets, sp->compact.neighbors, sld, sp->compact.hint);                                           \
+		sp->compact.hint = hbi;                                                                                           \
+		*(out_feat) = hbi;                                                                                                \
+		v3 lv = V3(sp->compact.vx[hbi]*sp->compact.scale.x, sp->compact.vy[hbi]*sp->compact.scale.y,                     \
+		           sp->compact.vz[hbi]*sp->compact.scale.z);                                                              \
+		(out_point) = add(sp->compact.center, gjk_mat_rotate_t(sp->compact.col0, sp->compact.col1,                        \
+		              sp->compact.col2, lv));                                                                              \
 		break;                                                                                                            \
 	}                                                                                                                     \
 	default: *(out_feat) = 0; (out_point) = V3(0,0,0); break;                                                             \

@@ -11257,6 +11257,101 @@ static void run_tests()
 			compact_hull_free(&fc);
 			hull_free(fh);
 		}
+
+		// GJK compact hull support: verify both compact types match full hull support.
+		TEST_BEGIN("gjk compact_hull32 support vs full hull");
+		{
+			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
+			Hull* fh = quickhull(bpts, 8);
+			CompactHull32 c32;
+			compact_hull32_from_hull(&c32, fh);
+			v3 pos = V3(5, 3, -2);
+			quat rot = norm(((quat){0.1f, 0.3f, -0.2f, 0.9f}));
+			v3 sc = V3(1.5f, 0.8f, 1.2f);
+			GJK_Shape c32_shape = gjk_compact_hull32(pos, rot, sc, &c32);
+			unsigned rng = 77777;
+			for (int t = 0; t < 500; t++) {
+				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+				float dx = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
+				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+				float dy = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
+				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+				float dz = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
+				v3 dir = V3(dx, dy, dz);
+				int f2; v3 p2;
+				gjk_support(&c32_shape, dir, &f2, p2);
+				// Brute-force: transform all verts and find true max.
+				float bf_max = -1e18f;
+				for (int vi = 0; vi < fh->vert_count; vi++) {
+					v3 lv = hmul(fh->verts[vi], sc);
+					v3 wv = add(pos, rotate(rot, lv));
+					float d = dot(dir, wv);
+					if (d > bf_max) bf_max = d;
+				}
+				float dp2 = dot(dir, p2);
+				TEST_ASSERT(bf_max - dp2 < 0.001f);
+			}
+			hull_free(fh);
+		}
+
+		TEST_BEGIN("gjk compact_hull support vs full hull (icosahedron)");
+		{
+			static const v3 ico[] = {
+				{-1,1.618f,0},{1,1.618f,0},{-1,-1.618f,0},{1,-1.618f,0},
+				{0,-1,1.618f},{0,1,1.618f},{0,-1,-1.618f},{0,1,-1.618f},
+				{1.618f,0,-1},{1.618f,0,1},{-1.618f,0,1},{-1.618f,0,-1},
+			};
+			Hull* fh = quickhull(ico, 12);
+			CompactHull fc;
+			compact_hull_from_hull(&fc, fh);
+			v3 pos = V3(-1, 4, 2);
+			quat rot = norm(((quat){0.5f, -0.1f, 0.3f, 0.8f}));
+			v3 sc = V3(2.0f, 2.0f, 2.0f);
+			GJK_Shape comp_shape = gjk_compact_hull_shape(pos, rot, sc, &fc);
+			unsigned rng = 12345;
+			for (int t = 0; t < 500; t++) {
+				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+				float dx = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
+				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+				float dy = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
+				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+				float dz = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
+				v3 dir = V3(dx, dy, dz);
+				int f2; v3 p2;
+				gjk_support(&comp_shape, dir, &f2, p2);
+				float bf_max = -1e18f;
+				for (int vi = 0; vi < fh->vert_count; vi++) {
+					v3 lv = hmul(fh->verts[vi], sc);
+					v3 wv = add(pos, rotate(rot, lv));
+					float d = dot(dir, wv);
+					if (d > bf_max) bf_max = d;
+				}
+				float dp2 = dot(dir, p2);
+				TEST_ASSERT(bf_max - dp2 < 0.001f);
+			}
+			compact_hull_free(&fc);
+			hull_free(fh);
+		}
+
+		// GJK distance: compact hull vs full hull should give same distance.
+		TEST_BEGIN("gjk distance compact vs full hull");
+		{
+			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
+			Hull* fh = quickhull(bpts, 8);
+			CompactHull32 c32;
+			compact_hull32_from_hull(&c32, fh);
+			v3 posA = V3(0,0,0), posB = V3(5,0,0);
+			quat rotA = quat_identity(), rotB = quat_identity();
+			v3 scA = V3(1,1,1), scB = V3(1,1,1);
+			GJK_Shape sa = gjk_hull_scaled(fh, posA, rotA, scA, NULL, NULL);
+			GJK_Shape sb = gjk_hull_scaled(fh, posB, rotB, scB, NULL, NULL);
+			GJK_Result r1 = gjk_distance_v(sa, sb, NULL);
+			GJK_Shape ca = gjk_compact_hull32(posA, rotA, scA, &c32);
+			GJK_Shape cb = gjk_compact_hull32(posB, rotB, scB, &c32);
+			GJK_Result r2 = gjk_distance_v(ca, cb, NULL);
+			TEST_ASSERT_FLOAT(r1.distance, r2.distance, 1e-3f);
+			hull_free(fh);
+		}
 	}
 
 	test_quickhull_case783();

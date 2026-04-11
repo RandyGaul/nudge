@@ -61,6 +61,7 @@ static inline v3 v3_neg(v3 a) { return (v3){ .m = simd_neg(a.m) }; }
 
 static inline quat quat_identity() { return (quat){ 0, 0, 0, 1 }; }
 static inline quat quat_inv(quat q) { return (quat){ -q.x, -q.y, -q.z, q.w }; }
+static inline quat quat_norm(quat q) { float l = sqrtf(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w); float inv = 1.0f / l; return (quat){ q.x*inv, q.y*inv, q.z*inv, q.w*inv }; }
 
 static inline quat quat_mul(quat a, quat b)
 {
@@ -331,7 +332,7 @@ static inline v3 solve(m3x3 a, v3 b)
 #define transpose(a) _Generic((a), m3x3: m3x3_transpose)(a)
 #define hmul(a, b)   _Generic((a), v3: v3_mul)(a, b)
 #define rcp(a)       _Generic((a), v3: v3_rcp)(a)
-#define norm(a)      _Generic((a), v3: v3_norm)(a)
+#define norm(a)      _Generic((a), v3: v3_norm, quat: quat_norm)(a)
 #define len(a)       _Generic((a), v3: v3_len)(a)
 #define len2(a)      _Generic((a), v3: v3_len2)(a)
 
