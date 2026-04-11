@@ -1020,6 +1020,85 @@ static PerfRow perf_cylinder_cylinder()
 }
 
 // =============================================================================
+// Cylinder native-narrowphase A/B bench: analytical vs GJK(cylinder-sphere).
+// Matches the cylinder_box / cylinder_cylinder harness pattern.
+
+static PerfRow perf_cyl_sphere_ana()
+{
+	gjk_perf_rng = 0x515aa1u;
+	PerfMotion m[PERF_CONFIGS];
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		float sep = 0.2f + (float)(c % 4) * 1.5f;
+		float sc = 0.5f + (float)(c / 4 % 4) * 1.8f;
+		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc, 0, 0);
+		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
+		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].heA = V3(sc, sc, sc); m[c].radiusA = sc * 0.5f;
+		m[c].radiusB = sc * 0.4f;
+	}
+	int total = PERF_N * PERF_CONFIGS;
+	float sum = 0;
+	double t0 = qpc_now();
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		PerfMotion* mc = &m[c];
+		for (int i = 0; i < PERF_N; i++) {
+			Cylinder cyl = { mc->posA, mc->rotA, mc->heA.y, mc->radiusA };
+			Sphere sph = { mc->posB, mc->radiusB };
+			Manifold man = {0};
+			int hit = collide_cylinder_sphere_ana(cyl, sph, &man);
+			sum += hit ? man.contacts[0].penetration : 0.0f;
+			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
+			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
+			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
+		}
+	}
+	double t1 = qpc_now();
+	volatile float sink = sum; (void)sink;
+	return (PerfRow){ (t1 - t0) * 1e9 / total, 0.0f };
+}
+
+static PerfRow perf_cyl_sphere_gjk()
+{
+	gjk_perf_rng = 0x515aa1u; // same seed for identical motion
+	PerfMotion m[PERF_CONFIGS];
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		float sep = 0.2f + (float)(c % 4) * 1.5f;
+		float sc = 0.5f + (float)(c / 4 % 4) * 1.8f;
+		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc, 0, 0);
+		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
+		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
+		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
+		m[c].heA = V3(sc, sc, sc); m[c].radiusA = sc * 0.5f;
+		m[c].radiusB = sc * 0.4f;
+	}
+	int total = PERF_N * PERF_CONFIGS;
+	float sum = 0; int iters = 0;
+	double t0 = qpc_now();
+	for (int c = 0; c < PERF_CONFIGS; c++) {
+		PerfMotion* mc = &m[c];
+		for (int i = 0; i < PERF_N; i++) {
+			Cylinder cyl = { mc->posA, mc->rotA, mc->heA.y, mc->radiusA };
+			Sphere sph = { mc->posB, mc->radiusB };
+			Manifold man = {0};
+			int hit = collide_cylinder_sphere_gjk(cyl, sph, &man);
+			sum += hit ? man.contacts[0].penetration : 0.0f;
+			iters += 1;
+			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
+			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
+			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
+		}
+	}
+	double t1 = qpc_now();
+	volatile float sink = sum; (void)sink;
+	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
+}
+
+// =============================================================================
 // Entry point.
 
 // Hull-hull perf: two random convex hulls of n_target verts each, rotating + translating.
@@ -1387,7 +1466,7 @@ static void run_gjk_perf_tests()
 	// Performance
 	int hull_sizes[] = { 20, 50, 200, 1000 };
 	int nh = 4;
-	enum { N_PERF = 5 + 5*4 + 2 }; // 5 prim-prim + 5 shape types * 4 hull sizes + 2 triangle
+	enum { N_PERF = 5 + 5*4 + 2 + 2 }; // 5 prim-prim + 5 shape types * 4 hull sizes + 2 triangle + 2 cyl-sphere A/B
 	const char* names[N_PERF];
 	PerfRow p[N_PERF];
 	char name_bufs[N_PERF][20];
@@ -1397,6 +1476,9 @@ static void run_gjk_perf_tests()
 	names[pi] = "capsule-cap";   p[pi++] = perf_capsule_capsule();
 	names[pi] = "cylinder-box";  p[pi++] = perf_cylinder_box();
 	names[pi] = "cylinder-cyl";  p[pi++] = perf_cylinder_cylinder();
+	// Phase 1 A/B bench: cyl-sphere analytical vs GJK on full cylinder support.
+	names[pi] = "cyl-sph (ana)"; p[pi++] = perf_cyl_sphere_ana();
+	names[pi] = "cyl-sph (gjk)"; p[pi++] = perf_cyl_sphere_gjk();
 	for (int h = 0; h < nh; h++) {
 		int n = hull_sizes[h];
 		sprintf(name_bufs[pi], "sph-h%d", n);    names[pi] = name_bufs[pi]; p[pi] = perf_sphere_hull(n);   pi++;

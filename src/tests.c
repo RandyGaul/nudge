@@ -1184,6 +1184,147 @@ static void run_cyl_case(CylCase t)
 }
 
 // ============================================================================
+// Phase 1: cyl-sphere (analytical). Hand-written Voronoi coverage table.
+
+static void test_cyl_sphere_native()
+{
+	const float hh = 1.0f, r = 0.5f;
+	const quat I = quat_identity();
+	const v3 O = V3(0,0,0);
+
+	// Notes on naming: "shallow" means the sphere touches the cyl with small overlap,
+	// "deep" means significant penetration or sphere center past the cyl surface.
+	// Geometry is chosen so that feat.distance - sphere.radius is:
+	//   shallow:  ~(-0.05)   (just inside contact)
+	//   deep:     <= -0.2    (substantial overlap)
+	CylCase cases[] = {
+		// SIDE shallow: sphere touching curved wall, small overlap.
+		{ "cyl-sphere SIDE shallow",
+		  O, I, hh, r, CYL_OTHER_SPHERE,
+		  .sphere = { V3(0.65f, 0.3f, 0.0f), 0.2f }, // feat.distance=0.15, gap=-0.05
+		  .is_deep = 0, .expected_normal = V3(1,0,0), .expected_contact_count = 1 },
+
+		// SIDE deep: sphere center close to wall, large overlap.
+		{ "cyl-sphere SIDE deep",
+		  O, I, hh, r, CYL_OTHER_SPHERE,
+		  .sphere = { V3(0.55f, 0.0f, 0.0f), 0.4f }, // feat.distance=0.05, gap=-0.35
+		  .is_deep = 1, .expected_normal = V3(1,0,0), .expected_contact_count = 1 },
+
+		// CAP shallow (top): sphere sitting on top cap.
+		{ "cyl-sphere CAP+ shallow",
+		  O, I, hh, r, CYL_OTHER_SPHERE,
+		  .sphere = { V3(0.1f, 1.15f, 0.0f), 0.2f }, // feat.distance=0.15, gap=-0.05
+		  .is_deep = 0, .expected_normal = V3(0,1,0), .expected_contact_count = 1 },
+
+		// CAP shallow (bottom).
+		{ "cyl-sphere CAP- shallow",
+		  O, I, hh, r, CYL_OTHER_SPHERE,
+		  .sphere = { V3(-0.1f, -1.15f, 0.0f), 0.2f },
+		  .is_deep = 0, .expected_normal = V3(0,-1,0), .expected_contact_count = 1 },
+
+		// CAP deep: sphere center just above cap, large overlap.
+		{ "cyl-sphere CAP+ deep",
+		  O, I, hh, r, CYL_OTHER_SPHERE,
+		  .sphere = { V3(0.0f, 1.05f, 0.0f), 0.4f }, // feat.distance=0.05, gap=-0.35
+		  .is_deep = 1, .expected_normal = V3(0,1,0), .expected_contact_count = 1 },
+
+		// RIM shallow: sphere tangent to the top rim circle at +X side.
+		{ "cyl-sphere RIM+ shallow",
+		  O, I, hh, r, CYL_OTHER_SPHERE,
+		  .sphere = { V3(0.65f, 1.15f, 0.0f), 0.25f }, // dr=0.15, da=0.15, dist~0.212, gap~-0.038
+		  .is_deep = 0, .expected_normal = norm(V3(0.15f, 0.15f, 0)), .expected_contact_count = 1 },
+
+		// RIM deep: sphere center just inside rim corner.
+		{ "cyl-sphere RIM+ deep",
+		  O, I, hh, r, CYL_OTHER_SPHERE,
+		  .sphere = { V3(0.58f, 1.08f, 0.0f), 0.35f }, // dist~0.113, gap~-0.237
+		  .is_deep = 1, .expected_normal = norm(V3(0.08f, 0.08f, 0)), .expected_contact_count = 1 },
+
+		// INSIDE (side escape): sphere near cyl center, closer to side wall.
+		// Normal flips: for INSIDE, normal points opposite to feat.normal so the solver
+		// pushes the sphere outward through the escape face. Escape is +X (feat.normal),
+		// so A->B = -X.
+		{ "cyl-sphere INSIDE side-escape",
+		  O, I, hh, r, CYL_OTHER_SPHERE,
+		  .sphere = { V3(0.35f, 0.0f, 0.0f), 0.3f }, // side_esc=0.15, feat.dist=-0.15, gap=-0.45
+		  .is_deep = 1, .expected_normal = V3(-1,0,0), .expected_contact_count = 1 },
+
+		// INSIDE (cap escape): sphere near cyl center, closer to top cap.
+		{ "cyl-sphere INSIDE cap-escape",
+		  O, I, hh, r, CYL_OTHER_SPHERE,
+		  .sphere = { V3(0.0f, 0.8f, 0.0f), 0.3f }, // cap_esc=0.2, feat.dist=-0.2, gap=-0.5
+		  .is_deep = 1, .expected_normal = V3(0,-1,0), .expected_contact_count = 1 },
+
+		// Translated + rotated cylinder -- tests the transform math.
+		// Z+90 rotation sends local Y (axis) to world -X. Witness placed perpendicular
+		// to that axis along world +Z at distance 0.75, so local (0, 0, 0.75) -- SIDE.
+		{ "cyl-sphere SIDE shallow (translated + rotated Z 90)",
+		  V3(5, 10, -3),
+		  { 0, 0, sinf(3.14159265f * 0.25f), cosf(3.14159265f * 0.25f) },
+		  hh, r, CYL_OTHER_SPHERE,
+		  .sphere = { V3(5.0f, 10.0f, -3.0f + 0.75f), 0.3f }, // feat.distance=0.25, gap=-0.05
+		  .is_deep = 0, .expected_normal = V3(0, 0, 1), .expected_contact_count = 1 },
+
+		// Separated: gap > 0, should not collide.
+		{ "cyl-sphere separated (miss)",
+		  O, I, hh, r, CYL_OTHER_SPHERE,
+		  .sphere = { V3(2.0f, 0.0f, 0.0f), 0.2f },
+		  .is_deep = 0, .expected_normal = V3(1,0,0), .expected_contact_count = 0 },
+	};
+
+	int n = (int)(sizeof(cases) / sizeof(cases[0]));
+	for (int i = 0; i < n; i++) {
+		// Special-case the miss test because run_cyl_case asserts hit.
+		if (cases[i].expected_contact_count == 0) {
+			Cylinder a = { cases[i].cyl_pos, cases[i].cyl_rot, cases[i].cyl_hh, cases[i].cyl_radius };
+			Manifold m = {0};
+			int hit = collide_cylinder_sphere(a, cases[i].sphere, &m);
+			TEST_BEGIN(cases[i].name);
+			TEST_ASSERT(!hit);
+			continue;
+		}
+		run_cyl_case(cases[i]);
+	}
+}
+
+// Fuzz: compare native cyl-sphere against brute-force reference for 2000 random configs.
+// Reference uses cyl_classify_point distance which we have already fuzz-verified against
+// double-precision ground truth in Phase 0. This catches drift between the narrowphase
+// wrapper and the classify helper.
+static void test_cyl_sphere_fuzz()
+{
+	TEST_BEGIN("cyl-sphere fuzz 2000 vs classify-reference");
+	cyl_rng = 0xdeadbeefu;
+	int hits = 0, misses = 0;
+	for (int i = 0; i < 2000; i++) {
+		Cylinder cyl = { cyl_rand_v3(-3,3), cyl_rand_quat(), cyl_randr(0.2f, 2.0f), cyl_randr(0.1f, 1.5f) };
+		// Sphere placed randomly in a box around the cylinder.
+		Sphere sph = { add(cyl.center, cyl_rand_v3(-3,3)), cyl_randr(0.05f, 0.8f) };
+
+		CylFeature feat = cyl_classify_point(sph.center, cyl.center, cyl.rotation, cyl.half_height, cyl.radius);
+		int expect_hit = feat.distance <= sph.radius;
+
+		Manifold m = {0};
+		int hit = collide_cylinder_sphere(cyl, sph, &m);
+		TEST_ASSERT(hit == expect_hit);
+		if (hit) {
+			hits++;
+			// Normal should be unit length and point from cyl surface toward sphere center
+			// (or opposite direction for INSIDE region).
+			float nl = sqrtf(len2(m.contacts[0].normal));
+			TEST_ASSERT_FLOAT(nl, 1.0f, 1e-3f);
+			// Penetration should equal sph.radius - feat.distance (matches native formula).
+			TEST_ASSERT_FLOAT(m.contacts[0].penetration, sph.radius - feat.distance, 1e-4f);
+		} else {
+			misses++;
+		}
+	}
+	// Both hit and miss buckets should have coverage.
+	TEST_ASSERT(hits > 100);
+	TEST_ASSERT(misses > 100);
+}
+
+// ============================================================================
 // Entry point.
 
 // ============================================================================
@@ -11204,6 +11345,8 @@ static void run_tests()
 	test_box_box();
 	test_normal_convention();
 	test_cyl_classify_point();
+	test_cyl_sphere_native();
+	test_cyl_sphere_fuzz();
 	test_quickhull();
 
 	// Compact hull converters -- thorough correctness tests.

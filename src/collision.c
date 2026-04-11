@@ -1707,19 +1707,69 @@ static ConvexHull cylinder_to_convex_hull(Cylinder c)
 // replace the bodies one at a time with native geometric implementations that
 // produce analytically-correct surface contacts using cyl_classify_point.
 
+// Analytical cyl-sphere: classify the sphere center as a point against the
+// cylinder, compare against sphere radius. No GJK iteration -- one call to
+// cyl_classify_point handles all four Voronoi regions.
+static int collide_cylinder_sphere_ana(Cylinder a, Sphere b, Manifold* manifold)
+{
+	CylFeature feat = cyl_classify_point(b.center, a.center, a.rotation, a.half_height, a.radius);
+
+	float gap = feat.distance - b.radius;
+	if (gap > 0.0f) return 0;
+	if (!manifold) return 1;
+
+	// Normal points from cyl surface toward sphere center.
+	// External regions (SIDE/CAP/RIM): feat.normal already points outward and
+	// the sphere center lies in that direction.
+	// INSIDE: the sphere center lies OPPOSITE to feat.normal (inside the cyl),
+	// so flip to get the A->B direction that the solver will use to push them
+	// apart through the nearest escape face.
+	v3 normal = feat.region == CYL_REGION_INSIDE ? neg(feat.normal) : feat.normal;
+	manifold->count = 1;
+	manifold->contacts[0] = (Contact){
+		.point = feat.surface_pt,
+		.normal = normal,
+		.penetration = b.radius - feat.distance,
+		.feature_id = 0,
+	};
+	return 1;
+}
+
+// GJK variant: cylinder-sphere via gjk_cylinder support + point-sphere as GJK B.
+// Benchmarked against the analytical path; kept as a reference implementation.
+static int collide_cylinder_sphere_gjk(Cylinder a, Sphere b, Manifold* manifold)
+{
+	v3 axis = rotate(a.rotation, V3(0, 1, 0));
+	v3 p = sub(a.center, scale(axis, a.half_height));
+	v3 q = add(a.center, scale(axis, a.half_height));
+	GJK_Shape ga = gjk_cylinder(p, q, a.radius);
+	GJK_Shape gb = gjk_sphere(b.center, 0.0f);
+	GJK_Result r = gjk_distance(&ga, &gb, NULL);
+
+	if (r.distance > b.radius) return 0;
+	if (!manifold) return 1;
+
+	// Shallow: GJK witness points -- normal from cyl surface toward sphere center.
+	if (r.distance > 1e-5f) {
+		v3 diff = sub(r.point2, r.point1);
+		float inv_d = 1.0f / r.distance;
+		manifold->count = 1;
+		manifold->contacts[0] = (Contact){
+			.point = r.point1,
+			.normal = scale(diff, inv_d),
+			.penetration = b.radius - r.distance,
+		};
+		return 1;
+	}
+
+	// Deep / touching: GJK distance collapses to zero -- fall back to analytical
+	// which handles INSIDE and near-boundary cases cleanly.
+	return collide_cylinder_sphere_ana(a, b, manifold);
+}
+
 int collide_cylinder_sphere(Cylinder a, Sphere b, Manifold* manifold)
 {
-	// Shape-A-first convention: sphere on the B side, so normal from cyl to sphere.
-	Manifold tmp = {0};
-	int hit = collide_sphere_hull(b, cylinder_to_convex_hull(a), &tmp);
-	if (!hit) return 0;
-	if (manifold) {
-		*manifold = tmp;
-		// collide_sphere_hull reports normal B->A (i.e. cyl->sphere is A side in the
-		// swapped call = sphere->cyl as reported). Flip to get cyl->sphere.
-		for (int i = 0; i < manifold->count; i++) manifold->contacts[i].normal = neg(manifold->contacts[i].normal);
-	}
-	return 1;
+	return collide_cylinder_sphere_ana(a, b, manifold);
 }
 
 int collide_cylinder_capsule(Cylinder a, Capsule b, Manifold* manifold)
