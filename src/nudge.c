@@ -198,33 +198,79 @@ static void pool_ensure(int n_workers)
 	pool_thread_count = needed;
 }
 
-// Dispatch work in parallel: fn(ctx, start, count) called for each block.
+// Persistent dispatch state — survives across pool_dispatch calls so workers
+// never access freed stack memory.
 static int pool_sync_counter;
+static WorkBlock pool_blocks[512];
+static WorkStage pool_stage;
+
 static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size, int n_workers)
 {
 	if (total_items <= 0) return;
 	int n_blocks = (total_items + block_size - 1) / block_size;
 	if (n_blocks > 512) n_blocks = 512;
-	WorkBlock blocks[512];
-	for (int i = 0; i < n_blocks; i++) { blocks[i].start = i * block_size; int rem = total_items - blocks[i].start; blocks[i].count = rem < block_size ? rem : block_size; blocks[i].sync_index = pool_sync_counter; }
-	WorkStage stage = { .blocks = blocks, .block_count = n_blocks, .completion_count = 0 };
-	pool_ctx.stage = &stage;
+	for (int i = 0; i < n_blocks; i++) { pool_blocks[i].start = i * block_size; int rem = total_items - pool_blocks[i].start; pool_blocks[i].count = rem < block_size ? rem : block_size; pool_blocks[i].sync_index = pool_sync_counter; }
+	pool_stage.blocks = pool_blocks;
+	pool_stage.block_count = n_blocks;
+	pool_stage.completion_count = 0;
+	pool_ctx.stage = &pool_stage;
 	pool_ctx.fn = fn;
 	pool_ctx.fn_ctx = ctx;
 	pool_sync_counter++;
 	long sync_bits = (long)((pool_sync_counter << 16) | 0);
 	_InterlockedExchange(&pool_ctx.sync_bits, sync_bits);
 	pool_execute(&pool_ctx, pool_sync_counter - 1, pool_sync_counter);
-	while (stage.completion_count < n_blocks) _mm_pause();
+	while (pool_stage.completion_count < n_blocks) _mm_pause();
 }
 
-// --- PGS solver work function ---
+// --- PGS solver work function (per-color) ---
 typedef struct PGS_WorkCtx { SolverBodyVel* bodies; PGS_Batch4* batches; } PGS_WorkCtx;
 static void pgs_work_fn(void* ctx, int start, int count)
 {
 	PGS_WorkCtx* p = (PGS_WorkCtx*)ctx;
 	for (int i = start; i < start + count; i++)
 		solve_contact_batch4_sv(p->bodies, &p->batches[i]);
+}
+
+// --- Integrate work function (parallel body integration) ---
+typedef struct IntegrateCtx { WorldInternal* w; float dt; int* body_indices; int mode; } IntegrateCtx;
+static void integrate_vel_work_fn(void* ctx, int start, int count)
+{
+	IntegrateCtx* ic = (IntegrateCtx*)ctx;
+	for (int k = start; k < start + count; k++) {
+		int i = ic->body_indices ? ic->body_indices[k] : k;
+		BodyHot* h = &ic->w->body_hot[i];
+		if (h->inv_mass == 0.0f) continue;
+		body_compute_inv_inertia_world(h);
+		h->velocity = add(h->velocity, scale(ic->w->gravity, ic->dt));
+		if (h->linear_damping > 0.0f) h->velocity = scale(h->velocity, 1.0f / (1.0f + h->linear_damping * ic->dt));
+		if (h->angular_damping > 0.0f) h->angular_velocity = scale(h->angular_velocity, 1.0f / (1.0f + h->angular_damping * ic->dt));
+	}
+}
+
+static void integrate_pos_work_fn(void* ctx, int start, int count)
+{
+	IntegrateCtx* ic = (IntegrateCtx*)ctx;
+	float dt = ic->dt;
+	for (int k = start; k < start + count; k++) {
+		int i = ic->body_indices ? ic->body_indices[k] : k;
+		BodyHot* h = &ic->w->body_hot[i];
+		if (h->inv_mass == 0.0f) continue;
+		float lv2 = len2(h->velocity);
+		if (lv2 > SOLVER_MAX_LINEAR_VEL * SOLVER_MAX_LINEAR_VEL) h->velocity = scale(h->velocity, SOLVER_MAX_LINEAR_VEL / sqrtf(lv2));
+		float av2 = len2(h->angular_velocity);
+		if (av2 > SOLVER_MAX_ANGULAR_VEL * SOLVER_MAX_ANGULAR_VEL) h->angular_velocity = scale(h->angular_velocity, SOLVER_MAX_ANGULAR_VEL / sqrtf(av2));
+		h->position = add(h->position, scale(h->velocity, dt));
+		h->angular_velocity = solve_gyroscopic(h->rotation, h->inv_inertia_local, h->angular_velocity, dt);
+		v3 ww = h->angular_velocity;
+		quat spin = { ww.x, ww.y, ww.z, 0.0f };
+		quat dq = mul(spin, h->rotation);
+		h->rotation.x += 0.5f * dt * dq.x; h->rotation.y += 0.5f * dt * dq.y; h->rotation.z += 0.5f * dt * dq.z; h->rotation.w += 0.5f * dt * dq.w;
+		float ql = sqrtf(h->rotation.x*h->rotation.x + h->rotation.y*h->rotation.y + h->rotation.z*h->rotation.z + h->rotation.w*h->rotation.w);
+		if (ql < 1e-15f) ql = 1.0f;
+		float inv_ql = 1.0f / ql;
+		h->rotation.x *= inv_ql; h->rotation.y *= inv_ql; h->rotation.z *= inv_ql; h->rotation.w *= inv_ql;
+	}
 }
 
 // --- Narrowphase work function ---
@@ -291,17 +337,26 @@ void world_step(World world, float dt)
 
 	double t0 = perf_now();
 	warm_cache_age_and_evict(w);
-	integrate_velocities_and_inertia(w, sub_dt);
+	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
+#ifdef _WIN32
+	if (n_workers > 1) pool_ensure(n_workers);
+#endif
+	int body_count = asize(w->body_hot);
+#ifdef _WIN32
+	if (n_workers > 1 && body_count >= 256) {
+		IntegrateCtx ic = { .w = w, .dt = sub_dt, .body_indices = NULL };
+		pool_dispatch(integrate_vel_work_fn, &ic, body_count, 64, n_workers);
+	} else
+#endif
+		integrate_velocities_and_inertia(w, sub_dt);
 	w->perf.integrate = perf_now() - t0;
 
 	double t1 = perf_now();
 	CK_DYNA InternalManifold* manifolds = NULL;
 	// Parallel narrowphase: broadphase outputs pair list, we dispatch narrowphase here.
 	CK_DYNA BroadPair* np_pairs = NULL;
-	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
 #ifdef _WIN32
 	if (n_workers > 1) {
-		pool_ensure(n_workers);
 		w->np_pairs_out = &np_pairs;
 	} else
 #endif
@@ -404,7 +459,13 @@ void world_step(World world, float dt)
 	for (int sub = 0; sub < n_sub; sub++) {
 		if (sub > 0) {
 			double ti = perf_now();
-			integrate_velocities_and_inertia(w, sub_dt);
+#ifdef _WIN32
+			if (n_workers > 1 && body_count >= 256) {
+				IntegrateCtx ic = { .w = w, .dt = sub_dt, .body_indices = NULL };
+				pool_dispatch(integrate_vel_work_fn, &ic, body_count, 64, n_workers);
+			} else
+#endif
+				integrate_velocities_and_inertia(w, sub_dt);
 			t_int_sub += perf_now() - ti;
 			// Refresh joint Jacobians/limits from current body state (positions
 			// changed by integrate_positions last substep, velocities just updated).
@@ -471,14 +532,10 @@ void world_step(World world, float dt)
 			}
 			int batch_count = asize(batches);
 
-			// Iteration loop: just gather velocities → solve → scatter velocities.
-			// Parallel: within each color, blocks of batches are claimed by worker threads.
-			// Sequential: colors are processed one at a time (graph coloring guarantees).
-			int n_workers = w->thread_count > 0 ? w->thread_count : 1;
-#ifdef _WIN32
-			if (n_workers > 1) pool_ensure(n_workers);
-#endif
-			static int sync_counter;
+			// Iteration loop: dispatch per color within each iteration.
+			// Colors must be sequential (graph coloring guarantee), but within each color
+			// all blocks are parallel.
+			// n_workers already computed at top of world_step
 			for (int iter = 0; iter < w->velocity_iters; iter++) {
 				for (int c = 0; c < color_count; c++) {
 					int bs = color_batch_starts[c], be = color_batch_starts[c + 1];
@@ -490,14 +547,8 @@ void world_step(World world, float dt)
 					} else
 #endif
 					{
-						for (int bi = bs; bi < be; bi++) {
-							if (bi + 1 < be) {
-								_mm_prefetch((char*)&batches[bi+1], _MM_HINT_T0);
-								_mm_prefetch((char*)&w->body_vel[batches[bi+1].body_a[0]], _MM_HINT_T0);
-								_mm_prefetch((char*)&w->body_vel[batches[bi+1].body_b[0]], _MM_HINT_T0);
-							}
+						for (int bi = bs; bi < be; bi++)
 							solve_contact_batch4_sv(w->body_vel, &batches[bi]);
-						}
 					}
 				}
 				double tjl = perf_now();
@@ -570,7 +621,13 @@ void world_step(World world, float dt)
 		}
 
 		double ti2 = perf_now();
-		integrate_positions(w, sub_dt);
+#ifdef _WIN32
+		if (n_workers > 1 && body_count >= 256) {
+			IntegrateCtx ic = { .w = w, .dt = sub_dt, .body_indices = NULL };
+			pool_dispatch(integrate_pos_work_fn, &ic, body_count, 64, n_workers);
+		} else
+#endif
+			integrate_positions(w, sub_dt);
 		t_int_sub += perf_now() - ti2;
 
 		// Relax contacts: refresh separation/bias from updated positions
