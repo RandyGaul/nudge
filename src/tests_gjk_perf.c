@@ -1741,5 +1741,89 @@ static void run_gjk_perf_tests()
 		printf("  scalar:  %6.1f ns/tri\n", scalar_tri);
 		printf("  batch:   %6.1f ns/tri (%.1fx)\n", batch_tri, scalar_tri / batch_tri);
 	}
+	// --- solve4 microbenchmark: bit-packed vs sequential branches ---
+	{
+		// Reference: old sequential-branch solve4
+		#define SOLVE4_OLD(s, ret) do { \
+			v3 a=(s)->v[0].point, b=(s)->v[1].point, c=(s)->v[2].point, d=(s)->v[3].point; \
+			float _uAB=dot(b,sub(b,a)), _vAB=dot(a,sub(a,b)); \
+			float _uBC=dot(c,sub(c,b)), _vBC=dot(b,sub(b,c)); \
+			float _uCA=dot(a,sub(a,c)), _vCA=dot(c,sub(c,a)); \
+			float _uBD=dot(d,sub(d,b)), _vBD=dot(b,sub(b,d)); \
+			float _uDC=dot(c,sub(c,d)), _vDC=dot(d,sub(d,c)); \
+			float _uAD=dot(d,sub(d,a)), _vAD=dot(a,sub(a,d)); \
+			v3 _n; \
+			_n=cross(sub(d,a),sub(b,a)); float _uADB=dot(cross(d,b),_n), _vADB=dot(cross(b,a),_n), _wADB=dot(cross(a,d),_n); \
+			_n=cross(sub(c,a),sub(d,a)); float _uACD=dot(cross(c,d),_n), _vACD=dot(cross(d,a),_n), _wACD=dot(cross(a,c),_n); \
+			_n=cross(sub(b,c),sub(d,c)); float _uCBD=dot(cross(b,d),_n), _vCBD=dot(cross(d,c),_n), _wCBD=dot(cross(c,b),_n); \
+			_n=cross(sub(b,a),sub(c,a)); float _uABC=dot(cross(b,c),_n), _vABC=dot(cross(c,a),_n), _wABC=dot(cross(a,b),_n); \
+			float _den=stp(sub(c,b),sub(a,b),sub(d,b)); if(_den==0){ret=0; break;} float _vol=1.0f/_den; \
+			float _uABCD=stp(c,d,b)*_vol, _vABCD=stp(c,a,d)*_vol, _wABCD=stp(d,a,b)*_vol, _xABCD=stp(b,a,c)*_vol; \
+			if(_vAB<=0&&_uCA<=0&&_vAD<=0){(s)->v[0].u=1;(s)->divisor=1;(s)->count=1;ret=1;break;} \
+			if(_uAB<=0&&_vBC<=0&&_vBD<=0){(s)->v[0]=(s)->v[1];(s)->v[0].u=1;(s)->divisor=1;(s)->count=1;ret=1;break;} \
+			if(_uBC<=0&&_vCA<=0&&_uDC<=0){(s)->v[0]=(s)->v[2];(s)->v[0].u=1;(s)->divisor=1;(s)->count=1;ret=1;break;} \
+			if(_uBD<=0&&_vDC<=0&&_uAD<=0){(s)->v[0]=(s)->v[3];(s)->v[0].u=1;(s)->divisor=1;(s)->count=1;ret=1;break;} \
+			if(_wABC<=0&&_vADB<=0&&_uAB>0&&_vAB>0){(s)->v[0].u=_uAB;(s)->v[1].u=_vAB;(s)->divisor=_uAB+_vAB;(s)->count=2;ret=1;break;} \
+			if(_uABC<=0&&_wCBD<=0&&_uBC>0&&_vBC>0){(s)->v[0]=(s)->v[1];(s)->v[1]=(s)->v[2];(s)->v[0].u=_uBC;(s)->v[1].u=_vBC;(s)->divisor=_uBC+_vBC;(s)->count=2;ret=1;break;} \
+			if(_vABC<=0&&_wACD<=0&&_uCA>0&&_vCA>0){(s)->v[1]=(s)->v[0];(s)->v[0]=(s)->v[2];(s)->v[0].u=_uCA;(s)->v[1].u=_vCA;(s)->divisor=_uCA+_vCA;(s)->count=2;ret=1;break;} \
+			if(_vCBD<=0&&_uACD<=0&&_uDC>0&&_vDC>0){(s)->v[0]=(s)->v[3];(s)->v[1]=(s)->v[2];(s)->v[0].u=_uDC;(s)->v[1].u=_vDC;(s)->divisor=_uDC+_vDC;(s)->count=2;ret=1;break;} \
+			if(_vACD<=0&&_wADB<=0&&_uAD>0&&_vAD>0){(s)->v[1]=(s)->v[3];(s)->v[0].u=_uAD;(s)->v[1].u=_vAD;(s)->divisor=_uAD+_vAD;(s)->count=2;ret=1;break;} \
+			if(_uCBD<=0&&_uADB<=0&&_uBD>0&&_vBD>0){(s)->v[0]=(s)->v[1];(s)->v[1]=(s)->v[3];(s)->v[0].u=_uBD;(s)->v[1].u=_vBD;(s)->divisor=_uBD+_vBD;(s)->count=2;ret=1;break;} \
+			if(_xABCD<=0&&_uABC>0&&_vABC>0&&_wABC>0){(s)->v[0].u=_uABC;(s)->v[1].u=_vABC;(s)->v[2].u=_wABC;(s)->divisor=_uABC+_vABC+_wABC;(s)->count=3;ret=1;break;} \
+			if(_uABCD<=0&&_uCBD>0&&_vCBD>0&&_wCBD>0){(s)->v[0]=(s)->v[2];(s)->v[2]=(s)->v[3];(s)->v[0].u=_uCBD;(s)->v[1].u=_vCBD;(s)->v[2].u=_wCBD;(s)->divisor=_uCBD+_vCBD+_wCBD;(s)->count=3;ret=1;break;} \
+			if(_vABCD<=0&&_uACD>0&&_vACD>0&&_wACD>0){(s)->v[1]=(s)->v[2];(s)->v[2]=(s)->v[3];(s)->v[0].u=_uACD;(s)->v[1].u=_vACD;(s)->v[2].u=_wACD;(s)->divisor=_uACD+_vACD+_wACD;(s)->count=3;ret=1;break;} \
+			if(_wABCD<=0&&_uADB>0&&_vADB>0&&_wADB>0){(s)->v[2]=(s)->v[1];(s)->v[1]=(s)->v[3];(s)->v[0].u=_uADB;(s)->v[1].u=_vADB;(s)->v[2].u=_wADB;(s)->divisor=_uADB+_vADB+_wADB;(s)->count=3;ret=1;break;} \
+			(s)->v[0].u=_uABCD;(s)->v[1].u=_vABCD;(s)->v[2].u=_wABCD;(s)->v[3].u=_xABCD;(s)->divisor=1;(s)->count=4;ret=1; \
+		} while(0)
+
+		int solve4_n = 1000000;
+		// Generate random tetrahedra that cover different Voronoi regions
+		GJK_Simplex configs[64];
+		gjk_perf_rng = 99999;
+		for (int c = 0; c < 64; c++) {
+			for (int vi = 0; vi < 4; vi++) {
+				float spread = 2.0f + gjk_perf_randf() * 6.0f;
+				configs[c].v[vi].point = V3((gjk_perf_randf()-0.5f)*spread, (gjk_perf_randf()-0.5f)*spread, (gjk_perf_randf()-0.5f)*spread);
+				configs[c].v[vi].point1 = configs[c].v[vi].point;
+				configs[c].v[vi].point2 = V3(0,0,0);
+				configs[c].v[vi].feat1 = vi;
+				configs[c].v[vi].feat2 = 0;
+				configs[c].v[vi].u = 1.0f;
+			}
+			configs[c].count = 4;
+			configs[c].divisor = 4.0f;
+		}
+
+		// Bench new (bit-packed)
+		volatile int sink = 0;
+		double t0 = qpc_now();
+		for (int i = 0; i < solve4_n; i++) {
+			GJK_Simplex s = configs[i & 63];
+			sink += gjk_solve4(&s);
+			sink += s.count;
+		}
+		double t1 = qpc_now();
+		double new_ns = (t1 - t0) * 1e9 / solve4_n;
+
+		// Bench old (sequential branches)
+		volatile int sink2 = 0;
+		t0 = qpc_now();
+		for (int i = 0; i < solve4_n; i++) {
+			GJK_Simplex s = configs[i & 63];
+			int ret = 0;
+			SOLVE4_OLD(&s, ret);
+			sink2 += ret;
+			sink2 += s.count;
+		}
+		t1 = qpc_now();
+		double old_ns = (t1 - t0) * 1e9 / solve4_n;
+
+		printf("\n  --- solve4 microbenchmark (%d calls) ---\n", solve4_n);
+		printf("  bit-packed:   %6.1f ns/call\n", new_ns);
+		printf("  sequential:   %6.1f ns/call\n", old_ns);
+		printf("  speedup:      %.2fx\n", old_ns / new_ns);
+		(void)sink; (void)sink2;
+		#undef SOLVE4_OLD
+	}
 	printf("\n");
 }

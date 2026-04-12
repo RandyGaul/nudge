@@ -605,33 +605,25 @@ static SIMD_NOINLINE int gjk_solve4(GJK_Simplex* s)
 	float uABCD = stp(c, d, b) * vol, vABCD = stp(c, a, d) * vol;
 	float wABCD = stp(d, a, b) * vol, xABCD = stp(b, a, c) * vol;
 
-	// Pack 28 sign bits for branchless Voronoi region classification (same
-	// pattern as gjk_solve3).  Each region check becomes a single mask test.
-	// Bit layout: 0:uAB 1:vAB 2:uBC 3:vBC 4:uCA 5:vCA 6:uBD 7:vBD
-	//   8:uDC 9:vDC 10:uAD 11:vAD  12:uADB 13:vADB 14:wADB
-	//   15:uACD 16:vACD 17:wACD  18:uCBD 19:vCBD 20:wCBD
-	//   21:uABC 22:vABC 23:wABC  24:uABCD 25:vABCD 26:wABCD 27:xABCD
-	uint32_t signs = (uAB > 0) | ((vAB > 0) << 1) | ((uBC > 0) << 2) | ((vBC > 0) << 3) | ((uCA > 0) << 4) | ((vCA > 0) << 5) | ((uBD > 0) << 6) | ((vBD > 0) << 7) | ((uDC > 0) << 8) | ((vDC > 0) << 9) | ((uAD > 0) << 10) | ((vAD > 0) << 11) | ((uADB > 0) << 12) | ((vADB > 0) << 13) | ((wADB > 0) << 14) | ((uACD > 0) << 15) | ((vACD > 0) << 16) | ((wACD > 0) << 17) | ((uCBD > 0) << 18) | ((vCBD > 0) << 19) | ((wCBD > 0) << 20) | ((uABC > 0) << 21) | ((vABC > 0) << 22) | ((wABC > 0) << 23) | ((uABCD > 0) << 24) | ((vABCD > 0) << 25) | ((wABCD > 0) << 26) | ((xABCD > 0) << 27);
+	// Vertex regions
+	if (vAB <= 0 && uCA <= 0 && vAD <= 0) { s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if (uAB <= 0 && vBC <= 0 && vBD <= 0) { s->v[0] = s->v[1]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if (uBC <= 0 && vCA <= 0 && uDC <= 0) { s->v[0] = s->v[2]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if (uBD <= 0 && vDC <= 0 && uAD <= 0) { s->v[0] = s->v[3]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
 
-	// Vertex regions (3 bits must be 0)
-	if ((signs & 0x812) == 0) { s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
-	if ((signs & 0x089) == 0) { s->v[0] = s->v[1]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
-	if ((signs & 0x124) == 0) { s->v[0] = s->v[2]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
-	if ((signs & 0x640) == 0) { s->v[0] = s->v[3]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	// Edge regions
+	if (wABC <= 0 && vADB <= 0 && uAB > 0 && vAB > 0) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
+	if (uABC <= 0 && wCBD <= 0 && uBC > 0 && vBC > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
+	if (vABC <= 0 && wACD <= 0 && uCA > 0 && vCA > 0) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
+	if (vCBD <= 0 && uACD <= 0 && uDC > 0 && vDC > 0) { s->v[0] = s->v[3]; s->v[1] = s->v[2]; s->v[0].u = uDC; s->v[1].u = vDC; s->divisor = uDC + vDC; s->count = 2; return 1; }
+	if (vACD <= 0 && wADB <= 0 && uAD > 0 && vAD > 0) { s->v[1] = s->v[3]; s->v[0].u = uAD; s->v[1].u = vAD; s->divisor = uAD + vAD; s->count = 2; return 1; }
+	if (uCBD <= 0 && uADB <= 0 && uBD > 0 && vBD > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uBD; s->v[1].u = vBD; s->divisor = uBD + vBD; s->count = 2; return 1; }
 
-	// Edge regions (2 bits must be 0, 2 bits must be 1)
-	if ((signs & 0x802003) == 0x003) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
-	if ((signs & 0x30000C) == 0x00C) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
-	if ((signs & 0x420030) == 0x030) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
-	if ((signs & 0x088300) == 0x300) { s->v[0] = s->v[3]; s->v[1] = s->v[2]; s->v[0].u = uDC; s->v[1].u = vDC; s->divisor = uDC + vDC; s->count = 2; return 1; }
-	if ((signs & 0x014C00) == 0xC00) { s->v[1] = s->v[3]; s->v[0].u = uAD; s->v[1].u = vAD; s->divisor = uAD + vAD; s->count = 2; return 1; }
-	if ((signs & 0x0410C0) == 0x0C0) { s->v[0] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uBD; s->v[1].u = vBD; s->divisor = uBD + vBD; s->count = 2; return 1; }
-
-	// Face regions (1 bit must be 0, 3 bits must be 1)
-	if ((signs & 0x8E00000) == 0xE00000) { s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = uABC + vABC + wABC; s->count = 3; return 1; }
-	if ((signs & 0x11C0000) == 0x1C0000) { s->v[0] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uCBD; s->v[1].u = vCBD; s->v[2].u = wCBD; s->divisor = uCBD + vCBD + wCBD; s->count = 3; return 1; }
-	if ((signs & 0x2038000) == 0x038000) { s->v[1] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uACD; s->v[1].u = vACD; s->v[2].u = wACD; s->divisor = uACD + vACD + wACD; s->count = 3; return 1; }
-	if ((signs & 0x4007000) == 0x007000) { s->v[2] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uADB; s->v[1].u = vADB; s->v[2].u = wADB; s->divisor = uADB + vADB + wADB; s->count = 3; return 1; }
+	// Face regions
+	if (xABCD <= 0 && uABC > 0 && vABC > 0 && wABC > 0) { s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = uABC + vABC + wABC; s->count = 3; return 1; }
+	if (uABCD <= 0 && uCBD > 0 && vCBD > 0 && wCBD > 0) { s->v[0] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uCBD; s->v[1].u = vCBD; s->v[2].u = wCBD; s->divisor = uCBD + vCBD + wCBD; s->count = 3; return 1; }
+	if (vABCD <= 0 && uACD > 0 && vACD > 0 && wACD > 0) { s->v[1] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uACD; s->v[1].u = vACD; s->v[2].u = wACD; s->divisor = uACD + vACD + wACD; s->count = 3; return 1; }
+	if (wABCD <= 0 && uADB > 0 && vADB > 0 && wADB > 0) { s->v[2] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uADB; s->v[1].u = vADB; s->v[2].u = wADB; s->divisor = uADB + vADB + wADB; s->count = 3; return 1; }
 
 	// Interior
 	s->v[0].u = uABCD; s->v[1].u = vABCD; s->v[2].u = wABCD; s->v[3].u = xABCD;
@@ -758,12 +750,13 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		}
 
 		// Relative progress termination.
-		// Use dsq as a conservative bound for max_vert2 (avoids iterating verts).
-		// The closest point is inside the convex hull of the simplex, so dsq <= max_vert2.
-		// Using dsq makes the threshold tighter (terminates sooner), which is fine
-		// since we already have duplicate-vertex and monotonic-progress checks.
+		float max_vert2 = 0.0f;
+		for (int i = 0; i < simplex.count; i++) {
+			float v2 = len2(simplex.v[i].point);
+			if (v2 > max_vert2) max_vert2 = v2;
+		}
 		float progress = dsq - dot(w, closest);
-		if (progress <= dsq * GJK_PROGRESS_EPS) break;
+		if (progress <= max_vert2 * GJK_PROGRESS_EPS) break;
 
 		iter++;
 		GJK_Vertex* vert = &simplex.v[simplex.count];

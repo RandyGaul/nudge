@@ -468,196 +468,208 @@ static SIMD_FORCEINLINE void solve_contact_patch_sv(SolverBodyVel* bodies, Solve
 	b->angular_velocity = add(b->angular_velocity, ang_b);
 }
 
-// --- SIMD 4-wide batch solver (Box2D / BEPU style) ---
+// --- SIMD 4-wide batch solver (BEPU-style: store minimal, recompute inline) ---
 // Process 4 manifolds simultaneously using SSE. Each lane = one manifold.
 // Contacts processed in lockstep: contact[0] across all 4, then [1], etc.
+// Store only raw offsets (r_a, r_b, centroid_r); recompute cross products and
+// inertia terms inline each iteration. Trades cheap ALU for expensive bandwidth.
 #if SIMD_SSE
 
-// Pre-built SoA contact layer: 4 contacts (one per manifold in batch) for a given contact index.
+// Lean contact layer: raw offsets + scalar prestep. Cross/inertia recomputed inline.
 typedef struct PGS_ContactLayer4
 {
-	__m128 rn_a_x, rn_a_y, rn_a_z, rn_b_x, rn_b_y, rn_b_z;
-	__m128 wn_a_x, wn_a_y, wn_a_z, wn_b_x, wn_b_y, wn_b_z;
-	__m128 eff_mass_n, bias, bounce, softness;
-	__m128 lambda_n; // read/write — persists between iterations
+	v3w r_a, r_b;
+	simd4f eff_mass_n, bias, bounce, softness;
+	simd4f lambda_n;
 } PGS_ContactLayer4;
 
-// Persistent SoA batch: built ONCE per frame, reused across all iterations + substeps.
-// Eliminates per-iteration manifold→SoA conversion (was 40x redundant).
+// Persistent SoA batch: built once per frame, reused across iterations + substeps.
+// Lean layout: directions + offsets stored as v3w; all angular terms recomputed inline.
 typedef struct PGS_Batch4
 {
 	int body_a[4], body_b[4];
 	int max_contacts;
-	__m128 inv_mass_a, inv_mass_b, inv_mass_sum, friction, patch_radius;
-	__m128 normal_x, normal_y, normal_z;
-	__m128 tangent1_x, tangent1_y, tangent1_z, tangent2_x, tangent2_y, tangent2_z;
-	__m128 eff_mass_t1, eff_mass_t2, eff_mass_twist;
-	__m128 rct1_a_x, rct1_a_y, rct1_a_z, rct1_b_x, rct1_b_y, rct1_b_z;
-	__m128 rct2_a_x, rct2_a_y, rct2_a_z, rct2_b_x, rct2_b_y, rct2_b_z;
-	__m128 w_t1_a_x, w_t1_a_y, w_t1_a_z, w_t1_b_x, w_t1_b_y, w_t1_b_z;
-	__m128 w_t2_a_x, w_t2_a_y, w_t2_a_z, w_t2_b_x, w_t2_b_y, w_t2_b_z;
-	__m128 w_tw_a_x, w_tw_a_y, w_tw_a_z, w_tw_b_x, w_tw_b_y, w_tw_b_z;
-	__m128 lambda_t1, lambda_t2, lambda_twist;
-	PGS_ContactLayer4 cp[MAX_CONTACTS]; // pre-built contact layers
-	int manifold_idx[4]; // manifold indices for substep refresh
-	int lane_count;      // active lanes (1-4)
+	simd4f inv_mass_a, inv_mass_b;
+	PGS_ContactLayer4 cp[MAX_CONTACTS];
+	v3w tangent1, tangent2, normal;
+	v3w centroid_r_a, centroid_r_b;
+	simd4f eff_mass_t1, eff_mass_t2, eff_mass_twist;
+	simd4f lambda_t1, lambda_t2, lambda_twist;
+	simd4f friction, patch_radius;
+	int manifold_idx[4];
+	int lane_count;
 } PGS_Batch4;
 
-#define SOA_DOT3(ax,ay,az,bx,by,bz) _mm_add_ps(_mm_add_ps(_mm_mul_ps(ax,bx), _mm_mul_ps(ay,by)), _mm_mul_ps(az,bz))
+// Gather a v3 field from 4 SolverBodyVel entries into SoA v3w via transpose.
+#define GATHER_V3(out, arr, i0, i1, i2, i3, field) do { \
+	simd4f _r0=(arr)[i0].field.m, _r1=(arr)[i1].field.m, _r2=(arr)[i2].field.m, _r3=(arr)[i3].field.m; \
+	simd_transpose4(&_r0,&_r1,&_r2,&_r3); (out).x=_r0; (out).y=_r1; (out).z=_r2; } while(0)
 
-static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices, int count, PatchContact* pc)
+// Scatter SoA v3w back to 4 SolverBodyVel entries via reverse transpose.
+#define SCATTER_V3(arr, i0, i1, i2, i3, field, src) do { \
+	simd4f _r0=(src).x, _r1=(src).y, _r2=(src).z, _r3=simd_zero(); \
+	simd_transpose4(&_r0,&_r1,&_r2,&_r3); \
+	(arr)[i0].field.m=_r0; (arr)[i1].field.m=_r1; (arr)[i2].field.m=_r2; (arr)[i3].field.m=_r3; } while(0)
+
+// Symmetric 3x3 inverse-inertia multiply: I_w * v, where I_w = diag(xx,yy,zz) + off(xy,xz,yz).
+static inline v3w iw_mul(v3w iw_d, v3w iw_o, v3w v)
+{
+	return (v3w){
+		simd_add(simd_add(simd_mul(iw_d.x, v.x), simd_mul(iw_o.x, v.y)), simd_mul(iw_o.y, v.z)),
+		simd_add(simd_add(simd_mul(iw_o.x, v.x), simd_mul(iw_d.y, v.y)), simd_mul(iw_o.z, v.z)),
+		simd_add(simd_add(simd_mul(iw_o.y, v.x), simd_mul(iw_o.z, v.y)), simd_mul(iw_d.z, v.z))
+	};
+}
+
+static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices, int count, SolverContact* sc, PatchContact* pc)
 {
 	float buf[4];
-	#define GATHER1(dst, field) for (int j = 0; j < 4; j++) buf[j] = (j < count) ? sm[indices[j]].field : 0; dst = _mm_loadu_ps(buf)
-	#define GATHER3(dx,dy,dz, field) for (int j = 0; j < 4; j++) { v3 v = (j < count) ? sm[indices[j]].field : V3(0,0,0); ((float*)&dx)[j]=v.x; ((float*)&dy)[j]=v.y; ((float*)&dz)[j]=v.z; }
+	#define GATHER1(dst, field) for (int j = 0; j < 4; j++) { buf[j] = (j < count) ? sm[indices[j]].field : 0; } dst = simd_load(buf)
 	bt->lane_count = count;
 	for (int j = 0; j < 4; j++) { bt->manifold_idx[j] = (j < count) ? indices[j] : 0; bt->body_a[j] = (j < count) ? sm[indices[j]].body_a : 0; bt->body_b[j] = (j < count) ? sm[indices[j]].body_b : 0; }
 	GATHER1(bt->inv_mass_a, inv_mass_a); GATHER1(bt->inv_mass_b, inv_mass_b);
-	bt->inv_mass_sum = _mm_add_ps(bt->inv_mass_a, bt->inv_mass_b);
 	GATHER1(bt->friction, friction); GATHER1(bt->patch_radius, patch_radius);
 	GATHER1(bt->eff_mass_t1, eff_mass_t1); GATHER1(bt->eff_mass_t2, eff_mass_t2); GATHER1(bt->eff_mass_twist, eff_mass_twist);
 	GATHER1(bt->lambda_t1, lambda_t1); GATHER1(bt->lambda_t2, lambda_t2); GATHER1(bt->lambda_twist, lambda_twist);
-	GATHER3(bt->normal_x, bt->normal_y, bt->normal_z, normal);
-	GATHER3(bt->tangent1_x, bt->tangent1_y, bt->tangent1_z, tangent1);
-	GATHER3(bt->tangent2_x, bt->tangent2_y, bt->tangent2_z, tangent2);
-	GATHER3(bt->rct1_a_x, bt->rct1_a_y, bt->rct1_a_z, rct1_a); GATHER3(bt->rct1_b_x, bt->rct1_b_y, bt->rct1_b_z, rct1_b);
-	GATHER3(bt->rct2_a_x, bt->rct2_a_y, bt->rct2_a_z, rct2_a); GATHER3(bt->rct2_b_x, bt->rct2_b_y, bt->rct2_b_z, rct2_b);
-	GATHER3(bt->w_t1_a_x, bt->w_t1_a_y, bt->w_t1_a_z, w_t1_a); GATHER3(bt->w_t1_b_x, bt->w_t1_b_y, bt->w_t1_b_z, w_t1_b);
-	GATHER3(bt->w_t2_a_x, bt->w_t2_a_y, bt->w_t2_a_z, w_t2_a); GATHER3(bt->w_t2_b_x, bt->w_t2_b_y, bt->w_t2_b_z, w_t2_b);
-	GATHER3(bt->w_tw_a_x, bt->w_tw_a_y, bt->w_tw_a_z, w_tw_a); GATHER3(bt->w_tw_b_x, bt->w_tw_b_y, bt->w_tw_b_z, w_tw_b);
 	#undef GATHER1
-	#undef GATHER3
+	// Pack v3 manifold fields via v3w_load4 (lane order: 0,1,2,3).
+	#define SM(j) sm[indices[(j) < count ? (j) : 0]]
+	#define V3_OR0(j, field) ((j) < count ? SM(j).field : V3(0,0,0))
+	// v3w_load4(a,b,c,d) puts a in lane 3, d in lane 0. Reverse args so lane j = manifold j.
+	bt->normal = v3w_load4(V3_OR0(3,normal), V3_OR0(2,normal), V3_OR0(1,normal), V3_OR0(0,normal));
+	bt->tangent1 = v3w_load4(V3_OR0(3,tangent1), V3_OR0(2,tangent1), V3_OR0(1,tangent1), V3_OR0(0,tangent1));
+	bt->tangent2 = v3w_load4(V3_OR0(3,tangent2), V3_OR0(2,tangent2), V3_OR0(1,tangent2), V3_OR0(0,tangent2));
+	bt->centroid_r_a = v3w_load4(V3_OR0(3,centroid_r_a), V3_OR0(2,centroid_r_a), V3_OR0(1,centroid_r_a), V3_OR0(0,centroid_r_a));
+	bt->centroid_r_b = v3w_load4(V3_OR0(3,centroid_r_b), V3_OR0(2,centroid_r_b), V3_OR0(1,centroid_r_b), V3_OR0(0,centroid_r_b));
+	#undef V3_OR0
+	#undef SM
 
-	// Pre-build contact layers (constant data — reused across all iterations).
+	// Pack contact layers: raw r_a/r_b from SolverContact + scalar prestep from PatchContact.
 	bt->max_contacts = 0;
-	for (int j = 0; j < count; j++) if (sm[indices[j]].contact_count > bt->max_contacts) bt->max_contacts = sm[indices[j]].contact_count;
+	for (int j = 0; j < count; j++) { if (sm[indices[j]].contact_count > bt->max_contacts) { bt->max_contacts = sm[indices[j]].contact_count; } }
 	for (int cp_idx = 0; cp_idx < bt->max_contacts; cp_idx++) {
 		PGS_ContactLayer4* cl = &bt->cp[cp_idx];
-		float rnax[4]={0},rnay[4]={0},rnaz[4]={0},rnbx[4]={0},rnby[4]={0},rnbz[4]={0};
-		float wnax[4]={0},wnay[4]={0},wnaz[4]={0},wnbx[4]={0},wnby[4]={0},wnbz[4]={0};
-		float emn[4]={0},bias[4]={0},bnc[4]={0},sft[4]={0},lam[4]={0};
+		v3 ra[4] = {{0}}, rb[4] = {{0}};
+		float emn[4]={0}, bi[4]={0}, bnc[4]={0}, sft[4]={0}, lam[4]={0};
 		for (int j = 0; j < count; j++) {
-			if (cp_idx >= sm[indices[j]].contact_count) continue;
-			PatchContact* s = &pc[sm[indices[j]].contact_start + cp_idx];
-			rnax[j]=s->rn_a.x;rnay[j]=s->rn_a.y;rnaz[j]=s->rn_a.z;
-			rnbx[j]=s->rn_b.x;rnby[j]=s->rn_b.y;rnbz[j]=s->rn_b.z;
-			wnax[j]=s->w_n_a.x;wnay[j]=s->w_n_a.y;wnaz[j]=s->w_n_a.z;
-			wnbx[j]=s->w_n_b.x;wnby[j]=s->w_n_b.y;wnbz[j]=s->w_n_b.z;
-			emn[j]=s->eff_mass_n;bias[j]=s->bias;bnc[j]=s->bounce;sft[j]=s->softness;lam[j]=s->lambda_n;
+			if (cp_idx >= sm[indices[j]].contact_count) { continue; }
+			int ci = sm[indices[j]].contact_start + cp_idx;
+			ra[j] = sc[ci].r_a; rb[j] = sc[ci].r_b;
+			PatchContact* s = &pc[ci];
+			emn[j]=s->eff_mass_n; bi[j]=s->bias; bnc[j]=s->bounce; sft[j]=s->softness; lam[j]=s->lambda_n;
 		}
-		cl->rn_a_x=_mm_loadu_ps(rnax);cl->rn_a_y=_mm_loadu_ps(rnay);cl->rn_a_z=_mm_loadu_ps(rnaz);
-		cl->rn_b_x=_mm_loadu_ps(rnbx);cl->rn_b_y=_mm_loadu_ps(rnby);cl->rn_b_z=_mm_loadu_ps(rnbz);
-		cl->wn_a_x=_mm_loadu_ps(wnax);cl->wn_a_y=_mm_loadu_ps(wnay);cl->wn_a_z=_mm_loadu_ps(wnaz);
-		cl->wn_b_x=_mm_loadu_ps(wnbx);cl->wn_b_y=_mm_loadu_ps(wnby);cl->wn_b_z=_mm_loadu_ps(wnbz);
-		cl->eff_mass_n=_mm_loadu_ps(emn);cl->bias=_mm_loadu_ps(bias);cl->bounce=_mm_loadu_ps(bnc);cl->softness=_mm_loadu_ps(sft);cl->lambda_n=_mm_loadu_ps(lam);
+		cl->r_a = v3w_load4(ra[3], ra[2], ra[1], ra[0]);
+		cl->r_b = v3w_load4(rb[3], rb[2], rb[1], rb[0]);
+		cl->eff_mass_n = simd_load(emn); cl->bias = simd_load(bi); cl->bounce = simd_load(bnc); cl->softness = simd_load(sft); cl->lambda_n = simd_load(lam);
 	}
 }
 
-// Lightweight refresh: only update bias and lambda from PatchContact/SolverManifold.
-// Called on substep 2+ when structural data (normals, eff_mass, etc.) hasn't changed.
+// Lightweight refresh: only update bias, bounce, and lambda from PatchContact/SolverManifold.
+// Called on substep 2+ when structural data (normals, offsets, etc.) hasn't changed.
 static void pgs_batch4_refresh(PGS_Batch4* bt, SolverManifold* sm, PatchContact* pc)
 {
 	int count = bt->lane_count;
 	float buf[4];
-	for (int j = 0; j < 4; j++) buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_t1 : 0; bt->lambda_t1 = _mm_loadu_ps(buf);
-	for (int j = 0; j < 4; j++) buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_t2 : 0; bt->lambda_t2 = _mm_loadu_ps(buf);
-	for (int j = 0; j < 4; j++) buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_twist : 0; bt->lambda_twist = _mm_loadu_ps(buf);
+	for (int j = 0; j < 4; j++) { buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_t1 : 0; } bt->lambda_t1 = simd_load(buf);
+	for (int j = 0; j < 4; j++) { buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_t2 : 0; } bt->lambda_t2 = simd_load(buf);
+	for (int j = 0; j < 4; j++) { buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_twist : 0; } bt->lambda_twist = simd_load(buf);
 	for (int cp_idx = 0; cp_idx < bt->max_contacts; cp_idx++) {
-		float bias[4]={0}, lam[4]={0};
+		float bi[4]={0}, lam[4]={0};
 		for (int j = 0; j < count; j++) {
 			int mi = bt->manifold_idx[j];
-			if (cp_idx >= sm[mi].contact_count) continue;
+			if (cp_idx >= sm[mi].contact_count) { continue; }
 			PatchContact* s = &pc[sm[mi].contact_start + cp_idx];
-			bias[j] = s->bias; lam[j] = s->lambda_n;
+			bi[j] = s->bias; lam[j] = s->lambda_n;
 		}
-		bt->cp[cp_idx].bias = _mm_loadu_ps(bias);
-		bt->cp[cp_idx].lambda_n = _mm_loadu_ps(lam);
+		bt->cp[cp_idx].bias = simd_load(bi);
+		bt->cp[cp_idx].lambda_n = simd_load(lam);
 	}
 }
 
 static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b)
 {
-	// Gather body velocities via transpose (4 aligned loads + shuffle per v3 field)
-	__m128 va_x, va_y, va_z, wa_x, wa_y, wa_z, vb_x, vb_y, vb_z, wb_x, wb_y, wb_z;
-	{ __m128 r0, r1, r2, r3;
-	  int i0a=b->body_a[0], i1a=b->body_a[1], i2a=b->body_a[2], i3a=b->body_a[3];
-	  int i0b=b->body_b[0], i1b=b->body_b[1], i2b=b->body_b[2], i3b=b->body_b[3];
-	  r0=bodies[i0a].velocity.m; r1=bodies[i1a].velocity.m; r2=bodies[i2a].velocity.m; r3=bodies[i3a].velocity.m;
-	  simd_transpose4(&r0,&r1,&r2,&r3); va_x=r0; va_y=r1; va_z=r2;
-	  r0=bodies[i0a].angular_velocity.m; r1=bodies[i1a].angular_velocity.m; r2=bodies[i2a].angular_velocity.m; r3=bodies[i3a].angular_velocity.m;
-	  simd_transpose4(&r0,&r1,&r2,&r3); wa_x=r0; wa_y=r1; wa_z=r2;
-	  r0=bodies[i0b].velocity.m; r1=bodies[i1b].velocity.m; r2=bodies[i2b].velocity.m; r3=bodies[i3b].velocity.m;
-	  simd_transpose4(&r0,&r1,&r2,&r3); vb_x=r0; vb_y=r1; vb_z=r2;
-	  r0=bodies[i0b].angular_velocity.m; r1=bodies[i1b].angular_velocity.m; r2=bodies[i2b].angular_velocity.m; r3=bodies[i3b].angular_velocity.m;
-	  simd_transpose4(&r0,&r1,&r2,&r3); wb_x=r0; wb_y=r1; wb_z=r2;
+	int i0a=b->body_a[0], i1a=b->body_a[1], i2a=b->body_a[2], i3a=b->body_a[3];
+	int i0b=b->body_b[0], i1b=b->body_b[1], i2b=b->body_b[2], i3b=b->body_b[3];
+
+	// Gather velocity, angular_velocity, and inverse inertia for all 4 body pairs.
+	v3w va, wa, vb, wb;
+	GATHER_V3(va, bodies, i0a, i1a, i2a, i3a, velocity);
+	GATHER_V3(wa, bodies, i0a, i1a, i2a, i3a, angular_velocity);
+	GATHER_V3(vb, bodies, i0b, i1b, i2b, i3b, velocity);
+	GATHER_V3(wb, bodies, i0b, i1b, i2b, i3b, angular_velocity);
+	v3w iw_d_a, iw_o_a, iw_d_b, iw_o_b;
+	GATHER_V3(iw_d_a, bodies, i0a, i1a, i2a, i3a, iw_diag);
+	GATHER_V3(iw_o_a, bodies, i0a, i1a, i2a, i3a, iw_off);
+	GATHER_V3(iw_d_b, bodies, i0b, i1b, i2b, i3b, iw_diag);
+	GATHER_V3(iw_o_b, bodies, i0b, i1b, i2b, i3b, iw_off);
+
+	simd4f zero = simd_zero();
+	simd4f inv_mass_sum = simd_add(b->inv_mass_a, b->inv_mass_b);
+	v3w dv = v3w_sub(vb, va);
+	simd4f linear_vn = v3w_dot(dv, b->normal);
+	simd4f total_lambda_n = zero;
+
+	// Normal contacts: recompute cross(r, n) and iw*cross(r, n) inline each iteration.
+	for (int ci = 0; ci < b->max_contacts; ci++) {
+		PGS_ContactLayer4* cl = &b->cp[ci];
+		v3w rn_a = v3w_cross(cl->r_a, b->normal);
+		v3w rn_b = v3w_cross(cl->r_b, b->normal);
+		v3w wn_a = iw_mul(iw_d_a, iw_o_a, rn_a);
+		v3w wn_b = iw_mul(iw_d_b, iw_o_b, rn_b);
+		simd4f vn = simd_add(linear_vn, simd_sub(v3w_dot(wb, rn_b), v3w_dot(wa, rn_a)));
+		simd4f lambda_n = simd_mul(cl->eff_mass_n, simd_sub(simd_sub(zero, simd_add(vn, simd_add(cl->bias, cl->bounce))), simd_mul(cl->softness, cl->lambda_n)));
+		simd4f new_lam = simd_max(simd_add(cl->lambda_n, lambda_n), zero);
+		simd4f delta = simd_sub(new_lam, cl->lambda_n);
+		cl->lambda_n = new_lam;
+		simd4f da = simd_mul(delta, b->inv_mass_a), db = simd_mul(delta, b->inv_mass_b);
+		va = v3w_sub(va, v3w_scale(b->normal, da));
+		vb = v3w_add(vb, v3w_scale(b->normal, db));
+		wa = v3w_sub(wa, v3w_scale(wn_a, delta));
+		wb = v3w_add(wb, v3w_scale(wn_b, delta));
+		linear_vn = simd_add(linear_vn, simd_mul(delta, inv_mass_sum));
+		total_lambda_n = simd_add(total_lambda_n, new_lam);
 	}
-	__m128 zero = _mm_setzero_ps();
-	__m128 linear_vn = SOA_DOT3(_mm_sub_ps(vb_x,va_x),_mm_sub_ps(vb_y,va_y),_mm_sub_ps(vb_z,va_z), b->normal_x,b->normal_y,b->normal_z);
-	__m128 total_lambda_n = zero;
 
-	// Normal contacts: read directly from pre-built contact layers (zero per-iteration gather).
-	for (int cp = 0; cp < b->max_contacts; cp++) {
-		PGS_ContactLayer4* cl = &b->cp[cp];
-		__m128 vn = _mm_add_ps(linear_vn, _mm_sub_ps(SOA_DOT3(wb_x,wb_y,wb_z,cl->rn_b_x,cl->rn_b_y,cl->rn_b_z), SOA_DOT3(wa_x,wa_y,wa_z,cl->rn_a_x,cl->rn_a_y,cl->rn_a_z)));
-		__m128 lambda_n = _mm_mul_ps(cl->eff_mass_n, _mm_sub_ps(_mm_sub_ps(zero, _mm_add_ps(vn, _mm_add_ps(cl->bias, cl->bounce))), _mm_mul_ps(cl->softness, cl->lambda_n)));
-		__m128 new_lam = _mm_max_ps(_mm_add_ps(cl->lambda_n, lambda_n), zero);
-		__m128 delta = _mm_sub_ps(new_lam, cl->lambda_n);
-		cl->lambda_n = new_lam; // persists for next iteration
-		__m128 da=_mm_mul_ps(delta,b->inv_mass_a), db=_mm_mul_ps(delta,b->inv_mass_b);
-		va_x=_mm_sub_ps(va_x,_mm_mul_ps(b->normal_x,da)); va_y=_mm_sub_ps(va_y,_mm_mul_ps(b->normal_y,da)); va_z=_mm_sub_ps(va_z,_mm_mul_ps(b->normal_z,da));
-		vb_x=_mm_add_ps(vb_x,_mm_mul_ps(b->normal_x,db)); vb_y=_mm_add_ps(vb_y,_mm_mul_ps(b->normal_y,db)); vb_z=_mm_add_ps(vb_z,_mm_mul_ps(b->normal_z,db));
-		wa_x=_mm_sub_ps(wa_x,_mm_mul_ps(cl->wn_a_x,delta)); wa_y=_mm_sub_ps(wa_y,_mm_mul_ps(cl->wn_a_y,delta)); wa_z=_mm_sub_ps(wa_z,_mm_mul_ps(cl->wn_a_z,delta));
-		wb_x=_mm_add_ps(wb_x,_mm_mul_ps(cl->wn_b_x,delta)); wb_y=_mm_add_ps(wb_y,_mm_mul_ps(cl->wn_b_y,delta)); wb_z=_mm_add_ps(wb_z,_mm_mul_ps(cl->wn_b_z,delta));
-		linear_vn = _mm_add_ps(linear_vn, _mm_mul_ps(delta, b->inv_mass_sum));
-		total_lambda_n = _mm_add_ps(total_lambda_n, new_lam);
-	}
+	// Jacobi friction: compute tangent + torsional from same velocity snapshot, apply once.
+	simd4f max_f = simd_mul(b->friction, total_lambda_n);
+	v3w dv2 = v3w_sub(vb, va);
+	v3w wa_s = wa, wb_s = wb;
 
-	// Jacobi friction: compute all three rows from same velocity snapshot, apply once.
-	__m128 max_f = _mm_mul_ps(b->friction, total_lambda_n);
-	__m128 dvx=_mm_sub_ps(vb_x,va_x),dvy=_mm_sub_ps(vb_y,va_y),dvz=_mm_sub_ps(vb_z,va_z);
-	// Snapshot angular velocities for all friction rows
-	__m128 wa_sx=wa_x,wa_sy=wa_y,wa_sz=wa_z, wb_sx=wb_x,wb_sy=wb_y,wb_sz=wb_z;
+	// Tangent 1: recompute cross(centroid_r, tangent1) and iw*cross inline.
+	v3w rct1_a = v3w_cross(b->centroid_r_a, b->tangent1), rct1_b = v3w_cross(b->centroid_r_b, b->tangent1);
+	v3w wt1_a = iw_mul(iw_d_a, iw_o_a, rct1_a), wt1_b = iw_mul(iw_d_b, iw_o_b, rct1_b);
+	simd4f vt1 = simd_add(v3w_dot(dv2, b->tangent1), simd_sub(v3w_dot(wb_s, rct1_b), v3w_dot(wa_s, rct1_a)));
+	simd4f nt1 = simd_max(simd_neg(max_f), simd_min(simd_add(b->lambda_t1, simd_mul(b->eff_mass_t1, simd_neg(vt1))), max_f));
+	simd4f dt1 = simd_sub(nt1, b->lambda_t1); b->lambda_t1 = nt1;
 
-	__m128 vt1=_mm_add_ps(SOA_DOT3(dvx,dvy,dvz,b->tangent1_x,b->tangent1_y,b->tangent1_z),_mm_sub_ps(SOA_DOT3(wb_sx,wb_sy,wb_sz,b->rct1_b_x,b->rct1_b_y,b->rct1_b_z),SOA_DOT3(wa_sx,wa_sy,wa_sz,b->rct1_a_x,b->rct1_a_y,b->rct1_a_z)));
-	__m128 nt1=_mm_max_ps(_mm_sub_ps(zero,max_f),_mm_min_ps(_mm_add_ps(b->lambda_t1,_mm_mul_ps(b->eff_mass_t1,_mm_sub_ps(zero,vt1))),max_f));
-	__m128 dt1=_mm_sub_ps(nt1,b->lambda_t1); b->lambda_t1=nt1;
+	// Tangent 2: recompute cross(centroid_r, tangent2) and iw*cross inline.
+	v3w rct2_a = v3w_cross(b->centroid_r_a, b->tangent2), rct2_b = v3w_cross(b->centroid_r_b, b->tangent2);
+	v3w wt2_a = iw_mul(iw_d_a, iw_o_a, rct2_a), wt2_b = iw_mul(iw_d_b, iw_o_b, rct2_b);
+	simd4f vt2 = simd_add(v3w_dot(dv2, b->tangent2), simd_sub(v3w_dot(wb_s, rct2_b), v3w_dot(wa_s, rct2_a)));
+	simd4f nt2 = simd_max(simd_neg(max_f), simd_min(simd_add(b->lambda_t2, simd_mul(b->eff_mass_t2, simd_neg(vt2))), max_f));
+	simd4f dt2 = simd_sub(nt2, b->lambda_t2); b->lambda_t2 = nt2;
 
-	__m128 vt2=_mm_add_ps(SOA_DOT3(dvx,dvy,dvz,b->tangent2_x,b->tangent2_y,b->tangent2_z),_mm_sub_ps(SOA_DOT3(wb_sx,wb_sy,wb_sz,b->rct2_b_x,b->rct2_b_y,b->rct2_b_z),SOA_DOT3(wa_sx,wa_sy,wa_sz,b->rct2_a_x,b->rct2_a_y,b->rct2_a_z)));
-	__m128 nt2=_mm_max_ps(_mm_sub_ps(zero,max_f),_mm_min_ps(_mm_add_ps(b->lambda_t2,_mm_mul_ps(b->eff_mass_t2,_mm_sub_ps(zero,vt2))),max_f));
-	__m128 dt2=_mm_sub_ps(nt2,b->lambda_t2); b->lambda_t2=nt2;
+	// Torsional: recompute iw*normal inline.
+	v3w wtw_a = iw_mul(iw_d_a, iw_o_a, b->normal), wtw_b = iw_mul(iw_d_b, iw_o_b, b->normal);
+	simd4f max_tw = simd_mul(simd_mul(b->friction, total_lambda_n), b->patch_radius);
+	simd4f wrel = v3w_dot(v3w_sub(wb_s, wa_s), b->normal);
+	simd4f ntw = simd_max(simd_neg(max_tw), simd_min(simd_add(b->lambda_twist, simd_mul(b->eff_mass_twist, simd_neg(wrel))), max_tw));
+	simd4f dtw = simd_sub(ntw, b->lambda_twist); b->lambda_twist = ntw;
 
-	__m128 max_tw=_mm_mul_ps(_mm_mul_ps(b->friction,total_lambda_n),b->patch_radius);
-	__m128 wrel=SOA_DOT3(_mm_sub_ps(wb_sx,wa_sx),_mm_sub_ps(wb_sy,wa_sy),_mm_sub_ps(wb_sz,wa_sz),b->normal_x,b->normal_y,b->normal_z);
-	__m128 ntw=_mm_max_ps(_mm_sub_ps(zero,max_tw),_mm_min_ps(_mm_add_ps(b->lambda_twist,_mm_mul_ps(b->eff_mass_twist,_mm_sub_ps(zero,wrel))),max_tw));
-	__m128 dtw=_mm_sub_ps(ntw,b->lambda_twist); b->lambda_twist=ntw;
+	// Single combined apply for all friction rows.
+	v3w lin = v3w_add(v3w_scale(b->tangent1, dt1), v3w_scale(b->tangent2, dt2));
+	va = v3w_sub(va, v3w_scale(lin, b->inv_mass_a));
+	vb = v3w_add(vb, v3w_scale(lin, b->inv_mass_b));
+	v3w ang_a = v3w_add(v3w_add(v3w_scale(wt1_a, dt1), v3w_scale(wt2_a, dt2)), v3w_scale(wtw_a, dtw));
+	v3w ang_b = v3w_add(v3w_add(v3w_scale(wt1_b, dt1), v3w_scale(wt2_b, dt2)), v3w_scale(wtw_b, dtw));
+	wa = v3w_sub(wa, ang_a);
+	wb = v3w_add(wb, ang_b);
 
-	// Single combined apply for all friction
-	__m128 lin_x=_mm_add_ps(_mm_mul_ps(b->tangent1_x,dt1),_mm_mul_ps(b->tangent2_x,dt2));
-	__m128 lin_y=_mm_add_ps(_mm_mul_ps(b->tangent1_y,dt1),_mm_mul_ps(b->tangent2_y,dt2));
-	__m128 lin_z=_mm_add_ps(_mm_mul_ps(b->tangent1_z,dt1),_mm_mul_ps(b->tangent2_z,dt2));
-	va_x=_mm_sub_ps(va_x,_mm_mul_ps(lin_x,b->inv_mass_a)); va_y=_mm_sub_ps(va_y,_mm_mul_ps(lin_y,b->inv_mass_a)); va_z=_mm_sub_ps(va_z,_mm_mul_ps(lin_z,b->inv_mass_a));
-	vb_x=_mm_add_ps(vb_x,_mm_mul_ps(lin_x,b->inv_mass_b)); vb_y=_mm_add_ps(vb_y,_mm_mul_ps(lin_y,b->inv_mass_b)); vb_z=_mm_add_ps(vb_z,_mm_mul_ps(lin_z,b->inv_mass_b));
-	wa_x=_mm_sub_ps(wa_x,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_a_x,dt1),_mm_mul_ps(b->w_t2_a_x,dt2)),_mm_mul_ps(b->w_tw_a_x,dtw)));
-	wa_y=_mm_sub_ps(wa_y,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_a_y,dt1),_mm_mul_ps(b->w_t2_a_y,dt2)),_mm_mul_ps(b->w_tw_a_y,dtw)));
-	wa_z=_mm_sub_ps(wa_z,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_a_z,dt1),_mm_mul_ps(b->w_t2_a_z,dt2)),_mm_mul_ps(b->w_tw_a_z,dtw)));
-	wb_x=_mm_add_ps(wb_x,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_b_x,dt1),_mm_mul_ps(b->w_t2_b_x,dt2)),_mm_mul_ps(b->w_tw_b_x,dtw)));
-	wb_y=_mm_add_ps(wb_y,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_b_y,dt1),_mm_mul_ps(b->w_t2_b_y,dt2)),_mm_mul_ps(b->w_tw_b_y,dtw)));
-	wb_z=_mm_add_ps(wb_z,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_b_z,dt1),_mm_mul_ps(b->w_t2_b_z,dt2)),_mm_mul_ps(b->w_tw_b_z,dtw)));
-
-	// Scatter velocities back
-	// Scatter body velocities via reverse transpose
-	{ __m128 r0, r1, r2, r3, z=_mm_setzero_ps();
-	  int i0a=b->body_a[0], i1a=b->body_a[1], i2a=b->body_a[2], i3a=b->body_a[3];
-	  int i0b=b->body_b[0], i1b=b->body_b[1], i2b=b->body_b[2], i3b=b->body_b[3];
-	  r0=va_x; r1=va_y; r2=va_z; r3=z; simd_transpose4(&r0,&r1,&r2,&r3);
-	  bodies[i0a].velocity.m=r0; bodies[i1a].velocity.m=r1; bodies[i2a].velocity.m=r2; bodies[i3a].velocity.m=r3;
-	  r0=wa_x; r1=wa_y; r2=wa_z; r3=z; simd_transpose4(&r0,&r1,&r2,&r3);
-	  bodies[i0a].angular_velocity.m=r0; bodies[i1a].angular_velocity.m=r1; bodies[i2a].angular_velocity.m=r2; bodies[i3a].angular_velocity.m=r3;
-	  r0=vb_x; r1=vb_y; r2=vb_z; r3=z; simd_transpose4(&r0,&r1,&r2,&r3);
-	  bodies[i0b].velocity.m=r0; bodies[i1b].velocity.m=r1; bodies[i2b].velocity.m=r2; bodies[i3b].velocity.m=r3;
-	  r0=wb_x; r1=wb_y; r2=wb_z; r3=z; simd_transpose4(&r0,&r1,&r2,&r3);
-	  bodies[i0b].angular_velocity.m=r0; bodies[i1b].angular_velocity.m=r1; bodies[i2b].angular_velocity.m=r2; bodies[i3b].angular_velocity.m=r3;
-	}
+	// Scatter velocities back via reverse transpose.
+	SCATTER_V3(bodies, i0a, i1a, i2a, i3a, velocity, va);
+	SCATTER_V3(bodies, i0a, i1a, i2a, i3a, angular_velocity, wa);
+	SCATTER_V3(bodies, i0b, i1b, i2b, i3b, velocity, vb);
+	SCATTER_V3(bodies, i0b, i1b, i2b, i3b, angular_velocity, wb);
 }
 
 #endif // SIMD_SSE
