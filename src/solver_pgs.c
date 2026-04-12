@@ -19,13 +19,14 @@ static void contact_tangent_basis(v3 n, v3* t1, v3* t2)
 #define PATCH_MIN_AREA 0.001f
 
 // Estimate contact patch area from manifold points projected onto contact plane.
+// Uses dot(n, cross(a,b)) instead of len(cross(a,b)) — avoids sqrtf per triangle.
 static float estimate_patch_area(Contact* contacts, int count)
 {
 	if (count < 3) return PATCH_MIN_AREA;
-	// Fan triangulation from contacts[0]
+	v3 n = contacts[0].normal;
 	float area = 0.0f;
 	for (int i = 1; i < count - 1; i++)
-		area += 0.5f * len(cross(sub(contacts[i].point, contacts[0].point), sub(contacts[i + 1].point, contacts[0].point)));
+		area += 0.5f * fabsf(dot(n, cross(sub(contacts[i].point, contacts[0].point), sub(contacts[i + 1].point, contacts[0].point))));
 	return area > PATCH_MIN_AREA ? area : PATCH_MIN_AREA;
 }
 
