@@ -53,7 +53,7 @@ static SIMD_FORCEINLINE void apply_impulse_row(BodyHot* a, BodyHot* b, v3 direct
 }
 
 // Match a new contact to a cached contact by feature ID. Returns index or -1.
-static SIMD_FORCEINLINE int warm_match(WarmManifold* wm, uint32_t feature_id)
+static int warm_match(WarmManifold* wm, uint32_t feature_id)
 {
 	for (int i = 0; i < wm->count; i++)
 		if (wm->contacts[i].feature_id == feature_id) return i;
