@@ -1875,9 +1875,180 @@ int collide_cylinder_box(Cylinder a, Box b, Manifold* manifold)
 	return collide_hull_hull(cylinder_to_convex_hull(a), cb, manifold);
 }
 
+// Cylinder support projection onto an arbitrary axis (tight, analytical).
+// Returns the half-extent: max of dot(surface_point, n) over all cylinder surface points, minus center.
+static float cyl_half_support(v3 cyl_axis, float hh, float radius, v3 n)
+{
+	float an = dot(cyl_axis, n);
+	float axial = fabsf(an) * hh;
+	float sin2 = 1.0f - an * an;
+	float radial = sin2 > 0.0f ? sqrtf(sin2) * radius : 0.0f;
+	return axial + radial;
+}
+
+// Analytical cyl-hull: GJK(axis_segment, hull) shallow + SAT deep.
+// Deep SAT tests hull face normals, cylinder axis, and cyl_axis x hull_edge.
+static int collide_cylinder_hull_ana(Cylinder a, ConvexHull b, Manifold* manifold)
+{
+	v3 cyl_p, cyl_q;
+	cylinder_axis_segment(a, &cyl_p, &cyl_q);
+	v3 cyl_axis = rotate(a.rotation, V3(0, 1, 0));
+	const Hull* hull = b.hull;
+
+	// Quick bounding-sphere rejection before running full SAT.
+	{
+		GJK_Result r = gjk_query_segment_hull(cyl_p, cyl_q, b);
+		float bound = sqrtf(a.radius * a.radius + a.half_height * a.half_height);
+		if (r.distance > bound) return 0;
+	}
+
+	// --- Deep SAT ---
+	// Track best separating axis across three families.
+	float best_sep = -1e18f;
+	v3 best_n = V3(0,0,0);
+	int best_type = -1; // 0 = hull face, 1 = cap, 2 = edge
+
+	// Family 1: hull face normals.
+	HullPlane best_face_plane = {0};
+	for (int i = 0; i < hull->face_count; i++) {
+		HullPlane wp = plane_transform(hull->planes[i], b.center, b.rotation, b.scale);
+		float cyl_min = dot(a.center, wp.normal) - cyl_half_support(cyl_axis, a.half_height, a.radius, wp.normal);
+		float sep = cyl_min - wp.offset;
+		if (sep > 0.0f) return 0;
+		if (sep > best_sep) { best_sep = sep; best_n = wp.normal; best_type = 0; best_face_plane = wp; }
+	}
+
+	// Family 2: cylinder axis (cap face contacts).
+	{
+		float hull_min = 1e18f, hull_max = -1e18f;
+		for (int j = 0; j < hull->vert_count; j++) {
+			v3 wv = add(b.center, rotate(b.rotation, hmul(hull->verts[j], b.scale)));
+			float p = dot(wv, cyl_axis);
+			if (p < hull_min) hull_min = p;
+			if (p > hull_max) hull_max = p;
+		}
+		float cyl_min_ax = dot(a.center, cyl_axis) - a.half_height;
+		float cyl_max_ax = dot(a.center, cyl_axis) + a.half_height;
+		if (hull_max < cyl_min_ax || cyl_max_ax < hull_min) return 0;
+		// Two overlap measures: hull poking through bottom cap, hull poking through top cap.
+		float pen_bot = hull_max - cyl_min_ax; // hull above cyl bottom
+		float pen_top = cyl_max_ax - hull_min; // cyl above hull bottom
+		float pen = pen_bot < pen_top ? pen_bot : pen_top;
+		float sep = -pen;
+		int sign = pen_bot < pen_top ? -1 : 1; // -1 = bottom cap reference, +1 = top cap
+		if (sep > best_sep + 0.001f) { best_sep = sep; best_n = scale(cyl_axis, (float)sign); best_type = 1; }
+	}
+
+	// Family 3: cyl_axis x hull_edge (edge-edge contacts).
+	int best_edge = -1;
+	for (int i = 0; i < hull->edge_count; i += 2) {
+		v3 ev0 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[i]], b.scale)));
+		v3 ev1 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[hull->edge_next[i]]], b.scale)));
+		v3 ed = sub(ev1, ev0);
+		v3 ax = cross(cyl_axis, ed);
+		float al = len2(ax);
+		if (al < 1e-12f) continue;
+		ax = scale(ax, 1.0f / sqrtf(al));
+		if (dot(ax, sub(a.center, ev0)) < 0.0f) ax = neg(ax);
+		// cyl_axis · ax ≈ 0 (ax is perpendicular to cyl_axis by construction of cross product)
+		// so cylinder projects as: center · ax ± radius
+		float cyl_min_e = dot(a.center, ax) - a.radius;
+		float hull_max_e = -1e18f;
+		for (int j = 0; j < hull->vert_count; j++) {
+			v3 wv = add(b.center, rotate(b.rotation, hmul(hull->verts[j], b.scale)));
+			float d = dot(wv, ax);
+			if (d > hull_max_e) hull_max_e = d;
+		}
+		float sep = cyl_min_e - hull_max_e;
+		if (sep > 0.0f) return 0;
+		if (sep > best_sep + 0.001f) { best_sep = sep; best_n = ax; best_type = 2; best_edge = i; }
+	}
+
+	if (best_sep > 0.0f || best_type < 0) return 0;
+	if (!manifold) return 1;
+
+	// --- Manifold generation by axis type ---
+
+	if (best_type == 0) {
+		// Hull face is reference. Project cylinder axis endpoints onto face plane,
+		// keep those that penetrate (same as capsule-hull contact generation).
+		float plane_d = best_face_plane.offset;
+		float dp = dot(cyl_p, best_n) - plane_d;
+		float dq = dot(cyl_q, best_n) - plane_d;
+		int cp = 0;
+		v3 points[2]; float depths[2];
+		if (dp < a.radius) { points[cp] = sub(cyl_p, scale(best_n, a.radius)); depths[cp] = a.radius - dp; cp++; }
+		if (dq < a.radius) { points[cp] = sub(cyl_q, scale(best_n, a.radius)); depths[cp] = a.radius - dq; cp++; }
+		if (cp == 0) { cp = 1; points[0] = sub(dp < dq ? cyl_p : cyl_q, scale(best_n, a.radius)); depths[0] = -best_sep; }
+		manifold->count = cp;
+		for (int i = 0; i < cp; i++)
+			manifold->contacts[i] = (Contact){ .point = points[i], .normal = neg(best_n), .penetration = depths[i] };
+		return 1;
+	}
+
+	if (best_type == 1) {
+		// Cylinder cap is reference. Project hull vertices onto cap plane,
+		// keep up to 4 that are within cap disk radius and penetrate.
+		v3 cap_n = best_n; // outward cap normal (+/- cyl_axis)
+		float cap_d = dot(a.center, cap_n) + a.half_height; // cap plane offset
+		int cp = 0;
+		v3 points[MAX_CONTACTS]; float depths[MAX_CONTACTS];
+		for (int j = 0; j < hull->vert_count && cp < MAX_CONTACTS; j++) {
+			v3 wv = add(b.center, rotate(b.rotation, hmul(hull->verts[j], b.scale)));
+			float d = dot(wv, cap_n) - cap_d;
+			if (d > 0.0f) continue; // above cap plane (outside)
+			// Check if vertex is within cap disk radius.
+			v3 on_cap = sub(wv, scale(cap_n, d)); // project onto cap plane
+			v3 radial = sub(on_cap, add(a.center, scale(cap_n, a.half_height)));
+			if (len2(radial) > a.radius * a.radius) continue;
+			points[cp] = wv;
+			depths[cp] = -d;
+			cp++;
+		}
+		if (cp == 0) { manifold->count = 1; manifold->contacts[0] = (Contact){ .point = add(a.center, scale(best_n, a.half_height)), .normal = neg(best_n), .penetration = -best_sep }; return 1; }
+		manifold->count = cp;
+		for (int i = 0; i < cp; i++)
+			manifold->contacts[i] = (Contact){ .point = points[i], .normal = neg(best_n), .penetration = depths[i] };
+		return 1;
+	}
+
+	// best_type == 2: edge-edge contact (single point).
+	// Use closest-points between cyl axis and the winning hull edge.
+	{
+		manifold->count = 1;
+		// Recompute closest pair for the winning edge.
+		int ei = best_edge;
+		v3 ev0 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[ei]], b.scale)));
+		v3 ev1 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[hull->edge_next[ei]]], b.scale)));
+		v3 cpa, cpb;
+		segments_closest_points(cyl_p, cyl_q, ev0, ev1, &cpa, &cpb);
+		CylFeature ef = cyl_classify_point(cpb, a.center, a.rotation, a.half_height, a.radius);
+		manifold->contacts[0] = (Contact){
+			.point = ef.surface_pt,
+			.normal = neg(best_n),
+			.penetration = -best_sep,
+		};
+		return 1;
+	}
+}
+
+// GJK variant: gjk_cylinder vs gjk_hull. Benchmarked against the analytical path.
+static int collide_cylinder_hull_gjk(Cylinder a, ConvexHull b, Manifold* manifold)
+{
+	v3 cyl_p, cyl_q;
+	cylinder_axis_segment(a, &cyl_p, &cyl_q);
+	GJK_Shape ga = gjk_cylinder(cyl_p, cyl_q, a.radius);
+	v3 hull_scaled[MAX_HULL_VERTS]; float hull_soa[MAX_HULL_VERTS*3];
+	GJK_Shape gb = gjk_hull_scaled(b.hull, b.center, b.rotation, b.scale, hull_scaled, hull_soa);
+	GJK_Result r = gjk_distance(&ga, &gb, NULL);
+	if (r.distance > LINEAR_SLOP) return 0;
+	// For touching/deep, fall back to analytical SAT path.
+	return collide_cylinder_hull_ana(a, b, manifold);
+}
+
 int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold)
 {
-	return collide_hull_hull(cylinder_to_convex_hull(a), b, manifold);
+	return collide_cylinder_hull_ana(a, b, manifold);
 }
 
 int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold)

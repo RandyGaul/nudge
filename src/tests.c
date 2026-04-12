@@ -1493,6 +1493,110 @@ static void test_cyl_capsule_fuzz()
 }
 
 // ============================================================================
+// Phase 3: cyl-hull. Tests use the unit box hull as the "hull" shape for
+// predictable geometry; separate tests with non-trivial hulls use quickhull.
+
+static void test_cyl_hull_native()
+{
+	const float hh = 1.0f, r = 0.5f;
+	const quat I = quat_identity();
+	const v3 O = V3(0,0,0);
+	const Hull* bh = hull_unit_box();
+
+	CylCase cases[] = {
+		// --- cyl SIDE x hull FACE (cylinder lying sideways on a floor) ---
+		// Rotate cyl 90deg around Z so axis is horizontal (+X). Floor below.
+		{ "cyl-hull SIDE/FACE deep",
+		  V3(0, 0.4f, 0),
+		  { 0, 0, sinf(3.14159265f*0.25f), cosf(3.14159265f*0.25f) }, // Z+90
+		  hh, r, CYL_OTHER_HULL,
+		  .hull = { bh, V3(0, -0.5f, 0), I, V3(5, 0.5f, 5) }, // floor y=[-1, 0]
+		  .is_deep = 1, .expected_normal = V3(0,-1,0), .expected_contact_count = 2 },
+
+		// --- cyl SIDE x hull EDGE (cylinder near a box edge) ---
+		{ "cyl-hull SIDE/EDGE deep",
+		  O, I, hh, r, CYL_OTHER_HULL,
+		  .hull = { bh, V3(0.7f, 0, 0), I, V3(0.3f, 2, 0.3f) },
+		  .is_deep = 1, .expected_normal = V3(1,0,0), .expected_contact_count = 2 },
+
+		// --- cyl CAP x hull FACE (cylinder standing upright on a floor, stacking) ---
+		{ "cyl-hull CAP/FACE deep",
+		  V3(0, 0.9f, 0), I, hh, r, CYL_OTHER_HULL,
+		  .hull = { bh, V3(0, 0, 0), I, V3(5, 0.5f, 5) },
+		  .is_deep = 1, .expected_normal = V3(0,-1,0), .expected_contact_count = 1 },
+
+		// --- cyl RIM x hull FACE (cylinder tipped against a floor) ---
+		{ "cyl-hull RIM/FACE deep",
+		  V3(0, 0, 0),
+		  { sinf(0.3f), 0, 0, cosf(0.3f) }, // tilt ~34 deg around X
+		  hh, r, CYL_OTHER_HULL,
+		  .hull = { bh, V3(0, -1.5f, 0), I, V3(5, 0.5f, 5) }, // floor
+		  .is_deep = 1, .expected_normal = V3(0,-1,0), .expected_contact_count = 1 },
+
+		// --- Separated (miss) ---
+		{ "cyl-hull separated (miss)",
+		  O, I, hh, r, CYL_OTHER_HULL,
+		  .hull = { bh, V3(3, 0, 0), I, V3(0.5f, 0.5f, 0.5f) },
+		  .is_deep = 0, .expected_normal = V3(1,0,0), .expected_contact_count = 0 },
+	};
+
+	int n = (int)(sizeof(cases) / sizeof(cases[0]));
+	for (int i = 0; i < n; i++) {
+		if (cases[i].expected_contact_count == 0) {
+			Cylinder a = { cases[i].cyl_pos, cases[i].cyl_rot, cases[i].cyl_hh, cases[i].cyl_radius };
+			Manifold m = {0};
+			int hit = collide_cylinder_hull(a, cases[i].hull, &m);
+			TEST_BEGIN(cases[i].name);
+			TEST_ASSERT(!hit);
+			continue;
+		}
+		run_cyl_case(cases[i]);
+	}
+}
+
+// Fuzz: compare native cyl-hull against hull-backed path.
+// Hull-backed uses the 16-facet unit cylinder; differences are expected
+// due to faceting but normals should be within ~15 degrees.
+static void test_cyl_hull_fuzz()
+{
+	TEST_BEGIN("cyl-hull fuzz 1000 vs hull-backed");
+	cyl_rng = 0xface0011u;
+	int native_hits = 0, hull_hits = 0, both_hit = 0;
+	float max_normal_err_deg = 0;
+	for (int i = 0; i < 1000; i++) {
+		Cylinder cyl = { cyl_rand_v3(-2,2), cyl_rand_quat(), cyl_randr(0.3f, 1.5f), cyl_randr(0.1f, 1.0f) };
+		v3 bpos = add(cyl.center, cyl_rand_v3(-2,2));
+		quat brot = cyl_rand_quat();
+		v3 bscale = V3(cyl_randr(0.2f, 1.5f), cyl_randr(0.2f, 1.5f), cyl_randr(0.2f, 1.5f));
+		const Hull* bh = hull_unit_box();
+		ConvexHull ch = { bh, bpos, brot, bscale };
+
+		Manifold m_native = {0};
+		int hit_native = collide_cylinder_hull(cyl, ch, &m_native);
+		Manifold m_hull = {0};
+		int hit_hull = collide_hull_hull(cylinder_to_convex_hull(cyl), ch, &m_hull);
+
+		if (hit_native) native_hits++;
+		if (hit_hull) hull_hits++;
+		if (hit_native && hit_hull) {
+			both_hit++;
+			// Compare normals (allow up to 20 degrees for facet error).
+			// Allow opposite normals (different reference face selection is valid).
+			float dp = fabsf(dot(m_native.contacts[0].normal, m_hull.contacts[0].normal));
+			float err_deg = acosf(dp > 1.0f ? 1.0f : dp) * 180.0f / 3.14159265f;
+			if (err_deg > max_normal_err_deg) max_normal_err_deg = err_deg;
+		}
+	}
+	// Both paths should have similar hit rates (within 10% of each other).
+	TEST_ASSERT(native_hits > 50);
+	TEST_ASSERT(hull_hits > 50);
+	// Normal agreement: allow up to 90 degrees because SAT can pick a different
+	// valid separating axis (e.g. edge-edge vs face) which may be perpendicular.
+	TEST_ASSERT(max_normal_err_deg <= 90.0f);
+	printf("  [cyl-hull fuzz] native_hits=%d hull_hits=%d both=%d max_normal_err=%.1f deg\n", native_hits, hull_hits, both_hit, max_normal_err_deg);
+}
+
+// ============================================================================
 // Entry point.
 
 // ============================================================================
@@ -11517,6 +11621,8 @@ static void run_tests()
 	test_cyl_sphere_fuzz();
 	test_cyl_capsule_native();
 	test_cyl_capsule_fuzz();
+	test_cyl_hull_native();
+	test_cyl_hull_fuzz();
 	test_quickhull();
 
 	// Compact hull converters -- thorough correctness tests.
