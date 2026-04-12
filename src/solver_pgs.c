@@ -80,8 +80,6 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 	afit(sc, total_contacts); asetlen(sc, total_contacts);
 	afit(pc, total_contacts); asetlen(pc, total_contacts);
 	memset(sm, 0, manifold_count * sizeof(SolverManifold));
-	memset(sc, 0, total_contacts * sizeof(SolverContact));
-	memset(pc, 0, total_contacts * sizeof(PatchContact));
 
 	for (int i = 0; i < manifold_count; i++)
 		pre_solve_manifold(w, &manifolds[i], i, sm, sc, pc, dt);
