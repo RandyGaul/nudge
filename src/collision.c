@@ -1669,22 +1669,12 @@ static int refresh_box_box_face(Box a, Box b, Manifold* manifold, CachedFeatureP
 	v3 side_n[4] = { ref_cols[u], neg(ref_cols[u]), ref_cols[v_ax], neg(ref_cols[v_ax]) };
 	float side_d[4] = { dot(ref_cols[u], ref_pos) + (&ref_he.x)[u], dot(neg(ref_cols[u]), ref_pos) + (&ref_he.x)[u], dot(ref_cols[v_ax], ref_pos) + (&ref_he.x)[v_ax], dot(neg(ref_cols[v_ax]), ref_pos) + (&ref_he.x)[v_ax] };
 
-	// Fast path: if all 4 incident vertices are inside all side planes, skip SH clip.
-	int all_inside = 1;
-	for (int i = 0; i < 4 && all_inside; i++)
-		for (int s = 0; s < 4 && all_inside; s++)
-			if (dot(side_n[s], buf1[i]) - side_d[s] > 0.0f) all_inside = 0;
-
-	v3* in_buf = buf1;
-	uint8_t* in_fid = fid1;
-	if (!all_inside) {
-		v3* out_buf = buf2;
-		uint8_t* out_fid = fid2;
-		for (int i = 0; i < 4; i++) {
-			clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n[i], side_d[i], (uint8_t)i, out_buf, out_fid);
-			v3* sw = in_buf; in_buf = out_buf; out_buf = sw;
-			uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
-		}
+	v3* in_buf = buf1; v3* out_buf = buf2;
+	uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
+	for (int i = 0; i < 4; i++) {
+		clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n[i], side_d[i], (uint8_t)i, out_buf, out_fid);
+		v3* sw = in_buf; in_buf = out_buf; out_buf = sw;
+		uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
 	}
 
 	v3 ref_center = add(ref_pos, scale(ref_cols[la], nsign * (&ref_he.x)[la]));
