@@ -1648,6 +1648,62 @@ static void test_cyl_box_native()
 }
 
 // ============================================================================
+// Phase 5: cyl-cyl (asymmetric sizes for meaningful A/B ordering).
+
+static void test_cyl_cyl_native()
+{
+	const quat I = quat_identity();
+	const v3 O = V3(0,0,0);
+
+	CylCase cases[] = {
+		// --- SIDE-SIDE parallel: two cylinders rolling next to each other ---
+		{ "cyl-cyl SIDE-SIDE parallel",
+		  O, I, 1.0f, 0.5f, CYL_OTHER_CYL,
+		  .cyl_b = { V3(0.8f, 0, 0), I, 1.2f, 0.4f }, // different size
+		  .is_deep = 1, .expected_normal = V3(1,0,0), .expected_contact_count = 1 },
+
+		// --- SIDE-SIDE skew perpendicular: T-configuration ---
+		{ "cyl-cyl SIDE-SIDE skew perp",
+		  O, I, 1.0f, 0.5f, CYL_OTHER_CYL,
+		  .cyl_b = { V3(0.8f, 0, 0),
+		    { 0, 0, sinf(3.14159265f*0.25f), cosf(3.14159265f*0.25f) },
+		    1.2f, 0.4f },
+		  .is_deep = 1, .expected_normal = V3(1,0,0), .expected_contact_count = 1 },
+
+		// --- CAP-CAP coaxial: stacked vertically ---
+		{ "cyl-cyl CAP-CAP coaxial",
+		  O, I, 1.0f, 0.5f, CYL_OTHER_CYL,
+		  .cyl_b = { V3(0, 1.9f, 0), I, 1.2f, 0.4f },
+		  .is_deep = 1, .expected_normal = V3(0,1,0), .expected_contact_count = 1 },
+
+		// --- SIDE-CAP: B's cap against A's side ---
+		{ "cyl-cyl SIDE-CAP",
+		  O, I, 1.0f, 0.5f, CYL_OTHER_CYL,
+		  .cyl_b = { V3(0.8f, 1.5f, 0), I, 0.6f, 0.3f },
+		  .is_deep = 1, .expected_normal = V3(1,0,0), .expected_contact_count = 1 },
+
+		// --- Separated (miss) ---
+		{ "cyl-cyl separated (miss)",
+		  O, I, 1.0f, 0.5f, CYL_OTHER_CYL,
+		  .cyl_b = { V3(3, 0, 0), I, 1.0f, 0.5f },
+		  .is_deep = 0, .expected_normal = V3(1,0,0), .expected_contact_count = 0 },
+	};
+
+	int n = (int)(sizeof(cases) / sizeof(cases[0]));
+	for (int i = 0; i < n; i++) {
+		if (cases[i].expected_contact_count == 0) {
+			Cylinder a = { cases[i].cyl_pos, cases[i].cyl_rot, cases[i].cyl_hh, cases[i].cyl_radius };
+			Manifold m = {0};
+			int hit = collide_cylinder_cylinder(a, cases[i].cyl_b, &m);
+			TEST_BEGIN(cases[i].name);
+			TEST_ASSERT(!hit);
+			continue;
+		}
+		run_cyl_case(cases[i]);
+	}
+}
+
+// ============================================================================
 // Entry point.
 
 // ============================================================================
@@ -11675,6 +11731,7 @@ static void run_tests()
 	test_cyl_hull_native();
 	test_cyl_hull_fuzz();
 	test_cyl_box_native();
+	test_cyl_cyl_native();
 	test_quickhull();
 
 	// Compact hull converters -- thorough correctness tests.

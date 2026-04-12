@@ -2064,9 +2064,176 @@ int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold)
 	return collide_cylinder_hull_ana(a, b, manifold);
 }
 
-int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold)
+// Analytical cyl-cyl: SAT with both cylinder axes + their cross product.
+// Each cylinder projects analytically via cyl_half_support.
+static int collide_cylinder_cylinder_ana(Cylinder a, Cylinder b, Manifold* manifold)
+{
+	v3 axis_a = rotate(a.rotation, V3(0, 1, 0));
+	v3 axis_b = rotate(b.rotation, V3(0, 1, 0));
+	v3 a_p, a_q, b_p, b_q;
+	cylinder_axis_segment(a, &a_p, &a_q);
+	cylinder_axis_segment(b, &b_p, &b_q);
+
+	// Quick bounding-sphere rejection.
+	float bound_a = sqrtf(a.radius * a.radius + a.half_height * a.half_height);
+	float bound_b = sqrtf(b.radius * b.radius + b.half_height * b.half_height);
+	float dist2_centers = len2(sub(a.center, b.center));
+	float bound_sum = bound_a + bound_b;
+	if (dist2_centers > bound_sum * bound_sum) return 0;
+
+	float best_sep = -1e18f;
+	v3 best_n = V3(0,0,0);
+	int best_type = -1; // 0 = axis_a, 1 = axis_b, 2 = cross
+	int best_sign = 1;
+
+	// Helper: test a candidate SAT axis. Returns 1 if separating (no collision).
+	#define CYL_CYL_TEST_AXIS(n_arg, type_arg, sign_arg) do { \
+		v3 n_ = (n_arg); \
+		float a_half = cyl_half_support(axis_a, a.half_height, a.radius, n_); \
+		float b_half = cyl_half_support(axis_b, b.half_height, b.radius, n_); \
+		float a_center = dot(a.center, n_); \
+		float b_center = dot(b.center, n_); \
+		float a_min = a_center - a_half, a_max = a_center + a_half; \
+		float b_min = b_center - b_half, b_max = b_center + b_half; \
+		if (a_max < b_min || b_max < a_min) return 0; /* separating axis */ \
+		float pen1 = a_max - b_min, pen2 = b_max - a_min; \
+		float pen = pen1 < pen2 ? pen1 : pen2; \
+		float sep = -pen; \
+		int s_ = pen1 < pen2 ? 1 : -1; \
+		if (sep > best_sep + 0.001f) { best_sep = sep; best_n = n_; best_type = (type_arg); best_sign = s_; } \
+	} while(0)
+
+	// Family 1: cylinder A axis.
+	CYL_CYL_TEST_AXIS(axis_a, 0, 0);
+
+	// Family 2: cylinder B axis.
+	CYL_CYL_TEST_AXIS(axis_b, 1, 0);
+
+	// Family 3: cross(axis_a, axis_b). Only if axes aren't parallel.
+	{
+		v3 cross_ab = cross(axis_a, axis_b);
+		float cross_len2 = len2(cross_ab);
+		if (cross_len2 > 1e-8f) {
+			v3 ax = scale(cross_ab, 1.0f / sqrtf(cross_len2));
+			if (dot(ax, sub(a.center, b.center)) < 0.0f) ax = neg(ax);
+			CYL_CYL_TEST_AXIS(ax, 2, 0);
+		}
+	}
+
+	// Family 4: "radial" direction — from closest points between the two axis segments.
+	// When axes cross at a point (radial = 0), fall back to center-to-center direction.
+	// This is the physically-preferred axis for side-side contacts, so it wins TIES
+	// (uses >= instead of the biased > comparison that other families use).
+	{
+		v3 cpa, cpb;
+		segments_closest_points(a_p, a_q, b_p, b_q, &cpa, &cpb);
+		v3 radial = sub(cpb, cpa);
+		float rl2 = len2(radial);
+		if (rl2 < 1e-12f) { radial = sub(b.center, a.center); rl2 = len2(radial); }
+		if (rl2 > 1e-12f) {
+			v3 ax = scale(radial, 1.0f / sqrtf(rl2));
+			if (dot(ax, sub(a.center, b.center)) < 0.0f) ax = neg(ax);
+			float a_half = cyl_half_support(axis_a, a.half_height, a.radius, ax);
+			float b_half = cyl_half_support(axis_b, b.half_height, b.radius, ax);
+			float a_center_proj = dot(a.center, ax);
+			float b_center_proj = dot(b.center, ax);
+			float a_min_v = a_center_proj - a_half, a_max_v = a_center_proj + a_half;
+			float b_min_v = b_center_proj - b_half, b_max_v = b_center_proj + b_half;
+			if (a_max_v < b_min_v || b_max_v < a_min_v) return 0;
+			float pen1 = a_max_v - b_min_v, pen2 = b_max_v - a_min_v;
+			float pen = pen1 < pen2 ? pen1 : pen2;
+			float sep = -pen;
+			if (sep >= best_sep) { best_sep = sep; best_n = ax; best_type = 3; }
+		}
+	}
+
+	#undef CYL_CYL_TEST_AXIS
+
+	if (best_sep > 0.0f || best_type < 0) return 0;
+	if (!manifold) return 1;
+
+	// --- Contact generation ---
+	if (best_type == 0) {
+		// A's axis wins: cap of A is the reference. Project B's axis endpoints
+		// onto A's cap plane and keep those within disk radius.
+		v3 cap_n = scale(axis_a, (float)best_sign);
+		float cap_d = dot(a.center, cap_n) + a.half_height;
+		// Project b's endpoints onto cap plane.
+		float d_bp = dot(b_p, cap_n) - cap_d;
+		float d_bq = dot(b_q, cap_n) - cap_d;
+		int cp = 0;
+		v3 points[2]; float depths[2];
+		if (d_bp < b.radius) {
+			v3 pt = sub(b_p, scale(cap_n, b.radius));
+			v3 radial = sub(pt, add(a.center, scale(cap_n, a.half_height)));
+			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
+			if (len2(radial) <= a.radius * a.radius) { points[cp] = pt; depths[cp] = b.radius - d_bp; cp++; }
+		}
+		if (d_bq < b.radius) {
+			v3 pt = sub(b_q, scale(cap_n, b.radius));
+			v3 radial = sub(pt, add(a.center, scale(cap_n, a.half_height)));
+			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
+			if (len2(radial) <= a.radius * a.radius) { points[cp] = pt; depths[cp] = b.radius - d_bq; cp++; }
+		}
+		if (cp == 0) { cp = 1; points[0] = add(a.center, scale(cap_n, a.half_height)); depths[0] = -best_sep; }
+		manifold->count = cp;
+		for (int i = 0; i < cp; i++)
+			manifold->contacts[i] = (Contact){ .point = points[i], .normal = cap_n, .penetration = depths[i] };
+		return 1;
+	}
+
+	if (best_type == 1) {
+		// B's axis wins: cap of B is the reference. Same as above with A/B swapped,
+		// but we keep the A->B normal convention.
+		v3 cap_n = scale(axis_b, (float)best_sign);
+		float cap_d = dot(b.center, cap_n) + b.half_height;
+		float d_ap = dot(a_p, cap_n) - cap_d;
+		float d_aq = dot(a_q, cap_n) - cap_d;
+		int cp = 0;
+		v3 points[2]; float depths[2];
+		if (d_ap < a.radius) {
+			v3 pt = sub(a_p, scale(cap_n, a.radius));
+			v3 radial = sub(pt, add(b.center, scale(cap_n, b.half_height)));
+			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
+			if (len2(radial) <= b.radius * b.radius) { points[cp] = pt; depths[cp] = a.radius - d_ap; cp++; }
+		}
+		if (d_aq < a.radius) {
+			v3 pt = sub(a_q, scale(cap_n, a.radius));
+			v3 radial = sub(pt, add(b.center, scale(cap_n, b.half_height)));
+			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
+			if (len2(radial) <= b.radius * b.radius) { points[cp] = pt; depths[cp] = a.radius - d_aq; cp++; }
+		}
+		if (cp == 0) { cp = 1; points[0] = add(b.center, scale(cap_n, b.half_height)); depths[0] = -best_sep; }
+		manifold->count = cp;
+		for (int i = 0; i < cp; i++)
+			manifold->contacts[i] = (Contact){ .point = points[i], .normal = cap_n, .penetration = depths[i] };
+		return 1;
+	}
+
+	// best_type == 2 or 3: edge/radial contact — single point from classify.
+	{
+		v3 cpa, cpb;
+		segments_closest_points(a_p, a_q, b_p, b_q, &cpa, &cpb);
+		CylFeature feat = cyl_classify_point(cpb, a.center, a.rotation, a.half_height, a.radius);
+		manifold->count = 1;
+		manifold->contacts[0] = (Contact){
+			.point = feat.surface_pt,
+			.normal = neg(best_n),
+			.penetration = -best_sep,
+		};
+		return 1;
+	}
+}
+
+// GJK variant for bench comparison.
+static int collide_cylinder_cylinder_gjk(Cylinder a, Cylinder b, Manifold* manifold)
 {
 	return collide_hull_hull(cylinder_to_convex_hull(a), cylinder_to_convex_hull(b), manifold);
+}
+
+int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold)
+{
+	return collide_cylinder_cylinder_ana(a, b, manifold);
 }
 
 // Narrowphase dispatch for a single body pair.
