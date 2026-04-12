@@ -70,17 +70,20 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	v3 n = sc[contact_base].normal;
 	smf.normal = n;
 	contact_tangent_basis(n, &smf.tangent1, &smf.tangent2);
-	smf.eff_mass_t1 = compute_effective_mass(a, b, inv_mass_sum, smf.centroid_r_a, smf.centroid_r_b, smf.tangent1);
-	smf.eff_mass_t2 = compute_effective_mass(a, b, inv_mass_sum, smf.centroid_r_a, smf.centroid_r_b, smf.tangent2);
 	smf.patch_area = estimate_patch_area(im->m.contacts, im->m.count);
 	smf.patch_radius = 0.6667f * sqrtf(smf.patch_area * (1.0f / 3.14159265f));
-	float k_twist = dot(inv_inertia_world_mul(a, n), n) + dot(inv_inertia_world_mul(b, n), n);
-	smf.eff_mass_twist = k_twist > 1e-12f ? 1.0f / k_twist : 0.0f;
+	// Compute cross(r, dir) and I_w * cross(r, dir) once, reuse for effective mass.
 	smf.rct1_a = cross(smf.centroid_r_a, smf.tangent1); smf.rct1_b = cross(smf.centroid_r_b, smf.tangent1);
 	smf.rct2_a = cross(smf.centroid_r_a, smf.tangent2); smf.rct2_b = cross(smf.centroid_r_b, smf.tangent2);
 	smf.w_t1_a = inv_inertia_world_mul(a, smf.rct1_a); smf.w_t1_b = inv_inertia_world_mul(b, smf.rct1_b);
 	smf.w_t2_a = inv_inertia_world_mul(a, smf.rct2_a); smf.w_t2_b = inv_inertia_world_mul(b, smf.rct2_b);
 	smf.w_tw_a = inv_inertia_world_mul(a, n); smf.w_tw_b = inv_inertia_world_mul(b, n);
+	float k_t1 = inv_mass_sum + dot(cross(smf.w_t1_a, smf.centroid_r_a), smf.tangent1) + dot(cross(smf.w_t1_b, smf.centroid_r_b), smf.tangent1);
+	smf.eff_mass_t1 = k_t1 > 1e-12f ? 1.0f / k_t1 : 0.0f;
+	float k_t2 = inv_mass_sum + dot(cross(smf.w_t2_a, smf.centroid_r_a), smf.tangent2) + dot(cross(smf.w_t2_b, smf.centroid_r_b), smf.tangent2);
+	smf.eff_mass_t2 = k_t2 > 1e-12f ? 1.0f / k_t2 : 0.0f;
+	float k_twist = dot(smf.w_tw_a, n) + dot(smf.w_tw_b, n);
+	smf.eff_mass_twist = k_twist > 1e-12f ? 1.0f / k_twist : 0.0f;
 
 	// Warm start matching
 	if (wm && w->warm_start_enabled) {
