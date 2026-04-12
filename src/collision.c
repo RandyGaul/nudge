@@ -965,7 +965,7 @@ static SIMD_FORCEINLINE int clip_to_plane(v3* in, uint8_t* in_fid, int in_count,
 // 1) Two farthest points (span the patch).
 // 2) Farthest from that segment (adds width).
 // 3) Maximal barycentric contributor (most outside triangle, completes quad).
-static int reduce_contacts(Contact* contacts, int count)
+static SIMD_FORCEINLINE int reduce_contacts(Contact* contacts, int count)
 {
 	if (count <= MAX_CONTACTS) return count;
 
