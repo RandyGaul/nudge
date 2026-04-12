@@ -755,10 +755,14 @@ void world_step(World world, float dt)
 		}
 		t_pgs += perf_now() - tp;
 
+		// Sync lambda_n from PatchContact back to SolverContact.
+		// SIMD path: scatter already writes both pc[] and sc[] (lines 724-726), skip.
+		// Non-SSE scalar path: solve_contact_patch_sv writes pc[] only, needs sync.
+#if !SIMD_SSE
 		if (use_simd_path) {
-			// Sync lambda_n from compact PatchContact back to SolverContact
 			for (int ci2 = 0; ci2 < asize(pc); ci2++) sc[ci2].lambda_n = pc[ci2].lambda_n;
 		}
+#endif
 
 		double ti2 = perf_now();
 #ifdef _WIN32
