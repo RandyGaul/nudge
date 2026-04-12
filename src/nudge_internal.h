@@ -326,6 +326,7 @@ typedef struct WorldInternal
 	float contact_damping_ratio;
 	float max_push_velocity;
 	int sub_steps;
+	int last_manifold_count; // hint for next frame's manifold array pre-allocation
 	PerfTimers perf;
 } WorldInternal;
 
