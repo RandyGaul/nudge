@@ -93,9 +93,11 @@ static void integration_dense_solve(LDL_Cache* c, IntegrationWorld* iw, double* 
 		double K_small[21] = {0};
 		ldl_K_body_contrib(jac, di, 0, 0, a, ci->weight_a, K_small);
 		ldl_K_body_contrib(jac, di, 1, 0, b, ci->weight_b, K_small);
-		for (int r = 0; r < di; r++)
-			for (int c2 = 0; c2 < di; c2++)
+		for (int r = 0; r < di; r++) {
+			for (int c2 = 0; c2 < di; c2++) {
 				K[(oi + r) * n + (oi + c2)] += K_small[LDL_TRI(r, c2)];
+			}
+		}
 
 		// Regularization
 		double trace = 0;
@@ -126,11 +128,12 @@ static void integration_dense_solve(LDL_Cache* c, IntegrationWorld* iw, double* 
 					int side_j = (body == con_j->body_b) ? 1 : 0;
 					double buf[36] = {0};
 					ldl_K_body_off(jac_i, di, side_i, jac_j, dj, side_j, &iw->bodies[real_b], wt, buf);
-					for (int r = 0; r < di; r++)
+					for (int r = 0; r < di; r++) {
 						for (int c2 = 0; c2 < dj; c2++) {
 							K[(oi + r) * n + (oj + c2)] += buf[r * dj + c2];
 							K[(oj + c2) * n + (oi + r)] += buf[r * dj + c2];
 						}
+					}
 				}
 			}
 		}
@@ -159,11 +162,12 @@ static void integration_dense_solve(LDL_Cache* c, IntegrationWorld* iw, double* 
 				LDL_JacobianRow* jac_j = &c->jacobians[con_j->jacobian_start];
 				double buf[36] = {0};
 				ldl_K_body_off(jac_i, di, side_i, jac_j, dj, side_j, &iw->bodies[real_b], wt, buf);
-				for (int r = 0; r < di; r++)
+				for (int r = 0; r < di; r++) {
 					for (int c2 = 0; c2 < dj; c2++) {
 						K[(oi + r) * n + (oj + c2)] += buf[r * dj + c2];
 						K[(oj + c2) * n + (oi + r)] += buf[r * dj + c2];
 					}
+				}
 			}
 		}
 	}

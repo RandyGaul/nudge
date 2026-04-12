@@ -8,6 +8,7 @@
 #include "quickhull.c"
 #include "bvh.c"
 #include "collision.c"
+#include "broadphase.c"
 #include "inertia.c"
 #include "solver_pgs.c"
 #include "joints.c"
@@ -201,8 +202,9 @@ static void pool_ensure(int n_workers)
 	if (pool_thread_count >= needed) return;
 	pool_ctx.worker_count = n_workers;
 	pool_ctx.sync_bits = 0;
-	for (int i = pool_thread_count; i < needed; i++)
+	for (int i = pool_thread_count; i < needed; i++) {
 		pool_threads[i] = CreateThread(NULL, 0, pool_worker_thread, &pool_ctx, 0, NULL);
+	}
 	pool_thread_count = needed;
 }
 
@@ -236,8 +238,9 @@ typedef struct PGS_WorkCtx { SolverBodyVel* bodies; PGS_Batch4* batches; } PGS_W
 static void pgs_work_fn(void* ctx, int start, int count)
 {
 	PGS_WorkCtx* p = (PGS_WorkCtx*)ctx;
-	for (int i = start; i < start + count; i++)
+	for (int i = start; i < start + count; i++) {
 		solve_contact_batch4_sv(p->bodies, &p->batches[i]);
+	}
 }
 
 // --- Integrate work function (parallel body integration) ---
@@ -288,8 +291,9 @@ typedef struct PreSolveCtx { WorldInternal* w; InternalManifold* manifolds; Solv
 static void pre_solve_work_fn(void* ctx, int start, int count)
 {
 	PreSolveCtx* ps = (PreSolveCtx*)ctx;
-	for (int i = start; i < start + count; i++)
+	for (int i = start; i < start + count; i++) {
 		pre_solve_manifold(ps->w, &ps->manifolds[i], i, ps->sm, ps->sc, ps->pc, ps->dt, ps->soft_dd, ps->bias_dd, ps->soft_ds, ps->bias_ds);
+	}
 }
 
 // Parallel pre_solve: alloc fixed-stride → dispatch → sequential warm start.
@@ -316,14 +320,13 @@ static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifo
 	PreSolveCtx ps_ctx = { .w = w, .manifolds = manifolds, .sm = sm, .sc = sc, .pc = pc, .dt = dt, .soft_dd = soft_dd, .bias_dd = bias_dd, .soft_ds = soft_ds, .bias_ds = bias_ds };
 	pool_dispatch(work_fn, &ps_ctx, manifold_count, 32, w->thread_count);
 	// Warm start (sequential — modifies shared body velocities)
-	int patch_warm = 1;
 	for (int i = 0; i < manifold_count; i++) {
 		SolverManifold* m = &sm[i];
 		if (m->contact_count == 0) continue;
 		BodyHot* a = &w->body_hot[m->body_a]; BodyHot* b = &w->body_hot[m->body_b];
-		for (int ci = 0; ci < m->contact_count; ci++) { SolverContact* s = &sc[m->contact_start + ci]; if (patch_warm) { if (s->lambda_n == 0.0f) continue; apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n)); } else { if (s->lambda_n == 0.0f && s->lambda_t1 == 0.0f && s->lambda_t2 == 0.0f) continue; apply_impulse(a, b, s->r_a, s->r_b, add(add(scale(s->normal, s->lambda_n), scale(s->tangent1, s->lambda_t1)), scale(s->tangent2, s->lambda_t2))); } }
-		if (patch_warm && (m->lambda_t1 != 0.0f || m->lambda_t2 != 0.0f)) apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, add(scale(m->tangent1, m->lambda_t1), scale(m->tangent2, m->lambda_t2)));
-		if (patch_warm && m->lambda_twist != 0.0f) { v3 tw = scale(m->normal, m->lambda_twist); a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, tw)); b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, tw)); }
+		for (int ci = 0; ci < m->contact_count; ci++) { SolverContact* s = &sc[m->contact_start + ci]; if (s->lambda_n == 0.0f) continue; apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n)); }
+		if (m->lambda_t1 != 0.0f || m->lambda_t2 != 0.0f) apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, add(scale(m->tangent1, m->lambda_t1), scale(m->tangent2, m->lambda_t2)));
+		if (m->lambda_twist != 0.0f) { v3 tw = scale(m->normal, m->lambda_twist); a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, tw)); b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, tw)); }
 	}
 	*out_sm = sm; *out_sc = sc;
 	if (out_pc) *out_pc = pc; else afree(pc);
@@ -416,10 +419,12 @@ void world_step(World world, float dt)
 	// Check BEFORE broadphase to avoid BVH refit and SAP overhead.
 	{
 		int any_awake = 0;
-		for (int ii = 0; ii < asize(w->islands) && !any_awake; ii++)
+		for (int ii = 0; ii < asize(w->islands) && !any_awake; ii++) {
 			if ((w->island_gen[ii] & 1) && w->islands[ii].awake) any_awake = 1;
-		for (int bi2 = 0; bi2 < body_count && !any_awake; bi2++)
+		}
+		for (int bi2 = 0; bi2 < body_count && !any_awake; bi2++) {
 			if (split_alive(w->body_gen, bi2) && w->body_hot[bi2].inv_mass > 0.0f && w->body_cold[bi2].island_id < 0) any_awake = 1;
+		}
 		if (!any_awake) {
 			w->perf.broadphase = 0;
 			w->perf.pre_solve = 0;
@@ -454,8 +459,9 @@ void world_step(World world, float dt)
 		pool_dispatch(np_work_fn, &np_ctx, asize(np_pairs), 32, n_workers);
 		manifolds = merged;
 	} else if (asize(np_pairs) > 0) {
-		for (int i = 0; i < asize(np_pairs); i++)
+		for (int i = 0; i < asize(np_pairs); i++) {
 			narrowphase_pair(w, np_pairs[i].a, np_pairs[i].b, &manifolds);
+		}
 	}
 	afree(np_pairs);
 #endif
@@ -468,9 +474,11 @@ void world_step(World world, float dt)
 	// Avoids 48KB of per-frame apush when debug visualization is unused.
 	if (w->debug_contacts) {
 		aclear(w->debug_contacts);
-		for (int i = 0; i < asize(manifolds); i++)
-			for (int c = 0; c < manifolds[i].m.count; c++)
+		for (int i = 0; i < asize(manifolds); i++) {
+			for (int c = 0; c < manifolds[i].m.count; c++) {
 				apush(w->debug_contacts, manifolds[i].m.contacts[c]);
+			}
+		}
 	}
 
 	int manifold_count = asize(manifolds);
@@ -479,18 +487,22 @@ void world_step(World world, float dt)
 	// Only safe when no islands are awake — free-falling bodies with 0 contacts still need integration.
 	// When sleep is disabled all islands are awake, so skip the scan.
 	int any_awake_island = !w->sleep_enabled;
-	if (!any_awake_island)
-		for (int ii = 0; ii < asize(w->islands) && !any_awake_island; ii++)
+	if (!any_awake_island) {
+		for (int ii = 0; ii < asize(w->islands) && !any_awake_island; ii++) {
 			if ((w->island_gen[ii] & 1) && w->islands[ii].awake) any_awake_island = 1;
+		}
+	}
 	// Skip joint/body scans when we already know there's work (contacts or awake islands).
 	int skip_solver = 0;
 	if (manifold_count == 0 && !any_awake_island) {
 		int any_active_joints = 0;
-		for (int ji = 0; ji < asize(w->joints) && !any_active_joints; ji++)
+		for (int ji = 0; ji < asize(w->joints) && !any_active_joints; ji++) {
 			if (split_alive(w->joint_gen, ji)) any_active_joints = 1;
+		}
 		int any_unisland_dynamic = 0;
-		for (int bi2 = 0; bi2 < body_count && !any_unisland_dynamic; bi2++)
+		for (int bi2 = 0; bi2 < body_count && !any_unisland_dynamic; bi2++) {
 			if (split_alive(w->body_gen, bi2) && w->body_hot[bi2].inv_mass > 0.0f && w->body_cold[bi2].island_id < 0) any_unisland_dynamic = 1;
+		}
 		skip_solver = !any_active_joints && !any_unisland_dynamic;
 	}
 	if (skip_solver) {
@@ -667,8 +679,9 @@ void world_step(World world, float dt)
 #if SIMD_SSE
 			// On substep 2+, only refresh changing fields (bias + lambda).
 			if (sub > 0 && simd_batch_count > 0) {
-				for (int bi = 0; bi < simd_batch_count; bi++)
+				for (int bi = 0; bi < simd_batch_count; bi++) {
 					pgs_batch4_refresh(&simd_batches[bi], sm, pc);
+			}
 			}
 
 			// Iteration loop: dispatch per color within each iteration.
@@ -684,8 +697,9 @@ void world_step(World world, float dt)
 					} else
 #endif
 					{
-						for (int bi = bs; bi < be; bi++)
+						for (int bi = bs; bi < be; bi++) {
 							solve_contact_batch4_sv(w->body_vel, &simd_batches[bi]);
+						}
 					}
 				}
 				double tjl = perf_now();
@@ -703,17 +717,20 @@ void world_step(World world, float dt)
 						sm[mi].lambda_t1 = ((float*)&bt->lambda_t1)[j];
 						sm[mi].lambda_t2 = ((float*)&bt->lambda_t2)[j];
 						sm[mi].lambda_twist = ((float*)&bt->lambda_twist)[j];
-						for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++)
+						for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
 							pc[sm[mi].contact_start + cp2].lambda_n = ((float*)&bt->cp[cp2].lambda_n)[j];
+					}
 					}
 				}
 			}
 #else
 			for (int iter = 0; iter < w->velocity_iters; iter++) {
-				for (int c = 0; c < color_count; c++)
-					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+				for (int c = 0; c < color_count; c++) {
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++) {
 						if (crefs[i].type == CTYPE_CONTACT)
 							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], pc);
+					}
+				}
 				double tjl = perf_now();
 				joints_solve_limits(w, sol_joints, asize(sol_joints));
 				t_jlim += perf_now() - tjl;
@@ -721,9 +738,11 @@ void world_step(World world, float dt)
 #endif
 		} else {
 			for (int iter = 0; iter < w->velocity_iters; iter++) {
-				for (int c = 0; c < color_count; c++)
-					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++)
+				for (int c = 0; c < color_count; c++) {
+					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++) {
 						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
+					}
+				}
 				double tjl = perf_now();
 				joints_solve_limits(w, sol_joints, asize(sol_joints));
 				t_jlim += perf_now() - tjl;

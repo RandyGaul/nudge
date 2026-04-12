@@ -7,9 +7,11 @@
 // Helper: pack a full NxN symmetric matrix into lower-triangular storage.
 static void pack_symmetric(double* full, int n, double* packed)
 {
-	for (int r = 0; r < n; r++)
-		for (int c = 0; c <= r; c++)
+	for (int r = 0; r < n; r++) {
+		for (int c = 0; c <= r; c++) {
 			packed[LDL_TRI(r, c)] = full[r * n + c];
+		}
+	}
 }
 
 // Helper: reconstruct K from L (packed, unit diagonal) and D, verify K = L*D*L^T.
@@ -20,16 +22,20 @@ static double ldl_reconstruct_error(double* L_packed, double* D, int n, double* 
 	double L[36] = {0};
 	for (int r = 0; r < n; r++) {
 		L[r * n + r] = 1.0;
-		for (int c = 0; c < r; c++)
+		for (int c = 0; c < r; c++) {
 			L[r * n + c] = L_packed[LDL_TRI(r, c)];
+		}
 	}
 
 	// Compute L * D * L^T
 	double LDLt[36] = {0};
-	for (int i = 0; i < n; i++)
-		for (int j = 0; j < n; j++)
-			for (int k = 0; k < n; k++)
+	for (int i = 0; i < n; i++) {
+		for (int j = 0; j < n; j++) {
+			for (int k = 0; k < n; k++) {
 				LDLt[i * n + j] += L[i * n + k] * D[k] * L[j * n + k];
+			}
+		}
+	}
 
 	double max_err = 0;
 	for (int i = 0; i < n * n; i++) {
@@ -397,9 +403,11 @@ static void test_ldl_factor_negative_offdiag()
 	}
 	// Verify it actually has negative off-diagonals
 	int has_neg = 0;
-	for (int i = 0; i < 3; i++)
-		for (int j = 0; j < 3; j++)
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
 			if (i != j && K_full[i * 3 + j] < 0) has_neg = 1;
+		}
+	}
 	TEST_ASSERT(has_neg);
 	double A[6], D[3];
 	pack_symmetric(K_full, 3, A);
@@ -692,9 +700,11 @@ static void test_ldl_block_transpose_5x3()
 	for (int i = 0; i < 15; i++) A[i] = (double)(i + 1);
 	block_transpose(A, 5, 3, At);
 	// A[r][c] = At[c][r]. A is 5x3 row-major, At is 3x5 row-major.
-	for (int r = 0; r < 5; r++)
-		for (int c = 0; c < 3; c++)
+	for (int r = 0; r < 5; r++) {
+		for (int c = 0; c < 3; c++) {
 			TEST_ASSERT(fabs(At[c * 5 + r] - A[r * 3 + c]) < LDL_EPS);
+		}
+	}
 }
 
 static void test_ldl_block_sub_rectangular()

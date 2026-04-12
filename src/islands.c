@@ -378,8 +378,9 @@ static void island_try_split(WorldInternal* w, int island_id)
 
 	// Map body_idx -> local index for fast lookup
 	CK_MAP(int) body_to_local = NULL;
-	for (int i = 0; i < n; i++)
+	for (int i = 0; i < n; i++) {
 		map_set(body_to_local, (uint64_t)bodies[i], i);
+	}
 
 	int num_components = 0;
 	CK_DYNA int* stack = NULL;
@@ -457,12 +458,14 @@ static void island_try_split(WorldInternal* w, int island_id)
 		afit(comp_islands, num_components);
 		asetlen(comp_islands, num_components);
 		comp_islands[0] = island_id;
-		for (int c = 1; c < num_components; c++)
+		for (int c = 1; c < num_components; c++) {
 			comp_islands[c] = island_create(w);
+		}
 
 		// Assign bodies to their component's island
-		for (int i = 0; i < n; i++)
+		for (int i = 0; i < n; i++) {
 			island_add_body(w, comp_islands[component[i]], bodies[i]);
+		}
 
 		// Assign joints to the island of body_a (both endpoints should be in same component)
 		for (int i = 0; i < asize(joint_list); i++) {

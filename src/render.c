@@ -445,8 +445,9 @@ static void mesh_generate_capsule(Mesh* mesh, float radius, float half_height)
 	}
 
 	// Bottom hemisphere ring strips
-	for (int r = 0; r < rings - 1; r++)
+	for (int r = 0; r < rings - 1; r++) {
 		RING_STRIP(bh + r * slices, bh + (r + 1) * slices)
+	}
 
 	// Bottom hemisphere to cylinder bottom
 	RING_STRIP(bh + (rings - 1) * slices, cb)
@@ -458,8 +459,9 @@ static void mesh_generate_capsule(Mesh* mesh, float radius, float half_height)
 	RING_STRIP(ct, th)
 
 	// Top hemisphere ring strips
-	for (int r = 0; r < rings - 1; r++)
+	for (int r = 0; r < rings - 1; r++) {
 		RING_STRIP(th + r * slices, th + (r + 1) * slices)
+	}
 
 	// North pole fan (CCW from above)
 	for (int s = 0; s < slices; s++) {
@@ -698,6 +700,7 @@ static GLuint r_shadow_program;
 static GLint r_shadow_loc_light_vp;
 static mat4 r_light_vp;
 static int r_shadows_enabled = 1;
+static int r_no_depth_write = 0;
 
 static Mesh* get_mesh(MeshType type)
 {
@@ -816,6 +819,11 @@ void render_set_shadows(int enabled)
 	r_shadows_enabled = enabled;
 }
 
+void render_set_no_depth_write(int enabled)
+{
+	r_no_depth_write = enabled;
+}
+
 void render_begin(mat4 vp)
 {
 	r_vp = vp;
@@ -889,6 +897,7 @@ void render_end()
 		gl_Uniform1f(r_loc_shadow_strength, 0.0f);
 	}
 
+	if (r_no_depth_write) glDepthMask(GL_FALSE);
 	for (int i = 0; i < r_mesh_count; i++) {
 		int count = asize(r_instances[i]);
 		if (count == 0) continue;
@@ -896,6 +905,7 @@ void render_end()
 		gl_BindVertexArray(m->vao);
 		gl_DrawElementsInstanced(GL_TRIANGLES, m->index_count, GL_UNSIGNED_SHORT, NULL, count);
 	}
+	if (r_no_depth_write) glDepthMask(GL_TRUE);
 
 	gl_BindVertexArray(0);
 

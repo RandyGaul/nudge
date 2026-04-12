@@ -421,143 +421,158 @@ int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 	return 1;
 }
 
-// Capsule-hull: GJK shallow path, face/edge-search deep path.
+// Capsule-hull narrowphase.
+// Shallow (GJK dist > LINEAR_SLOP): single reference plane from GJK, project
+// both endpoints.  Two contacts for face-parallel stability.
+// Deep (GJK dist <= LINEAR_SLOP): per-endpoint face search.  Each endpoint
+// independently finds its own minimum-penetration face, so contacts stay valid
+// when endpoints are in different Voronoi regions (e.g. near a box edge/corner).
+// Both paths place contacts on the hull surface for continuity at the boundary.
 int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 {
 	GJK_Result r = gjk_query_segment_hull(a.p, a.q, b);
 
 	if (r.distance > a.radius) return 0;
+	if (!manifold) return 1;
 
 	if (r.distance > LINEAR_SLOP) {
-		// Shallow: GJK witness points.
-		v3 normal = scale(sub(r.point2, r.point1), 1.0f / r.distance);
-		v3 contact_pt = add(r.point1, scale(normal, a.radius));
-		if (!manifold) return 1;
+		// --- Shallow path ---
+		v3 gjk_n = scale(sub(r.point2, r.point1), 1.0f / r.distance);
+		v3 outward = neg(gjk_n);  // hull outward direction at contact
+
+		// Try to match the GJK normal to a hull face.  Only face contacts
+		// can produce valid multi-contact manifolds via endpoint projection.
+		// Edge/vertex contacts give a diagonal reference plane that makes
+		// projected contact points fly off the face -- use single GJK
+		// contact for those.
+		const Hull* hull = b.hull;
+		int face_match = -1;
+		HullPlane matched_plane = {0};
+		for (int i = 0; i < hull->face_count; i++) {
+			HullPlane wp = plane_transform(hull->planes[i], b.center, b.rotation, b.scale);
+			if (dot(outward, wp.normal) > 0.99f) {
+				face_match = i;
+				matched_plane = wp;
+				break;
+			}
+		}
+
+		if (face_match >= 0) {
+			// Face contact: project both endpoints onto the matched face
+			// for two-contact rotational stability.
+			// Only generate a contact if the projection lands inside the face
+			// polygon.  Off-face projections are phantom contacts (the endpoint
+			// overhangs the box edge) that cause the solver to pop the capsule.
+			v3 fn = matched_plane.normal;
+			float fd = matched_plane.offset;
+			float dp = dot(a.p, fn) - fd;
+			float dq = dot(a.q, fn) - fd;
+			float pen_p = a.radius - dp;
+			float pen_q = a.radius - dq;
+
+			// Face containment: walk face edge loop, check side planes.
+			v3 proj_p = sub(a.p, scale(fn, dp));
+			v3 proj_q = sub(a.q, scale(fn, dq));
+			int p_inside = 1, q_inside = 1;
+			{
+				int start_e = hull->faces[face_match].edge, ei = start_e;
+				do {
+					v3 tail = add(b.center, rotate(b.rotation, hull_vert_scaled(hull, hull->edge_origin[ei], b.scale)));
+					int twin = hull->edge_twin[ei];
+					v3 head = add(b.center, rotate(b.rotation, hull_vert_scaled(hull, hull->edge_origin[twin], b.scale)));
+					v3 side_n = cross(sub(head, tail), fn);
+					float side_d = dot(side_n, tail);
+					if (p_inside && dot(side_n, proj_p) < side_d) p_inside = 0;
+					if (q_inside && dot(side_n, proj_q) < side_d) q_inside = 0;
+					if (!p_inside && !q_inside) break;
+					ei = hull->edge_next[ei];
+				} while (ei != start_e);
+			}
+
+			int cp = 0;
+			if (pen_p >= -LINEAR_SLOP && p_inside) {
+				if (pen_p < 0) pen_p = 0;
+				manifold->contacts[cp++] = (Contact){
+					.point = proj_p,
+					.normal = neg(fn),
+					.penetration = pen_p,
+					.feature_id = 0,
+				};
+			}
+			if (pen_q >= -LINEAR_SLOP && q_inside) {
+				if (pen_q < 0) pen_q = 0;
+				manifold->contacts[cp++] = (Contact){
+					.point = proj_q,
+					.normal = neg(fn),
+					.penetration = pen_q,
+					.feature_id = 1,
+				};
+			}
+			if (cp > 0) {
+				manifold->count = cp;
+				return 1;
+			}
+			// Both projections off-face -- fall through to single GJK contact.
+		}
+
+		// Edge/vertex contact (or face fallback): single contact from GJK.
 		manifold->count = 1;
 		manifold->contacts[0] = (Contact){
-			.point = contact_pt,
-			.normal = normal,
+			.point = add(r.point1, scale(gjk_n, a.radius)),
+			.normal = gjk_n,
 			.penetration = a.radius - r.distance,
+			.feature_id = 2,
 		};
 		return 1;
 	}
 
-	// Deep: SAT on hull faces + capsule edge axes. Work in world space to
-	// avoid non-uniform scale distortion (lm pattern).
+	// --- Deep path: per-endpoint face search. ---
+	// Each endpoint independently finds the hull face of minimum penetration.
+	// This handles the case where endpoints are in different Voronoi regions
+	// (one near top face, the other near a side face after tumbling in).
 	const Hull* hull = b.hull;
-	v3 cap_dir = sub(a.q, a.p);
-	float cap_len2 = len2(cap_dir);
-
-	// --- Axis family 1: hull face normals (world space) ---
-	// Hill-climb for large hulls, full scan for small.
-	float face_sep = -1e18f;
-	int face_idx = -1;
-	HullPlane face_plane = {0};
-	if (hull->face_count > 12) {
-		int cur = 0;
-		HullPlane wp = plane_transform(hull->planes[0], b.center, b.rotation, b.scale);
-		float dp = dot(a.p, wp.normal) - wp.offset, dq = dot(a.q, wp.normal) - wp.offset;
-		face_sep = dp < dq ? dp : dq; face_idx = 0; face_plane = wp;
-		for (int iter = 0; iter < hull->face_count; iter++) {
-			int improved = 0;
-			int start_e = hull->faces[cur].edge, ei = start_e;
-			do {
-				int adj = hull->edge_face[hull->edge_twin[ei]];
-				if (adj != cur) {
-					HullPlane awp = plane_transform(hull->planes[adj], b.center, b.rotation, b.scale);
-					float adp = dot(a.p, awp.normal) - awp.offset, adq = dot(a.q, awp.normal) - awp.offset;
-					float asup = adp < adq ? adp : adq;
-					if (asup > face_sep) { face_sep = asup; face_idx = adj; face_plane = awp; improved = 1; }
-				}
-				ei = hull->edge_next[ei];
-			} while (ei != start_e);
-			if (!improved) break;
-			cur = face_idx;
-		}
-	} else {
-		for (int i = 0; i < hull->face_count; i++) {
-			HullPlane wp = plane_transform(hull->planes[i], b.center, b.rotation, b.scale);
-			float dp = dot(a.p, wp.normal) - wp.offset;
-			float dq = dot(a.q, wp.normal) - wp.offset;
-			float sup = dp < dq ? dp : dq;
-			if (sup > face_sep) { face_sep = sup; face_idx = i; face_plane = wp; }
-		}
-	}
-
-	// --- Axis family 2: capsule dir x hull edge dirs (world space) ---
-	float edge_sep = -1e18f;
-	int edge_idx = -1;
-	v3 edge_axis = V3(0,0,0);
-	v3 edge_pt_world = V3(0,0,0);
-	if (cap_len2 > 1e-12f) {
-		v3 cd = scale(cap_dir, 1.0f / sqrtf(cap_len2));
-		for (int i = 0; i < hull->edge_count; i += 2) {
-			v3 ev0 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[i]], b.scale)));
-			v3 ev1 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[hull->edge_next[i]]], b.scale)));
-			v3 ed = sub(ev1, ev0);
-			v3 ax = cross(cd, ed);
-			float al = len2(ax);
-			if (al < 1e-12f) continue;
-			ax = scale(ax, 1.0f / sqrtf(al));
-			if (dot(ax, sub(a.p, ev0)) < 0.0f) ax = neg(ax);
-			float cs = dot(a.p, ax) < dot(a.q, ax) ? dot(a.p, ax) : dot(a.q, ax);
-			float hs = -1e18f;
-			for (int j = 0; j < hull->vert_count; j++) {
-				v3 wv = add(b.center, rotate(b.rotation, hmul(hull->verts[j], b.scale)));
-				float d = dot(wv, ax);
-				if (d > hs) hs = d;
-			}
-			float sep = cs - hs;
-			if (sep > edge_sep) { edge_sep = sep; edge_idx = i; edge_axis = ax; edge_pt_world = ev0; }
-		}
-	}
-
-	// Pick axis of minimum penetration.
-	float best_sep;
-	v3 best_n;
-	int use_face;
-	if (edge_idx >= 0 && edge_sep > face_sep + 0.001f) {
-		best_sep = edge_sep;
-		best_n = edge_axis;
-		use_face = 0;
-	} else {
-		best_sep = face_sep;
-		best_n = face_plane.normal;
-		use_face = 1;
-	}
-
-	if (best_sep > a.radius) return 0;
-	if (!manifold) return 1;
-
-	// Generate contacts: project capsule endpoints onto the reference plane,
-	// keep those that penetrate.
-	float plane_d = use_face ? face_plane.offset : dot(best_n, edge_pt_world);
-	float dp = dot(a.p, best_n) - plane_d;
-	float dq = dot(a.q, best_n) - plane_d;
-
 	int cp = 0;
-	v3 points[2];
-	float depths[2];
-	if (dp < a.radius) {
-		points[cp] = sub(a.p, scale(best_n, a.radius));
-		depths[cp] = a.radius - dp;
-		cp++;
-	}
-	if (dq < a.radius) {
-		points[cp] = sub(a.q, scale(best_n, a.radius));
-		depths[cp] = a.radius - dq;
-		cp++;
+	v3 endpoints[2] = { a.p, a.q };
+	for (int ei = 0; ei < 2; ei++) {
+		v3 pt = endpoints[ei];
+		float best_sep = -1e18f;
+		v3 best_n = V3(0, 1, 0);
+		float best_d = 0;
+		for (int fi = 0; fi < hull->face_count; fi++) {
+			HullPlane wp = plane_transform(hull->planes[fi], b.center, b.rotation, b.scale);
+			float s = dot(pt, wp.normal) - wp.offset;
+			if (s > a.radius) goto next_ep;  // this endpoint is separated on this face
+			if (s > best_sep) { best_sep = s; best_n = wp.normal; best_d = wp.offset; }
+		}
+		{
+			float pen = a.radius - best_sep;
+			if (pen >= -LINEAR_SLOP) {
+				if (pen < 0) pen = 0;
+				manifold->contacts[cp++] = (Contact){
+					.point = sub(pt, scale(best_n, best_sep)),  // project onto face
+					.normal = neg(best_n),
+					.penetration = pen,
+					.feature_id = (uint32_t)ei,
+				};
+			}
+		}
+		next_ep:;
 	}
 
-	if (cp == 0) return 0;
-	manifold->count = cp;
-	for (int i = 0; i < cp; i++) {
-		manifold->contacts[i] = (Contact){
-			.point = points[i],
-			.normal = neg(best_n),
-			.penetration = depths[i],
+	// Fallback: cylindrical portion contacts hull but neither hemisphere does.
+	if (cp == 0) {
+		v3 gjk_n = r.distance > 1e-6f ? scale(sub(r.point2, r.point1), 1.0f / r.distance) : V3(0, 1, 0);
+		manifold->count = 1;
+		manifold->contacts[0] = (Contact){
+			.point = r.point2,
+			.normal = gjk_n,
+			.penetration = a.radius - r.distance,
+			.feature_id = 2,
 		};
+		return 1;
 	}
+
+	manifold->count = cp;
 	return 1;
 }
 
@@ -665,17 +680,9 @@ static FaceQuery sat_query_faces_hint(const Hull* hull1, v3 pos1, quat rot1, v3 
 static FaceQuery sat_query_faces(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2) { return sat_query_faces_hint(hull1, pos1, rot1, scale1, hull2, pos2, rot2, scale2, -1); }
 
 // -----------------------------------------------------------------------------
-// SAT: Gauss map Minkowski face test.
-// Tests if arcs AB and CD intersect on the unit sphere.
-
-static int is_minkowski_face(v3 a, v3 b, v3 b_x_a, v3 c, v3 d, v3 d_x_c)
-{
-	float cba = dot(c, b_x_a);
-	float dba = dot(d, b_x_a);
-	float adc = dot(a, d_x_c);
-	float bdc = dot(b, d_x_c);
-	return (cba * dba < 0.0f) && (adc * bdc < 0.0f) && (cba * bdc > 0.0f);
-}
+// SAT: Gauss map Minkowski face test (arc intersection on the unit sphere).
+// 4-wide SIMD: returns movemask of lanes where arcs intersect.
+#define gauss_map_prune(cba, dba, adc, bdc) simd_movemask(simd_and(simd_and(simd_cmpgt(simd_zero(), simd_mul(cba, dba)), simd_cmpgt(simd_zero(), simd_mul(adc, bdc))), simd_cmpgt(simd_mul(cba, bdc), simd_zero())))
 
 // Project edge pair: signed distance along cross(e1,e2) from p1 to p2.
 // Uses support functions instead of full vertex scan — O(1) for boxes.
@@ -691,15 +698,7 @@ static float sat_edge_project_full(v3 e1, v3 e2, v3 c1,
 	if (l2 < tol2 * len2(e1) * len2(e2))
 		return -1e18f;
 
-	// Fast approximate normalize: rsqrt (1 Newton-Raphson iteration, ~5 cycles vs ~20 for sqrt+div).
-	float inv_l;
-#if SIMD_SSE
-	{ __m128 v = _mm_set_ss(l2); v = _mm_rsqrt_ss(v); _mm_store_ss(&inv_l, v); }
-	// One Newton-Raphson refinement: inv_l = inv_l * (1.5 - 0.5 * l2 * inv_l * inv_l)
-	inv_l = inv_l * (1.5f - 0.5f * l2 * inv_l * inv_l);
-#else
-	inv_l = 1.0f / sqrtf(l2);
-#endif
+	float inv_l = 1.0f / sqrtf(l2);
 	v3 n = scale(e1_x_e2, inv_l);
 
 	// For box hulls, use O(1) support function. For general hulls, keep O(V) vertex scan
@@ -822,7 +821,6 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 		simd4f bxa_x = simd_set1(b_x_a.x), bxa_y = simd_set1(b_x_a.y), bxa_z = simd_set1(b_x_a.z);
 		simd4f u1x = simd_set1(u1.x), u1y = simd_set1(u1.y), u1z = simd_set1(u1.z);
 		simd4f v1x = simd_set1(v1.x), v1y = simd_set1(v1.y), v1z = simd_set1(v1.z);
-		simd4f zero = simd_zero();
 
 		// SIMD 4-wide inner loop: Gauss map arc intersection test.
 		int n2_4 = n2 & ~3;
@@ -832,11 +830,7 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 			simd4f adc = simd_add(simd_add(simd_mul(u1x, simd_load(ne2x+k2)), simd_mul(u1y, simd_load(ne2y+k2))), simd_mul(u1z, simd_load(ne2z+k2)));
 			simd4f bdc = simd_add(simd_add(simd_mul(v1x, simd_load(ne2x+k2)), simd_mul(v1y, simd_load(ne2y+k2))), simd_mul(v1z, simd_load(ne2z+k2)));
 
-			// Minkowski face test: (cba*dba < 0) && (adc*bdc < 0) && (cba*bdc > 0)
-			simd4f cd_neg = simd_cmpgt(zero, simd_mul(cba, dba));
-			simd4f ab_neg = simd_cmpgt(zero, simd_mul(adc, bdc));
-			simd4f cb_pos = simd_cmpgt(simd_mul(cba, bdc), zero);
-			int mask = simd_movemask(simd_and(simd_and(cd_neg, ab_neg), cb_pos));
+			int mask = gauss_map_prune(cba, dba, adc, bdc);
 			if (!mask) continue;
 
 			for (int lane = 0; lane < 4; lane++) {
@@ -850,9 +844,7 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 		// Scalar tail for remaining hull2 edges.
 		for (int k2 = n2_4; k2 < n2; k2++) {
 			v3 ne2 = ne2_arr[k2];
-			float cba = dot(nu2_arr[k2], b_x_a), dba = dot(nv2_arr[k2], b_x_a);
-			float adc = dot(u1, ne2), bdc = dot(v1, ne2);
-			if (!((cba * dba < 0.0f) && (adc * bdc < 0.0f) && (cba * bdc > 0.0f))) continue;
+			if (!gauss_map_prune(simd_set1(dot(nu2_arr[k2], b_x_a)), simd_set1(dot(nv2_arr[k2], b_x_a)), simd_set1(dot(u1, ne2)), simd_set1(dot(v1, ne2)))) continue;
 			float sep = sat_edge_project_full(e1, e2_arr[k2], c1_local, hull1, rel_rot, scale1, hull2, scale2);
 			if (sep > best.separation) { best.index1 = k1*2; best.index2 = k2*2; best.separation = sep; }
 		}
@@ -976,11 +968,12 @@ static SIMD_FORCEINLINE int reduce_contacts(Contact* contacts, int count)
 	// Step 1: two farthest points
 	float best_d2 = -1.0f;
 	int i0 = 0, i1 = 1;
-	for (int i = 0; i < count; i++)
+	for (int i = 0; i < count; i++) {
 		for (int j = i + 1; j < count; j++) {
 			float d2 = len2(sub(contacts[j].point, contacts[i].point));
 			if (d2 > best_d2) { best_d2 = d2; i0 = i; i1 = j; }
 		}
+	}
 	sel[0] = i0; sel[1] = i1;
 	used[i0] = used[i1] = 1;
 
@@ -1061,9 +1054,11 @@ static SIMD_FORCEINLINE int generate_face_contact(const Hull* ref_hull, v3 ref_p
 		int ce = start_e;
 		do { corners[ncorners++] = add(ref_pos, rotate(ref_rot, hull_vert_scaled(ref_hull, ref_hull->edge_origin[ce], ref_sc))); ce = ref_hull->edge_next[ce]; } while (ce != start_e);
 		float snap_tol2 = 1e-6f;
-		for (int i = 0; i < clip_count; i++)
-			for (int c = 0; c < ncorners; c++)
+		for (int i = 0; i < clip_count; i++) {
+			for (int c = 0; c < ncorners; c++) {
 				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
+			}
+		}
 	}
 
 	v3 contact_n = flip ? neg(ref_plane.normal) : ref_plane.normal;
@@ -1253,8 +1248,9 @@ int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sa
 
 	cp = reduce_contacts(tmp_contacts, cp);
 	manifold->count = cp;
-	for (int i = 0; i < cp; i++)
+	for (int i = 0; i < cp; i++) {
 		manifold->contacts[i] = tmp_contacts[i];
+	}
 	// Cache the winning axis for next-frame warm-start.
 	if (sat_hint) *sat_hint = flip ? hull_a->face_count + ref_face : ref_face;
 	if (out_pair) *out_pair = (CachedFeaturePair){.type = 1, .ref_body = (int16_t)flip, .face_a = (int16_t)(flip ? inc_face : ref_face), .face_b = (int16_t)(flip ? ref_face : inc_face)};
@@ -1394,9 +1390,11 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint, C
 		v3 ref_eu = scale(ref_cols[u], (&ref_he.x)[u]), ref_ev = scale(ref_cols[v_ax], (&ref_he.x)[v_ax]);
 		v3 corners[4] = { add(ref_center, add(ref_eu, ref_ev)), add(ref_center, sub(ref_eu, ref_ev)), add(ref_center, sub(neg(ref_eu), neg(ref_ev))), add(ref_center, sub(neg(ref_eu), ref_ev)) };
 		float snap_tol2 = 1e-6f;
-		for (int i = 0; i < clip_count; i++)
-			for (int c = 0; c < 4; c++)
+		for (int i = 0; i < clip_count; i++) {
+			for (int c = 0; c < 4; c++) {
 				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
+			}
+		}
 
 		// Build face indices for feature IDs. Map (la, nsign) to hull face index.
 		static const int face_map[3][2] = { {2, 3}, {4, 5}, {0, 1} };
@@ -1434,28 +1432,6 @@ int collide_box_box(Box a, Box b, Manifold* manifold) { return collide_box_box_e
 
 const Hull* hull_unit_box() { return &s_unit_box_hull; }
 
-// Unit cylinder hull: half_height=1, radius=1 along local Y.
-// Built lazily from quickhull on first use; faceted by CYL_SEGMENTS.
-// Scale in queries: (radius, half_height, radius).
-#define CYL_SEGMENTS 16
-static const Hull* hull_unit_cylinder()
-{
-	static Hull* cached = NULL;
-	if (!cached) {
-		v3 verts[CYL_SEGMENTS * 2];
-		int n = 0;
-		for (int cap = 0; cap < 2; cap++) {
-			float y = cap == 0 ? -1.0f : 1.0f;
-			for (int i = 0; i < CYL_SEGMENTS; i++) {
-				float a = (float)i * 6.28318530718f / (float)CYL_SEGMENTS;
-				verts[n++] = V3(cosf(a), y, sinf(a));
-			}
-		}
-		cached = quickhull(verts, n);
-	}
-	return cached;
-}
-
 // -----------------------------------------------------------------------------
 // Cylinder Voronoi region classification.
 //
@@ -1484,9 +1460,9 @@ typedef enum
 typedef struct CylFeature
 {
 	CylRegion region;
-	float distance;      // signed: >0 outside, <0 inside (-escape_depth)
-	v3 surface_pt;       // world-space point on cylinder surface
-	v3 normal;           // unit outward cylinder normal at surface_pt (world)
+	float distance; // signed: >0 outside, <0 inside (-escape_depth)
+	v3 surface_pt;  // world-space point on cylinder surface
+	v3 normal;      // unit outward cylinder normal at surface_pt (world)
 } CylFeature;
 
 static CylFeature cyl_classify_point(v3 x_world, v3 cyl_pos, quat cyl_rot, float half_height, float radius)
@@ -1562,23 +1538,6 @@ static CylFeature cyl_classify_point(v3 x_world, v3 cyl_pos, quat cyl_rot, float
 	return feat;
 }
 
-// -----------------------------------------------------------------------------
-// Hull lifecycle. Quickhull implemented in quickhull.c.
-
-void hull_free(Hull* hull)
-{
-	if (!hull) return;
-	CK_FREE((void*)hull->verts);
-	if (hull->soa_verts) CK_FREE_ALIGNED((void*)hull->soa_verts);
-	CK_FREE((void*)hull->edge_twin);
-	CK_FREE((void*)hull->edge_next);
-	CK_FREE((void*)hull->edge_origin);
-	CK_FREE((void*)hull->edge_face);
-	CK_FREE((void*)hull->faces);
-	CK_FREE((void*)hull->planes);
-	CK_FREE(hull);
-}
-
 // hull_build_csr, compact hull converters, face extension, hull_from_compact
 // all moved to quickhull.c -- live with hull construction code.
 
@@ -1590,9 +1549,10 @@ void hull_free(Hull* hull)
 static int validate_cached_face_box(v3 cols[3], v3 d, int cached_la)
 {
 	float dots[3] = { fabsf(dot(d, cols[0])), fabsf(dot(d, cols[1])), fabsf(dot(d, cols[2])) };
-	for (int i = 0; i < 3; i++)
+	for (int i = 0; i < 3; i++) {
 		if (i != cached_la && dots[i] > dots[cached_la])
 			return 0;
+	}
 	return 1;
 }
 
@@ -1681,9 +1641,11 @@ static int refresh_box_box_face(Box a, Box b, Manifold* manifold, CachedFeatureP
 	v3 ref_eu = scale(ref_cols[u], (&ref_he.x)[u]), ref_ev = scale(ref_cols[v_ax], (&ref_he.x)[v_ax]);
 	v3 corners[4] = { add(ref_center, add(ref_eu, ref_ev)), add(ref_center, sub(ref_eu, ref_ev)), add(ref_center, sub(neg(ref_eu), neg(ref_ev))), add(ref_center, sub(neg(ref_eu), ref_ev)) };
 	float snap_tol2 = 1e-6f;
-	for (int i = 0; i < clip_count; i++)
-		for (int c = 0; c < 4; c++)
+	for (int i = 0; i < clip_count; i++) {
+		for (int c = 0; c < 4; c++) {
 			if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
+		}
+	}
 
 	v3 contact_n = flip ? neg(ref_n) : ref_n;
 	Contact tmp_contacts[MAX_CLIP_VERTS];
@@ -1757,35 +1719,21 @@ static ConvexHull make_convex_hull(BodyHot* h, ShapeInternal* s)
 	return (ConvexHull){ s->hull.hull, h->position, h->rotation, s->hull.scale };
 }
 
-// Build a ConvexHull view of a cylinder shape, backed by the shared unit cylinder hull.
-static ConvexHull make_cylinder_hull(BodyHot* h, ShapeInternal* s)
-{
-	return (ConvexHull){ hull_unit_cylinder(), h->position, h->rotation, V3(s->cylinder.radius, s->cylinder.half_height, s->cylinder.radius) };
-}
-
 // Build a Cylinder from an internal body+shape (mirror of make_box/make_sphere).
 static Cylinder make_cylinder(BodyHot* h, ShapeInternal* s)
 {
 	return (Cylinder){ h->position, h->rotation, s->cylinder.half_height, s->cylinder.radius };
 }
 
-// Convert a Cylinder to the shared unit-cylinder ConvexHull view (for hull-backed fallback).
-static ConvexHull cylinder_to_convex_hull(Cylinder c)
-{
-	return (ConvexHull){ hull_unit_cylinder(), c.center, c.rotation, V3(c.radius, c.half_height, c.radius) };
-}
-
 // -----------------------------------------------------------------------------
-// Native cylinder narrowphase.
+// Cylinder narrowphase.
 //
-// Each routine currently delegates to the hull-backed fallback. Phases 1-5
-// replace the bodies one at a time with native geometric implementations that
-// produce analytically-correct surface contacts using cyl_classify_point.
+// Analytical implementations using cyl_classify_point for surface contacts.
 
 // Analytical cyl-sphere: classify the sphere center as a point against the
 // cylinder, compare against sphere radius. No GJK iteration -- one call to
 // cyl_classify_point handles all four Voronoi regions.
-static int collide_cylinder_sphere_ana(Cylinder a, Sphere b, Manifold* manifold)
+int collide_cylinder_sphere(Cylinder a, Sphere b, Manifold* manifold)
 {
 	CylFeature feat = cyl_classify_point(b.center, a.center, a.rotation, a.half_height, a.radius);
 
@@ -1810,43 +1758,6 @@ static int collide_cylinder_sphere_ana(Cylinder a, Sphere b, Manifold* manifold)
 	return 1;
 }
 
-// GJK variant: cylinder-sphere via gjk_cylinder support + point-sphere as GJK B.
-// Benchmarked against the analytical path; kept as a reference implementation.
-static int collide_cylinder_sphere_gjk(Cylinder a, Sphere b, Manifold* manifold)
-{
-	v3 axis = rotate(a.rotation, V3(0, 1, 0));
-	v3 p = sub(a.center, scale(axis, a.half_height));
-	v3 q = add(a.center, scale(axis, a.half_height));
-	GJK_Shape ga = gjk_cylinder(p, q, a.radius);
-	GJK_Shape gb = gjk_sphere(b.center, 0.0f);
-	GJK_Result r = gjk_distance(&ga, &gb, NULL);
-
-	if (r.distance > b.radius) return 0;
-	if (!manifold) return 1;
-
-	// Shallow: GJK witness points -- normal from cyl surface toward sphere center.
-	if (r.distance > 1e-5f) {
-		v3 diff = sub(r.point2, r.point1);
-		float inv_d = 1.0f / r.distance;
-		manifold->count = 1;
-		manifold->contacts[0] = (Contact){
-			.point = r.point1,
-			.normal = scale(diff, inv_d),
-			.penetration = b.radius - r.distance,
-		};
-		return 1;
-	}
-
-	// Deep / touching: GJK distance collapses to zero -- fall back to analytical
-	// which handles INSIDE and near-boundary cases cleanly.
-	return collide_cylinder_sphere_ana(a, b, manifold);
-}
-
-int collide_cylinder_sphere(Cylinder a, Sphere b, Manifold* manifold)
-{
-	return collide_cylinder_sphere_ana(a, b, manifold);
-}
-
 // Cyl axis in world space as a segment (helper used by several pairs).
 static void cylinder_axis_segment(Cylinder c, v3* p, v3* q)
 {
@@ -1859,7 +1770,7 @@ static void cylinder_axis_segment(Cylinder c, v3* p, v3* q)
 // classify the capsule-side witness, inflate by capsule radius. Detects the parallel
 // SIDE-SIDE / CAP-CAP case by classifying both capsule endpoints -- when both land in
 // the same region with matching normals, emit a 2-point manifold.
-static int collide_cylinder_capsule_ana(Cylinder a, Capsule b, Manifold* manifold)
+int collide_cylinder_capsule(Cylinder a, Capsule b, Manifold* manifold)
 {
 	v3 cyl_p, cyl_q;
 	cylinder_axis_segment(a, &cyl_p, &cyl_q);
@@ -1909,58 +1820,12 @@ static int collide_cylinder_capsule_ana(Cylinder a, Capsule b, Manifold* manifol
 	return 1;
 }
 
-// GJK variant: gjk_cylinder vs gjk_capsule interior segment. Benchmarked
-// against the analytical path; kept as a reference implementation.
-static int collide_cylinder_capsule_gjk(Cylinder a, Capsule b, Manifold* manifold)
-{
-	v3 cyl_p, cyl_q;
-	cylinder_axis_segment(a, &cyl_p, &cyl_q);
-	GJK_Shape ga = gjk_cylinder(cyl_p, cyl_q, a.radius);
-	GJK_Shape gb = gjk_capsule(b.p, b.q, 0.0f);
-	GJK_Result r = gjk_distance(&ga, &gb, NULL);
-
-	if (r.distance > b.radius) return 0;
-	if (!manifold) return 1;
-
-	if (r.distance > 1e-5f) {
-		v3 diff = sub(r.point2, r.point1);
-		float inv_d = 1.0f / r.distance;
-		manifold->count = 1;
-		manifold->contacts[0] = (Contact){
-			.point = r.point1,
-			.normal = scale(diff, inv_d),
-			.penetration = b.radius - r.distance,
-		};
-		return 1;
-	}
-
-	// Deep fallback: analytical handles INSIDE region and touching contacts.
-	return collide_cylinder_capsule_ana(a, b, manifold);
-}
-
-int collide_cylinder_capsule(Cylinder a, Capsule b, Manifold* manifold)
-{
-	return collide_cylinder_capsule_ana(a, b, manifold);
-}
-
 // Cyl-box: delegate to cyl-hull using the unit box hull. The unit box has only
 // 8 verts / 6 faces / 24 edges, so the SAT is cheap.
-static int collide_cylinder_box_ana(Cylinder a, Box b, Manifold* manifold)
-{
-	ConvexHull cb = { &s_unit_box_hull, b.center, b.rotation, b.half_extents };
-	return collide_cylinder_hull_ana(a, cb, manifold);
-}
-
-// GJK variant for bench comparison (routes through the hull-backed path).
-static int collide_cylinder_box_gjk(Cylinder a, Box b, Manifold* manifold)
-{
-	ConvexHull cb = { &s_unit_box_hull, b.center, b.rotation, b.half_extents };
-	return collide_hull_hull(cylinder_to_convex_hull(a), cb, manifold);
-}
-
 int collide_cylinder_box(Cylinder a, Box b, Manifold* manifold)
 {
-	return collide_cylinder_box_ana(a, b, manifold);
+	ConvexHull cb = { &s_unit_box_hull, b.center, b.rotation, b.half_extents };
+	return collide_cylinder_hull(a, cb, manifold);
 }
 
 // Cylinder support projection onto an arbitrary axis (tight, analytical).
@@ -1974,9 +1839,9 @@ static float cyl_half_support(v3 cyl_axis, float hh, float radius, v3 n)
 	return axial + radial;
 }
 
-// Analytical cyl-hull: GJK(axis_segment, hull) shallow + SAT deep.
+// Cyl-hull: GJK(axis_segment, hull) shallow + SAT deep.
 // Deep SAT tests hull face normals, cylinder axis, and cyl_axis x hull_edge.
-static int collide_cylinder_hull_ana(Cylinder a, ConvexHull b, Manifold* manifold)
+int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold)
 {
 	v3 cyl_p, cyl_q;
 	cylinder_axis_segment(a, &cyl_p, &cyl_q);
@@ -2182,28 +2047,9 @@ static int collide_cylinder_hull_ana(Cylinder a, ConvexHull b, Manifold* manifol
 	}
 }
 
-// GJK variant: gjk_cylinder vs gjk_hull. Benchmarked against the analytical path.
-static int collide_cylinder_hull_gjk(Cylinder a, ConvexHull b, Manifold* manifold)
-{
-	v3 cyl_p, cyl_q;
-	cylinder_axis_segment(a, &cyl_p, &cyl_q);
-	GJK_Shape ga = gjk_cylinder(cyl_p, cyl_q, a.radius);
-	v3 hull_scaled[MAX_HULL_VERTS]; float hull_soa[MAX_HULL_VERTS*3];
-	GJK_Shape gb = gjk_hull_scaled(b.hull, b.center, b.rotation, b.scale, hull_scaled, hull_soa);
-	GJK_Result r = gjk_distance(&ga, &gb, NULL);
-	if (r.distance > LINEAR_SLOP) return 0;
-	// For touching/deep, fall back to analytical SAT path.
-	return collide_cylinder_hull_ana(a, b, manifold);
-}
-
-int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold)
-{
-	return collide_cylinder_hull_ana(a, b, manifold);
-}
-
-// Analytical cyl-cyl: SAT with both cylinder axes + their cross product.
+// Cyl-cyl: SAT with both cylinder axes + their cross product.
 // Each cylinder projects analytically via cyl_half_support.
-static int collide_cylinder_cylinder_ana(Cylinder a, Cylinder b, Manifold* manifold)
+int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold)
 {
 	v3 axis_a = rotate(a.rotation, V3(0, 1, 0));
 	v3 axis_b = rotate(b.rotation, V3(0, 1, 0));
@@ -2370,17 +2216,6 @@ static int collide_cylinder_cylinder_ana(Cylinder a, Cylinder b, Manifold* manif
 	}
 }
 
-// GJK variant for bench comparison.
-static int collide_cylinder_cylinder_gjk(Cylinder a, Cylinder b, Manifold* manifold)
-{
-	return collide_hull_hull(cylinder_to_convex_hull(a), cylinder_to_convex_hull(b), manifold);
-}
-
-int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold)
-{
-	return collide_cylinder_cylinder_ana(a, b, manifold);
-}
-
 // Narrowphase dispatch for a single body pair.
 // Narrowphase timing accumulators (indexed by shape pair type).
 // Pair encoding: type_a * 5 + type_b (upper triangle, type_a <= type_b).
@@ -2437,7 +2272,7 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	// SAT hint from warm cache (skip for box-box — 15 axes is cheap).
 	int* hp = NULL;
 	int hint = -1;
-	int uses_sat = (s0->type >= SHAPE_BOX && s1->type >= SHAPE_BOX);
+	int uses_sat = (s0->type >= SHAPE_BOX && s0->type != SHAPE_CYLINDER && s1->type >= SHAPE_BOX && s1->type != SHAPE_CYLINDER);
 	int uses_hint = uses_sat && !(s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull);
 	if (uses_hint && wm && w->sat_hint_enabled) { hint = wm->sat_axis; hp = &hint; }
 
@@ -2447,7 +2282,7 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull)
 			refreshed = refresh_box_box_face(make_box(h0, s0), make_box(h1, s1), &im.m, &wm->cached_pair);
 		else
-			refreshed = refresh_hull_hull_face((ConvexHull){ s0->type == SHAPE_BOX ? &s_unit_box_hull : (s0->type == SHAPE_CYLINDER ? hull_unit_cylinder() : s0->hull.hull), h0->position, h0->rotation, s0->type == SHAPE_BOX ? s0->box.half_extents : (s0->type == SHAPE_CYLINDER ? V3(s0->cylinder.radius, s0->cylinder.half_height, s0->cylinder.radius) : s0->hull.scale) }, (ConvexHull){ s1->type == SHAPE_BOX ? &s_unit_box_hull : (s1->type == SHAPE_CYLINDER ? hull_unit_cylinder() : s1->hull.hull), h1->position, h1->rotation, s1->type == SHAPE_BOX ? s1->box.half_extents : (s1->type == SHAPE_CYLINDER ? V3(s1->cylinder.radius, s1->cylinder.half_height, s1->cylinder.radius) : s1->hull.scale) }, &im.m, &wm->cached_pair);
+			refreshed = refresh_hull_hull_face((ConvexHull){ s0->type == SHAPE_BOX ? &s_unit_box_hull : s0->hull.hull, h0->position, h0->rotation, s0->type == SHAPE_BOX ? s0->box.half_extents : s0->hull.scale }, (ConvexHull){ s1->type == SHAPE_BOX ? &s_unit_box_hull : s1->hull.hull, h1->position, h1->rotation, s1->type == SHAPE_BOX ? s1->box.half_extents : s1->hull.scale }, &im.m, &wm->cached_pair);
 		if (refreshed) {
 			im.warm = wm;
 			wm->stale = 0;
@@ -2523,197 +2358,7 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	}
 }
 
-static uint64_t body_pair_key(int a, int b)
-{
-	uint32_t lo = a < b ? a : b;
-	uint32_t hi = a < b ? b : a;
-	return ((uint64_t)lo << 32) | (uint64_t)hi;
-}
-
-static int jointed_pair_skip(CK_MAP(uint8_t) joint_pairs, int a, int b)
-{
-	if (!joint_pairs) return 0;
-	uint64_t key = body_pair_key(a, b);
-	return map_get_ptr(joint_pairs, key) != NULL;
-}
-
-static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
-{
-	int count = asize(w->body_hot);
-	for (int i = 0; i < count; i++) {
-		if (!split_alive(w->body_gen, i)) continue;
-		if (asize(w->body_cold[i].shapes) == 0) continue;
-		for (int j = i + 1; j < count; j++) {
-			if (!split_alive(w->body_gen, j)) continue;
-			if (asize(w->body_cold[j].shapes) == 0) continue;
-			// Skip pair if both bodies are inactive (static or sleeping)
-			int isl_i = w->body_cold[i].island_id, isl_j = w->body_cold[j].island_id;
-			int inactive_i = w->body_hot[i].inv_mass == 0.0f || (isl_i >= 0 && (w->island_gen[isl_i] & 1) && !w->islands[isl_i].awake);
-			int inactive_j = w->body_hot[j].inv_mass == 0.0f || (isl_j >= 0 && (w->island_gen[isl_j] & 1) && !w->islands[isl_j].awake);
-			if (inactive_i && inactive_j) continue;
-			if (jointed_pair_skip(w->joint_pairs, i, j)) continue;
-			narrowphase_pair(w, i, j, manifolds);
-		}
-	}
-}
-
-// bvh_build_lut() moved to bvh.c.
-
-// Sweep-and-prune entry for axis-sorted broadphase.
-typedef struct SAP_Entry
-{
-	int body_idx;
-	float min_val, max_val; // along chosen axis
-} SAP_Entry;
-
-static int sap_cmp(const void* a, const void* b) { float d = ((SAP_Entry*)a)->min_val - ((SAP_Entry*)b)->min_val; return (d > 0) - (d < 0); }
-
-// Insertion sort: O(n) for nearly-sorted data (settled physics), O(n^2) worst case.
-static void sap_insertion_sort(SAP_Entry* arr, int n)
-{
-	for (int i = 1; i < n; i++) {
-		SAP_Entry key = arr[i];
-		int j = i - 1;
-		while (j >= 0 && arr[j].min_val > key.min_val) { arr[j + 1] = arr[j]; j--; }
-		arr[j + 1] = key;
-	}
-}
-
-// Broadphase sub-phase timing accumulators (seconds, summed across frames).
-double bp_refit_acc, bp_precomp_acc, bp_sweep_acc, bp_cross_acc;
-int bp_frame_count;
-
-static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
-{
-	double t0 = perf_now();
-	bvh_refit(w->bvh_dynamic, w);
-	bp_refit_acc += perf_now() - t0;
-
-	// Build tight AABBs + sweep-and-prune entries for awake dynamic bodies only.
-	// Sleeping bodies live in bvh_sleeping and are excluded from SAP.
-	double t1 = perf_now();
-	int body_count = asize(w->body_hot);
-	AABB tight_stack[256];
-	AABB* tight = (body_count <= 256) ? tight_stack : CK_ALLOC(sizeof(AABB) * body_count);
-	AABB scene_bounds = aabb_empty();
-	CK_DYNA SAP_Entry* sap = NULL;
-	// Compute tight AABBs. Skip sleeping dynamic bodies (they don't move).
-	CK_DYNA int* sleeping_bodies = NULL;
-	for (int i = 0; i < body_count; i++) {
-		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
-		if (w->body_hot[i].inv_mass > 0.0f) {
-			int isl = w->body_cold[i].island_id;
-			if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) {
-				tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]); // needed for wake detection
-				apush(sleeping_bodies, i);
-				continue;
-			}
-		}
-		tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]);
-		if (w->body_hot[i].inv_mass > 0.0f) { scene_bounds = aabb_merge(scene_bounds, tight[i]); }
-	}
-	v3 extent = sub(scene_bounds.max, scene_bounds.min);
-	int axis = (extent.y > extent.x && extent.y > extent.z) ? 1 : (extent.z > extent.x) ? 2 : 0;
-	for (int i = 0; i < body_count; i++) {
-		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) continue;
-		if (w->body_hot[i].inv_mass == 0.0f) continue;
-		int isl = w->body_cold[i].island_id;
-		if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) continue;
-		apush(sap, ((SAP_Entry){ i, ((float*)&tight[i].min)[axis], ((float*)&tight[i].max)[axis] }));
-	}
-
-	// Sort awake dynamic bodies by chosen axis AABB min.
-	int sap_count = asize(sap);
-	if (sap_count > 1) sap_insertion_sort(sap, sap_count);
-	bp_precomp_acc += perf_now() - t1;
-
-	// Sweep: test overlapping awake-awake pairs.
-	double t2 = perf_now();
-	CK_DYNA BroadPair* dd_pairs = NULL;
-	for (int i = 0; i < sap_count; i++) {
-		float max_val = sap[i].max_val;
-		int a = sap[i].body_idx;
-		AABB ta = tight[a];
-		for (int j = i + 1; j < sap_count && sap[j].min_val <= max_val; j++) {
-			int b = sap[j].body_idx;
-			if (!aabb_overlaps(ta, tight[b])) continue;
-			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
-			apush(dd_pairs, ((BroadPair){ a, b }));
-		}
-	}
-	// Wake detection: test each awake body against sleeping bodies.
-	// O(awake * sleeping) AABB tests, but fast with SIMD branchless overlap.
-	int n_sleeping = asize(sleeping_bodies);
-	for (int i = 0; i < sap_count; i++) {
-		int a = sap[i].body_idx;
-		AABB ta = tight[a];
-		for (int si = 0; si < n_sleeping; si++) {
-			int b = sleeping_bodies[si];
-			if (!aabb_overlaps(ta, tight[b])) continue;
-			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
-			apush(dd_pairs, ((BroadPair){ a, b }));
-		}
-	}
-	afree(sleeping_bodies);
-
-	// Collect awake-dynamic vs static pairs.
-	bp_sweep_acc += perf_now() - t2;
-	double t3 = perf_now();
-	CK_DYNA BroadPair* pairs = NULL;
-	bvh_cross_test(w->bvh_dynamic, w->bvh_static, &pairs);
-	for (int i = 0; i < asize(pairs); i++) {
-		int a = pairs[i].a, b = pairs[i].b;
-		if (!aabb_overlaps(tight[a], tight[b])) continue;
-		// Skip sleeping dynamic vs static
-		int isl_a = w->body_cold[a].island_id;
-		if (isl_a >= 0 && (w->island_gen[isl_a] & 1) && !w->islands[isl_a].awake) continue;
-		apush(dd_pairs, ((BroadPair){ a, b }));
-	}
-	afree(pairs);
-	bp_cross_acc += perf_now() - t3;
-
-	// Narrowphase on all collected pairs.
-	// If parallel dispatch is available (thread_count > 1), output pairs for external dispatch.
-	// Otherwise run narrowphase inline.
-	if (w->thread_count > 1 && w->np_pairs_out) {
-		// Output pairs for parallel narrowphase in nudge.c
-		CK_DYNA BroadPair** out = (CK_DYNA BroadPair**)w->np_pairs_out;
-		for (int i = 0; i < asize(dd_pairs); i++) apush(*out, dd_pairs[i]);
-	} else {
-		int dd_count = asize(dd_pairs);
-		for (int i = 0; i < dd_count; i++)
-			narrowphase_pair(w, dd_pairs[i].a, dd_pairs[i].b, manifolds);
-	}
-	afree(dd_pairs);
-	bp_frame_count++;
-
-	if (tight != tight_stack) CK_FREE(tight);
-	afree(sap);
-}
-
-// Rebuild joint_pairs map when joint topology changes (create/destroy joint).
-// O(joint_count) build, O(1) lookup per broadphase pair.
-static void joint_pairs_refresh(WorldInternal* w)
-{
-	if (w->joint_pairs_version == w->ldl_topo_version) return;
-	map_free(w->joint_pairs);
-	w->joint_pairs = NULL;
-	int jcount = asize(w->joints);
-	for (int i = 0; i < jcount; i++) {
-		if (!split_alive(w->joint_gen, i)) continue;
-		JointInternal* j = &w->joints[i];
-		uint64_t key = body_pair_key(j->body_a, j->body_b);
-		map_set(w->joint_pairs, key, (uint8_t)1);
-	}
-	w->joint_pairs_version = w->ldl_topo_version;
-}
-
-static void broadphase_and_collide(WorldInternal* w, InternalManifold** manifolds)
-{
-	joint_pairs_refresh(w);
-	if (w->broadphase_type == BROADPHASE_BVH) broadphase_bvh(w, manifolds);
-	else broadphase_n2(w, manifolds);
-}
+// Broadphase moved to broadphase.c.
 
 // -----------------------------------------------------------------------------
 // Ray-shape intersection. Each returns 1 on hit, sets t_out and n_out.
@@ -2857,6 +2502,58 @@ static int ray_hull(v3 ro, v3 rd, ConvexHull ch, float max_t, float* t_out, v3* 
 }
 
 // Test a ray against all shapes on a body. Returns closest hit.
+static int ray_cylinder(v3 ro, v3 rd, Cylinder cyl, float max_t, float* t_out, v3* n_out)
+{
+	v3 axis = rotate(cyl.rotation, V3(0, 1, 0));
+	v3 oc = sub(ro, cyl.center);
+	float rd_a = dot(rd, axis);
+	float oc_a = dot(oc, axis);
+	float r2 = cyl.radius * cyl.radius;
+
+	float best = max_t + 1.0f;
+	v3 best_n = {0};
+	int hit = 0;
+
+	// Infinite cylinder: |oc + t*rd - (oc_a + t*rd_a)*axis|^2 = r^2
+	float a = dot(rd, rd) - rd_a * rd_a;
+	float b = dot(oc, rd) - oc_a * rd_a;
+	float c = dot(oc, oc) - oc_a * oc_a - r2;
+	if (fabsf(a) > 1e-8f) {
+		float disc = b * b - a * c;
+		if (disc >= 0.0f) {
+			float sq = sqrtf(disc);
+			float t = (-b - sq) / a;
+			if (t < 0.0f) t = (-b + sq) / a;
+			if (t >= 0.0f && t < best) {
+				float y = oc_a + t * rd_a;
+				if (y >= -cyl.half_height && y <= cyl.half_height) {
+					best = t; hit = 1;
+					v3 hp = add(ro, scale(rd, t));
+					best_n = norm(sub(hp, add(cyl.center, scale(axis, y))));
+				}
+			}
+		}
+	}
+
+	// Flat caps: plane at center +/- half_height * axis.
+	for (int ci = 0; ci < 2; ci++) {
+		float sign = ci == 0 ? -1.0f : 1.0f;
+		float denom = rd_a * sign;
+		if (fabsf(denom) < 1e-8f) continue;
+		float t = (sign * cyl.half_height - oc_a) / (rd_a);
+		if (t < 0.0f || t >= best) continue;
+		v3 hp = add(ro, scale(rd, t));
+		v3 d = sub(hp, add(cyl.center, scale(axis, sign * cyl.half_height)));
+		if (dot(d, d) <= r2) {
+			best = t; hit = 1;
+			best_n = scale(axis, sign);
+		}
+	}
+
+	if (hit && best <= max_t) { *t_out = best; *n_out = best_n; return 1; }
+	return 0;
+}
+
 static int ray_body(WorldInternal* w, int body_idx, v3 origin, v3 dir, float max_t, float* t_out, v3* n_out)
 {
 	BodyHot* bh = &w->body_hot[body_idx];
@@ -2873,7 +2570,7 @@ static int ray_body(WorldInternal* w, int body_idx, v3 origin, v3 dir, float max
 		case SHAPE_CAPSULE:  hit = ray_capsule(origin, dir, make_capsule(bh, s), best_t, &t, &n); break;
 		case SHAPE_BOX:      hit = ray_box(origin, dir, make_box(bh, s), best_t, &t, &n); break;
 		case SHAPE_HULL:     hit = ray_hull(origin, dir, make_convex_hull(bh, s), best_t, &t, &n); break;
-		case SHAPE_CYLINDER: hit = ray_hull(origin, dir, make_cylinder_hull(bh, s), best_t, &t, &n); break;
+		case SHAPE_CYLINDER: hit = ray_cylinder(origin, dir, make_cylinder(bh, s), best_t, &t, &n); break;
 		}
 		if (hit && t < best_t) { best_t = t; best_n = n; found = 1; }
 	}

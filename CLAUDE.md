@@ -23,8 +23,10 @@
   - Prefer `_Generic` macros over type-prefixed functions (e.g. `is_valid(x)` not `v3_is_valid(x)`).
   - Struct naming: use underscore to separate acronym prefixes from words (e.g. `BVH_Tree` not `BVHTree`).
   - Keep expressions on one line. Do not break assignments, returns, or function call arguments across multiple lines with continuation indentation. Long one-liners are fine. Exception: matrix math blocks where rows map to visual rows (e.g. Cramer's rule, symmetric matrix multiply) should stay multi-line.
+  - All `for` loops require braces unless the entire loop (header + body) fits on a single line.
   - Function signatures on a single line. No wrapping parameters across lines.
 - **Handle-based API**: public types are opaque handles, e.g. `typedef struct Body { uint64_t id; } Body;`. Internally cast/lookup as needed. Distinct struct types per concept (Body, World, etc.).
+- **No rsqrt hacks**: Never use `_mm_rsqrt_ss`, fast inverse sqrt, or Newton-Raphson refinement for normalization. Use `1.0f / sqrtf(x)`. The "optimization" saves nothing on modern CPUs and introduces precision loss.
 - **Scope**:
   - Only dependency is `ckit.h` (vendored). Standard C library and platform APIs only.
   - Prefer minimal patches and local changes.

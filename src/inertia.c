@@ -172,8 +172,9 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 	int n = asize(shapes);
 
 	float total_vol = 0.0f;
-	for (int i = 0; i < n; i++)
+	for (int i = 0; i < n; i++) {
 		total_vol += shape_volume(&shapes[i]);
+	}
 	if (total_vol <= 0.0f) {
 		w->body_hot[idx].inv_inertia_local = V3(0, 0, 0);
 		return;

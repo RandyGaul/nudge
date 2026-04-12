@@ -58,7 +58,7 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		s->feature_id = ct->feature_id; s->rn_a = rn_a; s->rn_b = rn_b;
 		s->w_n_a = w_n_a; s->w_n_b = w_n_b; s->eff_mass_n = eff_mass_n;
 		s->softness = softness; s->bias = bias; s->bounce = bounce;
-		s->lambda_n = 0; s->lambda_t1 = 0; s->lambda_t2 = 0;
+		s->lambda_n = 0;
 		pc[contact_base + c] = (PatchContact){ .rn_a = rn_a, .rn_b = rn_b, .w_n_a = w_n_a, .w_n_b = w_n_b, .eff_mass_n = eff_mass_n, .bias = bias, .bounce = bounce, .softness = softness };
 	}
 
@@ -100,7 +100,7 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	// Sync lambda_n to PatchContact in the same pass (eliminates separate sync loop).
 	for (int c = 0; c < smf.contact_count; c++) {
 		SolverContact* s = &sc[contact_base+c];
-		if (s->penetration < 0.0f) { s->lambda_n = 0; s->lambda_t1 = 0; s->lambda_t2 = 0; }
+		if (s->penetration < 0.0f) s->lambda_n = 0;
 		pc[contact_base+c].lambda_n = s->lambda_n;
 	}
 

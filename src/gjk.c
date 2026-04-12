@@ -48,10 +48,10 @@ typedef struct GJK_Cache
 	int hintA;    // hull vertex hint for shape A
 	int hintB;    // hull vertex hint for shape B
 	int count;    // cached simplex vertex count (0 = direction-only warm start)
-	int feat1[2]; // feature IDs on shape A (max 2 cached vertices)
-	int feat2[2]; // feature IDs on shape B
-	v3 point1[2]; // cached world-space support points on A
-	v3 point2[2]; // cached world-space support points on B
+	int feat1[4]; // feature IDs on shape A
+	int feat2[4]; // feature IDs on shape B
+	v3 point1[4]; // cached world-space support points on A
+	v3 point2[4]; // cached world-space support points on B
 } GJK_Cache;
 
 // -----------------------------------------------------------------------------
@@ -151,8 +151,9 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* 
 			static int ve_next_slot = 0;
 			slot = ve_next_slot; ve_next_slot = (ve_next_slot + 1) % VE_CACHE_SLOTS;
 			for (int i = 0; i < n; i++) ve_cache_buf[slot][i] = -1;
-			for (int i = 0; i < hull->edge_count; i++)
+			for (int i = 0; i < hull->edge_count; i++) {
 				if (ve_cache_buf[slot][hull->edge_origin[i]] < 0) ve_cache_buf[slot][hull->edge_origin[i]] = i;
+			}
 			ve_cache_hull[slot] = hull;
 		}
 		return gjk_hull(pos, rot, sc, raw_verts, n, soa, hull->edge_twin, hull->edge_next, hull->edge_origin, ve_cache_buf[slot]);
@@ -266,6 +267,65 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 	return hbi;
 }
 
+// Min/max support scan: find both extreme vertices in one pass over SoA data.
+// Returns max and min vertex indices.  Used for cold-start 2-vertex simplex.
+static void gjk_hull_minmax_scan(const v3* __restrict verts, int count, const float* __restrict soa, v3 ld, int* out_max, int* out_min)
+{
+	simd4f ldx = simd_splat(ld.m, 0), ldy = simd_splat(ld.m, 1), ldz = simd_splat(ld.m, 2);
+	simd4f vmax = simd_set1(-1e18f), vmin = simd_set1(1e18f);
+	simd4i imax = simd_set1_i(0), imin = simd_set1_i(0);
+	int hi = 0;
+
+	if (soa) {
+		const float* sx = soa, *sy = sx + count, *sz = sy + count;
+		simd4i idx = _mm_set_epi32(3, 2, 1, 0);
+		simd4i four = simd_set1_i(4);
+		for (; hi + 3 < count; hi += 4) {
+			simd4f d = simd_add(simd_add(simd_mul(simd_load(sx+hi), ldx), simd_mul(simd_load(sy+hi), ldy)), simd_mul(simd_load(sz+hi), ldz));
+			simd4f mx = simd_cmpgt(d, vmax);
+			vmax = simd_blendv(vmax, d, mx);
+			imax = simd_cast_ftoi(simd_blendv(simd_cast_itof(imax), simd_cast_itof(idx), mx));
+			simd4f mn = simd_cmpgt(vmin, d);
+			vmin = simd_blendv(vmin, d, mn);
+			imin = simd_cast_ftoi(simd_blendv(simd_cast_itof(imin), simd_cast_itof(idx), mn));
+			idx = simd_add_i(idx, four);
+		}
+	} else {
+		for (; hi + 3 < count; hi += 4) {
+			simd4f v0 = verts[hi].m, v1 = verts[hi+1].m, v2 = verts[hi+2].m, v3r = verts[hi+3].m;
+			simd4f t0 = simd_unpacklo(v0, v1), t1 = simd_unpacklo(v2, v3r);
+			simd4f t2 = simd_unpackhi(v0, v1), t3 = simd_unpackhi(v2, v3r);
+			simd4f d = simd_add(simd_add(simd_mul(simd_movelh(t0, t1), ldx), simd_mul(simd_movehl(t1, t0), ldy)), simd_mul(simd_movelh(t2, t3), ldz));
+			simd4i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);
+			simd4f mx = simd_cmpgt(d, vmax);
+			vmax = simd_blendv(vmax, d, mx);
+			imax = simd_cast_ftoi(simd_blendv(simd_cast_itof(imax), simd_cast_itof(idx), mx));
+			simd4f mn = simd_cmpgt(vmin, d);
+			vmin = simd_blendv(vmin, d, mn);
+			imin = simd_cast_ftoi(simd_blendv(simd_cast_itof(imin), simd_cast_itof(idx), mn));
+		}
+	}
+
+	// Horizontal reduction for max.
+	float hmaxv[4]; int hmaxi[4];
+	simd_store(hmaxv, vmax); simd_store_i(hmaxi, imax);
+	float bmax = hmaxv[0]; int bi_max = hmaxi[0];
+	for (int k = 1; k < 4; k++) { if (hmaxv[k] > bmax) { bmax = hmaxv[k]; bi_max = hmaxi[k]; } }
+	// Horizontal reduction for min.
+	float hminv[4]; int hmini[4];
+	simd_store(hminv, vmin); simd_store_i(hmini, imin);
+	float bmin = hminv[0]; int bi_min = hmini[0];
+	for (int k = 1; k < 4; k++) { if (hminv[k] < bmin) { bmin = hminv[k]; bi_min = hmini[k]; } }
+	// Scalar tail.
+	for (; hi < count; hi++) {
+		float hd = dot(verts[hi], ld);
+		if (hd > bmax) { bmax = hd; bi_max = hi; }
+		if (hd < bmin) { bmin = hd; bi_min = hi; }
+	}
+	*out_max = bi_max;
+	*out_min = bi_min;
+}
+
 // -----------------------------------------------------------------------------
 // Support functions (per-shape-type).
 
@@ -294,12 +354,12 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 	float cplf = simd_get_x(cpl);
 	if (cplf <= FLT_EPSILON) { *feat = cap; return cbase; }
 
-	// Pack normalized perp direction as 3x10-bit signed + 1 cap bit = 31 bits.
-	float inv_cpl = 1.0f / cplf;
-	int ix = (int)(cdp.x * inv_cpl * 511.0f), iy = (int)(cdp.y * inv_cpl * 511.0f), iz = (int)(cdp.z * inv_cpl * 511.0f);
-	*feat = cap | ((ix & 0x3FF) << 1) | ((iy & 0x3FF) << 11) | ((iz & 0x3FF) << 21);
-	simd4f ratio = simd_div_ss(simd_set_ss(sp->cylinder.radius), cpl);
-	return add(cbase, scale(cdp, simd_get_x(ratio)));
+	// Feature ID not needed for cylinder (warm-start uses cached world-space
+	// points instead of feature reconstruction).  Skip the expensive 3x10-bit
+	// packing entirely.
+	*feat = cap;
+	float ratio = sp->cylinder.radius / cplf;
+	return add(cbase, scale(cdp, ratio));
 }
 
 // Support dispatch macro. Box/cylinder/hull use separate functions to control inlining.
@@ -398,18 +458,17 @@ static inline v3 gjk_support_feature(const GJK_Shape* sp, int feat)
 	case GJK_HULL:
 		return add(sp->hull.center, mat3_tmul_v(sp->hull.col0, sp->hull.col1, sp->hull.col2, hmul(sp->hull.verts[feat], sp->hull.scale)));
 	case GJK_CYLINDER: {
-		int cap = feat & 1;
-		simd4f sign = cap ? simd_zero() : simd_sign_mask();
-		v3 cbase = add(sp->cylinder.mid, (v3){ .m = simd_xor(sp->cylinder.half_axis.m, sign) });
-		int ix = (feat >> 1) & 0x3FF, iy = (feat >> 11) & 0x3FF, iz = (feat >> 21) & 0x3FF;
-		if (ix >= 0x200) ix -= 0x400;
-		if (iy >= 0x200) iy -= 0x400;
-		if (iz >= 0x200) iz -= 0x400;
-		if ((ix | iy | iz) == 0) return cbase;
-		return add(cbase, scale(V3((float)ix, (float)iy, (float)iz), sp->cylinder.radius / 511.0f));
+		// Cylinder warm-start uses cached world-space points, not feature
+		// reconstruction.  Feature ID is just the cap index (0 or 1).
+		simd4f sign = (feat & 1) ? simd_zero() : simd_sign_mask();
+		return add(sp->cylinder.mid, (v3){ .m = simd_xor(sp->cylinder.half_axis.m, sign) });
 	}
 	case GJK_TRIANGLE:
 		return feat == 0 ? sp->tri.a : (feat == 1 ? sp->tri.b : sp->tri.c);
+	case GJK_COMPACT_HULL32:
+		return add(sp->compact32.center, mat3_tmul_v(sp->compact32.col0, sp->compact32.col1, sp->compact32.col2, hmul(V3(sp->compact32.vx[feat], sp->compact32.vy[feat], sp->compact32.vz[feat]), sp->compact32.scale)));
+	case GJK_COMPACT_HULL:
+		return add(sp->compact.center, mat3_tmul_v(sp->compact.col0, sp->compact.col1, sp->compact.col2, hmul(V3(sp->compact.vx[feat], sp->compact.vy[feat], sp->compact.vz[feat]), sp->compact.scale)));
 	}
 	return V3(0,0,0);
 }
@@ -424,6 +483,8 @@ static v3 gjk_center(const GJK_Shape* s)
 	case GJK_HULL:     return s->hull.center;
 	case GJK_CYLINDER: return s->cylinder.mid;
 	case GJK_TRIANGLE: return scale(add(add(s->tri.a, s->tri.b), s->tri.c), 1.0f/3.0f);
+	case GJK_COMPACT_HULL32: return s->compact32.center;
+	case GJK_COMPACT_HULL:   return s->compact.center;
 	}
 	return V3(0,0,0);
 }
@@ -544,25 +605,33 @@ static SIMD_NOINLINE int gjk_solve4(GJK_Simplex* s)
 	float uABCD = stp(c, d, b) * vol, vABCD = stp(c, a, d) * vol;
 	float wABCD = stp(d, a, b) * vol, xABCD = stp(b, a, c) * vol;
 
-	// Vertex regions
-	if (vAB <= 0 && uCA <= 0 && vAD <= 0) { s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
-	if (uAB <= 0 && vBC <= 0 && vBD <= 0) { s->v[0] = s->v[1]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
-	if (uBC <= 0 && vCA <= 0 && uDC <= 0) { s->v[0] = s->v[2]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
-	if (uBD <= 0 && vDC <= 0 && uAD <= 0) { s->v[0] = s->v[3]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	// Pack 28 sign bits for branchless Voronoi region classification (same
+	// pattern as gjk_solve3).  Each region check becomes a single mask test.
+	// Bit layout: 0:uAB 1:vAB 2:uBC 3:vBC 4:uCA 5:vCA 6:uBD 7:vBD
+	//   8:uDC 9:vDC 10:uAD 11:vAD  12:uADB 13:vADB 14:wADB
+	//   15:uACD 16:vACD 17:wACD  18:uCBD 19:vCBD 20:wCBD
+	//   21:uABC 22:vABC 23:wABC  24:uABCD 25:vABCD 26:wABCD 27:xABCD
+	uint32_t signs = (uAB > 0) | ((vAB > 0) << 1) | ((uBC > 0) << 2) | ((vBC > 0) << 3) | ((uCA > 0) << 4) | ((vCA > 0) << 5) | ((uBD > 0) << 6) | ((vBD > 0) << 7) | ((uDC > 0) << 8) | ((vDC > 0) << 9) | ((uAD > 0) << 10) | ((vAD > 0) << 11) | ((uADB > 0) << 12) | ((vADB > 0) << 13) | ((wADB > 0) << 14) | ((uACD > 0) << 15) | ((vACD > 0) << 16) | ((wACD > 0) << 17) | ((uCBD > 0) << 18) | ((vCBD > 0) << 19) | ((wCBD > 0) << 20) | ((uABC > 0) << 21) | ((vABC > 0) << 22) | ((wABC > 0) << 23) | ((uABCD > 0) << 24) | ((vABCD > 0) << 25) | ((wABCD > 0) << 26) | ((xABCD > 0) << 27);
 
-	// Edge regions
-	if (wABC <= 0 && vADB <= 0 && uAB > 0 && vAB > 0) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
-	if (uABC <= 0 && wCBD <= 0 && uBC > 0 && vBC > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
-	if (vABC <= 0 && wACD <= 0 && uCA > 0 && vCA > 0) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
-	if (vCBD <= 0 && uACD <= 0 && uDC > 0 && vDC > 0) { s->v[0] = s->v[3]; s->v[1] = s->v[2]; s->v[0].u = uDC; s->v[1].u = vDC; s->divisor = uDC + vDC; s->count = 2; return 1; }
-	if (vACD <= 0 && wADB <= 0 && uAD > 0 && vAD > 0) { s->v[1] = s->v[3]; s->v[0].u = uAD; s->v[1].u = vAD; s->divisor = uAD + vAD; s->count = 2; return 1; }
-	if (uCBD <= 0 && uADB <= 0 && uBD > 0 && vBD > 0) { s->v[0] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uBD; s->v[1].u = vBD; s->divisor = uBD + vBD; s->count = 2; return 1; }
+	// Vertex regions (3 bits must be 0)
+	if ((signs & 0x812) == 0) { s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if ((signs & 0x089) == 0) { s->v[0] = s->v[1]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if ((signs & 0x124) == 0) { s->v[0] = s->v[2]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
+	if ((signs & 0x640) == 0) { s->v[0] = s->v[3]; s->v[0].u = 1; s->divisor = 1; s->count = 1; return 1; }
 
-	// Face regions
-	if (xABCD <= 0 && uABC > 0 && vABC > 0 && wABC > 0) { s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = uABC + vABC + wABC; s->count = 3; return 1; }
-	if (uABCD <= 0 && uCBD > 0 && vCBD > 0 && wCBD > 0) { s->v[0] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uCBD; s->v[1].u = vCBD; s->v[2].u = wCBD; s->divisor = uCBD + vCBD + wCBD; s->count = 3; return 1; }
-	if (vABCD <= 0 && uACD > 0 && vACD > 0 && wACD > 0) { s->v[1] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uACD; s->v[1].u = vACD; s->v[2].u = wACD; s->divisor = uACD + vACD + wACD; s->count = 3; return 1; }
-	if (wABCD <= 0 && uADB > 0 && vADB > 0 && wADB > 0) { s->v[2] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uADB; s->v[1].u = vADB; s->v[2].u = wADB; s->divisor = uADB + vADB + wADB; s->count = 3; return 1; }
+	// Edge regions (2 bits must be 0, 2 bits must be 1)
+	if ((signs & 0x802003) == 0x003) { s->v[0].u = uAB; s->v[1].u = vAB; s->divisor = uAB + vAB; s->count = 2; return 1; }
+	if ((signs & 0x30000C) == 0x00C) { s->v[0] = s->v[1]; s->v[1] = s->v[2]; s->v[0].u = uBC; s->v[1].u = vBC; s->divisor = uBC + vBC; s->count = 2; return 1; }
+	if ((signs & 0x420030) == 0x030) { s->v[1] = s->v[0]; s->v[0] = s->v[2]; s->v[0].u = uCA; s->v[1].u = vCA; s->divisor = uCA + vCA; s->count = 2; return 1; }
+	if ((signs & 0x088300) == 0x300) { s->v[0] = s->v[3]; s->v[1] = s->v[2]; s->v[0].u = uDC; s->v[1].u = vDC; s->divisor = uDC + vDC; s->count = 2; return 1; }
+	if ((signs & 0x014C00) == 0xC00) { s->v[1] = s->v[3]; s->v[0].u = uAD; s->v[1].u = vAD; s->divisor = uAD + vAD; s->count = 2; return 1; }
+	if ((signs & 0x0410C0) == 0x0C0) { s->v[0] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uBD; s->v[1].u = vBD; s->divisor = uBD + vBD; s->count = 2; return 1; }
+
+	// Face regions (1 bit must be 0, 3 bits must be 1)
+	if ((signs & 0x8E00000) == 0xE00000) { s->v[0].u = uABC; s->v[1].u = vABC; s->v[2].u = wABC; s->divisor = uABC + vABC + wABC; s->count = 3; return 1; }
+	if ((signs & 0x11C0000) == 0x1C0000) { s->v[0] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uCBD; s->v[1].u = vCBD; s->v[2].u = wCBD; s->divisor = uCBD + vCBD + wCBD; s->count = 3; return 1; }
+	if ((signs & 0x2038000) == 0x038000) { s->v[1] = s->v[2]; s->v[2] = s->v[3]; s->v[0].u = uACD; s->v[1].u = vACD; s->v[2].u = wACD; s->divisor = uACD + vACD + wACD; s->count = 3; return 1; }
+	if ((signs & 0x4007000) == 0x007000) { s->v[2] = s->v[1]; s->v[1] = s->v[3]; s->v[0].u = uADB; s->v[1].u = vADB; s->v[2].u = wADB; s->divisor = uADB + vADB + wADB; s->count = 3; return 1; }
 
 	// Interior
 	s->v[0].u = uABCD; s->v[1].u = vABCD; s->v[2].u = wABCD; s->v[3].u = xABCD;
@@ -593,21 +662,12 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	// Simplex initialization: reconstruct from cache or cold-start.
 	int fA, fB;
 	v3 sA, sB;
-	int use_simplex_cache = cache && cache->count >= 1 && cache->count <= 2;
+	int use_simplex_cache = cache && cache->count >= 1 && cache->count <= 4;
 	if (use_simplex_cache) {
-		int has_cyl = shapeA->type == GJK_CYLINDER || shapeB->type == GJK_CYLINDER;
 		for (int i = 0; i < cache->count; i++) {
-			v3 p1, p2;
-			if (has_cyl) {
-				p1 = gjk_support_feature(shapeA, cache->feat1[i]);
-				p2 = gjk_support_feature(shapeB, cache->feat2[i]);
-			} else {
-				p1 = cache->point1[i];
-				p2 = cache->point2[i];
-			}
-			simplex.v[i].point1 = p1;
-			simplex.v[i].point2 = p2;
-			simplex.v[i].point = sub(p2, p1);
+			simplex.v[i].point1 = cache->point1[i];
+			simplex.v[i].point2 = cache->point2[i];
+			simplex.v[i].point = sub(cache->point2[i], cache->point1[i]);
 			simplex.v[i].feat1 = cache->feat1[i];
 			simplex.v[i].feat2 = cache->feat2[i];
 			simplex.v[i].u = 1.0f;
@@ -622,16 +682,44 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 			init_d = sub(gjk_center(shapeB), gjk_center(shapeA));
 			if (len2(init_d) < FLT_EPSILON) init_d = V3(1, 0, 0);
 		}
-		gjk_support(shapeA, init_d, &fA, sA);
-		gjk_support(shapeB, neg(init_d), &fB, sB);
-		simplex.v[0].point1 = sA;
-		simplex.v[0].point2 = sB;
-		simplex.v[0].point = sub(sB, sA);
-		simplex.v[0].feat1 = fA;
-		simplex.v[0].feat2 = fB;
-		simplex.v[0].u = 1.0f;
-		simplex.divisor = 1.0f;
-		simplex.count = 1;
+
+		// SIMD 2-vertex cold start for hull shapes: min/max scan produces
+		// both extreme vertices in one pass, giving GJK a line segment to
+		// start from instead of a single point.  Saves ~1 iteration.
+		int did_2v = 0;
+		if (shapeA->type == GJK_HULL && shapeB->type == GJK_HULL) {
+			v3 ldA = hmul(mat3_mul_v(shapeA->hull.col0, shapeA->hull.col1, shapeA->hull.col2, init_d), shapeA->hull.scale);
+			v3 ldB = hmul(mat3_mul_v(shapeB->hull.col0, shapeB->hull.col1, shapeB->hull.col2, init_d), shapeB->hull.scale);
+			int amx, amn, bmx, bmn;
+			gjk_hull_minmax_scan(shapeA->hull.verts, shapeA->hull.count, shapeA->hull.soa, ldA, &amx, &amn);
+			gjk_hull_minmax_scan(shapeB->hull.verts, shapeB->hull.count, shapeB->hull.soa, ldB, &bmx, &bmn);
+			// Vertex 0: support(A, +d) vs support(B, -d)
+			v3 a0 = add(shapeA->hull.center, mat3_tmul_v(shapeA->hull.col0, shapeA->hull.col1, shapeA->hull.col2, hmul(shapeA->hull.verts[amx], shapeA->hull.scale)));
+			v3 b0 = add(shapeB->hull.center, mat3_tmul_v(shapeB->hull.col0, shapeB->hull.col1, shapeB->hull.col2, hmul(shapeB->hull.verts[bmn], shapeB->hull.scale)));
+			// Vertex 1: support(A, -d) vs support(B, +d)
+			v3 a1 = add(shapeA->hull.center, mat3_tmul_v(shapeA->hull.col0, shapeA->hull.col1, shapeA->hull.col2, hmul(shapeA->hull.verts[amn], shapeA->hull.scale)));
+			v3 b1 = add(shapeB->hull.center, mat3_tmul_v(shapeB->hull.col0, shapeB->hull.col1, shapeB->hull.col2, hmul(shapeB->hull.verts[bmx], shapeB->hull.scale)));
+			v3 w0 = sub(b0, a0), w1 = sub(b1, a1);
+			if (len2(sub(w0, w1)) > FLT_EPSILON) {
+				simplex.v[0].point1 = a0; simplex.v[0].point2 = b0; simplex.v[0].point = w0; simplex.v[0].feat1 = amx; simplex.v[0].feat2 = bmn; simplex.v[0].u = 1.0f;
+				simplex.v[1].point1 = a1; simplex.v[1].point2 = b1; simplex.v[1].point = w1; simplex.v[1].feat1 = amn; simplex.v[1].feat2 = bmx; simplex.v[1].u = 1.0f;
+				simplex.divisor = 2.0f; simplex.count = 2;
+				did_2v = 1;
+			}
+		}
+
+		if (!did_2v) {
+			gjk_support(shapeA, init_d, &fA, sA);
+			gjk_support(shapeB, neg(init_d), &fB, sB);
+			simplex.v[0].point1 = sA;
+			simplex.v[0].point2 = sB;
+			simplex.v[0].point = sub(sB, sA);
+			simplex.v[0].feat1 = fA;
+			simplex.v[0].feat2 = fB;
+			simplex.v[0].u = 1.0f;
+			simplex.divisor = 1.0f;
+			simplex.count = 1;
+		}
 	}
 
 	// Main loop.
@@ -698,9 +786,8 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		cache->dir = sep;
 		if (shapeA->type == GJK_HULL) cache->hintA = shapeA->hull.hint;
 		if (shapeB->type == GJK_HULL) cache->hintB = shapeB->hull.hint;
-		int cn = simplex.count < 2 ? simplex.count : 2;
-		cache->count = cn;
-		for (int i = 0; i < cn; i++) { cache->feat1[i] = simplex.v[i].feat1; cache->feat2[i] = simplex.v[i].feat2; cache->point1[i] = simplex.v[i].point1; cache->point2[i] = simplex.v[i].point2; }
+		cache->count = simplex.count;
+		for (int i = 0; i < simplex.count; i++) { cache->feat1[i] = simplex.v[i].feat1; cache->feat2[i] = simplex.v[i].feat2; cache->point1[i] = simplex.v[i].point1; cache->point2[i] = simplex.v[i].point2; }
 	}
 
 	// Post-hoc radius for sphere/capsule core shapes.

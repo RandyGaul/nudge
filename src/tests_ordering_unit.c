@@ -94,18 +94,22 @@ static void test_degree_clique()
 	ldl_sparse_init(&s);
 	s.node_count = 4;
 	for (int i = 0; i < 4; i++) s.dof[i] = 3;
-	for (int i = 0; i < 4; i++)
-		for (int j = i + 1; j < 4; j++)
+	for (int i = 0; i < 4; i++) {
+		for (int j = i + 1; j < 4; j++) {
 			ldl_sparse_get_or_create_edge(&s, i, j);
+		}
+	}
 
 	int eliminated[4] = {0};
-	for (int i = 0; i < 4; i++)
+	for (int i = 0; i < 4; i++) {
 		TEST_ASSERT(ldl_sparse_degree(&s, i, eliminated) == 3);
+	}
 
 	// Eliminate one: remaining all have degree 2
 	eliminated[0] = 1;
-	for (int i = 1; i < 4; i++)
+	for (int i = 1; i < 4; i++) {
 		TEST_ASSERT(ldl_sparse_degree(&s, i, eliminated) == 2);
+	}
 
 	ldl_sparse_free(&s);
 }
@@ -132,8 +136,9 @@ static int is_valid_permutation(int* order, int nc)
 // Helper: check inv_order is consistent with elim_order.
 static int inv_order_consistent(int* elim_order, int* inv_order, int nc)
 {
-	for (int step = 0; step < nc; step++)
+	for (int step = 0; step < nc; step++) {
 		if (inv_order[elim_order[step]] != step) return 0;
+	}
 	return 1;
 }
 

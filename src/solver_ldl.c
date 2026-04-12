@@ -288,13 +288,14 @@ static void ldl_K_body_contrib_comp(LDL_JacobianRow* jac, int dof, int side, int
 		W[4*dof+d] = w_ang.y;
 		W[5*dof+d] = w_ang.z;
 	}
-	for (int r = 0; r < dof; r++)
+	for (int r = 0; r < dof; r++) {
 		for (int c = 0; c <= r; c++) {
 			double sum = 0;
 			double* Jr = side ? jac[r].J_b : jac[r].J_a;
 			for (int k = 0; k < 6; k++) sum += Jr[k] * W[k*dof + c];
 			K_packed[LDL_TRI(dof_start+r, dof_start+c)] += sum;
 		}
+	}
 }
 
 static void ldl_K_body_off_comp(LDL_JacobianRow* jac_i, int di, int side_i, LDL_JacobianRow* jac_j, int dj, int side_j, LDL_CompBody* body, double weight, double* out)
@@ -362,8 +363,9 @@ static int ldl_sparse_degree(LDL_Sparse* s, int i, int* eliminated)
 {
 	int cnt = asize(s->adj[i]);
 	int deg = 0;
-	for (int k = 0; k < cnt; k++)
+	for (int k = 0; k < cnt; k++) {
 		if (!eliminated[s->adj[i][k]]) deg++;
+	}
 	return deg;
 }
 
@@ -377,8 +379,9 @@ static void ldl_sparse_min_degree_order(LDL_Sparse* s)
 	int eliminated[LDL_MAX_NODES] = {0};
 	int degree[LDL_MAX_NODES];
 
-	for (int i = 0; i < nc; i++)
+	for (int i = 0; i < nc; i++) {
 		degree[i] = ldl_sparse_degree(s, i, eliminated);
+	}
 
 	for (int step = 0; step < nc; step++) {
 		// Pick node with minimum degree, breaking ties by lowest DOF then lowest index
@@ -946,9 +949,11 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 					int side_j = (body == con_j->body_b) ? 1 : 0;
 					double buf[LDL_MAX_BLOCK_DIM * LDL_MAX_BLOCK_DIM] = {0};
 					ldl_K_body_off_comp(jac_i, di, side_i, jac_j, dj, side_j, B, wt, buf);
-					for (int r = 0; r < di; r++)
-						for (int col = 0; col < dj; col++)
+					for (int r = 0; r < di; r++) {
+						for (int col = 0; col < dj; col++) {
 							c->diag_data[bi][LDL_TRI(oi+r, oj+col)] += buf[r*dj + col];
+						}
+					}
 				}
 			}
 		}
@@ -983,14 +988,18 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 				double buf[LDL_MAX_BLOCK_DIM * LDL_MAX_BLOCK_DIM] = {0};
 				ldl_K_body_off_comp(jac_i, di, side_i, jac_j, dj, side_j, B, wt, buf);
 				// Write to both directions
-				for (int r = 0; r < di; r++)
-					for (int col = 0; col < dj; col++)
+				for (int r = 0; r < di; r++) {
+					for (int col = 0; col < dj; col++) {
 						edge_ij[(oi+r)*bdk_j + (oj+col)] += buf[r*dj + col];
+					}
+				}
 				double buf_T[LDL_MAX_BLOCK_DIM * LDL_MAX_BLOCK_DIM];
 				block_transpose(buf, di, dj, buf_T);
-				for (int r = 0; r < dj; r++)
-					for (int col = 0; col < di; col++)
+				for (int r = 0; r < dj; r++) {
+					for (int col = 0; col < di; col++) {
 						edge_ji[(oj+r)*bdk_i + (oi+col)] += buf_T[r*di + col];
+					}
+				}
 			}
 		}
 	}
@@ -1089,9 +1098,11 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 				// Diagonal Schur update — average (r,c) and (c,r) into packed storage.
 				// E * L^T is symmetric in exact arithmetic; averaging absorbs float asymmetry.
 				int tn = op->target_node;
-				for (int r = 0; r < di; r++)
-					for (int col = 0; col <= r; col++)
+				for (int r = 0; r < di; r++) {
+					for (int col = 0; col <= r; col++) {
 						c->diag_data[tn][LDL_TRI(r, col)] -= 0.5 * (product[r*di+col] + product[col*di+r]);
+					}
+				}
 			} else {
 				// Off-diagonal update: write to (i,j) and transpose to (j,i)
 				block_sub(&c->L_factors[op->target_offset], product, di, dj);
@@ -1424,8 +1435,9 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 		if (con->is_synthetic) continue;
 		int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
 		SolverJoint* sj = &sol_joints[con->solver_idx];
-		for (int d = 0; d < con->dof; d++)
+		for (int d = 0; d < con->dof; d++) {
 			pos_rhs[oi + d] = -ptv * sj->pos_error[d];
+		}
 	}
 
 	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, pos_rhs, pos_lambda);

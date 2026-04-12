@@ -549,8 +549,9 @@ static void joints_warm_start(WorldInternal* w, SolverJoint* joints, int count)
 
 static int solver_joint_has_limits(SolverJoint* s)
 {
-	for (int d = 0; d < s->dof; d++)
+	for (int d = 0; d < s->dof; d++) {
 		if (s->lo[d] > -1e18f || s->hi[d] < 1e18f) return 1;
+	}
 	return 0;
 }
 

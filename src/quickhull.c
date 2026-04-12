@@ -974,14 +974,16 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 	// Two-pass merge: first larger-face-biased, then mutual non-convexity.
 	// Each successful merge reduces the live face count by 1, so the total
 	// number of merges across all faces is bounded by the initial face count.
-	for (int fi = nf.first; fi != QH_INVALID; fi = s->faces[fi].next)
+	for (int fi = nf.first; fi != QH_INVALID; fi = s->faces[fi].next) {
 		if (s->faces[fi].mark == QH_VISIBLE)
 			while (qh_do_adjacent_merge(s, fi, QH_MERGE_LARGE, &unclaimed));
-	for (int fi = nf.first; fi != QH_INVALID; fi = s->faces[fi].next)
+	}
+	for (int fi = nf.first; fi != QH_INVALID; fi = s->faces[fi].next) {
 		if (s->faces[fi].mark == QH_NON_CONVEX) {
 			s->faces[fi].mark = QH_VISIBLE;
 			while (qh_do_adjacent_merge(s, fi, QH_MERGE_ANY, &unclaimed));
 		}
+	}
 	// Global topology fixup: cascade merges + degenerate connect can create
 	// face pairs sharing >1 edge, violating manifold topology. Sweep only
 	// new faces (and faces touching them) for multi-adjacent pairs.
@@ -1020,8 +1022,9 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 						while (qh_opp_face(s, me) != small) me = s->edges.enext[me];
 						int disc[3];
 						int nd = qh_merge_adjacent_face(s, me, disc, &unclaimed);
-						for (int k = 0; k < nd; k++)
+						for (int k = 0; k < nd; k++) {
 							qh_delete_face_points(s, disc[k], large, &unclaimed);
+						}
 						nfaces = asize(s->faces);
 						if (nfaces > qh_face_seen_cap) {
 							free(qh_face_seen);
@@ -1070,8 +1073,9 @@ static HullPlane hull_newell_plane(const uint16_t* edge_next, const uint16_t* ed
 static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 {
 	CK_DYNA int* live = NULL;
-	for (int i = 0; i < asize(s->faces); i++)
+	for (int i = 0; i < asize(s->faces); i++) {
 		if (s->faces[i].mark == QH_VISIBLE) apush(live, i);
+	}
 
 	// Validate face loops before output -- detect broken topology from merges.
 	QH_DEBUG({
@@ -1293,8 +1297,9 @@ static int hull_build_csr(const Hull* hull, int max_verts, void* offsets_out, in
 	int vert_edge[1024];
 	assert(nv <= 1024);
 	for (int i = 0; i < nv; i++) vert_edge[i] = -1;
-	for (int i = 0; i < hull->edge_count; i++)
+	for (int i = 0; i < hull->edge_count; i++) {
 		if (vert_edge[hull->edge_origin[i]] < 0) vert_edge[hull->edge_origin[i]] = i;
+	}
 
 	// Count neighbors per vertex, then fill CSR.
 	int total = 0;
@@ -1383,6 +1388,20 @@ void compact_hull_attach_planes(CompactHull* ch, const Hull* hull)
 	ch->face_count = (uint16_t)hull->face_count;
 	ch->planes = (HullPlane*)CK_ALLOC(hull->face_count * sizeof(HullPlane));
 	memcpy(ch->planes, hull->planes, hull->face_count * sizeof(HullPlane));
+}
+
+void hull_free(Hull* hull)
+{
+	if (!hull) return;
+	CK_FREE((void*)hull->verts);
+	if (hull->soa_verts) CK_FREE_ALIGNED((void*)hull->soa_verts);
+	CK_FREE((void*)hull->edge_twin);
+	CK_FREE((void*)hull->edge_next);
+	CK_FREE((void*)hull->edge_origin);
+	CK_FREE((void*)hull->edge_face);
+	CK_FREE((void*)hull->faces);
+	CK_FREE((void*)hull->planes);
+	CK_FREE(hull);
 }
 
 void compact_hull_free(CompactHull* ch)
@@ -1477,9 +1496,11 @@ int hull_face_extension_build(HullFaceExtension* out, const CompactHull* ch)
 
 	// Each CSR entry neighbors[i] at offset i is half-edge i: origin = v where offsets[v] <= i < offsets[v+1].
 	// Set edge origins.
-	for (int v = 0; v < nv; v++)
-		for (int i = ch->offsets[v]; i < ch->offsets[v+1]; i++)
+	for (int v = 0; v < nv; v++) {
+		for (int i = ch->offsets[v]; i < ch->offsets[v+1]; i++) {
 			out->edge_origin[i] = (uint16_t)v;
+		}
+	}
 
 	// Build twin map: edge i goes from origin[i] to neighbors[i].
 	// Its twin goes from neighbors[i] back to origin[i].

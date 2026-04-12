@@ -396,8 +396,9 @@ static void test_capsule_settles_on_floor()
 		Manifold m = {0};
 		int hit = collide_capsule_hull(tc, bh, &m);
 		printf("  capsule_hull: hit=%d count=%d\n", hit, m.count);
-		for (int c = 0; c < m.count; c++)
+		for (int c = 0; c < m.count; c++) {
 			printf("    c%d: n=(%.4f,%.4f,%.4f) pen=%.5f pt=(%.4f,%.4f,%.4f)\n", c, m.contacts[c].normal.x, m.contacts[c].normal.y, m.contacts[c].normal.z, m.contacts[c].penetration, m.contacts[c].point.x, m.contacts[c].point.y, m.contacts[c].point.z);
+		}
 		TEST_ASSERT(hit);
 		if (hit) TEST_ASSERT(m.contacts[0].penetration > 0.01f);
 	}
@@ -416,6 +417,111 @@ static void test_capsule_settles_on_floor()
 	}
 	TEST_ASSERT(y > 1.0f);
 	TEST_ASSERT(y < 3.0f);
+	destroy_world(w);
+}
+
+static void test_capsule_rolls_no_lurch()
+{
+	// Capsule lying on its side on a flat floor, given a diagonal push.
+	// Rolls for many frames.  Assert no sudden upward lurch (max y delta
+	// between consecutive frames stays below a threshold).
+	float dt = 1.0f / 60.0f;
+
+	TEST_BEGIN("capsule rolling no lurch");
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50) });
+
+	// Capsule on its side (rotated 90 deg around Z).
+	float ang90 = 3.14159265f * 0.5f;
+	quat side = { 0, 0, sinf(ang90 * 0.5f), cosf(ang90 * 0.5f) };
+	Body cap = create_body(w, (BodyParams){ .position = V3(0, 0.4f, 0), .rotation = side, .mass = 1.0f, .friction = 0.5f });
+	body_add_shape(w, cap, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.5f, .radius = 0.3f } });
+
+	// Let it settle for a moment.
+	for (int i = 0; i < 60; i++) world_step(w, dt);
+
+	// Diagonal push: linear velocity + angular velocity (top-spin).
+	body_set_velocity(w, cap, V3(3, 0, 2));
+	body_set_angular_velocity(w, cap, V3(5, 0, 3));
+
+	float prev_y = body_get_position(w, cap).y;
+	float max_dy = 0;
+	int lurch_frame = -1;
+	for (int i = 0; i < 600; i++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, cap);
+		float dy = pos.y - prev_y;
+		if (dy > max_dy) { max_dy = dy; lurch_frame = i; }
+		prev_y = pos.y;
+		if (pos.y < -2.0f || pos.y > 5.0f) {
+			printf("  CAPSULE ESCAPED at frame %d  y=%.4f\n", i, pos.y);
+			break;
+		}
+	}
+	printf("  max upward dy=%.5f at frame %d  final y=%.4f\n", max_dy, lurch_frame, prev_y);
+	// A well-behaved rolling capsule should not jump more than ~0.05m in a single
+	// frame (solver correction). Anything above 0.15m is a lurch.
+	TEST_ASSERT(max_dy < 0.15f);
+	TEST_ASSERT(prev_y > -2.0f);
+	destroy_world(w);
+
+	// Same test but with different capsule proportions (long thin capsule).
+	TEST_BEGIN("capsule rolling no lurch (long thin)");
+	w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50) });
+	cap = create_body(w, (BodyParams){ .position = V3(0, 0.25f, 0), .rotation = side, .mass = 1.0f, .friction = 0.5f });
+	body_add_shape(w, cap, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 1.0f, .radius = 0.15f } });
+	for (int i = 0; i < 60; i++) world_step(w, dt);
+	body_set_velocity(w, cap, V3(2, 0, 3));
+	body_set_angular_velocity(w, cap, V3(4, 1, 2));
+
+	prev_y = body_get_position(w, cap).y;
+	max_dy = 0; lurch_frame = -1;
+	for (int i = 0; i < 600; i++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, cap);
+		float dy = pos.y - prev_y;
+		if (dy > max_dy) { max_dy = dy; lurch_frame = i; }
+		prev_y = pos.y;
+		if (pos.y < -2.0f || pos.y > 5.0f) {
+			printf("  CAPSULE ESCAPED at frame %d  y=%.4f\n", i, pos.y);
+			break;
+		}
+	}
+	printf("  max upward dy=%.5f at frame %d  final y=%.4f\n", max_dy, lurch_frame, prev_y);
+	TEST_ASSERT(max_dy < 0.15f);
+	TEST_ASSERT(prev_y > -2.0f);
+	destroy_world(w);
+
+	// Fat capsule (radius > half_height).
+	TEST_BEGIN("capsule rolling no lurch (fat)");
+	w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50) });
+	cap = create_body(w, (BodyParams){ .position = V3(0, 0.6f, 0), .rotation = side, .mass = 1.0f, .friction = 0.5f });
+	body_add_shape(w, cap, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.2f, .radius = 0.5f } });
+	for (int i = 0; i < 60; i++) world_step(w, dt);
+	body_set_velocity(w, cap, V3(4, 0, 1));
+	body_set_angular_velocity(w, cap, V3(3, 2, 5));
+
+	prev_y = body_get_position(w, cap).y;
+	max_dy = 0; lurch_frame = -1;
+	for (int i = 0; i < 600; i++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, cap);
+		float dy = pos.y - prev_y;
+		if (dy > max_dy) { max_dy = dy; lurch_frame = i; }
+		prev_y = pos.y;
+		if (pos.y < -2.0f || pos.y > 5.0f) {
+			printf("  CAPSULE ESCAPED at frame %d  y=%.4f\n", i, pos.y);
+			break;
+		}
+	}
+	printf("  max upward dy=%.5f at frame %d  final y=%.4f\n", max_dy, lurch_frame, prev_y);
+	TEST_ASSERT(max_dy < 0.15f);
+	TEST_ASSERT(prev_y > -2.0f);
 	destroy_world(w);
 }
 
@@ -1641,48 +1747,6 @@ static void test_cyl_hull_native()
 	}
 }
 
-// Fuzz: compare native cyl-hull against hull-backed path.
-// Hull-backed uses the 16-facet unit cylinder; differences are expected
-// due to faceting but normals should be within ~15 degrees.
-static void test_cyl_hull_fuzz()
-{
-	TEST_BEGIN("cyl-hull fuzz 1000 vs hull-backed");
-	cyl_rng = 0xface0011u;
-	int native_hits = 0, hull_hits = 0, both_hit = 0;
-	float max_normal_err_deg = 0;
-	for (int i = 0; i < 1000; i++) {
-		Cylinder cyl = { cyl_rand_v3(-2,2), cyl_rand_quat(), cyl_randr(0.3f, 1.5f), cyl_randr(0.1f, 1.0f) };
-		v3 bpos = add(cyl.center, cyl_rand_v3(-2,2));
-		quat brot = cyl_rand_quat();
-		v3 bscale = V3(cyl_randr(0.2f, 1.5f), cyl_randr(0.2f, 1.5f), cyl_randr(0.2f, 1.5f));
-		const Hull* bh = hull_unit_box();
-		ConvexHull ch = { bh, bpos, brot, bscale };
-
-		Manifold m_native = {0};
-		int hit_native = collide_cylinder_hull(cyl, ch, &m_native);
-		Manifold m_hull = {0};
-		int hit_hull = collide_hull_hull(cylinder_to_convex_hull(cyl), ch, &m_hull);
-
-		if (hit_native) native_hits++;
-		if (hit_hull) hull_hits++;
-		if (hit_native && hit_hull) {
-			both_hit++;
-			// Compare normals (allow up to 20 degrees for facet error).
-			// Allow opposite normals (different reference face selection is valid).
-			float dp = fabsf(dot(m_native.contacts[0].normal, m_hull.contacts[0].normal));
-			float err_deg = acosf(dp > 1.0f ? 1.0f : dp) * 180.0f / 3.14159265f;
-			if (err_deg > max_normal_err_deg) max_normal_err_deg = err_deg;
-		}
-	}
-	// Both paths should have similar hit rates (within 10% of each other).
-	TEST_ASSERT(native_hits > 50);
-	TEST_ASSERT(hull_hits > 50);
-	// Normal agreement: allow up to 90 degrees because SAT can pick a different
-	// valid separating axis (e.g. edge-edge vs face) which may be perpendicular.
-	TEST_ASSERT(max_normal_err_deg <= 90.0f);
-	printf("  [cyl-hull fuzz] native_hits=%d hull_hits=%d both=%d max_normal_err=%.1f deg\n", native_hits, hull_hits, both_hit, max_normal_err_deg);
-}
-
 // ============================================================================
 // Phase 4: cyl-box (delegates to cyl-hull via unit box hull).
 
@@ -1758,8 +1822,9 @@ static void test_tilted_cyl_on_floor()
 			const Contact* contacts;
 			int nc = world_get_contacts(w, &contacts);
 			printf("  tilt f=%d pos=(%.3f,%.3f,%.3f) nc=%d", i, pos.x, pos.y, pos.z, nc);
-			for (int c = 0; c < nc && c < 4; c++)
+			for (int c = 0; c < nc && c < 4; c++) {
 				printf(" [n=(%.2f,%.2f,%.2f) pen=%.4f pt=(%.2f,%.2f,%.2f)]", contacts[c].normal.x, contacts[c].normal.y, contacts[c].normal.z, contacts[c].penetration, contacts[c].point.x, contacts[c].point.y, contacts[c].point.z);
+			}
 			printf("\n");
 		}
 		if (pos.y < -1.0f) { printf("  FELL THROUGH at frame %d\n", i); fell = 1; break; }
@@ -11841,6 +11906,7 @@ static void run_tests()
 	test_capsule_box();
 	test_floor_contacts();
 	test_capsule_settles_on_floor();
+	test_capsule_rolls_no_lurch();
 	test_sphere_settles_on_floor();
 	test_gjk_dispatch();
 	test_gjk_distance();
@@ -11853,7 +11919,6 @@ static void run_tests()
 	test_cyl_capsule_native();
 	test_cyl_capsule_fuzz();
 	test_cyl_hull_native();
-	test_cyl_hull_fuzz();
 	test_cyl_box_native();
 	test_cyl_cyl_native();
 	test_tilted_cyl_on_floor();

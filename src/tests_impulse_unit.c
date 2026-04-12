@@ -504,14 +504,17 @@ static void test_cvel_roundtrip_extreme_mass_ratio()
 
 	// Read constraint velocity
 	double cv[3];
-	for (int d = 0; d < 3; d++)
+	for (int d = 0; d < 3; d++) {
 		cv[d] = ldl_constraint_velocity(&jac[d], &a, &b);
+	}
 
 	// Expected: K * lambda
 	double expected[3] = {0};
-	for (int r = 0; r < 3; r++)
-		for (int c = 0; c < 3; c++)
+	for (int r = 0; r < 3; r++) {
+		for (int c = 0; c < 3; c++) {
 			expected[r] += K[LDL_TRI(r, c)] * lambda[c];
+		}
+	}
 
 	TEST_ASSERT(fabs(cv[0] - expected[0]) < 0.01);
 	TEST_ASSERT(fabs(cv[1] - expected[1]) < 0.01);
@@ -540,17 +543,21 @@ static void test_cvel_roundtrip_with_lever()
 	ldl_apply_jacobian_impulse(jac, 3, lambda, &b, 1);
 
 	double cv[3];
-	for (int d = 0; d < 3; d++)
+	for (int d = 0; d < 3; d++) {
 		cv[d] = ldl_constraint_velocity(&jac[d], &a, &b);
+	}
 
 	double expected[3] = {0};
-	for (int r = 0; r < 3; r++)
-		for (int c = 0; c < 3; c++)
+	for (int r = 0; r < 3; r++) {
+		for (int c = 0; c < 3; c++) {
 			expected[r] += K[LDL_TRI(r, c)] * lambda[c];
+		}
+	}
 
 	// Looser tolerance: float32 accumulation with large lever arms
-	for (int i = 0; i < 3; i++)
+	for (int i = 0; i < 3; i++) {
 		TEST_ASSERT(fabs(cv[i] - expected[i]) / (fabs(expected[i]) + 0.01) < 0.01);
+	}
 }
 
 static void test_cvel_impulse_roundtrip()
@@ -582,14 +589,17 @@ static void test_cvel_impulse_roundtrip()
 
 	// Read constraint velocity
 	double cv[3];
-	for (int d = 0; d < 3; d++)
+	for (int d = 0; d < 3; d++) {
 		cv[d] = ldl_constraint_velocity(&jac[d], &a, &b);
+	}
 
 	// Expected: K * lambda
 	double expected[3] = {0};
-	for (int r = 0; r < 3; r++)
-		for (int c = 0; c < 3; c++)
+	for (int r = 0; r < 3; r++) {
+		for (int c = 0; c < 3; c++) {
 			expected[r] += K[LDL_TRI(r, c)] * lambda[c];
+		}
+	}
 
 	TEST_ASSERT(fabs(cv[0] - expected[0]) < 0.01);
 	TEST_ASSERT(fabs(cv[1] - expected[1]) < 0.01);

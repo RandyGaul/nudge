@@ -5,7 +5,7 @@
 // so modular and well-understood it often becomes useful as a supporting algorithm in other more
 // advanced solvers, or hybrid approaches.
 
-// body_pair_key defined in collision.c (included before this file)
+// body_pair_key defined in broadphase.c (included before this file)
 
 static void contact_tangent_basis(v3 n, v3* t1, v3* t2)
 {
@@ -25,8 +25,9 @@ static float estimate_patch_area(Contact* contacts, int count)
 	if (count < 3) return PATCH_MIN_AREA;
 	v3 n = contacts[0].normal;
 	float area = 0.0f;
-	for (int i = 1; i < count - 1; i++)
+	for (int i = 1; i < count - 1; i++) {
 		area += 0.5f * fabsf(dot(n, cross(sub(contacts[i].point, contacts[0].point), sub(contacts[i + 1].point, contacts[0].point))));
+	}
 	return area > PATCH_MIN_AREA ? area : PATCH_MIN_AREA;
 }
 
@@ -55,8 +56,9 @@ static SIMD_FORCEINLINE void apply_impulse_row(BodyHot* a, BodyHot* b, v3 direct
 // Match a new contact to a cached contact by feature ID. Returns index or -1.
 static int warm_match(WarmManifold* wm, uint32_t feature_id)
 {
-	for (int i = 0; i < wm->count; i++)
+	for (int i = 0; i < wm->count; i++) {
 		if (wm->contacts[i].feature_id == feature_id) return i;
+	}
 	return -1;
 }
 
@@ -89,8 +91,9 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 		if (den2 > 1e-12f) { soft_ds = 1.0f / den2; bias_ds = dt * k2 * soft_ds; }
 	}
 
-	for (int i = 0; i < manifold_count; i++)
+	for (int i = 0; i < manifold_count; i++) {
 		pre_solve_manifold(w, &manifolds[i], i, sm, sc, pc, dt, soft_dd, bias_dd, soft_ds, bias_ds);
+	}
 
 	// Apply warm start impulses
 	for (int i = 0; i < asize(sm); i++) {
@@ -119,47 +122,6 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 	*out_sm = sm;
 	*out_sc = sc;
 	if (out_pc) *out_pc = pc; else afree(pc);
-}
-
-static void solver_iterate(WorldInternal* w, SolverManifold* sm, int sm_count, SolverContact* sc)
-{
-	for (int i = 0; i < sm_count; i++) {
-		SolverManifold* m = &sm[i];
-		BodyHot* a = &w->body_hot[m->body_a];
-		BodyHot* b = &w->body_hot[m->body_b];
-
-		for (int ci = 0; ci < m->contact_count; ci++) {
-			SolverContact* s = &sc[m->contact_start + ci];
-
-			// Relative velocity at contact point
-			v3 dv = sub( add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-
-			// --- Normal constraint ---
-			float vn = dot(dv, s->normal);
-			float lambda_n = s->eff_mass_n * (-(vn + s->bias + s->bounce));
-			float old_n = s->lambda_n;
-			s->lambda_n = fmaxf(old_n + lambda_n, 0.0f);
-			float delta_n = s->lambda_n - old_n;
-			apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, delta_n));
-
-			// --- Friction tangent 1 ---
-			dv = sub( add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			float vt1 = dot(dv, s->tangent1);
-			float lambda_t1 = s->eff_mass_t1 * (-vt1);
-			float max_f = m->friction * s->lambda_n;
-			float old_t1 = s->lambda_t1;
-			s->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + lambda_t1, max_f));
-			apply_impulse(a, b, s->r_a, s->r_b, scale(s->tangent1, s->lambda_t1 - old_t1));
-
-			// --- Friction tangent 2 ---
-			dv = sub( add(b->velocity, cross(b->angular_velocity, s->r_b)), add(a->velocity, cross(a->angular_velocity, s->r_a)));
-			float vt2 = dot(dv, s->tangent2);
-			float lambda_t2 = s->eff_mass_t2 * (-vt2);
-			float old_t2 = s->lambda_t2;
-			s->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + lambda_t2, max_f));
-			apply_impulse(a, b, s->r_a, s->r_b, scale(s->tangent2, s->lambda_t2 - old_t2));
-		}
-	}
 }
 
 // NGS position correction: directly fix remaining penetration after velocity solve
@@ -267,8 +229,6 @@ static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count
 				.feature_id = s->feature_id,
 				.r_a = s->r_a,
 				.lambda_n = s->lambda_n,
-				.lambda_t1 = s->lambda_t1,
-				.lambda_t2 = s->lambda_t2,
 			};
 		}
 		wm->manifold_lambda_t1 = m->lambda_t1;
@@ -339,8 +299,9 @@ static void color_constraints(ConstraintRef* refs, int count, int body_count, in
 	out_batch_starts[color_count] = count; // sentinel
 
 	ConstraintRef* sorted = (ConstraintRef*)CK_ALLOC(count * sizeof(ConstraintRef));
-	for (int i = 0; i < count; i++)
+	for (int i = 0; i < count; i++) {
 		sorted[offsets[refs[i].color]++] = refs[i];
+	}
 	memcpy(refs, sorted, count * sizeof(ConstraintRef));
 
 	CK_FREE(sorted);

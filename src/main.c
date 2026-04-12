@@ -108,6 +108,7 @@ static bool g_show_bvh = true;
 static bool g_show_proxies = false;
 static bool g_show_sleep = true;
 static bool g_show_shadows = true;
+static bool g_translucent_shapes = false;
 static bool g_sleep_enabled = true;
 static bool g_sat_hint = true;
 static bool g_sat_hillclimb = true;
@@ -657,6 +658,7 @@ void update()
 	ImGui_SameLine(); ImGui_Checkbox("Proxies", &g_show_proxies);
 	ImGui_Checkbox("Sleeping bodies", &g_show_sleep);
 	ImGui_Checkbox("Shadows", &g_show_shadows);
+	ImGui_Checkbox("Translucent shapes", &g_translucent_shapes);
 
 	// Stats
 	ImGui_SeparatorText("Stats");
@@ -693,10 +695,10 @@ static void draw_body_mesh(int mesh, Body body, v3 sc, v3 color)
 {
 	v3 pos = body_get_position(g_world, body);
 	quat rot = body_get_rotation(g_world, body);
-	float opacity = 1.0f;
+	float opacity = g_translucent_shapes ? 0.3f : 1.0f;
 	if (g_show_sleep && body_is_asleep(g_world, body)) {
 		color = V3(0.3f, 0.35f, 0.5f); // desaturated blue tint
-		opacity = 0.6f;
+		opacity = g_translucent_shapes ? 0.15f : 0.6f;
 	}
 	render_push(mesh, mat4_trs(pos, rot, sc), color, opacity);
 }
@@ -729,6 +731,7 @@ void draw()
 	mat4 vp = mul(proj, view);
 
 	render_set_shadows(g_show_shadows);
+	render_set_no_depth_write(g_translucent_shapes);
 	render_begin(vp);
 
 	// Ground grid (XZ plane, y=0)

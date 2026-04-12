@@ -71,8 +71,9 @@ static AABB shape_aabb(BodyHot* h, ShapeInternal* s)
 static AABB body_aabb(BodyHot* h, BodyCold* c)
 {
 	AABB box = shape_aabb(h, &c->shapes[0]);
-	for (int i = 1; i < asize(c->shapes); i++)
+	for (int i = 1; i < asize(c->shapes); i++) {
 		box = aabb_merge(box, shape_aabb(h, &c->shapes[i]));
+	}
 	return box;
 }
 

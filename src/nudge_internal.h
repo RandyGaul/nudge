@@ -233,7 +233,7 @@ typedef struct LDL_Topology
 	CK_DYNA LDL_Column* columns;
 	CK_DYNA LDL_Schur* schurs;
 	CK_DYNA LDL_Coupling* couplings;
-	int L_factors_size;                    // total floats in L_factors
+	int L_factors_size; // total floats in L_factors
 } LDL_Topology;
 
 typedef struct LDL_Cache
@@ -347,24 +347,16 @@ typedef struct SolverContact
 	// --- Hot fields for patch-mode PGS inner loop (first 92 bytes = 2 cache lines) ---
 	v3 r_a;              // contact offset from body A
 	v3 r_b;              // contact offset from body B
-	v3 rn_a, rn_b;      // precomputed cross(r, normal)
-	v3 w_n_a, w_n_b;    // precomputed I_w * cross(r, normal) — angular impulse direction
+	v3 rn_a, rn_b;       // precomputed cross(r, normal)
+	v3 w_n_a, w_n_b;     // precomputed I_w * cross(r, normal) — angular impulse direction
 	float eff_mass_n;    // 1/K for normal row
 	float bias;          // velocity bias for penetration recovery
 	float bounce;        // restitution velocity bias
 	float softness;      // soft constraint regularization (0 = rigid/NGS)
 	float lambda_n;      // accumulated normal impulse (>= 0)
-	// --- Cold fields (Coulomb mode, warm starting, position correction) ---
+	// --- Cold fields (warm starting, position correction) ---
 	v3 normal;           // cached contact normal
-	v3 tangent1;         // friction direction 1
-	v3 tangent2;         // friction direction 2
-	float eff_mass_t1;   // 1/K for tangent1 row
-	float eff_mass_t2;   // 1/K for tangent2 row
-	float lambda_t1;     // accumulated tangent1 impulse
-	float lambda_t2;     // accumulated tangent2 impulse
 	float penetration;   // cached for position correction pass
-	v3 w_t1_a, w_t1_b;  // tangent1 row — Coulomb mode only
-	v3 w_t2_a, w_t2_b;  // tangent2 row — Coulomb mode only
 	uint32_t feature_id; // geometric feature key for warm starting
 } SolverContact;
 
@@ -414,8 +406,6 @@ typedef struct WarmContact
 {
 	v3 r_a;              // body-A-relative position for spatial fallback matching
 	float lambda_n;
-	float lambda_t1;
-	float lambda_t2;
 	uint32_t feature_id; // geometric feature key for matching
 } WarmContact;
 
