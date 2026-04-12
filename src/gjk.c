@@ -331,15 +331,11 @@ static void gjk_hull_minmax_scan(const v3* __restrict verts, int count, const fl
 
 static v3 gjk_box_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict feat)
 {
-	// Fused: 3 column dots + copysign scale + sum, avoiding two separate mat3 ops.
-	simd4f he = sp->box.half_extents.m;
-	simd4f d0m = v3_dot_m(sp->box.col0, sd), d1m = v3_dot_m(sp->box.col1, sd), d2m = v3_dot_m(sp->box.col2, sd);
-	simd4f d0 = simd_splat(d0m, 0), d1 = simd_splat(d1m, 0), d2 = simd_splat(d2m, 0);
-	simd4f s0 = simd_and(d0, simd_sign_mask()), s1 = simd_and(d1, simd_sign_mask()), s2 = simd_and(d2, simd_sign_mask());
-	simd4f h0 = simd_xor(simd_splat(he, 0), s0), h1 = simd_xor(simd_splat(he, 1), s1), h2 = simd_xor(simd_splat(he, 2), s2);
-	v3 result = { .m = simd_add(sp->box.center.m, simd_add(simd_add(simd_mul(sp->box.col0.m, h0), simd_mul(sp->box.col1.m, h1)), simd_mul(sp->box.col2.m, h2))) };
-	*feat = ((simd_get_x(d0m) >= 0) ? 1 : 0) | ((simd_get_x(d1m) >= 0) ? 2 : 0) | ((simd_get_x(d2m) >= 0) ? 4 : 0);
-	return result;
+	v3 ld = mat3_mul_v(sp->box.col0, sp->box.col1, sp->box.col2, sd);
+	simd4f sign_bits = simd_and(ld.m, simd_sign_mask());
+	v3 lc = { .m = simd_xor(sp->box.half_extents.m, sign_bits) };
+	*feat = simd_movemask(simd_cmpge(ld.m, simd_zero())) & 7;
+	return add(sp->box.center, mat3_tmul_v(sp->box.col0, sp->box.col1, sp->box.col2, lc));
 }
 
 static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict feat)
@@ -762,13 +758,12 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		}
 
 		// Relative progress termination.
-		float max_vert2 = 0.0f;
-		for (int i = 0; i < simplex.count; i++) {
-			float v2 = len2(simplex.v[i].point);
-			if (v2 > max_vert2) max_vert2 = v2;
-		}
+		// Use dsq as a conservative bound for max_vert2 (avoids iterating verts).
+		// The closest point is inside the convex hull of the simplex, so dsq <= max_vert2.
+		// Using dsq makes the threshold tighter (terminates sooner), which is fine
+		// since we already have duplicate-vertex and monotonic-progress checks.
 		float progress = dsq - dot(w, closest);
-		if (progress <= max_vert2 * GJK_PROGRESS_EPS) break;
+		if (progress <= dsq * GJK_PROGRESS_EPS) break;
 
 		iter++;
 		GJK_Vertex* vert = &simplex.v[simplex.count];
