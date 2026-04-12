@@ -612,7 +612,7 @@ void world_step(World world, float dt)
 		// PGS: iterate all constraints (contacts, and joints when LDL is off).
 		// Fast path: contacts with no joints use compact SolverBodyVel
 		// (32 bytes/body instead of 120 bytes — fits more bodies in cache).
-		if (use_body_vel) solver_sync_vel_in(w);
+		if (use_body_vel) solver_sync_vel_in(w, sub == 0 || simd_batch_count == 0);
 
 		// Build SIMD batches on first substep; refresh only bias/lambda on substep 2+.
 #if SIMD_SSE
