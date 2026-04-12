@@ -202,12 +202,12 @@ static void test_soft_spring_pulls_together()
 
 	// After solve: body A should have gained +X velocity, body B should have gained -X velocity.
 	// Both moving toward each other = spring pulling.
-	TEST_ASSERT(w->body_hot[0].velocity.x > 0.01f); // A moves right
-	TEST_ASSERT(w->body_hot[1].velocity.x < -0.01f); // B moves left
+	TEST_ASSERT(body_vel(w, 0).x > 0.01f); // A moves right
+	TEST_ASSERT(body_vel(w, 1).x < -0.01f); // B moves left
 
 	// Y and Z should be near zero (separation is along X only)
-	TEST_ASSERT(fabsf(w->body_hot[0].velocity.y) < 0.01f);
-	TEST_ASSERT(fabsf(w->body_hot[0].velocity.z) < 0.01f);
+	TEST_ASSERT(fabsf(body_vel(w, 0).y) < 0.01f);
+	TEST_ASSERT(fabsf(body_vel(w, 0).z) < 0.01f);
 
 	integration_cache_free(&c);
 	soft_test_free_world(w);
@@ -262,8 +262,8 @@ static void test_soft_spring_no_overshoot()
 
 	// Velocity should be moderate -- not shooting off. At sub_dt = 1/240,
 	// even aggressive correction shouldn't exceed a few m/s for 1m separation.
-	float speed_a = len(w->body_hot[0].velocity);
-	float speed_b = len(w->body_hot[1].velocity);
+	float speed_a = len(body_vel(w, 0));
+	float speed_b = len(body_vel(w, 1));
 	TEST_ASSERT(speed_a < 50.0f);
 	TEST_ASSERT(speed_b < 50.0f);
 	// Both should be nonzero (spring is doing work)
@@ -321,11 +321,11 @@ static void test_soft_spring_heavy_light()
 	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	// Both should move toward each other
-	TEST_ASSERT(w->body_hot[0].velocity.x > 0.0f);
-	TEST_ASSERT(w->body_hot[1].velocity.x < 0.0f);
+	TEST_ASSERT(body_vel(w, 0).x > 0.0f);
+	TEST_ASSERT(body_vel(w, 1).x < 0.0f);
 
 	// Light body should move ~1000x faster than heavy body
-	float ratio = fabsf(w->body_hot[1].velocity.x) / (fabsf(w->body_hot[0].velocity.x) + 1e-10f);
+	float ratio = fabsf(body_vel(w, 1).x) / (fabsf(body_vel(w, 0).x) + 1e-10f);
 	TEST_ASSERT(ratio > 100.0f);
 
 	integration_cache_free(&c);
@@ -381,7 +381,7 @@ static void test_rigid_constraint_zeroes_velocity()
 	// Bodies were separating at 2 m/s relative; the rigid constraint should cancel that.
 	// With equal masses and zero lever arms, each body gets half the correction.
 	// Final: both should have ~0 relative velocity.
-	float rel_vx = w->body_hot[1].velocity.x - w->body_hot[0].velocity.x;
+	float rel_vx = body_vel(w, 1).x - body_vel(w, 0).x;
 	TEST_ASSERT(fabsf(rel_vx) < 0.01f);
 
 	integration_cache_free(&c);

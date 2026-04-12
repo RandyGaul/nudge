@@ -540,7 +540,7 @@ static void ldl_apply_shattering(LDL_Cache* c, WorldInternal* w)
 
 	for (int b = 0; b < body_count; b++) {
 		if (body_dof[b] <= SHATTER_THRESHOLD) continue;
-		if (w->body_hot[b].inv_mass == 0.0f) continue;
+		if (body_inv_mass(w, b) == 0.0f) continue;
 
 		int S = (body_dof[b] + SHARD_TARGET - 1) / SHARD_TARGET;
 		if (S < 2) S = 2;
@@ -852,7 +852,7 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 	if (!comp_bodies) {
 		int bc = asize(w->body_hot);
 		local_comp = CK_ALLOC(bc * sizeof(LDL_CompBody));
-		for (int i2 = 0; i2 < bc; i2++) { local_comp[i2].inv_mass = w->body_hot[i2].inv_mass; local_comp[i2].iw_diag = w->body_hot[i2].iw_diag; local_comp[i2].iw_off = w->body_hot[i2].iw_off; }
+		for (int i2 = 0; i2 < bc; i2++) { local_comp[i2].inv_mass = body_inv_mass(w, i2); local_comp[i2].iw_diag = body_iw_diag(w, i2); local_comp[i2].iw_off = body_iw_off(w, i2); }
 		comp_bodies = local_comp;
 	}
 	LDL_Topology* t = c->topo;
@@ -1240,7 +1240,7 @@ static int ldl_cache_rebuild_blocks(LDL_Cache* c, WorldInternal* w, int island_i
 				if (jj->type == JOINT_PRISMATIC && jj->prismatic.motor_max_impulse > 0.0f) ldl_dof = 5;
 				LDL_Constraint con = { .type = sj->type, .dof = ldl_dof, .body_a = sj->body_a, .body_b = sj->body_b, .real_body_a = sj->body_a, .real_body_b = sj->body_b, .weight_a = 1.0f, .weight_b = 1.0f, .solver_idx = i };
 				assert(con.body_a != con.body_b && "Joint between body and itself");
-				assert((w->body_hot[con.body_a].inv_mass > 0.0f || w->body_hot[con.body_b].inv_mass > 0.0f) && "Both bodies are static");
+				assert((body_inv_mass(w, con.body_a) > 0.0f || body_inv_mass(w, con.body_b) > 0.0f) && "Both bodies are static");
 				apush(c->constraints, con);
 				c->n += sj->dof;
 				c->joint_count++;
@@ -1363,7 +1363,7 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 			LDL_Constraint* con = &c->constraints[i];
 			if (con->is_synthetic) continue;
 			int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
-			printf("    joint[%d] bodies=%d-%d inv_m=%.4f/%.4f rhs=(%.2f,%.2f,%.2f) lam=(%.2f,%.2f,%.2f)\n", i, con->real_body_a, con->real_body_b, w->body_hot[con->real_body_a].inv_mass, w->body_hot[con->real_body_b].inv_mass, vel_rhs[oi], vel_rhs[oi+1], vel_rhs[oi+2], vel_lambda[oi], vel_lambda[oi+1], vel_lambda[oi+2]);
+			printf("    joint[%d] bodies=%d-%d inv_m=%.4f/%.4f rhs=(%.2f,%.2f,%.2f) lam=(%.2f,%.2f,%.2f)\n", i, con->real_body_a, con->real_body_b, body_inv_mass(w, con->real_body_a), body_inv_mass(w, con->real_body_b), vel_rhs[oi], vel_rhs[oi+1], vel_rhs[oi+2], vel_lambda[oi], vel_lambda[oi+1], vel_lambda[oi+2]);
 		}
 		for (int i = 0; i < jc; i++) {
 			LDL_Constraint* con = &c->constraints[i];
@@ -1475,9 +1475,9 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 		}
 
 		for (int bi = 0; bi < body_count; bi++) {
-			if (w->body_hot[bi].inv_mass == 0.0f) continue;
-			w->body_state[bi].position = add(w->body_state[bi].position, dv3_to_v3(pos_delta[bi]));
-			apply_rotation_delta(&w->body_state[bi].rotation, ang_delta[bi]);
+			if (body_inv_mass(w, bi) == 0.0f) continue;
+			body_pos(w, bi) = add(body_pos(w, bi), dv3_to_v3(pos_delta[bi]));
+			apply_rotation_delta(&body_rot(w, bi), ang_delta[bi]);
 		}
 
 	}
@@ -1587,12 +1587,12 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 	int body_count = asize(w->body_hot);
 	LDL_CompBody* comp_bodies = CK_ALLOC(body_count * sizeof(LDL_CompBody));
 	for (int i = 0; i < body_count; i++) {
-		float inv_m = w->body_hot[i].inv_mass;
+		float inv_m = body_inv_mass(w, i);
 		if (inv_m > 0.0f) {
 			float comp_ratio = sqrtf(inv_m) / inv_m;
 			comp_bodies[i].inv_mass = sqrtf(inv_m);
-			comp_bodies[i].iw_diag = scale(w->body_hot[i].iw_diag, comp_ratio);
-			comp_bodies[i].iw_off = scale(w->body_hot[i].iw_off, comp_ratio);
+			comp_bodies[i].iw_diag = scale(body_iw_diag(w, i), comp_ratio);
+			comp_bodies[i].iw_off = scale(body_iw_off(w, i), comp_ratio);
 		} else {
 			comp_bodies[i].inv_mass = 0.0f;
 			comp_bodies[i].iw_diag = V3(0, 0, 0);
@@ -1688,13 +1688,13 @@ static void ldl_position_solve(WorldInternal* w, SolverJoint* sol_joints, int jo
 	int body_count = asize(w->body_hot);
 	LDL_CompBody* comp_bodies = CK_ALLOC(body_count * sizeof(LDL_CompBody));
 	for (int i = 0; i < body_count; i++) {
-		float inv_m = w->body_hot[i].inv_mass;
+		float inv_m = body_inv_mass(w, i);
 		if (inv_m > 0.0f) {
 			float inv_m_comp = sqrtf(inv_m);
 			float comp_ratio = inv_m_comp / inv_m;
 			comp_bodies[i].inv_mass = inv_m_comp;
-			comp_bodies[i].iw_diag = scale(w->body_hot[i].iw_diag, comp_ratio);
-			comp_bodies[i].iw_off  = scale(w->body_hot[i].iw_off,  comp_ratio);
+			comp_bodies[i].iw_diag = scale(body_iw_diag(w, i), comp_ratio);
+			comp_bodies[i].iw_off  = scale(body_iw_off(w, i),  comp_ratio);
 		} else {
 			comp_bodies[i].inv_mass = 0.0f;
 			comp_bodies[i].iw_diag = V3(0, 0, 0);

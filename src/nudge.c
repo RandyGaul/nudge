@@ -427,7 +427,7 @@ void world_step(World world, float dt)
 			if ((w->island_gen[ii] & 1) && w->islands[ii].awake) any_awake = 1;
 		}
 		for (int bi2 = 0; bi2 < body_count && !any_awake; bi2++) {
-			if (split_alive(w->body_gen, bi2) && w->body_hot[bi2].inv_mass > 0.0f && w->body_cold[bi2].island_id < 0) any_awake = 1;
+			if (split_alive(w->body_gen, bi2) && body_inv_mass(w, bi2) > 0.0f && w->body_cold[bi2].island_id < 0) any_awake = 1;
 		}
 		if (!any_awake) {
 			w->perf.broadphase = 0;
@@ -505,7 +505,7 @@ void world_step(World world, float dt)
 		}
 		int any_unisland_dynamic = 0;
 		for (int bi2 = 0; bi2 < body_count && !any_unisland_dynamic; bi2++) {
-			if (split_alive(w->body_gen, bi2) && w->body_hot[bi2].inv_mass > 0.0f && w->body_cold[bi2].island_id < 0) any_unisland_dynamic = 1;
+			if (split_alive(w->body_gen, bi2) && body_inv_mass(w, bi2) > 0.0f && w->body_cold[bi2].island_id < 0) any_unisland_dynamic = 1;
 		}
 		skip_solver = !any_active_joints && !any_unisland_dynamic;
 	}
@@ -912,7 +912,7 @@ void destroy_body(World world, Body body)
 	}
 	if (w->body_cold[idx].bvh_leaf >= 0) {
 		BVH_Tree* tree;
-		if (w->body_hot[idx].inv_mass == 0.0f) tree = w->bvh_static;
+		if (body_inv_mass(w, idx) == 0.0f) tree = w->bvh_static;
 		else if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake) tree = w->bvh_sleeping;
 		else tree = w->bvh_dynamic;
 		// body_state[idx] will be cleared by split_del below
@@ -950,7 +950,7 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	// Insert into BVH on first shape add.
 	if (w->broadphase_type == BROADPHASE_BVH && asize(w->body_cold[idx].shapes) == 1) {
 		AABB box = aabb_expand(body_aabb(&w->body_state[idx], &w->body_cold[idx]), BVH_AABB_MARGIN);
-		BVH_Tree* tree = w->body_hot[idx].inv_mass == 0.0f ? w->bvh_static : w->bvh_dynamic;
+		BVH_Tree* tree = body_inv_mass(w, idx) == 0.0f ? w->bvh_static : w->bvh_dynamic;
 		w->body_cold[idx].bvh_leaf = bvh_insert(tree, idx, box);
 	}
 }
@@ -960,7 +960,7 @@ v3 body_get_position(World world, Body body)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
-	return w->body_state[idx].position;
+	return body_pos(w, idx);
 }
 
 quat body_get_rotation(World world, Body body)
@@ -968,7 +968,7 @@ quat body_get_rotation(World world, Body body)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
-	return w->body_state[idx].rotation;
+	return body_rot(w, idx);
 }
 
 void body_wake(World world, Body body)
@@ -986,7 +986,7 @@ void body_set_velocity(World world, Body body, v3 vel)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
-	w->body_hot[idx].velocity = vel;
+	body_vel(w, idx) = vel;
 	int isl = w->body_cold[idx].island_id;
 	if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
 		island_wake(w, isl);
@@ -997,7 +997,7 @@ void body_set_angular_velocity(World world, Body body, v3 avel)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
-	w->body_hot[idx].angular_velocity = avel;
+	body_angvel(w, idx) = avel;
 	int isl = w->body_cold[idx].island_id;
 	if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
 		island_wake(w, isl);
@@ -1008,7 +1008,7 @@ int body_is_asleep(World world, Body body)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
-	if (w->body_hot[idx].inv_mass == 0.0f) return 1; // static bodies are always "asleep"
+	if (body_inv_mass(w, idx) == 0.0f) return 1; // static bodies are always "asleep"
 	int isl = w->body_cold[idx].island_id;
 	if (isl < 0 || !island_alive(w, isl)) return 0;
 	return !w->islands[isl].awake;
@@ -1031,7 +1031,7 @@ void body_set_sleep_allowed(World world, Body body, int allowed)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
-	w->body_state[idx].sleep_allowed = allowed;
+	body_sleep_allowed(w, idx) = allowed;
 	if (!allowed) {
 		int isl = w->body_cold[idx].island_id;
 		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
@@ -1162,8 +1162,8 @@ Joint create_hinge(World world, HingeParams params)
 	v3 ref_a, ref_a_t2;
 	hinge_tangent_basis(axis_a_local, &ref_a, &ref_a_t2);
 	// Transform ref_a into world, then into body B's local space
-	quat q_a = w->body_state[ba].rotation;
-	quat q_b = w->body_state[bb].rotation;
+	quat q_a = body_rot(w, ba);
+	quat q_b = body_rot(w, bb);
 	v3 ref_a_world = rotate(q_a, ref_a);
 	v3 ref_b = rotate(inv(q_b), ref_a_world);
 
@@ -1208,8 +1208,8 @@ Joint create_fixed(World world, FixedParams params)
 		apush(w->joint_gen, 1);
 	}
 
-	quat q_a = w->body_state[ba].rotation;
-	quat q_b = w->body_state[bb].rotation;
+	quat q_a = body_rot(w, ba);
+	quat q_b = body_rot(w, bb);
 	w->joints[idx] = (JointInternal){
 		.type = JOINT_FIXED,
 		.body_a = ba, .body_b = bb,
@@ -1250,8 +1250,8 @@ Joint create_prismatic(World world, PrismaticParams params)
 		apush(w->joint_gen, 1);
 	}
 
-	quat q_a = w->body_state[ba].rotation;
-	quat q_b = w->body_state[bb].rotation;
+	quat q_a = body_rot(w, ba);
+	quat q_b = body_rot(w, bb);
 	w->joints[idx] = (JointInternal){
 		.type = JOINT_PRISMATIC,
 		.body_a = ba, .body_b = bb,

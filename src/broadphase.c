@@ -26,8 +26,8 @@ static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
 			if (asize(w->body_cold[j].shapes) == 0) continue;
 			// Skip pair if both bodies are inactive (static or sleeping)
 			int isl_i = w->body_cold[i].island_id, isl_j = w->body_cold[j].island_id;
-			int inactive_i = w->body_hot[i].inv_mass == 0.0f || (isl_i >= 0 && (w->island_gen[isl_i] & 1) && !w->islands[isl_i].awake);
-			int inactive_j = w->body_hot[j].inv_mass == 0.0f || (isl_j >= 0 && (w->island_gen[isl_j] & 1) && !w->islands[isl_j].awake);
+			int inactive_i = body_inv_mass(w, i) == 0.0f || (isl_i >= 0 && (w->island_gen[isl_i] & 1) && !w->islands[isl_i].awake);
+			int inactive_j = body_inv_mass(w, j) == 0.0f || (isl_j >= 0 && (w->island_gen[isl_j] & 1) && !w->islands[isl_j].awake);
 			if (inactive_i && inactive_j) continue;
 			if (jointed_pair_skip(w->joint_pairs, i, j)) continue;
 			narrowphase_pair(w, i, j, manifolds);
@@ -77,7 +77,7 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	CK_DYNA int* sleeping_bodies = NULL;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
-		if (w->body_hot[i].inv_mass > 0.0f) {
+		if (body_inv_mass(w, i) > 0.0f) {
 			int isl = w->body_cold[i].island_id;
 			if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) {
 				tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]); // needed for wake detection
@@ -86,13 +86,13 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 			}
 		}
 		tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]);
-		if (w->body_hot[i].inv_mass > 0.0f) { scene_bounds = aabb_merge(scene_bounds, tight[i]); }
+		if (body_inv_mass(w, i) > 0.0f) { scene_bounds = aabb_merge(scene_bounds, tight[i]); }
 	}
 	v3 extent = sub(scene_bounds.max, scene_bounds.min);
 	int axis = (extent.y > extent.x && extent.y > extent.z) ? 1 : (extent.z > extent.x) ? 2 : 0;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) continue;
-		if (w->body_hot[i].inv_mass == 0.0f) continue;
+		if (body_inv_mass(w, i) == 0.0f) continue;
 		int isl = w->body_cold[i].island_id;
 		if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) continue;
 		apush(sap, ((SAP_Entry){ i, ((float*)&tight[i].min)[axis], ((float*)&tight[i].max)[axis] }));

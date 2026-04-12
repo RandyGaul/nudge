@@ -651,10 +651,10 @@ static void joints_split_impulse(WorldInternal* w, SolverJoint* joints, int join
 	v3* saved_vel = CK_ALLOC(body_count * sizeof(v3));
 	v3* saved_ang = CK_ALLOC(body_count * sizeof(v3));
 	for (int i = 0; i < body_count; i++) {
-		saved_vel[i] = w->body_hot[i].velocity;
-		saved_ang[i] = w->body_hot[i].angular_velocity;
-		w->body_hot[i].velocity = V3(0, 0, 0);
-		w->body_hot[i].angular_velocity = V3(0, 0, 0);
+		saved_vel[i] = body_vel(w, i);
+		saved_ang[i] = body_angvel(w, i);
+		body_vel(w, i) = V3(0, 0, 0);
+		body_angvel(w, i) = V3(0, 0, 0);
 	}
 
 	// Save lambda and zero for fresh pseudo-velocity accumulation
@@ -705,8 +705,8 @@ static void joints_split_impulse(WorldInternal* w, SolverJoint* joints, int join
 
 	// Restore real velocities and lambda
 	for (int i = 0; i < body_count; i++) {
-		w->body_hot[i].velocity = saved_vel[i];
-		w->body_hot[i].angular_velocity = saved_ang[i];
+		body_vel(w, i) = saved_vel[i];
+		body_angvel(w, i) = saved_ang[i];
 	}
 	for (int i = 0; i < joint_count; i++) {
 		for (int d = 0; d < JOINT_MAX_DOF; d++) joints[i].lambda[d] = saved_lambda[i * JOINT_MAX_DOF + d];

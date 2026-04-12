@@ -67,6 +67,23 @@ typedef struct BodyState
 	int sleep_allowed;    // 1 = can sleep (default), 0 = never sleep
 } BodyState;
 
+// Body field accessors: decouple call sites from tier assignment.
+// Moving a field between BodyHot/BodyState = change one macro, not 50 files.
+#define body_pos(w, i)              (w)->body_state[i].position
+#define body_rot(w, i)              (w)->body_state[i].rotation
+#define body_vel(w, i)              (w)->body_hot[i].velocity
+#define body_angvel(w, i)           (w)->body_hot[i].angular_velocity
+#define body_inv_mass(w, i)         (w)->body_hot[i].inv_mass
+#define body_iw_diag(w, i)          (w)->body_hot[i].iw_diag
+#define body_iw_off(w, i)           (w)->body_hot[i].iw_off
+#define body_inv_inertia_local(w, i) (w)->body_state[i].inv_inertia_local
+#define body_friction(w, i)         (w)->body_state[i].friction
+#define body_restitution(w, i)      (w)->body_state[i].restitution
+#define body_lin_damping(w, i)      (w)->body_state[i].linear_damping
+#define body_ang_damping(w, i)      (w)->body_state[i].angular_damping
+#define body_sleep_time(w, i)       (w)->body_state[i].sleep_time
+#define body_sleep_allowed(w, i)    (w)->body_state[i].sleep_allowed
+
 // Cached narrowphase feature pair for incremental manifold refresh.
 // type=0: cold (no cache), type=1: face-face, type=2: edge-edge.
 typedef struct CachedFeaturePair

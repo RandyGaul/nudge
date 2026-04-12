@@ -162,9 +162,9 @@ static void test_shatter_hub_star_pipeline()
 
 	// Verify no NaN in body velocities
 	for (int i = 0; i < sw.body_count; i++) {
-		TEST_ASSERT(w->body_hot[i].velocity.x == w->body_hot[i].velocity.x);
-		TEST_ASSERT(w->body_hot[i].velocity.y == w->body_hot[i].velocity.y);
-		TEST_ASSERT(w->body_hot[i].velocity.z == w->body_hot[i].velocity.z);
+		TEST_ASSERT(body_vel(w, i).x == body_vel(w, i).x);
+		TEST_ASSERT(body_vel(w, i).y == body_vel(w, i).y);
+		TEST_ASSERT(body_vel(w, i).z == body_vel(w, i).z);
 	}
 
 	integration_cache_free(&c);
@@ -218,7 +218,7 @@ static void test_shatter_hub_star_extreme_mass()
 	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	for (int i = 0; i < sw.body_count; i++) {
-		TEST_ASSERT(w->body_hot[i].velocity.x == w->body_hot[i].velocity.x);
+		TEST_ASSERT(body_vel(w, i).x == body_vel(w, i).x);
 	}
 
 	integration_cache_free(&c);
@@ -285,7 +285,7 @@ static void test_shatter_hub_with_soft_springs()
 
 	// Velocities should be finite and bounded
 	for (int i = 0; i < sw.body_count; i++) {
-		float speed = len(w->body_hot[i].velocity);
+		float speed = len(body_vel(w, i));
 		TEST_ASSERT(speed == speed); // not NaN
 		TEST_ASSERT(speed < 1000.0f); // not shooting off
 	}

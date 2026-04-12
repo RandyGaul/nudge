@@ -33,11 +33,11 @@ static void draw_ldl_overview(WorldInternal* w, Island* isl, LDL_Cache* c)
 	if (ImGui_TreeNodeEx("Bodies", 0)) {
 		int bi = isl->head_body;
 		while (bi >= 0) {
-			float mass = w->body_hot[bi].inv_mass > 0 ? 1.0f / w->body_hot[bi].inv_mass : 0;
-			if (w->body_hot[bi].inv_mass == 0) {
+			float mass = body_inv_mass(w, bi) > 0 ? 1.0f / body_inv_mass(w, bi) : 0;
+			if (body_inv_mass(w, bi) == 0) {
 				ImGui_Text("  [%d] static", bi);
 			} else {
-				v3 inv_I = w->body_state[bi].inv_inertia_local;
+				v3 inv_I = body_inv_inertia_local(w, bi);
 				ImGui_Text("  [%d] mass=%.1f  inv_I=(%.2f, %.2f, %.2f)", bi, (double)mass, (double)inv_I.x, (double)inv_I.y, (double)inv_I.z);
 			}
 			if (ImGui_IsItemHovered(0)) {
@@ -54,7 +54,7 @@ static void draw_ldl_overview(WorldInternal* w, Island* isl, LDL_Cache* c)
 		while (bi >= 0) {
 			if (c->body_remap[bi] >= 0) {
 				int shard_n = c->shard_counts[bi];
-				float real_mass = w->body_hot[bi].inv_mass > 0 ? 1.0f / w->body_hot[bi].inv_mass : 0;
+				float real_mass = body_inv_mass(w, bi) > 0 ? 1.0f / body_inv_mass(w, bi) : 0;
 				ImGui_Text("  Body %d (mass=%.1f) -> %d shards", bi, (double)real_mass, shard_n);
 				if (ImGui_IsItemHovered(0) && ImGui_BeginTooltip()) {
 					ImGui_Text("Hub body %d was shattered into %d virtual shards.", bi, shard_n);

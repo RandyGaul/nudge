@@ -3320,7 +3320,7 @@ static void test_contact_sphere_rests_on_floor()
 	TEST_BEGIN("contact: sphere velocity near zero at rest");
 	WorldInternal* wi = (WorldInternal*)w.id;
 	int idx = handle_index(ball);
-	float speed = len(wi->body_hot[idx].velocity);
+	float speed = len(body_vel(wi, idx));
 	TEST_ASSERT(speed < 1.0f);
 
 	destroy_world(w);
@@ -3401,7 +3401,7 @@ static void test_distance_spring_equilibrium()
 
 	TEST_BEGIN("distance spring: bob velocity settled");
 	WorldInternal* wi = (WorldInternal*)w.id;
-	float speed = len(wi->body_hot[handle_index(bob)].velocity);
+	float speed = len(body_vel(wi, handle_index(bob)));
 	TEST_ASSERT(speed < 2.0f);
 
 	destroy_world(w);
@@ -3826,7 +3826,7 @@ static void test_ldl_lift_and_drop()
 	for (int f = 0; f < 120; f++) {
 		float t = (float)f / 120.0f;
 		// Move from current position up to (0, 20, 0) — above the anchor
-		wi->body_state[anchor_idx].position = V3(0, 10 + 10 * t, 0);
+		body_pos(wi, anchor_idx) = V3(0, 10 + 10 * t, 0);
 		world_step(w, 1.0f / 60.0f);
 	}
 
@@ -3901,7 +3901,7 @@ static void test_ldl_mouse_yank_chain()
 	int anchor_idx = handle_index(mouse_anchor);
 	for (int f = 0; f < 120; f++) {
 		float t = (float)f / 120.0f;
-		wi->body_state[anchor_idx].position = V3(10 * t, 10 + 20 * t, 0);
+		body_pos(wi, anchor_idx) = V3(10 * t, 10 + 20 * t, 0);
 		world_step(w, 1.0f / 60.0f);
 		// Check for NaN during yank
 		v3 p = body_get_position(w, chain[chain_len - 1]);
@@ -3925,7 +3925,7 @@ static void test_ldl_mouse_yank_chain()
 	for (int i = 0; i < chain_len; i++) {
 		v3 p = body_get_position(w, chain[i]);
 		if (!(p.x == p.x) || !(p.y == p.y) || !(p.z == p.z)) finite = 0;
-		v3 v = wi->body_hot[handle_index(chain[i])].velocity;
+		v3 v = body_vel(wi, handle_index(chain[i]));
 		if (!(v.x == v.x) || !(v.y == v.y) || !(v.z == v.z)) finite = 0;
 		float gap = anchor_distance(w, prev, off_a, chain[i], off_b);
 		if (gap > max_gap) max_gap = gap;
@@ -3993,14 +3993,14 @@ static void test_ldl_pull_down_heavy_chain()
 		// Lift up for 30 frames
 		for (int f = 0; f < 30; f++) {
 			float t = (float)(f + 1) / 30.0f;
-			wi->body_state[anchor_idx].position = V3(0, ball_pos.y + 4.0f * t, 0);
+			body_pos(wi, anchor_idx) = V3(0, ball_pos.y + 4.0f * t, 0);
 			world_step(w, 1.0f / 60.0f);
 		}
 		// Fling down for 15 frames (mouse yanks downward fast)
-		v3 top = wi->body_state[anchor_idx].position;
+		v3 top = body_pos(wi, anchor_idx);
 		for (int f = 0; f < 15; f++) {
 			float t = (float)(f + 1) / 15.0f;
-			wi->body_state[anchor_idx].position = V3(0, top.y - 10.0f * t, 0);
+			body_pos(wi, anchor_idx) = V3(0, top.y - 10.0f * t, 0);
 			world_step(w, 1.0f / 60.0f);
 		}
 
@@ -4017,7 +4017,7 @@ static void test_ldl_pull_down_heavy_chain()
 			float frame_speed = 0;
 			int worst_body = 0;
 			for (int i = 0; i < chain_len; i++) {
-				v3 v = wi->body_hot[handle_index(chain[i])].velocity;
+				v3 v = body_vel(wi, handle_index(chain[i]));
 				if (!(v.x == v.x)) { nan_frame = f; break; }
 				float speed = len(v);
 				if (speed > max_speed) max_speed = speed;
@@ -4032,9 +4032,9 @@ static void test_ldl_pull_down_heavy_chain()
 				printf("    FRAME %d (t=%.2fs) max_speed=%.2f body=%d\n", f, f/60.0f, frame_speed, worst_body);
 				for (int i = 0; i < chain_len; i++) {
 					int bi = handle_index(chain[i]);
-					v3 p = wi->body_state[bi].position;
-					v3 v = wi->body_hot[bi].velocity;
-					v3 av = wi->body_hot[bi].angular_velocity;
+					v3 p = body_pos(wi, bi);
+					v3 v = body_vel(wi, bi);
+					v3 av = body_angvel(wi, bi);
 					printf("      body[%d] pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f) angvel=(%.3f,%.3f,%.3f)\n", i, p.x, p.y, p.z, v.x, v.y, v.z, av.x, av.y, av.z);
 				}
 				// Joint gaps
@@ -4108,7 +4108,7 @@ static void test_ldl_showcase_chain_stretch()
 		// Yank sideways fast (stretch ~8m in 10 frames — very aggressive)
 		for (int f = 0; f < 10; f++) {
 			float t = (float)(f + 1) / 10.0f;
-			wi->body_state[anchor_idx].position = V3(tip.x + 8.0f * t, tip.y - 5.0f * t, 0);
+			body_pos(wi, anchor_idx) = V3(tip.x + 8.0f * t, tip.y - 5.0f * t, 0);
 			world_step(w, 1.0f / 60.0f);
 		}
 
@@ -4117,11 +4117,11 @@ static void test_ldl_showcase_chain_stretch()
 		float max_speed = 0;
 		int nan_frame = -1;
 		for (int f = 0; f < 300; f++) {
-			wi->body_state[anchor_idx].position = hold;
+			body_pos(wi, anchor_idx) = hold;
 			world_step(w, 1.0f / 60.0f);
 			for (int i = 0; i < chain_len; i++) {
-				v3 v = wi->body_hot[handle_index(chain[i])].velocity;
-				v3 av = wi->body_hot[handle_index(chain[i])].angular_velocity;
+				v3 v = body_vel(wi, handle_index(chain[i]));
+				v3 av = body_angvel(wi, handle_index(chain[i]));
 				if (!(v.x == v.x)) { nan_frame = f; break; }
 				float speed = len(v) + len(av);
 				if (speed > max_speed) max_speed = speed;
@@ -4980,8 +4980,8 @@ static void test_ldl_sleep_cache()
 	// Wake the island by applying a velocity kick
 	int bi = wi->islands[isl_idx].head_body;
 	while (bi >= 0) {
-		if (wi->body_hot[bi].inv_mass > 0) {
-			wi->body_hot[bi].velocity = V3(0, -1, 0);
+		if (body_inv_mass(wi, bi) > 0) {
+			body_vel(wi, bi) = V3(0, -1, 0);
 			break;
 		}
 		bi = wi->body_cold[bi].island_next;
@@ -5031,8 +5031,8 @@ static void test_ldl_energy_stability()
 		float ke = 0;
 		for (int i = 0; i < 5; i++) {
 			int idx = handle_index(chain[i]);
-			v3 v = wi->body_hot[idx].velocity;
-			v3 av = wi->body_hot[idx].angular_velocity;
+			v3 v = body_vel(wi, idx);
+			v3 av = body_angvel(wi, idx);
 			float mass = 1.0f;
 			ke += 0.5f * mass * dot(v, v);
 			ke += 0.5f * dot(av, av); // approximate rotational KE
@@ -5044,8 +5044,8 @@ static void test_ldl_energy_stability()
 	float final_ke = 0;
 	for (int i = 0; i < 5; i++) {
 		int idx = handle_index(chain[i]);
-		v3 v = wi->body_hot[idx].velocity;
-		v3 av = wi->body_hot[idx].angular_velocity;
+		v3 v = body_vel(wi, idx);
+		v3 av = body_angvel(wi, idx);
 		final_ke += 0.5f * dot(v, v) + 0.5f * dot(av, av);
 	}
 
@@ -5077,9 +5077,9 @@ static float measure_system_ke(WorldInternal* wi, Body* bodies, int count)
 	float ke = 0;
 	for (int i = 0; i < count; i++) {
 		int idx = handle_index(bodies[i]);
-		v3 v = wi->body_hot[idx].velocity;
-		v3 av = wi->body_hot[idx].angular_velocity;
-		float m = 1.0f / wi->body_hot[idx].inv_mass;
+		v3 v = body_vel(wi, idx);
+		v3 av = body_angvel(wi, idx);
+		float m = 1.0f / body_inv_mass(wi, idx);
 		ke += 0.5f * m * dot(v, v);
 		ke += 0.5f * dot(av, av);
 	}
@@ -5996,7 +5996,7 @@ static void test_ldl_energy_comprehensive()
 			prev = b;
 		}
 		// Give tip a kick to create motion
-		((WorldInternal*)w.id)->body_hot[(int)bodies[4].id].velocity = V3(0, 2, 0);
+		body_vel(((WorldInternal*)w.id), (int)bodies[4].id) = V3(0, 2, 0);
 		float r = energy_growth(w, bodies, asize(bodies), 2000);
 		printf("  [energy-ldl] zero_gravity_chain: growth=%.4f\n", (double)r);
 		if (r > worst) worst = r;
@@ -6058,7 +6058,7 @@ static void test_ldl_energy_comprehensive()
 		}
 		// Give all bodies angular velocity
 		for (int i = 0; i < 5; i++)
-			((WorldInternal*)w.id)->body_hot[(int)bodies[i].id].angular_velocity = V3(0, 5.0f, 0);
+			body_angvel(((WorldInternal*)w.id), (int)bodies[i].id) = V3(0, 5.0f, 0);
 		float r = energy_growth(w, bodies, asize(bodies), frames);
 		printf("  [energy-ldl] spinning_chain: growth=%.4f\n", (double)r);
 		if (r > worst) worst = r;
@@ -6407,7 +6407,7 @@ static void test_ldl_energy_comprehensive()
 			float angle = (float)f * 0.05f;
 			float r_drag = 3.0f; // drag radius
 			v3 target = V3(r_drag * cosf(angle), 10 - 4*0.8f + r_drag * sinf(angle), 0);
-			wi->body_state[(int)mouse_anchor.id].position = target;
+			body_pos(wi, (int)mouse_anchor.id) = target;
 			world_step(w, 1.0f / 60.0f);
 		}
 		// Release and measure
@@ -6457,7 +6457,7 @@ static void test_ldl_energy_comprehensive()
 			float angle = (float)f * 0.08f;
 			float r_drag = 5.0f;
 			v3 target = V3(r_drag * cosf(angle), 10 + r_drag * sinf(angle), 0);
-			wi->body_state[(int)mouse_anchor.id].position = target;
+			body_pos(wi, (int)mouse_anchor.id) = target;
 			world_step(w, 1.0f / 60.0f);
 		}
 		destroy_joint(w, mouse_joint);
@@ -6504,7 +6504,7 @@ static void test_ldl_energy_comprehensive()
 			float angle = (float)f * 0.15f; // fast rotation
 			float r_drag = 8.0f; // large radius
 			v3 target = V3(r_drag * cosf(angle), 10 + r_drag * sinf(angle), r_drag * sinf(angle * 0.7f));
-			wi->body_state[(int)mouse_anchor.id].position = target;
+			body_pos(wi, (int)mouse_anchor.id) = target;
 			world_step(w, 1.0f / 60.0f);
 		}
 		destroy_joint(w, mouse_joint);
@@ -6552,7 +6552,7 @@ static void test_ldl_energy_comprehensive()
 			float x = 10.0f * (((f * 7 + 3) % 13) / 6.5f - 1.0f);
 			float y = 10.0f + 10.0f * (((f * 11 + 5) % 17) / 8.5f - 1.0f);
 			float z = 10.0f * (((f * 13 + 7) % 19) / 9.5f - 1.0f);
-			wi->body_state[(int)mouse_anchor.id].position = V3(x, y, z);
+			body_pos(wi, (int)mouse_anchor.id) = V3(x, y, z);
 			world_step(w, 1.0f / 60.0f);
 		}
 		destroy_joint(w, mouse_joint);
@@ -6592,8 +6592,8 @@ static void test_ldl_energy_comprehensive()
 		}
 		step_n(w, 120);
 		// Slam hub with huge velocity
-		wi->body_hot[(int)hub.id].velocity = V3(50, 100, 30);
-		wi->body_hot[(int)hub.id].angular_velocity = V3(20, 20, 20);
+		body_vel(wi, (int)hub.id) = V3(50, 100, 30);
+		body_angvel(wi, (int)hub.id) = V3(20, 20, 20);
 		int all_valid = 1;
 		for (int f = 0; f < 300; f++) {
 			world_step(w, 1.0f / 60.0f);
@@ -6633,7 +6633,7 @@ static void test_ldl_energy_comprehensive()
 		}
 		step_n(w, 120);
 		// Slam arm[0] with huge velocity
-		wi->body_hot[(int)bodies[1].id].velocity = V3(100, 50, 0);
+		body_vel(wi, (int)bodies[1].id) = V3(100, 50, 0);
 		int all_valid = 1;
 		for (int f = 0; f < 300; f++) {
 			world_step(w, 1.0f / 60.0f);
@@ -6676,7 +6676,7 @@ static void test_ldl_energy_comprehensive()
 		for (int f = 0; f < 600; f++) {
 			if (f % 10 == 0) {
 				int target = 1 + (f / 10) % 8;
-				wi->body_hot[(int)bodies[target].id].velocity = add(wi->body_hot[(int)bodies[target].id].velocity, V3(20, 10, 0));
+				body_vel(wi, (int)bodies[target].id) = add(body_vel(wi, (int)bodies[target].id), V3(20, 10, 0));
 			}
 			world_step(w, 1.0f / 60.0f);
 			for (int i = 0; i < asize(bodies); i++) {
@@ -6723,7 +6723,7 @@ static void test_ldl_energy_comprehensive()
 		// Move pull target around aggressively
 		for (int f = 0; f < 300; f++) {
 			float a = (float)f * 0.1f;
-			wi->body_state[(int)mouse_anchor.id].position = V3(5*cosf(a), 8 + 5*sinf(a), 3*sinf(a*0.7f));
+			body_pos(wi, (int)mouse_anchor.id) = V3(5*cosf(a), 8 + 5*sinf(a), 3*sinf(a*0.7f));
 			world_step(w, 1.0f / 60.0f);
 		}
 		destroy_joint(w, mouse_joint);
@@ -6764,7 +6764,7 @@ static void test_ldl_energy_comprehensive()
 		}
 		step_n(w, 120);
 		// Slam the heavy arm
-		wi->body_hot[(int)bodies[1].id].velocity = V3(50, 30, 0);
+		body_vel(wi, (int)bodies[1].id) = V3(50, 30, 0);
 		int all_valid = 1;
 		for (int f = 0; f < 300; f++) {
 			world_step(w, 1.0f / 60.0f);
@@ -6969,7 +6969,7 @@ static void test_ldl_soft_box()
 	}
 
 	v3 p = body_get_position(w, box);
-	v3 v = wi->body_hot[handle_index(box)].velocity;
+	v3 v = body_vel(wi, handle_index(box));
 	printf("  [LDL soft box] pos=(%.2f,%.2f,%.2f) vel=(%.4f,%.4f,%.4f) speed=%.4f\n", p.x, p.y, p.z, v.x, v.y, v.z, len(v));
 
 	TEST_BEGIN("LDL soft box: body valid");
@@ -7020,13 +7020,13 @@ static void test_ldl_soft_box_drag()
 	extern int g_ldl_trace_solve;
 	for (int f = 0; f < 120; f++) {
 		float t = (float)f / 120.0f;
-		wi->body_state[mi].position = V3(2.0f * t, 3.0f + 2.0f * t, 1.0f * sinf(t * 6.28f));
+		body_pos(wi, mi) = V3(2.0f * t, 3.0f + 2.0f * t, 1.0f * sinf(t * 6.28f));
 		g_ldl_trace_solve = (f >= 7 && f <= 8);
 		world_step(w, 1.0f / 60.0f);
 		g_ldl_trace_solve = 0;
 		v3 p = body_get_position(w, box);
 		if (!is_valid(p)) { nan_frame = f; break; }
-		v3 bv = wi->body_hot[handle_index(box)].velocity;
+		v3 bv = body_vel(wi, handle_index(box));
 		if (f < 25) printf("  [drag f%d] pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f) speed=%.1f\n", f, p.x, p.y, p.z, bv.x, bv.y, bv.z, len(bv));
 		if (explode_frame < 0 && len(p) > 50.0f) { explode_frame = f; printf("  [LDL soft box drag] EXPLODE at frame %d pos=(%.2f,%.2f,%.2f)\n", f, p.x, p.y, p.z); }
 	}
@@ -7039,7 +7039,7 @@ static void test_ldl_soft_box_drag()
 	step_n(w, 60);
 
 	v3 p_after = body_get_position(w, box);
-	v3 v_after = wi->body_hot[handle_index(box)].velocity;
+	v3 v_after = body_vel(wi, handle_index(box));
 
 	printf("  [LDL soft box drag] nan=%d during_drag=(%.2f,%.2f,%.2f) after=(%.2f,%.2f,%.2f) speed=%.4f\n",
 		nan_frame, p_drag.x, p_drag.y, p_drag.z, p_after.x, p_after.y, p_after.z, len(v_after));
@@ -7086,7 +7086,7 @@ static void test_ldl_soft_box_chain()
 	}
 
 	v3 p = body_get_position(w, box);
-	v3 v = wi->body_hot[handle_index(box)].velocity;
+	v3 v = body_vel(wi, handle_index(box));
 	float rigid_gap = anchor_distance(w, anchor, V3(0,-0.5f,0), link1, V3(0,0.5f,0));
 
 	printf("  [LDL soft box chain] nan=%d pos=(%.2f,%.2f,%.2f) speed=%.4f rigid_gap=%.4f\n",
@@ -7137,7 +7137,7 @@ static void test_ldl_soft_chain()
 	// Soft chain should settle (low velocity)
 	float max_speed = 0;
 	for (int i = 0; i < 3; i++) {
-		v3 v = wi->body_hot[handle_index(bodies[i])].velocity;
+		v3 v = body_vel(wi, handle_index(bodies[i]));
 		float s = len(v);
 		if (s > max_speed) max_speed = s;
 	}
@@ -7280,7 +7280,7 @@ static void test_ldl_sharp_yank_recovery()
 
 	// Sharp teleport
 	int mi = handle_index(mouse);
-	wi->body_state[mi].position = V3(20, 30, 0);
+	body_pos(wi, mi) = V3(20, 30, 0);
 	step_n(w, 10);
 
 	// Release
@@ -7341,7 +7341,7 @@ static void test_ldl_soft_heavy()
 	step_n(w, 300);
 
 	v3 p = body_get_position(w, heavy);
-	v3 v = wi->body_hot[handle_index(heavy)].velocity;
+	v3 v = body_vel(wi, handle_index(heavy));
 	printf("  [LDL soft heavy] pos=(%.2f,%.2f,%.2f) vel=(%.4f,%.4f,%.4f)\n", p.x, p.y, p.z, v.x, v.y, v.z);
 
 	TEST_BEGIN("LDL soft heavy: body valid");
@@ -7778,8 +7778,8 @@ static void test_ldl_stress_alternating_mass()
 		float ke = 0;
 		for (int i = 0; i < N; i++) {
 			int idx = handle_index(chain[i]);
-			v3 v = wi->body_hot[idx].velocity;
-			float m = 1.0f / wi->body_hot[idx].inv_mass;
+			v3 v = body_vel(wi, idx);
+			float m = 1.0f / body_inv_mass(wi, idx);
 			ke += 0.5f * m * dot(v, v);
 		}
 		if (ke > max_ke) max_ke = ke;
@@ -9282,7 +9282,7 @@ static void test_fixed_joint_bridge_stability()
 			for (int j = 1; j < n - 1; j++) {
 				v3 p = body_get_position(w, bodies[j]);
 				if (!is_valid(p)) { nan_frame = i; break; }
-				float speed = len(wi->body_hot[handle_index(bodies[j])].velocity);
+				float speed = len(body_vel(wi, handle_index(bodies[j])));
 				if (speed > max_speed) max_speed = speed;
 			}
 			if (nan_frame >= 0) break;
@@ -9565,7 +9565,7 @@ static void test_hinge_y_axis_limits()
 		Joint h = create_hinge(w, (HingeParams){ .body_a = frame, .body_b = door, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0) });
 		joint_set_hinge_limits(w, h, -1.57f, 1.57f);
 		// Give the door an initial push
-		wi->body_hot[handle_index(door)].velocity = V3(0, 0, 5);
+		body_vel(wi, handle_index(door)) = V3(0, 0, 5);
 		int nan_frame = -1;
 		float max_angle = 0, min_angle = 0;
 		for (int i = 0; i < 300; i++) {
@@ -9635,7 +9635,7 @@ static void test_hinge_limit_pendulum_row()
 			joints[i] = create_hinge(w, (HingeParams){ .body_a = anchor, .body_b = arm, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0.7f, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
 			joint_set_hinge_limits(w, joints[i], -limits[i], limits[i]);
 			// Give each arm a push so they swing into the limits
-			wi->body_hot[handle_index(arm)].velocity = V3(5, 0, 0);
+			body_vel(wi, handle_index(arm)) = V3(5, 0, 0);
 		}
 		// Let all pendulums swing under gravity for 5 seconds
 		float max_angles[5] = {0}, min_angles[5] = {0};
@@ -9765,7 +9765,7 @@ static void test_slider_crane_scene()
 			for (int j = 0; j < 4; j++) {
 				v3 p = body_get_position(w, bodies[j]);
 				if (!is_valid(p)) { nan_frame = f; break; }
-				float speed = len(wi->body_hot[handle_index(bodies[j])].velocity);
+				float speed = len(body_vel(wi, handle_index(bodies[j])));
 				if (speed > max_speed) max_speed = speed;
 			}
 			if (nan_frame >= 0) break;
@@ -9894,7 +9894,7 @@ static void test_hinge_limit_gravity_both_sides()
 		Joint h = create_hinge(w, (HingeParams){ .body_a = anchor, .body_b = bob, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(-1, 0, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
 		joint_set_hinge_limits(w, h, -1.0f, 1.0f);
 		// Push bob upward to swing to positive angle
-		wi->body_hot[handle_index(bob)].velocity = V3(0, 8, 0);
+		body_vel(wi, handle_index(bob)) = V3(0, 8, 0);
 		float max_angle = 0, min_angle = 0;
 		int nan_frame = -1;
 		for (int i = 0; i < 600; i++) {
@@ -11088,8 +11088,8 @@ static void test_sleep_stacked_boxes()
 
 	TEST_BEGIN("sleep: sleeping bodies have near-zero velocity");
 	WorldInternal* wi = (WorldInternal*)w.id;
-	float va = len(wi->body_hot[handle_index(box_a)].velocity);
-	float vb = len(wi->body_hot[handle_index(box_b)].velocity);
+	float va = len(body_vel(wi, handle_index(box_a)));
+	float vb = len(body_vel(wi, handle_index(box_b)));
 	TEST_ASSERT(va < 1e-6f);
 	TEST_ASSERT(vb < 1e-6f);
 
@@ -11452,7 +11452,7 @@ static void test_stretched_joint_trace()
 		}
 		step_n(w, 120);
 		// Give the ball a strong downward kick (simulates mouse release)
-		wi->body_hot[handle_index(bodies[9])].velocity = V3(5, -20, 3);
+		body_vel(wi, handle_index(bodies[9])) = V3(5, -20, 3);
 		for (int f = 0; f < 300; f++) {
 			world_step(w, 1.0f / 60.0f);
 			if (f % 60 == 59 || f < 3) {
@@ -11465,8 +11465,8 @@ static void test_stretched_joint_trace()
 				// Also check anchor->body[0]
 				float g0 = anchor_distance(w, anchor, oa2, bodies[0], ob2);
 				if (g0 > max_gap) max_gap = g0;
-				v3 bp = wi->body_state[handle_index(bodies[9])].position;
-				float bs = len(wi->body_hot[handle_index(bodies[9])].velocity);
+				v3 bp = body_pos(wi, handle_index(bodies[9]));
+				float bs = len(body_vel(wi, handle_index(bodies[9])));
 				printf("  [offset=%s] f=%d ball_y=%.1f speed=%.1f gap=%.4f\n", off_names[oi], f, bp.y, bs, max_gap);
 			}
 		}
@@ -11494,11 +11494,11 @@ static void test_stretched_joint_trace()
 			if (f % 60 == 59) {
 				float max_speed = 0;
 				for (int i = 0; i < 10; i++) {
-					v3 v = wi->body_hot[handle_index(bodies[i])].velocity;
+					v3 v = body_vel(wi, handle_index(bodies[i]));
 					float s = len(v);
 					if (s > max_speed) max_speed = s;
 				}
-				v3 p9 = wi->body_state[handle_index(bodies[9])].position;
+				v3 p9 = body_pos(wi, handle_index(bodies[9]));
 				float max_gap = 0;
 				Body gp = anchor;
 				for (int i = 0; i < 10; i++) {
@@ -11544,13 +11544,13 @@ static void test_stretched_joint_trace()
 			world_step(w, 1.0f / 60.0f);
 			float frame_speed = 0;
 			for (int i = 0; i < chain_len; i++) {
-				v3 v = wi->body_hot[handle_index(bodies[i])].velocity;
+				v3 v = body_vel(wi, handle_index(bodies[i]));
 				float s = len(v);
 				if (s > frame_speed) frame_speed = s;
 				if (s > max_speed) max_speed = s;
 			}
 			int bi = handle_index(bodies[chain_len - 1]);
-			v3 p = wi->body_state[bi].position;
+			v3 p = body_pos(wi, bi);
 			if (f < 5 || frame_speed > 10.0f)
 				printf("  [trace %s n=%d] f=%d ball_y=%.3f speed=%.2f max=%.2f\n", use_ldl ? "LDL" : "PGS", chain_len, f, p.y, frame_speed, max_speed);
 		}
@@ -11660,7 +11660,7 @@ static void test_replay_recording(const char* path)
 				}
 			} else if (rf->type == 2 && mouse_anchor.id) {
 				// Update drag
-				wi->body_state[handle_index(mouse_anchor)].position = rf->anchor_pos;
+				body_pos(wi, handle_index(mouse_anchor)) = rf->anchor_pos;
 			} else if (rf->type == 3 && mouse_anchor.id) {
 				// End drag
 				destroy_joint(w, mouse_joint);
@@ -11680,9 +11680,9 @@ static void test_replay_recording(const char* path)
 			// Measure max speed across all bodies
 			for (int i = 0; i < body_count; i++) {
 				int idx = handle_index(bodies[i]);
-				if (wi->body_hot[idx].inv_mass == 0.0f) continue;
-				v3 v = wi->body_hot[idx].velocity;
-				v3 av = wi->body_hot[idx].angular_velocity;
+				if (body_inv_mass(wi, idx) == 0.0f) continue;
+				v3 v = body_vel(wi, idx);
+				v3 av = body_angvel(wi, idx);
 				if (!(v.x == v.x)) { nan_frame = fi; break; }
 				float speed = len(v) + len(av);
 				if (speed > max_speed) max_speed = speed;
@@ -11693,8 +11693,8 @@ static void test_replay_recording(const char* path)
 			int worst_body = -1;
 			for (int i = 0; i < body_count; i++) {
 				int idx = handle_index(bodies[i]);
-				if (wi->body_hot[idx].inv_mass == 0.0f) continue;
-				v3 v = wi->body_hot[idx].velocity;
+				if (body_inv_mass(wi, idx) == 0.0f) continue;
+				v3 v = body_vel(wi, idx);
 				float s = len(v);
 				if (s > frame_speed) { frame_speed = s; worst_body = i; }
 			}
@@ -11716,9 +11716,9 @@ static void test_replay_recording(const char* path)
 					// Dump all body velocities and joint gaps
 					for (int i = 0; i < body_count; i++) {
 						int idx = handle_index(bodies[i]);
-						if (wi->body_hot[idx].inv_mass == 0.0f) continue;
-						v3 p = wi->body_state[idx].position;
-						v3 v = wi->body_hot[idx].velocity;
+						if (body_inv_mass(wi, idx) == 0.0f) continue;
+						v3 p = body_pos(wi, idx);
+						v3 v = body_vel(wi, idx);
 						printf("    b[%d] p=(%.2f,%.2f,%.2f) v=(%.2f,%.2f,%.2f) |v|=%.2f\n", i, p.x, p.y, p.z, v.x, v.y, v.z, len(v));
 					}
 				}
@@ -11743,8 +11743,8 @@ static void test_replay_recording(const char* path)
 					if (g > max_gap) max_gap = g;
 				}
 				int last = body_count - 1;
-				v3 ball_p = wi->body_state[handle_index(bodies[last])].position;
-				float ball_speed = len(wi->body_hot[handle_index(bodies[last])].velocity);
+				v3 ball_p = body_pos(wi, handle_index(bodies[last]));
+				float ball_speed = len(body_vel(wi, handle_index(bodies[last])));
 				printf("  [post %s] f=%d ball=(%.1f,%.1f,%.1f) speed=%.2f joint_gap=%.4f\n",
 					use_ldl ? "LDL" : "PGS", f, ball_p.x, ball_p.y, ball_p.z, ball_speed, max_gap);
 			}
@@ -13501,10 +13501,10 @@ static void pyramid_report(WorldInternal* wi, int body_count, float t)
 	float max_v2 = 0;
 	int awake = 0, max_body = -1;
 	for (int i = 0; i < asize(wi->body_hot); i++) {
-		if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
+		if (!split_alive(wi->body_gen, i) || body_inv_mass(wi, i) == 0) continue;
 		int isl = wi->body_cold[i].island_id;
 		if (isl >= 0 && (wi->island_gen[isl] & 1) && wi->islands[isl].awake) awake++;
-		float v2 = len2(wi->body_hot[i].velocity) + len2(wi->body_hot[i].angular_velocity);
+		float v2 = len2(body_vel(wi, i)) + len2(body_angvel(wi, i));
 		if (v2 > max_v2) { max_v2 = v2; max_body = i; }
 	}
 	printf("  t=%.1fs  awake=%d/%d  max_v2=%.6f (body %d)\n", t, awake, body_count - 1, max_v2, max_body);
@@ -13557,19 +13557,19 @@ static void test_pyramid_yank(int base, int frames)
 	// 1. Create static anchor body + ball-socket joint with spring
 	// 2. Each frame BEFORE world_step: move anchor position, wake island
 	// 3. Validate BVH after each world_step
-	Body anchor = create_body(w, (BodyParams){ .position = wi->body_state[yanked_idx].position, .rotation = quat_identity(), .mass = 0 });
+	Body anchor = create_body(w, (BodyParams){ .position = body_pos(wi, yanked_idx), .rotation = quat_identity(), .mass = 0 });
 	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.01f });
 	Joint drag_joint = create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = yanked, .spring = { .frequency = 30.0f, .damping_ratio = 1.0f } });
 	int anchor_idx = handle_index(anchor);
 
-	v3 start_pos = wi->body_state[yanked_idx].position;
+	v3 start_pos = body_pos(wi, yanked_idx);
 	v3 end_pos = add(start_pos, V3(3, 0, 3)); // slow horizontal pull
 	int total_stale = 0;
 	for (int f = 0; f < 120; f++) {
 		// Move anchor (app does this in update() before world_step)
 		float t = (float)f / 59.0f;
 		if (t > 1.0f) t = 1.0f;
-		wi->body_state[anchor_idx].position = add(scale(start_pos, 1-t), scale(end_pos, t));
+		body_pos(wi, anchor_idx) = add(scale(start_pos, 1-t), scale(end_pos, t));
 
 		// Wake island (app does this in mouse_update_drag)
 		int ji = handle_index(drag_joint);
@@ -13587,7 +13587,7 @@ static void test_pyramid_yank(int base, int frames)
 			int num_islands = 0;
 			for (int i = 0; i < asize(wi->islands); i++)
 				if ((wi->island_gen[i] & 1) && wi->islands[i].awake) num_islands++;
-			v3 pos = wi->body_state[yanked_idx].position;
+			v3 pos = body_pos(wi, yanked_idx);
 			printf("    drag f=%d pos=(%.2f,%.2f,%.2f) island=%d bodies_in_isl=%d awake=%d total_awake_islands=%d\n", f, pos.x, pos.y, pos.z, yanked_isl, isl_bodies, isl_awake, num_islands);
 		}
 		// Validate ALL dynamic body BVH leaves
@@ -13603,7 +13603,7 @@ static void test_pyramid_yank(int base, int frames)
 					AABB bb = body_aabb(&wi->body_state[bi], &wi->body_cold[bi]);
 					v3 lmin = wi->bvh_dynamic->leaves[i].fat_min, lmax = wi->bvh_dynamic->leaves[i].fat_max;
 					if (bb.min.x < lmin.x || bb.min.y < lmin.y || bb.min.z < lmin.z || bb.max.x > lmax.x || bb.max.y > lmax.y || bb.max.z > lmax.z)
-						printf(" [body %d pos=(%.2f,%.2f,%.2f)]", bi, wi->body_state[bi].position.x, wi->body_state[bi].position.y, wi->body_state[bi].position.z);
+						printf(" [body %d pos=(%.2f,%.2f,%.2f)]", bi, body_pos(wi, bi).x, body_pos(wi, bi).y, body_pos(wi, bi).z);
 				}
 				printf("\n");
 			}
@@ -13623,10 +13623,10 @@ static void test_pyramid_yank(int base, int frames)
 		// Check if any body penetrated the floor (floor surface at y=0, body half_extent=0.5)
 		if (floor_pen_count < 10) {
 			for (int i = 0; i < asize(wi->body_hot); i++) {
-				if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
-				float y = wi->body_state[i].position.y;
+				if (!split_alive(wi->body_gen, i) || body_inv_mass(wi, i) == 0) continue;
+				float y = body_pos(wi, i).y;
 				if (y < -0.1f) {
-					printf("    FLOOR PEN f=%d body %d y=%.3f vy=%.2f\n", f, i, y, wi->body_hot[i].velocity.y);
+					printf("    FLOOR PEN f=%d body %d y=%.3f vy=%.2f\n", f, i, y, body_vel(wi, i).y);
 					floor_pen_count++;
 				}
 			}
@@ -13634,14 +13634,14 @@ static void test_pyramid_yank(int base, int frames)
 		// Validate BVH leaves every frame for first 60 frames after yank
 		if (f < 60 && stale_reported < 10) {
 			for (int i = 0; i < asize(wi->body_hot); i++) {
-				if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
+				if (!split_alive(wi->body_gen, i) || body_inv_mass(wi, i) == 0) continue;
 				if (asize(wi->body_cold[i].shapes) == 0) continue;
 				int leaf = wi->body_cold[i].bvh_leaf;
-				AABB bb = body_aabb(&wi->body_hot[i], &wi->body_cold[i]);
+				AABB bb = body_aabb(&wi->body_state[i], &wi->body_cold[i]);
 				v3 lmin = wi->bvh_dynamic->leaves[leaf].fat_min;
 				v3 lmax = wi->bvh_dynamic->leaves[leaf].fat_max;
 				if (bb.min.x < lmin.x || bb.min.y < lmin.y || bb.min.z < lmin.z || bb.max.x > lmax.x || bb.max.y > lmax.y || bb.max.z > lmax.z) {
-					printf("    BVH STALE f=%d body %d pos=(%.2f,%.2f,%.2f) outside leaf\n", f, i, wi->body_state[i].position.x, wi->body_state[i].position.y, wi->body_state[i].position.z);
+					printf("    BVH STALE f=%d body %d pos=(%.2f,%.2f,%.2f) outside leaf\n", f, i, body_pos(wi, i).x, body_pos(wi, i).y, body_pos(wi, i).z);
 					stale_reported++;
 				}
 			}
@@ -13650,33 +13650,33 @@ static void test_pyramid_yank(int base, int frames)
 			pyramid_report(wi, body_count, 5.0f + (f + 1) * dt);
 			float max_v2 = 0; int mb = -1;
 			for (int i = 0; i < asize(wi->body_hot); i++) {
-				if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
-				float v2 = len2(wi->body_hot[i].velocity) + len2(wi->body_hot[i].angular_velocity);
+				if (!split_alive(wi->body_gen, i) || body_inv_mass(wi, i) == 0) continue;
+				float v2 = len2(body_vel(wi, i)) + len2(body_angvel(wi, i));
 				if (v2 > max_v2) { max_v2 = v2; mb = i; }
 			}
 			// Track energy in non-yanked bodies only
 			float pile_max_v2 = 0; int pile_mb = -1;
 			for (int i = 0; i < asize(wi->body_hot); i++) {
-				if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
+				if (!split_alive(wi->body_gen, i) || body_inv_mass(wi, i) == 0) continue;
 				if (i == yanked_idx) continue;
-				float v2 = len2(wi->body_hot[i].velocity) + len2(wi->body_hot[i].angular_velocity);
+				float v2 = len2(body_vel(wi, i)) + len2(body_angvel(wi, i));
 				if (v2 > pile_max_v2) { pile_max_v2 = v2; pile_mb = i; }
 			}
 			if (pile_max_v2 > 5.0f) {
-				v3 v = wi->body_hot[pile_mb].velocity, p = wi->body_state[pile_mb].position;
+				v3 v = body_vel(wi, pile_mb), p = body_pos(wi, pile_mb);
 				printf("    PILE body %d v2=%.1f v=(%.2f,%.2f,%.2f) pos=(%.2f,%.2f,%.2f)\n", pile_mb, pile_max_v2, v.x, v.y, v.z, p.x, p.y, p.z);
 			}
 			// Validate every dynamic body is inside its BVH leaf
 			for (int i = 0; i < asize(wi->body_hot); i++) {
-				if (!split_alive(wi->body_gen, i) || wi->body_hot[i].inv_mass == 0) continue;
+				if (!split_alive(wi->body_gen, i) || body_inv_mass(wi, i) == 0) continue;
 				if (asize(wi->body_cold[i].shapes) == 0) continue;
 				int leaf = wi->body_cold[i].bvh_leaf;
 				if (leaf < 0 || leaf >= asize(wi->bvh_dynamic->leaves)) { printf("    BVH MISSING leaf for body %d\n", i); continue; }
-				AABB body_box = body_aabb(&wi->body_hot[i], &wi->body_cold[i]);
+				AABB body_box = body_aabb(&wi->body_state[i], &wi->body_cold[i]);
 				v3 lmin = wi->bvh_dynamic->leaves[leaf].fat_min;
 				v3 lmax = wi->bvh_dynamic->leaves[leaf].fat_max;
 				if (body_box.min.x < lmin.x || body_box.min.y < lmin.y || body_box.min.z < lmin.z || body_box.max.x > lmax.x || body_box.max.y > lmax.y || body_box.max.z > lmax.z)
-					printf("    BVH STALE body %d pos=(%.2f,%.2f,%.2f) body_min=(%.2f,%.2f,%.2f) body_max=(%.2f,%.2f,%.2f) leaf_min=(%.2f,%.2f,%.2f) leaf_max=(%.2f,%.2f,%.2f)\n", i, wi->body_state[i].position.x, wi->body_state[i].position.y, wi->body_state[i].position.z, body_box.min.x, body_box.min.y, body_box.min.z, body_box.max.x, body_box.max.y, body_box.max.z, lmin.x, lmin.y, lmin.z, lmax.x, lmax.y, lmax.z);
+					printf("    BVH STALE body %d pos=(%.2f,%.2f,%.2f) body_min=(%.2f,%.2f,%.2f) body_max=(%.2f,%.2f,%.2f) leaf_min=(%.2f,%.2f,%.2f) leaf_max=(%.2f,%.2f,%.2f)\n", i, body_pos(wi, i).x, body_pos(wi, i).y, body_pos(wi, i).z, body_box.min.x, body_box.min.y, body_box.min.z, body_box.max.x, body_box.max.y, body_box.max.z, lmin.x, lmin.y, lmin.z, lmax.x, lmax.y, lmax.z);
 			}
 			prev_max = max_v2;
 		}

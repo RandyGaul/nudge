@@ -112,14 +112,14 @@ static void test_pgs_vs_ldl_single_rigid()
 
 	// Compare final velocities
 	printf("    PGS vel B: (%.6f, %.6f, %.6f)\n", bodies_pgs[1].velocity.x, bodies_pgs[1].velocity.y, bodies_pgs[1].velocity.z);
-	printf("    LDL vel B: (%.6f, %.6f, %.6f)\n", w->body_hot[1].velocity.x, w->body_hot[1].velocity.y, w->body_hot[1].velocity.z);
+	printf("    LDL vel B: (%.6f, %.6f, %.6f)\n", body_vel(w, 1).x, body_vel(w, 1).y, body_vel(w, 1).z);
 
-	TEST_ASSERT_FLOAT(w->body_hot[1].velocity.x, bodies_pgs[1].velocity.x, 0.01f);
-	TEST_ASSERT_FLOAT(w->body_hot[1].velocity.y, bodies_pgs[1].velocity.y, 0.01f);
-	TEST_ASSERT_FLOAT(w->body_hot[1].velocity.z, bodies_pgs[1].velocity.z, 0.01f);
+	TEST_ASSERT_FLOAT(body_vel(w, 1).x, bodies_pgs[1].velocity.x, 0.01f);
+	TEST_ASSERT_FLOAT(body_vel(w, 1).y, bodies_pgs[1].velocity.y, 0.01f);
+	TEST_ASSERT_FLOAT(body_vel(w, 1).z, bodies_pgs[1].velocity.z, 0.01f);
 
 	// Body B's Y velocity should be ~0 (gravity cancelled by constraint)
-	TEST_ASSERT(fabsf(w->body_hot[1].velocity.y) < 0.01f);
+	TEST_ASSERT(fabsf(body_vel(w, 1).y) < 0.01f);
 
 	integration_cache_free(&c);
 	soft_test_free_world(w);
@@ -205,16 +205,16 @@ static void test_pgs_vs_ldl_chain_gravity()
 
 	// Compare final body velocities
 	printf("    PGS vel B: (%.6f, %.6f, %.6f)\n", bodies_pgs[1].velocity.x, bodies_pgs[1].velocity.y, bodies_pgs[1].velocity.z);
-	printf("    LDL vel B: (%.6f, %.6f, %.6f)\n", w->body_hot[1].velocity.x, w->body_hot[1].velocity.y, w->body_hot[1].velocity.z);
+	printf("    LDL vel B: (%.6f, %.6f, %.6f)\n", body_vel(w, 1).x, body_vel(w, 1).y, body_vel(w, 1).z);
 	printf("    PGS vel C: (%.6f, %.6f, %.6f)\n", bodies_pgs[2].velocity.x, bodies_pgs[2].velocity.y, bodies_pgs[2].velocity.z);
-	printf("    LDL vel C: (%.6f, %.6f, %.6f)\n", w->body_hot[2].velocity.x, w->body_hot[2].velocity.y, w->body_hot[2].velocity.z);
+	printf("    LDL vel C: (%.6f, %.6f, %.6f)\n", body_vel(w, 2).x, body_vel(w, 2).y, body_vel(w, 2).z);
 
-	TEST_ASSERT_FLOAT(w->body_hot[1].velocity.y, bodies_pgs[1].velocity.y, 0.01f);
-	TEST_ASSERT_FLOAT(w->body_hot[2].velocity.y, bodies_pgs[2].velocity.y, 0.01f);
+	TEST_ASSERT_FLOAT(body_vel(w, 1).y, bodies_pgs[1].velocity.y, 0.01f);
+	TEST_ASSERT_FLOAT(body_vel(w, 2).y, bodies_pgs[2].velocity.y, 0.01f);
 
 	// Both bodies' Y velocity should be near zero (chain holds against gravity)
-	TEST_ASSERT(fabsf(w->body_hot[1].velocity.y) < 0.1f);
-	TEST_ASSERT(fabsf(w->body_hot[2].velocity.y) < 0.1f);
+	TEST_ASSERT(fabsf(body_vel(w, 1).y) < 0.1f);
+	TEST_ASSERT(fabsf(body_vel(w, 2).y) < 0.1f);
 
 	// Compare lambdas
 	printf("    PGS lam0: (%.6f, %.6f, %.6f)\n", pgs_sols[0].lambda[0], pgs_sols[0].lambda[1], pgs_sols[0].lambda[2]);
@@ -330,19 +330,19 @@ static void test_pgs_vs_ldl_star_gravity()
 	ldl_island_solve(&cc, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
 	printf("    Star hub PGS vel: (%.6f, %.6f, %.6f)\n", bodies_pgs[1].velocity.x, bodies_pgs[1].velocity.y, bodies_pgs[1].velocity.z);
-	printf("    Star hub LDL vel: (%.6f, %.6f, %.6f)\n", w->body_hot[1].velocity.x, w->body_hot[1].velocity.y, w->body_hot[1].velocity.z);
+	printf("    Star hub LDL vel: (%.6f, %.6f, %.6f)\n", body_vel(w, 1).x, body_vel(w, 1).y, body_vel(w, 1).z);
 	for (int i = 2; i < 5; i++) {
-		printf("    Leaf %d PGS vel.y: %.6f  LDL vel.y: %.6f\n", i, bodies_pgs[i].velocity.y, w->body_hot[i].velocity.y);
+		printf("    Leaf %d PGS vel.y: %.6f  LDL vel.y: %.6f\n", i, bodies_pgs[i].velocity.y, body_vel(w, i).y);
 	}
 
 	// All bodies should have near-zero Y velocity (held up by chain to static anchor)
 	for (int i = 1; i < nb; i++) {
-		TEST_ASSERT(fabsf(w->body_hot[i].velocity.y) < 0.1f);
+		TEST_ASSERT(fabsf(body_vel(w, i).y) < 0.1f);
 	}
 
 	// LDL and PGS should agree
 	for (int i = 1; i < nb; i++) {
-		TEST_ASSERT_FLOAT(w->body_hot[i].velocity.y, bodies_pgs[i].velocity.y, 0.05f);
+		TEST_ASSERT_FLOAT(body_vel(w, i).y, bodies_pgs[i].velocity.y, 0.05f);
 	}
 
 	integration_cache_free(&cc);
@@ -443,16 +443,16 @@ static void test_pgs_vs_ldl_star_shattering()
 	ldl_numeric_factor(&cc, w, sw.sol_joints, NULL);
 	ldl_island_solve(&cc, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
 
-	printf("    [shattering] Hub PGS vel.y: %.6f  LDL vel.y: %.6f\n", bodies_pgs[1].velocity.y, w->body_hot[1].velocity.y);
+	printf("    [shattering] Hub PGS vel.y: %.6f  LDL vel.y: %.6f\n", bodies_pgs[1].velocity.y, body_vel(w, 1).y);
 	for (int i = 2; i < nb; i++)
-		printf("    [shattering] Leaf %d PGS vel.y: %.6f  LDL vel.y: %.6f\n", i, bodies_pgs[i].velocity.y, w->body_hot[i].velocity.y);
+		printf("    [shattering] Leaf %d PGS vel.y: %.6f  LDL vel.y: %.6f\n", i, bodies_pgs[i].velocity.y, body_vel(w, i).y);
 
 	// All Y velocities should be near zero (gravity held by constraints).
 	// Full gravity impulse is g*dt = -0.0409. If we see that, constraints aren't working.
 	float grav_impulse = fabsf(g * sub_dt);
 	for (int i = 1; i < nb - 1; i++) { // skip last leaf (test setup issue with PGS too)
-		float uncorrected_fraction = fabsf(w->body_hot[i].velocity.y) / grav_impulse;
-		printf("    Body %d: vel.y=%.6f, uncorrected=%.1f%%\n", i, w->body_hot[i].velocity.y, uncorrected_fraction * 100);
+		float uncorrected_fraction = fabsf(body_vel(w, i).y) / grav_impulse;
+		printf("    Body %d: vel.y=%.6f, uncorrected=%.1f%%\n", i, body_vel(w, i).y, uncorrected_fraction * 100);
 		TEST_ASSERT(uncorrected_fraction < 0.1f); // less than 10% of gravity uncorrected
 	}
 

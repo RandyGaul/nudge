@@ -164,7 +164,7 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 {
 	float mass = w->body_cold[idx].mass;
 	if (mass <= 0.0f) {
-		w->body_state[idx].inv_inertia_local = V3(0, 0, 0);
+		body_inv_inertia_local(w, idx) = V3(0, 0, 0);
 		return;
 	}
 
@@ -176,7 +176,7 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 		total_vol += shape_volume(&shapes[i]);
 	}
 	if (total_vol <= 0.0f) {
-		w->body_state[idx].inv_inertia_local = V3(0, 0, 0);
+		body_inv_inertia_local(w, idx) = V3(0, 0, 0);
 		return;
 	}
 
@@ -193,5 +193,5 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 		total.z += li.z + sm * (d.x*d.x + d.y*d.y);
 	}
 
-	w->body_state[idx].inv_inertia_local = inertia_to_inv(total);
+	body_inv_inertia_local(w, idx) = inertia_to_inv(total);
 }

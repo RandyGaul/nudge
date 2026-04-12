@@ -172,7 +172,7 @@ static void island_wake(WorldInternal* w, int island_id)
 	isl->awake = 1;
 	int bi = isl->head_body;
 	while (bi >= 0) {
-		w->body_state[bi].sleep_time = 0.0f;
+		body_sleep_time(w, bi) = 0.0f;
 		bi = w->body_cold[bi].island_next;
 	}
 }
@@ -184,8 +184,8 @@ static void island_sleep(WorldInternal* w, int island_id)
 	ldl_cache_sleep(&isl->ldl);
 	int bi = isl->head_body;
 	while (bi >= 0) {
-		w->body_hot[bi].velocity = V3(0, 0, 0);
-		w->body_hot[bi].angular_velocity = V3(0, 0, 0);
+		body_vel(w, bi) = V3(0, 0, 0);
+		body_angvel(w, bi) = V3(0, 0, 0);
 		bi = w->body_cold[bi].island_next;
 	}
 }
@@ -195,8 +195,8 @@ static void link_joint_to_islands(WorldInternal* w, int joint_idx)
 {
 	JointInternal* j = &w->joints[joint_idx];
 	int ba = j->body_a, bb = j->body_b;
-	int is_static_a = w->body_hot[ba].inv_mass == 0.0f;
-	int is_static_b = w->body_hot[bb].inv_mass == 0.0f;
+	int is_static_a = body_inv_mass(w, ba) == 0.0f;
+	int is_static_b = body_inv_mass(w, bb) == 0.0f;
 	// Static bodies never get islands
 	if (is_static_a && is_static_b) return;
 	int isl_a = is_static_a ? -1 : w->body_cold[ba].island_id;
@@ -241,8 +241,8 @@ static void islands_update_contacts(WorldInternal* w, InternalManifold* manifold
 
 	for (int i = 0; i < manifold_count; i++) {
 		int a = manifolds[i].body_a, b = manifolds[i].body_b;
-		int is_static_a = w->body_hot[a].inv_mass == 0.0f;
-		int is_static_b = w->body_hot[b].inv_mass == 0.0f;
+		int is_static_a = body_inv_mass(w, a) == 0.0f;
+		int is_static_b = body_inv_mass(w, b) == 0.0f;
 		// Skip static-static (shouldn't happen, but guard)
 		if (is_static_a && is_static_b) continue;
 
