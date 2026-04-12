@@ -79,7 +79,9 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 	int total_contacts = manifold_count * MAX_CONTACTS;
 	afit(sc, total_contacts); asetlen(sc, total_contacts);
 	afit(pc, total_contacts); asetlen(pc, total_contacts);
-	memset(sm, 0, manifold_count * sizeof(SolverManifold));
+	// Only contact_count must be zero for early-return manifolds; the full struct
+	// is written by pre_solve_manifold for all active manifolds.
+	for (int i = 0; i < manifold_count; i++) sm[i].contact_count = 0;
 
 	for (int i = 0; i < manifold_count; i++)
 		pre_solve_manifold(w, &manifolds[i], i, sm, sc, pc, dt);
