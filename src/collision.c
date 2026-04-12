@@ -1745,12 +1745,17 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
 	AABB scene_bounds = aabb_empty();
 	CK_DYNA SAP_Entry* sap = NULL;
+	// Compute tight AABBs. Skip sleeping dynamic bodies (they don't move).
+	CK_DYNA int* sleeping_bodies = NULL;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
-		// Skip tight AABB for sleeping dynamic bodies (static AABBs still needed for cross test)
 		if (w->body_hot[i].inv_mass > 0.0f) {
 			int isl = w->body_cold[i].island_id;
-			if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) { tight[i] = aabb_empty(); continue; }
+			if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) {
+				tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]); // needed for wake detection
+				apush(sleeping_bodies, i);
+				continue;
+			}
 		}
 		tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]);
 		if (w->body_hot[i].inv_mass > 0.0f) { scene_bounds = aabb_merge(scene_bounds, tight[i]); }
@@ -1760,7 +1765,6 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) continue;
 		if (w->body_hot[i].inv_mass == 0.0f) continue;
-		// Skip sleeping bodies -- they're in bvh_sleeping, not SAP
 		int isl = w->body_cold[i].island_id;
 		if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) continue;
 		apush(sap, ((SAP_Entry){ i, ((float*)&tight[i].min)[axis], ((float*)&tight[i].max)[axis] }));
@@ -1771,7 +1775,7 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAP_Entry), sap_cmp);
 	bp_precomp_acc += perf_now() - t1;
 
-	// Sweep: test overlapping pairs along chosen axis, then full 3D AABB overlap (SIMD branchless).
+	// Sweep: test overlapping awake-awake pairs.
 	double t2 = perf_now();
 	CK_DYNA BroadPair* dd_pairs = NULL;
 	for (int i = 0; i < sap_count; i++) {
@@ -1785,6 +1789,20 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 			apush(dd_pairs, ((BroadPair){ a, b }));
 		}
 	}
+	// Wake detection: test each awake body against sleeping bodies.
+	// O(awake * sleeping) AABB tests, but fast with SIMD branchless overlap.
+	int n_sleeping = asize(sleeping_bodies);
+	for (int i = 0; i < sap_count; i++) {
+		int a = sap[i].body_idx;
+		AABB ta = tight[a];
+		for (int si = 0; si < n_sleeping; si++) {
+			int b = sleeping_bodies[si];
+			if (!aabb_overlaps(ta, tight[b])) continue;
+			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
+			apush(dd_pairs, ((BroadPair){ a, b }));
+		}
+	}
+	afree(sleeping_bodies);
 
 	// Collect awake-dynamic vs static pairs.
 	bp_sweep_acc += perf_now() - t2;
