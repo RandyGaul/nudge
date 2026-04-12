@@ -893,7 +893,7 @@ static int hull_face_verts_world(const Hull* hull, int face_idx, v3 pos, quat ro
 }
 
 // Find face on hull most anti-parallel to a world-space normal.
-static SIMD_FORCEINLINE int find_incident_face(const Hull* hull, v3 pos, quat rot, v3 sc, v3 ref_normal)
+static int find_incident_face(const Hull* hull, v3 pos, quat rot, v3 sc, v3 ref_normal)
 {
 	// Fast path: box faces are rotation columns. 3 dot products vs 6 plane_transforms.
 	if (hull->verts == s_box_verts) {
