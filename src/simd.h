@@ -509,6 +509,15 @@ static inline void simd_store_i(int* p, simd4i v)
 	static inline simd4f simd_movehl(simd4f a, simd4f b) { return (simd4f){{ b.v[2], b.v[3], a.v[2], a.v[3] }}; }
 #endif
 
+// 4x4 transpose in-place: rows become columns.
+static inline void simd_transpose4(simd4f* r0, simd4f* r1, simd4f* r2, simd4f* r3)
+{
+	simd4f t0 = simd_unpacklo(*r0, *r1), t1 = simd_unpackhi(*r0, *r1);
+	simd4f t2 = simd_unpacklo(*r2, *r3), t3 = simd_unpackhi(*r2, *r3);
+	*r0 = simd_movelh(t0, t2); *r1 = simd_movehl(t2, t0);
+	*r2 = simd_movelh(t1, t3); *r3 = simd_movehl(t3, t1);
+}
+
 // Sign mask constant.
 static inline simd4f simd_sign_mask() { return simd_cast_itof(simd_set1_i((int)0x80000000)); }
 

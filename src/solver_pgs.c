@@ -577,21 +577,19 @@ static void pgs_batch4_refresh(PGS_Batch4* bt, SolverManifold* sm, PatchContact*
 
 static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b)
 {
-	// Gather body velocities into SoA (only thing that changes per iteration)
+	// Gather body velocities via transpose (4 aligned loads + shuffle per v3 field)
 	__m128 va_x, va_y, va_z, wa_x, wa_y, wa_z, vb_x, vb_y, vb_z, wb_x, wb_y, wb_z;
-	{ float t[4];
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_a[j]].velocity.x; va_x=_mm_loadu_ps(t);
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_a[j]].velocity.y; va_y=_mm_loadu_ps(t);
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_a[j]].velocity.z; va_z=_mm_loadu_ps(t);
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_a[j]].angular_velocity.x; wa_x=_mm_loadu_ps(t);
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_a[j]].angular_velocity.y; wa_y=_mm_loadu_ps(t);
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_a[j]].angular_velocity.z; wa_z=_mm_loadu_ps(t);
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_b[j]].velocity.x; vb_x=_mm_loadu_ps(t);
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_b[j]].velocity.y; vb_y=_mm_loadu_ps(t);
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_b[j]].velocity.z; vb_z=_mm_loadu_ps(t);
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_b[j]].angular_velocity.x; wb_x=_mm_loadu_ps(t);
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_b[j]].angular_velocity.y; wb_y=_mm_loadu_ps(t);
-	  for (int j=0;j<4;j++) t[j]=bodies[b->body_b[j]].angular_velocity.z; wb_z=_mm_loadu_ps(t);
+	{ __m128 r0, r1, r2, r3;
+	  int i0a=b->body_a[0], i1a=b->body_a[1], i2a=b->body_a[2], i3a=b->body_a[3];
+	  int i0b=b->body_b[0], i1b=b->body_b[1], i2b=b->body_b[2], i3b=b->body_b[3];
+	  r0=bodies[i0a].velocity.m; r1=bodies[i1a].velocity.m; r2=bodies[i2a].velocity.m; r3=bodies[i3a].velocity.m;
+	  simd_transpose4(&r0,&r1,&r2,&r3); va_x=r0; va_y=r1; va_z=r2;
+	  r0=bodies[i0a].angular_velocity.m; r1=bodies[i1a].angular_velocity.m; r2=bodies[i2a].angular_velocity.m; r3=bodies[i3a].angular_velocity.m;
+	  simd_transpose4(&r0,&r1,&r2,&r3); wa_x=r0; wa_y=r1; wa_z=r2;
+	  r0=bodies[i0b].velocity.m; r1=bodies[i1b].velocity.m; r2=bodies[i2b].velocity.m; r3=bodies[i3b].velocity.m;
+	  simd_transpose4(&r0,&r1,&r2,&r3); vb_x=r0; vb_y=r1; vb_z=r2;
+	  r0=bodies[i0b].angular_velocity.m; r1=bodies[i1b].angular_velocity.m; r2=bodies[i2b].angular_velocity.m; r3=bodies[i3b].angular_velocity.m;
+	  simd_transpose4(&r0,&r1,&r2,&r3); wb_x=r0; wb_y=r1; wb_z=r2;
 	}
 	__m128 zero = _mm_setzero_ps();
 	__m128 linear_vn = SOA_DOT3(_mm_sub_ps(vb_x,va_x),_mm_sub_ps(vb_y,va_y),_mm_sub_ps(vb_z,va_z), b->normal_x,b->normal_y,b->normal_z);
@@ -647,19 +645,18 @@ static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b)
 	wb_z=_mm_add_ps(wb_z,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_b_z,dt1),_mm_mul_ps(b->w_t2_b_z,dt2)),_mm_mul_ps(b->w_tw_b_z,dtw)));
 
 	// Scatter velocities back
-	{ float t[4];
-	  _mm_storeu_ps(t, va_x); for(int j=0;j<4;j++) bodies[b->body_a[j]].velocity.x=t[j];
-	  _mm_storeu_ps(t, va_y); for(int j=0;j<4;j++) bodies[b->body_a[j]].velocity.y=t[j];
-	  _mm_storeu_ps(t, va_z); for(int j=0;j<4;j++) bodies[b->body_a[j]].velocity.z=t[j];
-	  _mm_storeu_ps(t, wa_x); for(int j=0;j<4;j++) bodies[b->body_a[j]].angular_velocity.x=t[j];
-	  _mm_storeu_ps(t, wa_y); for(int j=0;j<4;j++) bodies[b->body_a[j]].angular_velocity.y=t[j];
-	  _mm_storeu_ps(t, wa_z); for(int j=0;j<4;j++) bodies[b->body_a[j]].angular_velocity.z=t[j];
-	  _mm_storeu_ps(t, vb_x); for(int j=0;j<4;j++) bodies[b->body_b[j]].velocity.x=t[j];
-	  _mm_storeu_ps(t, vb_y); for(int j=0;j<4;j++) bodies[b->body_b[j]].velocity.y=t[j];
-	  _mm_storeu_ps(t, vb_z); for(int j=0;j<4;j++) bodies[b->body_b[j]].velocity.z=t[j];
-	  _mm_storeu_ps(t, wb_x); for(int j=0;j<4;j++) bodies[b->body_b[j]].angular_velocity.x=t[j];
-	  _mm_storeu_ps(t, wb_y); for(int j=0;j<4;j++) bodies[b->body_b[j]].angular_velocity.y=t[j];
-	  _mm_storeu_ps(t, wb_z); for(int j=0;j<4;j++) bodies[b->body_b[j]].angular_velocity.z=t[j];
+	// Scatter body velocities via reverse transpose
+	{ __m128 r0, r1, r2, r3, z=_mm_setzero_ps();
+	  int i0a=b->body_a[0], i1a=b->body_a[1], i2a=b->body_a[2], i3a=b->body_a[3];
+	  int i0b=b->body_b[0], i1b=b->body_b[1], i2b=b->body_b[2], i3b=b->body_b[3];
+	  r0=va_x; r1=va_y; r2=va_z; r3=z; simd_transpose4(&r0,&r1,&r2,&r3);
+	  bodies[i0a].velocity.m=r0; bodies[i1a].velocity.m=r1; bodies[i2a].velocity.m=r2; bodies[i3a].velocity.m=r3;
+	  r0=wa_x; r1=wa_y; r2=wa_z; r3=z; simd_transpose4(&r0,&r1,&r2,&r3);
+	  bodies[i0a].angular_velocity.m=r0; bodies[i1a].angular_velocity.m=r1; bodies[i2a].angular_velocity.m=r2; bodies[i3a].angular_velocity.m=r3;
+	  r0=vb_x; r1=vb_y; r2=vb_z; r3=z; simd_transpose4(&r0,&r1,&r2,&r3);
+	  bodies[i0b].velocity.m=r0; bodies[i1b].velocity.m=r1; bodies[i2b].velocity.m=r2; bodies[i3b].velocity.m=r3;
+	  r0=wb_x; r1=wb_y; r2=wb_z; r3=z; simd_transpose4(&r0,&r1,&r2,&r3);
+	  bodies[i0b].angular_velocity.m=r0; bodies[i1b].angular_velocity.m=r1; bodies[i2b].angular_velocity.m=r2; bodies[i3b].angular_velocity.m=r3;
 	}
 }
 
