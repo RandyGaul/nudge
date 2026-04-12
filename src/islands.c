@@ -337,10 +337,9 @@ static void islands_evaluate_sleep(WorldInternal* w, float dt)
 		int bi = isl->head_body;
 		while (bi >= 0) {
 			BodyHot* h = &w->body_hot[bi];
+			if (!h->sleep_allowed) { all_sleepy = 0; bi = w->body_cold[bi].island_next; continue; }
 			float v2 = len2(h->velocity) + len2(h->angular_velocity);
 			if (v2 > SLEEP_VEL_THRESHOLD) {
-				// Gradual decay: single solver spikes don't fully reset.
-				// A body needs sustained above-threshold motion to stay awake.
 				h->sleep_time = fmaxf(h->sleep_time - dt * 2.0f, 0.0f);
 				all_sleepy = 0;
 			} else {

@@ -56,6 +56,7 @@ typedef struct BodyHot
 	float linear_damping;
 	float angular_damping;
 	float sleep_time; // accumulated seconds below velocity threshold
+	int sleep_allowed; // 1 = can sleep (default), 0 = never sleep
 } BodyHot;
 
 // Solver velocity state: compact copy of just the fields the PGS inner loop

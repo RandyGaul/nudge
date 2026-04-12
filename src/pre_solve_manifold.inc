@@ -11,8 +11,7 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 
 	float mu = sqrtf(a->friction * b->friction);
 	float rest = a->restitution > b->restitution ? a->restitution : b->restitution;
-	uint64_t key = body_pair_key(im->body_a, im->body_b);
-	WarmManifold* wm = map_get_ptr(w->warm_cache, key);
+	WarmManifold* wm = im->warm; // cached from narrowphase (avoids duplicate hash lookup)
 	int contact_base = idx * MAX_CONTACTS;
 
 	SolverManifold smf = { .body_a = im->body_a, .body_b = im->body_b, .contact_start = contact_base, .contact_count = im->m.count, .friction = mu, .inv_mass_a = a->inv_mass, .inv_mass_b = b->inv_mass };

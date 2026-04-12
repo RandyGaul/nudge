@@ -403,6 +403,26 @@ void world_step(World world, float dt)
 		integrate_velocities_and_inertia(w, sub_dt);
 	w->perf.integrate = perf_now() - t0;
 
+	// Ultra-fast path: skip broadphase + solver when all islands sleeping and no free bodies.
+	// Check BEFORE broadphase to avoid BVH refit and SAP overhead.
+	{
+		int any_awake = 0;
+		for (int ii = 0; ii < asize(w->islands) && !any_awake; ii++)
+			if ((w->island_gen[ii] & 1) && w->islands[ii].awake) any_awake = 1;
+		for (int bi2 = 0; bi2 < body_count && !any_awake; bi2++)
+			if (split_alive(w->body_gen, bi2) && w->body_hot[bi2].inv_mass > 0.0f && w->body_cold[bi2].island_id < 0) any_awake = 1;
+		if (!any_awake) {
+			w->perf.broadphase = 0;
+			w->perf.pre_solve = 0;
+			w->perf.pgs_solve = 0;
+			w->perf.position_correct = 0;
+			w->perf.pgs = (PGSTimers){0};
+			w->perf.islands = 0;
+			w->perf.total = perf_now() - t_total;
+			return;
+		}
+	}
+
 	double t1 = perf_now();
 	CK_DYNA InternalManifold* manifolds = NULL;
 	// Parallel narrowphase: broadphase outputs pair list, we dispatch narrowphase here.
@@ -430,7 +450,9 @@ void world_step(World world, float dt)
 	}
 	afree(np_pairs);
 #endif
+	double t_iuc = perf_now();
 	islands_update_contacts(w, manifolds, asize(manifolds));
+	w->perf.pgs.pos_joints = perf_now() - t_iuc; // hijack: store islands_update_contacts time
 	w->perf.broadphase = perf_now() - t1;
 
 	aclear(w->debug_contacts);
@@ -439,6 +461,34 @@ void world_step(World world, float dt)
 			apush(w->debug_contacts, manifolds[i].m.contacts[c]);
 
 	int manifold_count = asize(manifolds);
+
+	// Fast path: skip entire solver when nothing to solve (all sleeping, no contacts, no joints).
+	// Only safe when no islands are awake — free-falling bodies with 0 contacts still need integration.
+	int any_awake_island = 0;
+	for (int ii = 0; ii < asize(w->islands) && !any_awake_island; ii++)
+		if ((w->island_gen[ii] & 1) && w->islands[ii].awake) any_awake_island = 1;
+	int any_active_joints = 0;
+	for (int ji = 0; ji < asize(w->joints) && !any_active_joints; ji++)
+		if (split_alive(w->joint_gen, ji)) any_active_joints = 1;
+	// Also check for bodies with no island (newly created, free-falling)
+	int any_unisland_dynamic = 0;
+	for (int bi2 = 0; bi2 < body_count && !any_unisland_dynamic; bi2++)
+		if (split_alive(w->body_gen, bi2) && w->body_hot[bi2].inv_mass > 0.0f && w->body_cold[bi2].island_id < 0) any_unisland_dynamic = 1;
+	if (manifold_count == 0 && !any_awake_island && !any_active_joints && !any_unisland_dynamic) {
+		w->perf.pre_solve = 0;
+		w->perf.pgs_solve = 0;
+		w->perf.position_correct = 0;
+		w->perf.pgs = (PGSTimers){0};
+		// No post-step bvh_refit needed — bodies didn't move (solver skipped).
+		// The broadphase already refitted at start of this frame.
+		double t4 = perf_now();
+		islands_try_splits(w);
+		if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
+		w->perf.islands = perf_now() - t4;
+		afree(manifolds);
+		w->perf.total = perf_now() - t_total;
+		return;
+	}
 
 	// --- Pre-solve (once per frame, using sub_dt for softness/bias) ---
 	double t2 = perf_now();
@@ -797,6 +847,7 @@ Body create_body(World world, BodyParams params)
 		.restitution = params.restitution,
 		.linear_damping = params.linear_damping,
 		.angular_damping = ang_damp,
+		.sleep_allowed = 1,
 	};
 	return split_handle(Body, w->body_gen, idx);
 }
@@ -923,6 +974,31 @@ int body_is_asleep(World world, Body body)
 	int isl = w->body_cold[idx].island_id;
 	if (isl < 0 || !island_alive(w, isl)) return 0;
 	return !w->islands[isl].awake;
+}
+
+void world_set_sleep_enabled(World world, int enabled)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	w->sleep_enabled = enabled;
+}
+
+int world_get_sleep_enabled(World world)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	return w->sleep_enabled;
+}
+
+void body_set_sleep_allowed(World world, Body body, int allowed)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	assert(split_valid(w->body_gen, body));
+	w->body_hot[idx].sleep_allowed = allowed;
+	if (!allowed) {
+		int isl = w->body_cold[idx].island_id;
+		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
+			island_wake(w, isl);
+	}
 }
 
 // -----------------------------------------------------------------------------
