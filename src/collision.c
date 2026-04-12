@@ -1166,7 +1166,7 @@ static int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot,
 // -----------------------------------------------------------------------------
 // Full SAT hull vs hull with Sutherland-Hodgman face clipping.
 
-int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint)
+int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair)
 {
 	const Hull* hull_a = a.hull;
 	v3 pos_a = a.center; quat rot_a = a.rotation; v3 scale_a = a.scale;
@@ -1219,6 +1219,7 @@ int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sa
 			.penetration = -edge_q.separation,
 			.feature_id = FEATURE_EDGE_BIT | (uint32_t)edge_q.index1 | ((uint32_t)edge_q.index2 << 16),
 		};
+		if (out_pair) *out_pair = (CachedFeaturePair){.type = 2, .edge_a = (int16_t)edge_q.index1, .edge_b = (int16_t)edge_q.index2};
 		return 1;
 	}
 
@@ -1334,12 +1335,13 @@ int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sa
 		manifold->contacts[i] = tmp_contacts[i];
 	// Cache the winning axis for next-frame warm-start.
 	if (sat_hint) *sat_hint = flip ? hull_a->face_count + ref_face : ref_face;
+	if (out_pair) *out_pair = (CachedFeaturePair){.type = 1, .ref_body = (int16_t)flip, .face_a = (int16_t)(flip ? inc_face : ref_face), .face_b = (int16_t)(flip ? ref_face : inc_face)};
 	return 1;
 }
 
 int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 {
-	return collide_hull_hull_ex(a, b, manifold, NULL);
+	return collide_hull_hull_ex(a, b, manifold, NULL, NULL);
 }
 
 // -----------------------------------------------------------------------------
@@ -1348,7 +1350,7 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 // Falls through to collide_hull_hull for contact generation when penetrating.
 // sat_hint: if non-NULL, *sat_hint is the cached axis from last frame (-1 = no cache).
 // On return, *sat_hint is updated to the winning axis for next frame.
-static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint)
+static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair)
 {
 	// Rotation columns for each box.
 	v3 ax = rotate(a.rotation, V3(1, 0, 0)), ay = rotate(a.rotation, V3(0, 1, 0)), az = rotate(a.rotation, V3(0, 0, 1));
@@ -1494,18 +1496,19 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint)
 		manifold->count = cp;
 		for (int i = 0; i < cp; i++) manifold->contacts[i] = tmp_contacts[i];
 		if (sat_hint) *sat_hint = best_axis;
+		if (out_pair) *out_pair = (CachedFeaturePair){.type = 1, .ref_body = (int16_t)flip, .face_a = (int16_t)(flip ? inc_face : ref_face), .face_b = (int16_t)(flip ? ref_face : inc_face)};
 		return 1;
 	}
 
 	// Edge-edge contact: fall through to hull-hull (edge contacts are rare in box piles).
 	if (sat_hint) *sat_hint = best_axis;
-	return collide_hull_hull(
+	return collide_hull_hull_ex(
 		(ConvexHull){ &s_unit_box_hull, a.center, a.rotation, a.half_extents },
 		(ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents },
-		manifold);
+		manifold, NULL, out_pair);
 }
 
-int collide_box_box(Box a, Box b, Manifold* manifold) { return collide_box_box_ex(a, b, manifold, NULL); }
+int collide_box_box(Box a, Box b, Manifold* manifold) { return collide_box_box_ex(a, b, manifold, NULL, NULL); }
 
 const Hull* hull_unit_box() { return &s_unit_box_hull; }
 
@@ -1550,6 +1553,155 @@ void hull_free(Hull* hull)
 
 // hull_build_csr, compact hull converters, face extension, hull_from_compact
 // all moved to quickhull.c -- live with hull construction code.
+
+// -----------------------------------------------------------------------------
+// Incremental narrowphase: validate + refresh cached feature pairs.
+
+// Box face validation: check if the cached local axis is still the dominant
+// projection axis for the separation direction. 3 dot products + 3 fabsf.
+static int validate_cached_face_box(v3 cols[3], v3 d, int cached_la)
+{
+	float dots[3] = { fabsf(dot(d, cols[0])), fabsf(dot(d, cols[1])), fabsf(dot(d, cols[2])) };
+	for (int i = 0; i < 3; i++)
+		if (i != cached_la && dots[i] > dots[cached_la])
+			return 0;
+	return 1;
+}
+
+// Hull face validation: check if any neighbor face of the cached face is more
+// aligned with the separation direction. Uses half-edge neighbor traversal.
+static int validate_cached_face_hull(const Hull* hull, v3 pos, quat rot, v3 sc, int cached_face, v3 sep_dir)
+{
+	HullPlane cached_plane = plane_transform(hull->planes[cached_face], pos, rot, sc);
+	float cached_dot = dot(cached_plane.normal, sep_dir);
+	int ei = hull->faces[cached_face].edge;
+	int start = ei;
+	do {
+		int adj = hull->edge_face[hull->edge_twin[ei]];
+		HullPlane adj_plane = plane_transform(hull->planes[adj], pos, rot, sc);
+		if (dot(adj_plane.normal, sep_dir) > cached_dot + 1e-4f) return 0;
+		ei = hull->edge_next[ei];
+	} while (ei != start);
+	return 1;
+}
+
+// Refresh box-box face contact using cached feature pair (skip full SAT).
+// Returns 1 if refresh succeeded, 0 if invalidated (caller falls through to full SAT).
+static int refresh_box_box_face(Box a, Box b, Manifold* manifold, CachedFeaturePair* cp)
+{
+	v3 ax = rotate(a.rotation, V3(1, 0, 0)), ay = rotate(a.rotation, V3(0, 1, 0)), az = rotate(a.rotation, V3(0, 0, 1));
+	v3 bx = rotate(b.rotation, V3(1, 0, 0)), by = rotate(b.rotation, V3(0, 1, 0)), bz = rotate(b.rotation, V3(0, 0, 1));
+	v3 d = sub(b.center, a.center);
+
+	// face_map: local axis + sign -> hull face index. Matches collide_box_box_ex.
+	// face_map_la[face] = local axis, face_map_sign[face] = +1 or -1.
+	static const int face_map_la[6] = {2, 2, 0, 0, 1, 1};   // -Z=0,+Z=1,-X=2,+X=3,-Y=4,+Y=5
+	static const float face_map_sign[6] = {-1, 1, -1, 1, -1, 1};
+
+	v3 a_cols[3] = {ax, ay, az}, b_cols[3] = {bx, by, bz};
+	v3 ref_cols[3], inc_cols[3], ref_pos, inc_pos, ref_he, inc_he;
+	int ref_fi, inc_fi;
+	int flip = cp->ref_body;
+	if (!flip) { ref_fi = cp->face_a; inc_fi = cp->face_b; for (int i = 0; i < 3; i++) { ref_cols[i] = a_cols[i]; inc_cols[i] = b_cols[i]; } ref_pos = a.center; inc_pos = b.center; ref_he = a.half_extents; inc_he = b.half_extents; }
+	else { ref_fi = cp->face_b; inc_fi = cp->face_a; for (int i = 0; i < 3; i++) { ref_cols[i] = b_cols[i]; inc_cols[i] = a_cols[i]; } ref_pos = b.center; inc_pos = a.center; ref_he = b.half_extents; inc_he = a.half_extents; }
+
+	int la = face_map_la[ref_fi];
+	float nsign = face_map_sign[ref_fi];
+	int inc_la = face_map_la[inc_fi];
+
+	// Validate reference side: is cached axis still dominant?
+	v3 sep = flip ? neg(d) : d;
+	if (!validate_cached_face_box(ref_cols, sep, la)) return 0;
+	v3 ref_n = scale(ref_cols[la], nsign);
+
+	// Recompute incident face from current transforms (3 dots, always correct).
+	inc_la = 0; float inc_best = 1e18f;
+	for (int i = 0; i < 3; i++) { float dd = dot(inc_cols[i], ref_n); if (dd < inc_best) { inc_best = dd; inc_la = i; } if (-dd < inc_best) { inc_best = -dd; inc_la = i; } }
+	float inc_nsign = dot(inc_cols[inc_la], ref_n) > 0 ? -1.0f : 1.0f;
+	static const int face_map[3][2] = { {2, 3}, {4, 5}, {0, 1} };
+	inc_fi = face_map[inc_la][inc_nsign > 0 ? 1 : 0];
+
+	// Re-run face clip with known ref / recomputed inc faces.
+	float ref_off = dot(ref_n, ref_pos) + (&ref_he.x)[la];
+	int u = (la + 1) % 3, v_ax = (la + 2) % 3;
+	int inc_u = (inc_la + 1) % 3, inc_v = (inc_la + 2) % 3;
+
+	v3 inc_center = add(inc_pos, scale(inc_cols[inc_la], inc_nsign * (&inc_he.x)[inc_la]));
+	v3 inc_eu = scale(inc_cols[inc_u], (&inc_he.x)[inc_u]), inc_ev = scale(inc_cols[inc_v], (&inc_he.x)[inc_v]);
+	v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
+	uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
+	buf1[0] = add(inc_center, add(inc_eu, inc_ev));
+	buf1[1] = add(inc_center, sub(neg(inc_eu), neg(inc_ev)));
+	buf1[2] = add(inc_center, sub(neg(inc_eu), inc_ev));
+	buf1[3] = add(inc_center, sub(inc_eu, inc_ev));
+	if (dot(cross(sub(buf1[1], buf1[0]), sub(buf1[2], buf1[0])), ref_n) > 0) { v3 tmp = buf1[1]; buf1[1] = buf1[3]; buf1[3] = tmp; }
+	for (int i = 0; i < 4; i++) fid1[i] = 0x80 | (uint8_t)i;
+	int clip_count = 4;
+
+	v3 side_n[4] = { ref_cols[u], neg(ref_cols[u]), ref_cols[v_ax], neg(ref_cols[v_ax]) };
+	float side_d[4] = { dot(ref_cols[u], ref_pos) + (&ref_he.x)[u], dot(neg(ref_cols[u]), ref_pos) + (&ref_he.x)[u], dot(ref_cols[v_ax], ref_pos) + (&ref_he.x)[v_ax], dot(neg(ref_cols[v_ax]), ref_pos) + (&ref_he.x)[v_ax] };
+
+	v3* in_buf = buf1; v3* out_buf = buf2;
+	uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
+	for (int i = 0; i < 4; i++) {
+		clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n[i], side_d[i], (uint8_t)i, out_buf, out_fid);
+		v3* sw = in_buf; in_buf = out_buf; out_buf = sw;
+		uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
+	}
+
+	v3 ref_center = add(ref_pos, scale(ref_cols[la], nsign * (&ref_he.x)[la]));
+	v3 ref_eu = scale(ref_cols[u], (&ref_he.x)[u]), ref_ev = scale(ref_cols[v_ax], (&ref_he.x)[v_ax]);
+	v3 corners[4] = { add(ref_center, add(ref_eu, ref_ev)), add(ref_center, sub(ref_eu, ref_ev)), add(ref_center, sub(neg(ref_eu), neg(ref_ev))), add(ref_center, sub(neg(ref_eu), ref_ev)) };
+	float snap_tol2 = 1e-6f;
+	for (int i = 0; i < clip_count; i++)
+		for (int c = 0; c < 4; c++)
+			if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
+
+	v3 contact_n = flip ? neg(ref_n) : ref_n;
+	Contact tmp_contacts[MAX_CLIP_VERTS];
+	int cpc = 0;
+	for (int i = 0; i < clip_count; i++) {
+		float depth = ref_off - dot(ref_n, in_buf[i]);
+		if (depth >= -LINEAR_SLOP) {
+			uint32_t fid = flip ? ((uint32_t)inc_fi | ((uint32_t)ref_fi << 8) | ((uint32_t)in_fid[i] << 16)) : ((uint32_t)ref_fi | ((uint32_t)inc_fi << 8) | ((uint32_t)in_fid[i] << 16));
+			tmp_contacts[cpc++] = (Contact){ .point = in_buf[i], .normal = contact_n, .penetration = depth, .feature_id = fid };
+		}
+	}
+	if (cpc == 0) return 0;
+	cpc = reduce_contacts(tmp_contacts, cpc);
+	manifold->count = cpc;
+	for (int i = 0; i < cpc; i++) manifold->contacts[i] = tmp_contacts[i];
+	return 1;
+}
+
+// Refresh hull-hull face contact using cached feature pair.
+// Validates both ref and incident faces via neighbor check, then re-clips.
+static int refresh_hull_hull_face(ConvexHull a, ConvexHull b, Manifold* manifold, CachedFeaturePair* cp)
+{
+	const Hull* hull_a = a.hull; v3 pos_a = a.center; quat rot_a = a.rotation; v3 sc_a = a.scale;
+	const Hull* hull_b = b.hull; v3 pos_b = b.center; quat rot_b = b.rotation; v3 sc_b = b.scale;
+
+	const Hull* ref_hull; const Hull* inc_hull;
+	v3 ref_pos, inc_pos, ref_sc, inc_sc;
+	quat ref_rot, inc_rot;
+	int ref_face, flip;
+	if (cp->ref_body == 0) {
+		ref_hull = hull_a; ref_pos = pos_a; ref_rot = rot_a; ref_sc = sc_a;
+		inc_hull = hull_b; inc_pos = pos_b; inc_rot = rot_b; inc_sc = sc_b;
+		ref_face = cp->face_a; flip = 0;
+	} else {
+		ref_hull = hull_b; ref_pos = pos_b; ref_rot = rot_b; ref_sc = sc_b;
+		inc_hull = hull_a; inc_pos = pos_a; inc_rot = rot_a; inc_sc = sc_a;
+		ref_face = cp->face_b; flip = 1;
+	}
+
+	// Validate ref face: is it still the best separating face on its side?
+	v3 sep_dir = norm(sub(inc_pos, ref_pos));
+	if (!validate_cached_face_hull(ref_hull, ref_pos, ref_rot, ref_sc, ref_face, sep_dir)) return 0;
+
+	// Re-clip using existing generate_face_contact (re-discovers incident face internally).
+	return generate_face_contact(ref_hull, ref_pos, ref_rot, ref_sc, inc_hull, inc_pos, inc_rot, inc_sc, ref_face, flip, manifold);
+}
 
 // -----------------------------------------------------------------------------
 // N^2 broadphase + narrowphase dispatch.
@@ -1643,8 +1795,28 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	int uses_hint = uses_sat && !(s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull);
 	if (uses_hint && wm && w->sat_hint_enabled) { hint = wm->sat_axis; hp = &hint; }
 
+	// Incremental narrowphase fast path: validate cached feature pair, re-clip without SAT.
+	if (wm && wm->cached_pair.type == 1 && uses_sat && w->incremental_np_enabled) {
+		int refreshed = 0;
+		if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull)
+			refreshed = refresh_box_box_face(make_box(h0, s0), make_box(h1, s1), &im.m, &wm->cached_pair);
+		else
+			refreshed = refresh_hull_hull_face((ConvexHull){ s0->type == SHAPE_BOX ? &s_unit_box_hull : (s0->type == SHAPE_CYLINDER ? hull_unit_cylinder() : s0->hull.hull), h0->position, h0->rotation, s0->type == SHAPE_BOX ? s0->box.half_extents : (s0->type == SHAPE_CYLINDER ? V3(s0->cylinder.radius, s0->cylinder.half_height, s0->cylinder.radius) : s0->hull.scale) }, (ConvexHull){ s1->type == SHAPE_BOX ? &s_unit_box_hull : (s1->type == SHAPE_CYLINDER ? hull_unit_cylinder() : s1->hull.hull), h1->position, h1->rotation, s1->type == SHAPE_BOX ? s1->box.half_extents : (s1->type == SHAPE_CYLINDER ? V3(s1->cylinder.radius, s1->cylinder.half_height, s1->cylinder.radius) : s1->hull.scale) }, &im.m, &wm->cached_pair);
+		if (refreshed) {
+			im.warm = wm;
+			wm->stale = 0;
+			np_call_acc[np_pair_idx(s0->type, s1->type)]++;
+			apush(*manifolds, im);
+			return;
+		}
+		wm->cached_pair.type = 0; // invalidated, fall through to full SAT
+	}
+	// Edge-edge cached pairs (type==2): always invalidate for V1
+	if (wm && wm->cached_pair.type == 2) wm->cached_pair.type = 0;
+
 	// Upper-triangle dispatch: simple pairs first, then SAT-based pairs.
 	int hit = 0;
+	CachedFeaturePair out_pair = {0};
 
 	if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE)
 		hit = collide_sphere_sphere(make_sphere(h0, s0), make_sphere(h1, s1), &im.m);
@@ -1657,36 +1829,37 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX)
 		hit = collide_capsule_box(make_capsule(h0, s0), make_box(h1, s1), &im.m);
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) {
-		if (w->box_use_hull) hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, (ConvexHull){ &s_unit_box_hull, h1->position, h1->rotation, s1->box.half_extents }, &im.m, hp);
-		else hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, hp);
+		if (w->box_use_hull) hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, (ConvexHull){ &s_unit_box_hull, h1->position, h1->rotation, s1->box.half_extents }, &im.m, hp, &out_pair);
+		else hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, hp, &out_pair);
 	}
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL)
-		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m, hp);
+		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m, hp, &out_pair);
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL)
 		hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL)
 		hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL)
-		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m, hp);
+		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m, hp, &out_pair);
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER)
 		hit = collide_sphere_hull(make_sphere(h0, s0), make_cylinder_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER)
 		hit = collide_capsule_hull(make_capsule(h0, s0), make_cylinder_hull(h1, s1), &im.m);
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER)
-		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_cylinder_hull(h1, s1), &im.m, hp);
+		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_cylinder_hull(h1, s1), &im.m, hp, &out_pair);
 	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER)
-		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m, hp);
+		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m, hp, &out_pair);
 	else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER)
-		hit = collide_hull_hull_ex(make_cylinder_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m, hp);
+		hit = collide_hull_hull_ex(make_cylinder_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m, hp, &out_pair);
 
 	// Store SAT hint back to warm cache
 	if (hp && wm) wm->sat_axis = hint;
 
 	int idx = np_pair_idx(s0->type, s1->type);
 	np_call_acc[idx]++;
-	// Cache geometry for next frame reuse
+	// Cache geometry and feature pair for next frame reuse
 	if (hit) {
 		if (!wm && w->warm_start_enabled) { wm = map_get_ptr(w->warm_cache, pkey); }
+		if (wm && out_pair.type) wm->cached_pair = out_pair;
 		im.warm = wm;
 		apush(*manifolds, im);
 	}

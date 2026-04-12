@@ -11999,6 +11999,49 @@ static void bench_pyramid(int base_size, int frames_count)
 	destroy_world(w);
 }
 
+// A/B comparison of incremental narrowphase on pyramids (2D and 3D).
+static int setup_pyramid(World w, int base, float box_size, float spacing, CK_DYNA Body** bodies_out);
+static int setup_pyramid_2d(World w, int base, float box_size, float spacing);
+static void bench_incremental_np_run(int base, int frames, int is_3d, int incremental)
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = 2, .velocity_iters = 8 };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+	wi->incremental_np_enabled = incremental;
+	int total;
+	if (is_3d) total = setup_pyramid(w, base, 0.5f, 1.01f, NULL);
+	else total = setup_pyramid_2d(w, base, 0.5f, 1.01f);
+	extern void narrowphase_reset_timers();
+	extern void narrowphase_end_frame();
+	narrowphase_reset_timers();
+	PerfTimers acc = {0};
+	float dt = 1.0f / 60.0f;
+	for (int frame = 0; frame < frames; frame++) {
+		world_step(w, dt);
+		narrowphase_end_frame();
+		PerfTimers t = world_get_perf((World){(uint64_t)wi});
+		acc.total += t.total; acc.broadphase += t.broadphase;
+	}
+	double n = (double)frames;
+	printf("  %-5s base=%-3d %4d boxes  incr_np=%-3s  total=%6.3f ms  broadphase=%6.3f ms\n", is_3d ? "3D" : "2D", base, total, incremental ? "ON" : "OFF", acc.total / n * 1000.0, acc.broadphase / n * 1000.0);
+	extern double bp_refit_acc, bp_precomp_acc, bp_sweep_acc, bp_cross_acc;
+	extern int bp_frame_count;
+	bp_refit_acc = bp_precomp_acc = bp_sweep_acc = bp_cross_acc = 0;
+	bp_frame_count = 0;
+	destroy_world(w);
+}
+
+static void bench_incremental_np(int base_2d, int base_3d, int frames)
+{
+	printf("=== Incremental NP A/B comparison (sleep OFF) ===\n");
+	bench_incremental_np_run(base_2d, frames, 0, 0);
+	bench_incremental_np_run(base_2d, frames, 0, 1);
+	bench_incremental_np_run(base_3d, frames, 1, 0);
+	bench_incremental_np_run(base_3d, frames, 1, 1);
+	printf("=================================================\n");
+}
+
 // Run bench_box_pile at multiple scales for scaling analysis.
 // Simple deterministic RNG for benchmark reproducibility.
 static uint32_t bench_rng_state = 12345;

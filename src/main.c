@@ -112,6 +112,7 @@ static bool g_sat_hint = true;
 static bool g_sat_hillclimb = true;
 static bool g_box_use_hull = false;
 static bool g_warm_start = true;
+static bool g_incremental_np = true;
 // Coulomb friction removed -- patch friction is the only mode.
 static int g_solver_type = SOLVER_SOFT_STEP;
 static bool g_ldl_enabled = true;
@@ -435,6 +436,7 @@ static void setup_scene()
 	((WorldInternal*)g_world.id)->sat_hillclimb_enabled = g_sat_hillclimb;
 	((WorldInternal*)g_world.id)->box_use_hull = g_box_use_hull;
 	((WorldInternal*)g_world.id)->warm_start_enabled = g_warm_start;
+	((WorldInternal*)g_world.id)->incremental_np_enabled = g_incremental_np;
 	world_set_solver_type(g_world, (SolverType)g_solver_type);
 	g_scenes[g_scene_index].setup();
 }
@@ -640,6 +642,7 @@ void update()
 	if (ImGui_Checkbox("SAT Hill-Climb", &g_sat_hillclimb)) dbg_w->sat_hillclimb_enabled = g_sat_hillclimb;
 	if (ImGui_Checkbox("Box via Hull", &g_box_use_hull)) dbg_w->box_use_hull = g_box_use_hull;
 	if (ImGui_Checkbox("Warm Start", &g_warm_start)) dbg_w->warm_start_enabled = g_warm_start;
+	if (ImGui_Checkbox("Incremental NP", &g_incremental_np)) dbg_w->incremental_np_enabled = g_incremental_np;
 	if (!g_ldl_enabled) {
 		g_ldl_inspect_island = -1;
 	}

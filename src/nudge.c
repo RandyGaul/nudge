@@ -28,6 +28,7 @@ World create_world(WorldParams params)
 	w->sat_hint_enabled = 1;
 	w->sat_hillclimb_enabled = 1;
 	w->warm_start_enabled = 1;
+	w->incremental_np_enabled = 1;
 	w->velocity_iters = params.velocity_iters > 0 ? params.velocity_iters : SOLVER_VELOCITY_ITERS;
 	w->position_iters = params.position_iters > 0 ? params.position_iters : SOLVER_POSITION_ITERS;
 	w->contact_hertz = params.contact_hertz > 0.0f ? params.contact_hertz : 60.0f;
@@ -352,7 +353,7 @@ static void np_work_fn(void* ctx, int start, int count)
 		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_BOX) hit = collide_sphere_box(make_sphere(h0, s0), make_box(h1, s1), &im.m);
 		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CAPSULE) hit = collide_capsule_capsule(make_capsule(h0, s0), make_capsule(h1, s1), &im.m);
 		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX) hit = collide_capsule_box(make_capsule(h0, s0), make_box(h1, s1), &im.m);
-		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, &(int){-1});
+		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, &(int){-1}, NULL);
 		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL) hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m);
 		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL) hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
 		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL) hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);

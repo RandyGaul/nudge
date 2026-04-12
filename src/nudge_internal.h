@@ -73,6 +73,18 @@ typedef struct SolverBodyVel
 	float _pad[3];
 } SolverBodyVel;
 
+// Cached narrowphase feature pair for incremental manifold refresh.
+// type=0: cold (no cache), type=1: face-face, type=2: edge-edge.
+typedef struct CachedFeaturePair
+{
+	int16_t type;      // 0=cold, 1=face-face, 2=edge-edge
+	int16_t ref_body;  // 0=A is reference, 1=B is reference
+	int16_t face_a;    // face index on hull A (or box face 0-5)
+	int16_t face_b;    // face index on hull B
+	int16_t edge_a;    // half-edge index (edge-edge only)
+	int16_t edge_b;    // half-edge index (edge-edge only)
+} CachedFeaturePair;
+
 typedef struct WarmManifold WarmManifold; // forward decl for warm cache
 
 
@@ -293,6 +305,7 @@ typedef struct WorldInternal
 	int sat_hint_enabled;    // 1 = warm-cache SAT axis hints fed to narrowphase
 	int sat_hillclimb_enabled; // 1 = hill-climb face search for hulls (vs brute force)
 	int box_use_hull;          // 1 = route box-box through hull-hull path (debug)
+	int incremental_np_enabled; // 1 = incremental narrowphase (cached feature pair refresh)
 	int warm_start_enabled;    // 1 = warm-start contact impulses from cache
 	int thread_count;        // 0 or 1 = single-threaded, >1 = parallel PGS solver
 	void* np_pairs_out; // CK_DYNA BroadPair** — when set, broadphase outputs pairs here instead of running narrowphase
@@ -410,6 +423,8 @@ struct WarmManifold
 	float manifold_lambda_twist;
 	// Cached SAT axis for hill-climb warm-start (-1 = no cache).
 	int sat_axis;
+	// Cached feature pair for incremental narrowphase (skip full SAT when valid).
+	CachedFeaturePair cached_pair;
 };
 
 // -----------------------------------------------------------------------------

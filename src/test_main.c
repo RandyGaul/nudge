@@ -44,6 +44,7 @@ int main(int argc, char* argv[])
 	int bench_pile_grid = 10;
 	int bench_pile_height = 5;
 	int bench_pile_frames = 300;
+	int bench_incr_np = 0;
 	int pyramid_test = 0;
 	int pyramid_base = 5;
 	int pyramid_frames = 600;
@@ -67,6 +68,8 @@ int main(int argc, char* argv[])
 			bench_suite_flag = 1;
 		else if (strcmp(argv[i], "--bench-chaos") == 0)
 			bench_chaos = 1;
+		else if (strcmp(argv[i], "--bench-incr-np") == 0)
+			bench_incr_np = 1;
 		else if (strcmp(argv[i], "--chaos-bodies") == 0 && i + 1 < argc)
 			chaos_bodies = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--chaos-frames") == 0 && i + 1 < argc)
@@ -147,6 +150,10 @@ int main(int argc, char* argv[])
 	}
 	if (bench_pyramid_base > 0) {
 		bench_pyramid(bench_pyramid_base, 600);
+		return 0;
+	}
+	if (bench_incr_np) {
+		bench_incremental_np(20, 8, 600);
 		return 0;
 	}
 
