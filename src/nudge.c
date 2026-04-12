@@ -434,7 +434,6 @@ void world_step(World world, float dt)
 
 	double t1 = perf_now();
 	CK_DYNA InternalManifold* manifolds = NULL;
-	if (w->frame > 1 && w->last_manifold_count > 0) afit(manifolds, w->last_manifold_count);
 	// Parallel narrowphase: broadphase outputs pair list, we dispatch narrowphase here.
 	CK_DYNA BroadPair* np_pairs = NULL;
 #ifdef _WIN32
@@ -805,7 +804,6 @@ void world_step(World world, float dt)
 	if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
 	w->perf.islands = perf_now() - t4;
 
-	w->last_manifold_count = asize(manifolds);
 	afree(manifolds);
 	afree(pc);
 	w->perf.total = perf_now() - t_total;
