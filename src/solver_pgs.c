@@ -272,14 +272,12 @@ static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count
 }
 
 // Age and evict stale warm cache entries. Called once per frame (not per sub-step).
+// Single pass: increment stale and evict in one traversal.
 static void warm_cache_age_and_evict(WorldInternal* w)
 {
-	map_each(w->warm_cache, i) w->warm_cache[i].stale++;
-	// Evict entries stale for >1 frame. map_del swaps last entry into slot i,
-	// so don't advance i when deleting (re-check the swapped entry).
 	int i = 0;
 	while (i < map_size(w->warm_cache)) {
-		if (w->warm_cache[i].stale > 1)
+		if (++w->warm_cache[i].stale > 1)
 			map_del(w->warm_cache, map_key(w->warm_cache, i));
 		else
 			i++;
