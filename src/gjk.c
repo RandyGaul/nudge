@@ -775,9 +775,17 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	}
 
 	// Extract witness points and distance.
-	gjk_witness_points(&simplex, result.point1, result.point2, &result.feat1, &result.feat2);
+	// Fast path for 1-vertex simplex (most common with warm cache).
+	if (simplex.count == 1) {
+		result.point1 = simplex.v[0].point1;
+		result.point2 = simplex.v[0].point2;
+		result.feat1 = simplex.v[0].feat1;
+		result.feat2 = simplex.v[0].feat2;
+	} else {
+		gjk_witness_points(&simplex, result.point1, result.point2, &result.feat1, &result.feat2);
+	}
 	v3 sep = sub(result.point2, result.point1);
-	result.distance = simd_get_x(simd_sqrt_ss(v3_dot_m(sep, sep)));
+	result.distance = len(sep);
 	result.iterations = iter;
 
 	// Save cache for next frame.
