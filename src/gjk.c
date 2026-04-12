@@ -749,9 +749,14 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		v3 w = sub(sB, sA);
 
 		// Duplicate vertex termination (non-cylinder shapes only).
+		// Pack feat pair into 64-bit for single-compare.
 		if (use_index_term) {
+			uint64_t key = ((uint64_t)(uint32_t)fA) | ((uint64_t)(uint32_t)fB << 32);
 			int dup = 0;
-			for (int i = 0; i < simplex.count; i++) if (simplex.v[i].feat1 == fA && simplex.v[i].feat2 == fB) { dup = 1; break; }
+			for (int i = 0; i < simplex.count; i++) {
+				uint64_t ki = ((uint64_t)(uint32_t)simplex.v[i].feat1) | ((uint64_t)(uint32_t)simplex.v[i].feat2 << 32);
+				if (ki == key) { dup = 1; break; }
+			}
 			if (dup) break;
 		}
 
@@ -775,15 +780,7 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	}
 
 	// Extract witness points and distance.
-	// Fast path for 1-vertex simplex (most common with warm cache).
-	if (simplex.count == 1) {
-		result.point1 = simplex.v[0].point1;
-		result.point2 = simplex.v[0].point2;
-		result.feat1 = simplex.v[0].feat1;
-		result.feat2 = simplex.v[0].feat2;
-	} else {
-		gjk_witness_points(&simplex, result.point1, result.point2, &result.feat1, &result.feat2);
-	}
+	gjk_witness_points(&simplex, result.point1, result.point2, &result.feat1, &result.feat2);
 	v3 sep = sub(result.point2, result.point1);
 	result.distance = len(sep);
 	result.iterations = iter;
