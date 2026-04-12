@@ -33,7 +33,7 @@ static float estimate_patch_area(Contact* contacts, int count)
 
 // Apply an impulse (linear + angular) to a body pair.
 // Uses precomputed world-space inverse inertia (iw_diag/iw_off) for speed.
-static void apply_impulse(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, v3 impulse)
+static SIMD_FORCEINLINE void apply_impulse(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, v3 impulse)
 {
 	a->velocity = sub(a->velocity, scale(impulse, a->inv_mass));
 	b->velocity = add(b->velocity, scale(impulse, b->inv_mass));
