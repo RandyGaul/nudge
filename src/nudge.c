@@ -236,12 +236,26 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 }
 
 // --- PGS solver work function (per-color) ---
-typedef struct PGS_WorkCtx { BodyHot* bodies; PGS_Batch4* batches; } PGS_WorkCtx;
+typedef struct PGS_WorkCtx { BodyHot* bodies; PGS_Batch4* batches; SolverManifold* sm; SolverContact* sc; PatchContact* pc; int scatter; } PGS_WorkCtx;
 static void pgs_work_fn(void* ctx, int start, int count)
 {
 	PGS_WorkCtx* p = (PGS_WorkCtx*)ctx;
 	for (int i = start; i < start + count; i++) {
 		solve_contact_batch4_sv(p->bodies, &p->batches[i]);
+		if (p->scatter) {
+			PGS_Batch4* bt = &p->batches[i];
+			for (int j = 0; j < bt->lane_count; j++) {
+				int mi = bt->manifold_idx[j];
+				p->sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
+				p->sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
+				p->sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
+				for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < p->sm[mi].contact_count; cp2++) {
+					float lam = SIMD_LANE(bt->cp[cp2].lambda_n, j);
+					p->pc[p->sm[mi].contact_start + cp2].lambda_n = lam;
+					p->sc[p->sm[mi].contact_start + cp2].lambda_n = lam;
+				}
+			}
+		}
 	}
 }
 
@@ -690,43 +704,44 @@ void world_step(World world, float dt)
 			}
 
 			// Iteration loop: dispatch per color within each iteration.
-			// n_workers already computed at top of world_step
-			for (int iter = 0; iter < w->velocity_iters; iter++) {
+			// Last iteration fuses lambda scatter (batch -> sm/sc/pc) into solve
+			// to avoid a separate sequential pass. Safe: batches within a color
+			// write to disjoint manifold/contact slots.
+			int last_iter = w->velocity_iters - 1;
+			for (int iter = 0; iter <= last_iter; iter++) {
+				int do_scatter = (iter == last_iter);
 				for (int c = 0; c < color_count; c++) {
 					int bs = simd_color_batch_starts[c], be = simd_color_batch_starts[c + 1];
 					int n_color_batches = be - bs;
 #ifdef _WIN32
 					if (n_workers > 1 && n_color_batches >= n_workers * 2) {
-						PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs };
+						PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs, .sm = sm, .sc = sc, .pc = pc, .scatter = do_scatter };
 						pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
 					} else
 #endif
 					{
 						for (int bi = bs; bi < be; bi++) {
 							solve_contact_batch4_sv(w->body_hot, &simd_batches[bi]);
+							if (do_scatter) {
+								PGS_Batch4* bt = &simd_batches[bi];
+								for (int j = 0; j < bt->lane_count; j++) {
+									int mi = bt->manifold_idx[j];
+									sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
+									sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
+									sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
+									for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
+										float lam = SIMD_LANE(bt->cp[cp2].lambda_n, j);
+										pc[sm[mi].contact_start + cp2].lambda_n = lam;
+										sc[sm[mi].contact_start + cp2].lambda_n = lam;
+									}
+								}
+							}
 						}
 					}
 				}
 				double tjl = perf_now();
 				joints_solve_limits(w, sol_joints, asize(sol_joints));
 				t_jlim += perf_now() - tjl;
-			}
-
-			// Scatter lambdas back from persistent batches to SolverManifold/PatchContact.
-			for (int c2 = 0; c2 < color_count; c2++) {
-				for (int bi = simd_color_batch_starts[c2]; bi < simd_color_batch_starts[c2+1]; bi++) {
-					PGS_Batch4* bt = &simd_batches[bi];
-					int base = batch_starts[c2] + (bi - simd_color_batch_starts[c2]) * 4;
-					for (int j = 0; j < 4 && base + j < batch_starts[c2+1]; j++) {
-						int mi = crefs[base + j].index;
-						sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
-						sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
-						sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
-						for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
-							pc[sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
-					}
-					}
-				}
 			}
 #else
 			for (int iter = 0; iter < w->velocity_iters; iter++) {
