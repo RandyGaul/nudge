@@ -29,36 +29,38 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		if (denom > 1e-12f) { soft_val = 1.0f / denom; bias_rate_val = dt * kk * soft_val; }
 	}
 
-	// Per-contact setup
+	// Per-contact setup. Only initialize fields used by patch-mode PGS and post-solve.
 	for (int c = 0; c < im->m.count; c++) {
 		Contact* ct = &im->m.contacts[c];
-		SolverContact s = {0};
-		s.r_a = sub(ct->point, a->position);
-		s.r_b = sub(ct->point, b->position);
-		s.normal = ct->normal;
-		s.penetration = ct->penetration;
-		s.feature_id = ct->feature_id;
-		s.rn_a = cross(s.r_a, s.normal);
-		s.rn_b = cross(s.r_b, s.normal);
-		s.w_n_a = inv_inertia_world_mul(a, s.rn_a);
-		s.w_n_b = inv_inertia_world_mul(b, s.rn_b);
-		float K_n = inv_mass_sum + dot(cross(s.w_n_a, s.r_a), s.normal) + dot(cross(s.w_n_b, s.r_b), s.normal);
-		s.eff_mass_n = K_n > 1e-12f ? 1.0f / K_n : 0.0f;
+		v3 r_a = sub(ct->point, a->position);
+		v3 r_b = sub(ct->point, b->position);
+		v3 rn_a = cross(r_a, ct->normal);
+		v3 rn_b = cross(r_b, ct->normal);
+		v3 w_n_a = inv_inertia_world_mul(a, rn_a);
+		v3 w_n_b = inv_inertia_world_mul(b, rn_b);
+		float K_n = inv_mass_sum + dot(cross(w_n_a, r_a), ct->normal) + dot(cross(w_n_b, r_b), ct->normal);
+		float eff_mass_n = K_n > 1e-12f ? 1.0f / K_n : 0.0f;
+		float softness = 0.0f, bias = 0.0f;
 		if (soft_val > 0.0f) {
-			float K = s.eff_mass_n > 0.0f ? 1.0f / s.eff_mass_n : 0.0f;
-			s.softness = soft_val;
-			s.eff_mass_n = (K + soft_val) > 1e-12f ? 1.0f / (K + soft_val) : 0.0f;
+			float K = eff_mass_n > 0.0f ? 1.0f / eff_mass_n : 0.0f;
+			softness = soft_val;
+			eff_mass_n = (K + soft_val) > 1e-12f ? 1.0f / (K + soft_val) : 0.0f;
 			float pen = ct->penetration - SOLVER_SLOP;
-			s.bias = pen > 0.0f ? -bias_rate_val * pen : 0.0f;
-			if (s.bias < -w->max_push_velocity) s.bias = -w->max_push_velocity;
+			bias = pen > 0.0f ? -bias_rate_val * pen : 0.0f;
+			if (bias < -w->max_push_velocity) bias = -w->max_push_velocity;
 		}
-		v3 vel_a = add(a->velocity, cross(a->angular_velocity, s.r_a));
-		v3 vel_b = add(b->velocity, cross(b->angular_velocity, s.r_b));
+		v3 vel_a = add(a->velocity, cross(a->angular_velocity, r_a));
+		v3 vel_b = add(b->velocity, cross(b->angular_velocity, r_b));
 		float vn_rel = dot(sub(vel_b, vel_a), ct->normal);
-		s.bounce = (-vn_rel > SOLVER_RESTITUTION_THRESH) ? rest * vn_rel : 0.0f;
-		if (s.bounce != 0.0f) s.bias = 0.0f;
-		sc[contact_base + c] = s;
-		pc[contact_base + c] = (PatchContact){ .rn_a = s.rn_a, .rn_b = s.rn_b, .w_n_a = s.w_n_a, .w_n_b = s.w_n_b, .eff_mass_n = s.eff_mass_n, .bias = s.bias, .bounce = s.bounce, .softness = s.softness, .lambda_n = s.lambda_n };
+		float bounce = (-vn_rel > SOLVER_RESTITUTION_THRESH) ? rest * vn_rel : 0.0f;
+		if (bounce != 0.0f) bias = 0.0f;
+		SolverContact* s = &sc[contact_base + c];
+		s->r_a = r_a; s->r_b = r_b; s->normal = ct->normal; s->penetration = ct->penetration;
+		s->feature_id = ct->feature_id; s->rn_a = rn_a; s->rn_b = rn_b;
+		s->w_n_a = w_n_a; s->w_n_b = w_n_b; s->eff_mass_n = eff_mass_n;
+		s->softness = softness; s->bias = bias; s->bounce = bounce;
+		s->lambda_n = 0; s->lambda_t1 = 0; s->lambda_t2 = 0;
+		pc[contact_base + c] = (PatchContact){ .rn_a = rn_a, .rn_b = rn_b, .w_n_a = w_n_a, .w_n_b = w_n_b, .eff_mass_n = eff_mass_n, .bias = bias, .bounce = bounce, .softness = softness };
 	}
 
 	// Patch friction: centroid, tangent basis, effective mass
