@@ -238,13 +238,14 @@ static void solver_relax_contacts(WorldInternal* w, SolverManifold* sm, int sm_c
 // when narrowphase misses a pair for a single frame (FP noise).
 static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count, SolverContact* sc, InternalManifold* manifolds, int manifold_count)
 {
-	// Update active pairs (per sub-step)
+	// Update active pairs (per sub-step). Preserve geometry cache fields.
 	for (int i = 0; i < sm_count; i++) {
 		SolverManifold* m = &sm[i];
 		if (m->contact_count == 0) continue; // skip empty (fixed-stride padding)
 		uint64_t key = body_pair_key(m->body_a, m->body_b);
 
-		WarmManifold wm = {0};
+		WarmManifold* existing = map_get_ptr(w->warm_cache, key);
+		WarmManifold wm = existing ? *existing : (WarmManifold){0}; // preserve geometry cache
 		wm.count = m->contact_count;
 		wm.stale = 0;
 		for (int ci = 0; ci < m->contact_count; ci++) {
@@ -257,11 +258,9 @@ static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count
 				.lambda_t2 = s->lambda_t2,
 			};
 		}
-		{
-			wm.manifold_lambda_t1 = m->lambda_t1;
-			wm.manifold_lambda_t2 = m->lambda_t2;
-			wm.manifold_lambda_twist = m->lambda_twist;
-		}
+		wm.manifold_lambda_t1 = m->lambda_t1;
+		wm.manifold_lambda_t2 = m->lambda_t2;
+		wm.manifold_lambda_twist = m->lambda_twist;
 
 		map_set(w->warm_cache, key, wm);
 	}

@@ -1632,14 +1632,16 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	BodyHot* h1 = &w->body_hot[j];
 	InternalManifold im = { .body_a = i, .body_b = j };
 
-	// SAT hint: warm cache lookup only for hull/cylinder pairs (box-box skips — 15 axes is cheap).
+	// Warm cache lookup: used for SAT hints, geometry caching, and passed to pre_solve.
+	uint64_t pkey = body_pair_key(i, j);
+	WarmManifold* wm = w->warm_start_enabled ? map_get_ptr(w->warm_cache, pkey) : NULL;
+
+	// SAT hint from warm cache (skip for box-box — 15 axes is cheap).
 	int* hp = NULL;
 	int hint = -1;
-	uint64_t pkey = 0;
-	WarmManifold* wm = NULL;
 	int uses_sat = (s0->type >= SHAPE_BOX && s1->type >= SHAPE_BOX);
 	int uses_hint = uses_sat && !(s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull);
-	if (uses_hint && w->sat_hint_enabled) { pkey = body_pair_key(i, j); wm = map_get_ptr(w->warm_cache, pkey); if (wm) hint = wm->sat_axis; hp = &hint; }
+	if (uses_hint && wm && w->sat_hint_enabled) { hint = wm->sat_axis; hp = &hint; }
 
 	// Upper-triangle dispatch: simple pairs first, then SAT-based pairs.
 	int hit = 0;
@@ -1682,10 +1684,9 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 
 	int idx = np_pair_idx(s0->type, s1->type);
 	np_call_acc[idx]++;
+	// Cache geometry for next frame reuse
 	if (hit) {
-		// Cache warm pointer for pre_solve (avoids duplicate hash lookup).
-		// Only look up if we didn't already (SAT hint path already has it).
-		if (!wm && w->warm_start_enabled) { if (!pkey) pkey = body_pair_key(i, j); wm = map_get_ptr(w->warm_cache, pkey); }
+		if (!wm && w->warm_start_enabled) { wm = map_get_ptr(w->warm_cache, pkey); }
 		im.warm = wm;
 		apush(*manifolds, im);
 	}
