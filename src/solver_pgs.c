@@ -566,17 +566,13 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 	GATHER1(bt->eff_mass_t1, eff_mass_t1); GATHER1(bt->eff_mass_t2, eff_mass_t2); GATHER1(bt->eff_mass_twist, eff_mass_twist);
 	GATHER1(bt->lambda_t1, lambda_t1); GATHER1(bt->lambda_t2, lambda_t2); GATHER1(bt->lambda_twist, lambda_twist);
 	#undef GATHER1
-	// Pack v3 manifold fields via v3w_load4 (lane order: 0,1,2,3).
-	#define SM(j) sm[indices[(j) < count ? (j) : 0]]
-	#define V3_OR0(j, field) ((j) < count ? SM(j).field : V3(0,0,0))
-	// v3w_load4(a,b,c,d) puts a in lane 3, d in lane 0. Reverse args so lane j = manifold j.
-	bt->normal = v3w_load4(V3_OR0(3,normal), V3_OR0(2,normal), V3_OR0(1,normal), V3_OR0(0,normal));
-	bt->tangent1 = v3w_load4(V3_OR0(3,tangent1), V3_OR0(2,tangent1), V3_OR0(1,tangent1), V3_OR0(0,tangent1));
-	bt->tangent2 = v3w_load4(V3_OR0(3,tangent2), V3_OR0(2,tangent2), V3_OR0(1,tangent2), V3_OR0(0,tangent2));
-	bt->centroid_r_a = v3w_load4(V3_OR0(3,centroid_r_a), V3_OR0(2,centroid_r_a), V3_OR0(1,centroid_r_a), V3_OR0(0,centroid_r_a));
-	bt->centroid_r_b = v3w_load4(V3_OR0(3,centroid_r_b), V3_OR0(2,centroid_r_b), V3_OR0(1,centroid_r_b), V3_OR0(0,centroid_r_b));
-	#undef V3_OR0
-	#undef SM
+	// Pack v3 manifold fields via hardware transpose (GATHER_V3 on SolverManifold array).
+	int mi0 = indices[0], mi1 = count > 1 ? indices[1] : mi0, mi2 = count > 2 ? indices[2] : mi0, mi3 = count > 3 ? indices[3] : mi0;
+	GATHER_V3(bt->normal, sm, mi0, mi1, mi2, mi3, normal);
+	GATHER_V3(bt->tangent1, sm, mi0, mi1, mi2, mi3, tangent1);
+	GATHER_V3(bt->tangent2, sm, mi0, mi1, mi2, mi3, tangent2);
+	GATHER_V3(bt->centroid_r_a, sm, mi0, mi1, mi2, mi3, centroid_r_a);
+	GATHER_V3(bt->centroid_r_b, sm, mi0, mi1, mi2, mi3, centroid_r_b);
 
 	// Pack contact layers: raw r_a/r_b from SolverContact + scalar prestep from PatchContact.
 	bt->max_contacts = 0;
