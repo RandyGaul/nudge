@@ -882,3 +882,126 @@ static void scene_hinge_limits_setup()
 	});
 	joint_set_hinge_limits(g_world, door_hinge, -1.57f, 1.57f); // 90 degrees each way
 }
+
+// ---------------------------------------------------------------------------
+// Scene: Cylinder Playground
+// Mixed cylinders, boxes, spheres, and capsules for manual interaction.
+// Designed to exercise all native cyl-* narrowphase pairs visually.
+// ---------------------------------------------------------------------------
+static void scene_cylinder_playground_setup()
+{
+	add_floor();
+
+	v3 cyl_color = V3(0.8f, 0.4f, 0.6f);
+	v3 box_color = V3(0.3f, 0.5f, 0.9f);
+	v3 sph_color = V3(0.9f, 0.3f, 0.2f);
+	v3 cap_color = V3(0.2f, 0.8f, 0.3f);
+
+	// --- Upright cylinders (test cap-on-floor, cyl-cyl stacking) ---
+	for (int i = 0; i < 3; i++) {
+		Body c = create_body(g_world, (BodyParams){
+			.position = V3(-3.0f + i * 1.2f, 0.5f + i * 1.2f, 0),
+			.rotation = quat_identity(),
+			.mass = 1.0f,
+			.friction = 0.6f,
+		});
+		body_add_shape(g_world, c, (ShapeParams){
+			.type = SHAPE_CYLINDER,
+			.cylinder = { .half_height = 0.5f, .radius = 0.4f },
+		});
+		apush(g_draw_list, ((DrawEntry){ c, g_mesh_cylinder, V3(1, 1, 1), cyl_color }));
+	}
+
+	// --- Sideways cylinder (test side-on-floor rolling) ---
+	{
+		float ang = 3.14159265f * 0.5f;
+		quat rot_z90 = { 0, 0, sinf(ang * 0.5f), cosf(ang * 0.5f) };
+		Body c = create_body(g_world, (BodyParams){
+			.position = V3(2, 0.5f, 0),
+			.rotation = rot_z90,
+			.mass = 1.0f,
+			.friction = 0.5f,
+		});
+		body_add_shape(g_world, c, (ShapeParams){
+			.type = SHAPE_CYLINDER,
+			.cylinder = { .half_height = 0.8f, .radius = 0.4f },
+		});
+		apush(g_draw_list, ((DrawEntry){ c, g_mesh_cylinder, V3(1, 1, 1), V3(0.9f, 0.6f, 0.3f) }));
+	}
+
+	// --- Boxes (test cyl-box pairs) ---
+	for (int i = 0; i < 3; i++) {
+		Body b = create_body(g_world, (BodyParams){
+			.position = V3(-2.0f + i * 2.0f, 3.0f, -2.0f),
+			.rotation = quat_identity(),
+			.mass = 1.0f,
+			.friction = 0.5f,
+		});
+		body_add_shape(g_world, b, (ShapeParams){
+			.type = SHAPE_BOX,
+			.box.half_extents = V3(0.4f, 0.4f, 0.4f),
+		});
+		apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(0.4f, 0.4f, 0.4f), box_color }));
+	}
+
+	// --- Spheres (test cyl-sphere pairs) ---
+	for (int i = 0; i < 3; i++) {
+		Body s = create_body(g_world, (BodyParams){
+			.position = V3(-1.5f + i * 1.5f, 4.0f, 2.0f),
+			.rotation = quat_identity(),
+			.mass = 0.5f,
+			.restitution = 0.4f,
+		});
+		body_add_shape(g_world, s, (ShapeParams){
+			.type = SHAPE_SPHERE,
+			.sphere.radius = 0.35f,
+		});
+		apush(g_draw_list, ((DrawEntry){ s, MESH_SPHERE, V3(0.35f, 0.35f, 0.35f), sph_color }));
+	}
+
+	// --- Capsules (test cyl-capsule pairs) ---
+	for (int i = 0; i < 2; i++) {
+		Body c = create_body(g_world, (BodyParams){
+			.position = V3(3.0f, 2.0f + i * 1.5f, -1.0f + i * 2.0f),
+			.rotation = quat_identity(),
+			.mass = 0.8f,
+		});
+		body_add_shape(g_world, c, (ShapeParams){
+			.type = SHAPE_CAPSULE,
+			.capsule = { .half_height = CAP_HALF_H, .radius = CAP_RADIUS },
+		});
+		apush(g_draw_list, ((DrawEntry){ c, g_mesh_capsule, V3(1, 1, 1), cap_color }));
+	}
+
+	// --- A big cylinder as a "barrel" to push things into ---
+	{
+		Body barrel = create_body(g_world, (BodyParams){
+			.position = V3(0, 1.0f, 4.0f),
+			.rotation = quat_identity(),
+			.mass = 5.0f,
+			.friction = 0.4f,
+		});
+		body_add_shape(g_world, barrel, (ShapeParams){
+			.type = SHAPE_CYLINDER,
+			.cylinder = { .half_height = 1.0f, .radius = 0.7f },
+		});
+		int barrel_mesh = render_create_cylinder_mesh(0.7f, 1.0f);
+		apush(g_draw_list, ((DrawEntry){ barrel, barrel_mesh, V3(1, 1, 1), V3(0.5f, 0.3f, 0.15f) }));
+	}
+
+	// --- Hull body (test cyl-hull pair) ---
+	{
+		Body h = create_body(g_world, (BodyParams){
+			.position = V3(-4, 3, 1),
+			.rotation = quat_identity(),
+			.mass = 1.0f,
+			.restitution = 0.3f,
+		});
+		body_add_shape(g_world, h, (ShapeParams){
+			.type = SHAPE_HULL,
+			.hull = { .hull = g_test_hull, .scale = V3(0.8f, 0.8f, 0.8f) },
+		});
+		int hm = render_create_hull_mesh(g_test_hull, V3(0.8f, 0.8f, 0.8f));
+		apush(g_draw_list, ((DrawEntry){ h, hm, V3(1, 1, 1), V3(0.9f, 0.7f, 0.2f) }));
+	}
+}

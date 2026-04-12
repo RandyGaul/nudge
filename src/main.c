@@ -136,7 +136,7 @@ typedef struct Scene {
 	void (*setup)();
 } Scene;
 
-static int g_scene_index = 1; // Box Pyramid
+static int g_scene_index = 14; // Cylinder Playground
 
 // Mouse constraint state (right-click drag to interact with bodies)
 static Body g_mouse_body;         // body being dragged ({0} if none)
@@ -185,6 +185,7 @@ static Scene g_scenes[] = {
 	{ "Weld Bridge",     scene_weld_bridge_setup },
 	{ "Slider Crane",    scene_slider_crane_setup },
 	{ "Hinge Limits",    scene_hinge_limits_setup },
+	{ "Cylinder Playground", scene_cylinder_playground_setup },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 

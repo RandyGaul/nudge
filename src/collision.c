@@ -2335,31 +2335,26 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
 	}
 
-	// Cylinder pairs: route through hull-hull using the shared unit cylinder hull.
-	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER)
-		hit = collide_sphere_hull(make_sphere(h0, s0), make_cylinder_hull(h1, s1), &im.m);
-	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER)
-		hit = collide_capsule_hull(make_capsule(h0, s0), make_cylinder_hull(h1, s1), &im.m);
+	// Cylinder pairs: native narrowphase with cylinder as shape A.
+	// Dispatch puts cyl as s1 (higher enum). Call with cyl as first arg, flip normals.
+	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER) {
+		hit = collide_cylinder_sphere(make_cylinder(h1, s1), make_sphere(h0, s0), &im.m);
+		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
+	}
+	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER) {
+		hit = collide_cylinder_capsule(make_cylinder(h1, s1), make_capsule(h0, s0), &im.m);
+		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
+	}
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER) {
-		int* hp = NULL;
-		int hint;
-		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
-		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_cylinder_hull(h1, s1), &im.m, hp);
-		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
+		hit = collide_cylinder_box(make_cylinder(h1, s1), make_box(h0, s0), &im.m);
+		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
 	}
 	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER) {
-		int* hp = NULL;
-		int hint;
-		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
-		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m, hp);
-		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
+		hit = collide_cylinder_hull(make_cylinder(h1, s1), make_convex_hull(h0, s0), &im.m);
+		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
 	}
 	else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) {
-		int* hp = NULL;
-		int hint;
-		if (w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); hint = wm ? wm->sat_axis : -1; hp = &hint; }
-		hit = collide_hull_hull_ex(make_cylinder_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m, hp);
-		if (hp && w->sat_hint_enabled) { uint64_t pkey = body_pair_key(i, j); WarmManifold* wm = map_get_ptr(w->warm_cache, pkey); if (wm) wm->sat_axis = hint; }
+		hit = collide_cylinder_cylinder(make_cylinder(h0, s0), make_cylinder(h1, s1), &im.m);
 	}
 
 	double np_end = perf_now();
