@@ -1587,7 +1587,7 @@ void hull_free(Hull* hull)
 
 // Box face validation: check if the cached local axis is still the dominant
 // projection axis for the separation direction. 3 dot products + 3 fabsf.
-static SIMD_FORCEINLINE int validate_cached_face_box(v3 cols[3], v3 d, int cached_la)
+static int validate_cached_face_box(v3 cols[3], v3 d, int cached_la)
 {
 	float dots[3] = { fabsf(dot(d, cols[0])), fabsf(dot(d, cols[1])), fabsf(dot(d, cols[2])) };
 	for (int i = 0; i < 3; i++)
@@ -1598,7 +1598,7 @@ static SIMD_FORCEINLINE int validate_cached_face_box(v3 cols[3], v3 d, int cache
 
 // Hull face validation: check if any neighbor face of the cached face is more
 // aligned with the separation direction. Uses half-edge neighbor traversal.
-static SIMD_FORCEINLINE int validate_cached_face_hull(const Hull* hull, v3 pos, quat rot, v3 sc, int cached_face, v3 sep_dir)
+static int validate_cached_face_hull(const Hull* hull, v3 pos, quat rot, v3 sc, int cached_face, v3 sep_dir)
 {
 	HullPlane cached_plane = plane_transform(hull->planes[cached_face], pos, rot, sc);
 	float cached_dot = dot(cached_plane.normal, sep_dir);
