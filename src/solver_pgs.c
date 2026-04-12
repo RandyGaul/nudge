@@ -20,7 +20,7 @@ static void contact_tangent_basis(v3 n, v3* t1, v3* t2)
 
 // Estimate contact patch area from manifold points projected onto contact plane.
 // Uses dot(n, cross(a,b)) instead of len(cross(a,b)) — avoids sqrtf per triangle.
-static float estimate_patch_area(Contact* contacts, int count)
+static SIMD_FORCEINLINE float estimate_patch_area(Contact* contacts, int count)
 {
 	if (count < 3) return PATCH_MIN_AREA;
 	v3 n = contacts[0].normal;
