@@ -667,35 +667,18 @@ void world_step(World world, float dt)
 			}
 
 			// Scatter lambdas back from persistent batches to SolverManifold/PatchContact.
-			for (int bi = 0; bi < batch_count; bi++) {
-				PGS_Batch4* bt = &batches[bi];
-				// Manifold lambdas
-				for (int c2 = 0; c2 < color_count; c2++) {
-					if (bi >= color_batch_starts[c2] && bi < color_batch_starts[c2+1]) {
-						int base = batch_starts[c2] + (bi - color_batch_starts[c2]) * 4;
-						for (int j = 0; j < 4 && base + j < batch_starts[c2+1]; j++) {
-							int mi = crefs[base + j].index;
-							sm[mi].lambda_t1 = ((float*)&bt->lambda_t1)[j];
-							sm[mi].lambda_t2 = ((float*)&bt->lambda_t2)[j];
-							sm[mi].lambda_twist = ((float*)&bt->lambda_twist)[j];
-						}
-						break;
-					}
-				}
-				// Contact lambdas
-				for (int cp2 = 0; cp2 < bt->max_contacts; cp2++) {
-					float nl[4]; _mm_storeu_ps(nl, bt->cp[cp2].lambda_n);
-					for (int j = 0; j < 4; j++) {
-						if (bt->body_a[j] == 0 && bt->body_b[j] == 0 && j > 0) continue; // padding lane
-						// Find manifold index for this lane
-						for (int c2 = 0; c2 < color_count; c2++) {
-							if (bi >= color_batch_starts[c2] && bi < color_batch_starts[c2+1]) {
-								int base = batch_starts[c2] + (bi - color_batch_starts[c2]) * 4;
-								if (base + j < batch_starts[c2+1] && cp2 < sm[crefs[base+j].index].contact_count)
-									pc[sm[crefs[base+j].index].contact_start + cp2].lambda_n = nl[j];
-								break;
-							}
-						}
+			// Iterate by color to avoid per-batch color search.
+			for (int c2 = 0; c2 < color_count; c2++) {
+				for (int bi = color_batch_starts[c2]; bi < color_batch_starts[c2+1]; bi++) {
+					PGS_Batch4* bt = &batches[bi];
+					int base = batch_starts[c2] + (bi - color_batch_starts[c2]) * 4;
+					for (int j = 0; j < 4 && base + j < batch_starts[c2+1]; j++) {
+						int mi = crefs[base + j].index;
+						sm[mi].lambda_t1 = ((float*)&bt->lambda_t1)[j];
+						sm[mi].lambda_t2 = ((float*)&bt->lambda_t2)[j];
+						sm[mi].lambda_twist = ((float*)&bt->lambda_twist)[j];
+						for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++)
+							pc[sm[mi].contact_start + cp2].lambda_n = ((float*)&bt->cp[cp2].lambda_n)[j];
 					}
 				}
 			}
