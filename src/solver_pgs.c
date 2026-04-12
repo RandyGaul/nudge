@@ -397,24 +397,16 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 // --- SolverBodyVel fast path: compact 32-byte body state for PGS iteration ---
 
 // Sync body_hot velocity → body_vel (before PGS).
-// full=1: copy all fields (first substep). full=0: only velocity (substep 2+, inertia in batch4).
-static void solver_sync_vel_in(WorldInternal* w, int full)
+static void solver_sync_vel_in(WorldInternal* w)
 {
 	int count = asize(w->body_hot);
 	split_ensure(w->body_vel, count - 1);
-	if (full) {
-		for (int i = 0; i < count; i++) {
-			w->body_vel[i].velocity = w->body_hot[i].velocity;
-			w->body_vel[i].angular_velocity = w->body_hot[i].angular_velocity;
-			w->body_vel[i].inv_mass = w->body_hot[i].inv_mass;
-			w->body_vel[i].iw_diag = w->body_hot[i].iw_diag;
-			w->body_vel[i].iw_off = w->body_hot[i].iw_off;
-		}
-	} else {
-		for (int i = 0; i < count; i++) {
-			w->body_vel[i].velocity = w->body_hot[i].velocity;
-			w->body_vel[i].angular_velocity = w->body_hot[i].angular_velocity;
-		}
+	for (int i = 0; i < count; i++) {
+		w->body_vel[i].velocity = w->body_hot[i].velocity;
+		w->body_vel[i].angular_velocity = w->body_hot[i].angular_velocity;
+		w->body_vel[i].inv_mass = w->body_hot[i].inv_mass;
+		w->body_vel[i].iw_diag = w->body_hot[i].iw_diag;
+		w->body_vel[i].iw_off = w->body_hot[i].iw_off;
 	}
 }
 
