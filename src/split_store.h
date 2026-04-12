@@ -117,4 +117,29 @@
 // Validate a handle against the current gen array.
 #define split_valid(gen, h) ((gen)[handle_index(h)] == handle_gen(h))
 
+// --- 3-tier split store (hot + state + cold) ---
+// Same as split_add/del/free but manages a third parallel "state" array.
+// Use when you need two hot-path tiers (e.g. solver-hot + integration-warm)
+// plus a cold tier for lifecycle/topology data.
+//
+// Example (bodies):
+//   split3_add(body_cold, body_state, body_hot, body_gen, body_free, idx);
+//   split3_del(body_cold, body_state, body_hot, body_gen, body_free, idx);
+//   split3_free(body_cold, body_state, body_hot, body_gen, body_free);
+
+#define split3_add(cold, state, hot, gen, freelist, out_idx) do { \
+	split_add(cold, hot, gen, freelist, out_idx); \
+	split_ensure(state, out_idx); \
+	memset(&(state)[(out_idx)], 0, sizeof(*(state))); \
+} while(0)
+
+#define split3_del(cold, state, hot, gen, freelist, i) do { \
+	split_del(cold, hot, gen, freelist, i); \
+	split_clear(state, i); \
+} while(0)
+
+#define split3_free(cold, state, hot, gen, freelist) do { \
+	split_free(cold, hot, gen, freelist); afree(state); \
+} while(0)
+
 #endif

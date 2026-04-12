@@ -479,16 +479,71 @@ typedef struct PGS_Batch4
 	int lane_count;
 } PGS_Batch4;
 
-// Gather a v3 field from 4 BodyHot entries into SoA v3w via transpose.
+// --- Generic SIMD gather/scatter helpers ---
+// These work with any struct array + field name. Portable across constraint types.
+
+// Gather a v3 field from 4 struct entries into v3w via hardware transpose.
+// Requires the v3 field to have a .m member (simd4f). Fast: 4 loads + 1 shuffle.
 #define GATHER_V3(out, arr, i0, i1, i2, i3, field) do { \
 	simd4f _r0=(arr)[i0].field.m, _r1=(arr)[i1].field.m, _r2=(arr)[i2].field.m, _r3=(arr)[i3].field.m; \
 	simd_transpose4(&_r0,&_r1,&_r2,&_r3); (out).x=_r0; (out).y=_r1; (out).z=_r2; } while(0)
 
-// Scatter SoA v3w back to 4 BodyHot entries via reverse transpose.
+// Scatter v3w back to 4 struct entries via reverse transpose.
 #define SCATTER_V3(arr, i0, i1, i2, i3, field, src) do { \
 	simd4f _r0=(src).x, _r1=(src).y, _r2=(src).z, _r3=simd_zero(); \
 	simd_transpose4(&_r0,&_r1,&_r2,&_r3); \
 	(arr)[i0].field.m=_r0; (arr)[i1].field.m=_r1; (arr)[i2].field.m=_r2; (arr)[i3].field.m=_r3; } while(0)
+
+// Gather one v3 field from up to 4 indexed structs into v3w. Zeroes inactive lanes.
+// Slower than GATHER_V3 (scalar path), but works with any array + index list.
+#define GATHER_V3_INDEXED(dst, arr, indices, count, field) do { \
+	v3 _v[4] = {{0}}; \
+	for (int _j = 0; _j < (count); _j++) { _v[_j] = (arr)[(indices)[_j]].field; } \
+	dst = v3w_load4(_v[3], _v[2], _v[1], _v[0]); \
+} while(0)
+
+// Gather one float field from up to 4 indexed structs into simd4f. Zeroes inactive lanes.
+#define GATHER_F1(dst, arr, indices, count, field) do { \
+	float _buf[4] = {0}; \
+	for (int _j = 0; _j < (count); _j++) { _buf[_j] = (arr)[(indices)[_j]].field; } \
+	dst = simd_load(_buf); \
+} while(0)
+
+// Scatter one simd4f back to a float field on up to 4 indexed structs.
+#define SCATTER_F1(arr, indices, count, field, src) do { \
+	float _buf[4]; simd_store(_buf, src); \
+	for (int _j = 0; _j < (count); _j++) { (arr)[(indices)[_j]].field = _buf[_j]; } \
+} while(0)
+
+// --- BodyWide: 4-wide SIMD body state for constraint solvers ---
+// Bundles all solver-needed fields for 4 bodies. One gather call replaces 4-8 GATHER_V3 calls.
+// Reusable across constraint types (contacts, joints, springs -- anything that touches bodies).
+typedef struct BodyWide
+{
+	v3w vel, angvel;
+	v3w iw_diag, iw_off;
+	simd4f inv_mass;
+} BodyWide;
+
+static inline BodyWide body_wide_gather(BodyHot* arr, int i0, int i1, int i2, int i3)
+{
+	BodyWide bw;
+	GATHER_V3(bw.vel, arr, i0, i1, i2, i3, velocity);
+	GATHER_V3(bw.angvel, arr, i0, i1, i2, i3, angular_velocity);
+	GATHER_V3(bw.iw_diag, arr, i0, i1, i2, i3, iw_diag);
+	GATHER_V3(bw.iw_off, arr, i0, i1, i2, i3, iw_off);
+	// inv_mass: scalar field, no .m member -- gather manually
+	float _im[4] = { arr[i0].inv_mass, arr[i1].inv_mass, arr[i2].inv_mass, arr[i3].inv_mass };
+	bw.inv_mass = simd_load(_im);
+	return bw;
+}
+
+static inline void body_wide_scatter(BodyHot* arr, int i0, int i1, int i2, int i3, BodyWide* bw)
+{
+	SCATTER_V3(arr, i0, i1, i2, i3, velocity, bw->vel);
+	SCATTER_V3(arr, i0, i1, i2, i3, angular_velocity, bw->angvel);
+	// iw_diag, iw_off, inv_mass are read-only during solve -- don't scatter back
+}
 
 // Symmetric 3x3 inverse-inertia multiply: I_w * v, where I_w = diag(xx,yy,zz) + off(xy,xz,yz).
 static inline v3w iw_mul(v3w iw_d, v3w iw_o, v3w v)
@@ -570,15 +625,14 @@ static void solve_contact_batch4_sv(BodyHot* bodies, PGS_Batch4* b)
 	int i0a=b->body_a[0], i1a=b->body_a[1], i2a=b->body_a[2], i3a=b->body_a[3];
 	int i0b=b->body_b[0], i1b=b->body_b[1], i2b=b->body_b[2], i3b=b->body_b[3];
 
-	// Gather velocity, angular_velocity, and inverse inertia for all 4 body pairs.
-	v3w va, wa, vb, wb;
+	// Gather body state as flat v3w locals (not struct -- avoids register spill).
+	v3w va, wa, vb, wb, iw_d_a, iw_o_a, iw_d_b, iw_o_b;
 	GATHER_V3(va, bodies, i0a, i1a, i2a, i3a, velocity);
 	GATHER_V3(wa, bodies, i0a, i1a, i2a, i3a, angular_velocity);
-	GATHER_V3(vb, bodies, i0b, i1b, i2b, i3b, velocity);
-	GATHER_V3(wb, bodies, i0b, i1b, i2b, i3b, angular_velocity);
-	v3w iw_d_a, iw_o_a, iw_d_b, iw_o_b;
 	GATHER_V3(iw_d_a, bodies, i0a, i1a, i2a, i3a, iw_diag);
 	GATHER_V3(iw_o_a, bodies, i0a, i1a, i2a, i3a, iw_off);
+	GATHER_V3(vb, bodies, i0b, i1b, i2b, i3b, velocity);
+	GATHER_V3(wb, bodies, i0b, i1b, i2b, i3b, angular_velocity);
 	GATHER_V3(iw_d_b, bodies, i0b, i1b, i2b, i3b, iw_diag);
 	GATHER_V3(iw_o_b, bodies, i0b, i1b, i2b, i3b, iw_off);
 
@@ -630,7 +684,7 @@ static void solve_contact_batch4_sv(BodyHot* bodies, PGS_Batch4* b)
 
 	// Torsional: recompute iw*normal inline.
 	v3w wtw_a = iw_mul(iw_d_a, iw_o_a, b->normal), wtw_b = iw_mul(iw_d_b, iw_o_b, b->normal);
-	simd4f max_tw = simd_mul(simd_mul(b->friction, total_lambda_n), b->patch_radius);
+	simd4f max_tw = simd_mul(max_f, b->patch_radius);
 	simd4f wrel = v3w_dot(v3w_sub(wb_s, wa_s), b->normal);
 	simd4f ntw = simd_max(simd_neg(max_tw), simd_min(simd_add(b->lambda_twist, simd_mul(b->eff_mass_twist, simd_neg(wrel))), max_tw));
 	simd4f dtw = simd_sub(ntw, b->lambda_twist); b->lambda_twist = ntw;

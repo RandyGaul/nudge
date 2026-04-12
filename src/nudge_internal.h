@@ -84,6 +84,12 @@ typedef struct BodyState
 #define body_sleep_time(w, i)       (w)->body_state[i].sleep_time
 #define body_sleep_allowed(w, i)    (w)->body_state[i].sleep_allowed
 
+// Scalar body reference: bundles pointers to both tiers from a single index lookup.
+// Prevents mismatched indices (body_hot[a] with body_state[b]).
+// Usage: BodyRef r = body_ref(w, idx); r.hot->velocity; r.state->position;
+typedef struct BodyRef { BodyHot* hot; BodyState* state; } BodyRef;
+#define body_ref(w, i) ((BodyRef){ &(w)->body_hot[i], &(w)->body_state[i] })
+
 // Cached narrowphase feature pair for incremental manifold refresh.
 // type=0: cold (no cache), type=1: face-face, type=2: edge-edge.
 typedef struct CachedFeaturePair
