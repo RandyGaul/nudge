@@ -1868,11 +1868,24 @@ int collide_cylinder_capsule(Cylinder a, Capsule b, Manifold* manifold)
 	return collide_cylinder_capsule_ana(a, b, manifold);
 }
 
-int collide_cylinder_box(Cylinder a, Box b, Manifold* manifold)
+// Cyl-box: delegate to cyl-hull using the unit box hull. The unit box has only
+// 8 verts / 6 faces / 24 edges, so the SAT is cheap.
+static int collide_cylinder_box_ana(Cylinder a, Box b, Manifold* manifold)
 {
-	// Cyl is A, box is B. Route through hull-hull with a-side = unit cylinder.
+	ConvexHull cb = { &s_unit_box_hull, b.center, b.rotation, b.half_extents };
+	return collide_cylinder_hull_ana(a, cb, manifold);
+}
+
+// GJK variant for bench comparison (routes through the hull-backed path).
+static int collide_cylinder_box_gjk(Cylinder a, Box b, Manifold* manifold)
+{
 	ConvexHull cb = { &s_unit_box_hull, b.center, b.rotation, b.half_extents };
 	return collide_hull_hull(cylinder_to_convex_hull(a), cb, manifold);
+}
+
+int collide_cylinder_box(Cylinder a, Box b, Manifold* manifold)
+{
+	return collide_cylinder_box_ana(a, b, manifold);
 }
 
 // Cylinder support projection onto an arbitrary axis (tight, analytical).
