@@ -2568,6 +2568,17 @@ typedef struct SAP_Entry
 
 static int sap_cmp(const void* a, const void* b) { float d = ((SAP_Entry*)a)->min_val - ((SAP_Entry*)b)->min_val; return (d > 0) - (d < 0); }
 
+// Insertion sort: O(n) for nearly-sorted data (settled physics), O(n^2) worst case.
+static void sap_insertion_sort(SAP_Entry* arr, int n)
+{
+	for (int i = 1; i < n; i++) {
+		SAP_Entry key = arr[i];
+		int j = i - 1;
+		while (j >= 0 && arr[j].min_val > key.min_val) { arr[j + 1] = arr[j]; j--; }
+		arr[j + 1] = key;
+	}
+}
+
 // Broadphase sub-phase timing accumulators (seconds, summed across frames).
 double bp_refit_acc, bp_precomp_acc, bp_sweep_acc, bp_cross_acc;
 int bp_frame_count;
@@ -2612,7 +2623,7 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 
 	// Sort awake dynamic bodies by chosen axis AABB min.
 	int sap_count = asize(sap);
-	if (sap_count > 1) qsort(sap, sap_count, sizeof(SAP_Entry), sap_cmp);
+	if (sap_count > 1) sap_insertion_sort(sap, sap_count);
 	bp_precomp_acc += perf_now() - t1;
 
 	// Sweep: test overlapping awake-awake pairs.
