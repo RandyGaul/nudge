@@ -668,28 +668,29 @@ void world_step(World world, float dt)
 		// Build SIMD batches on first substep; refresh only bias/lambda on substep 2+.
 #if SIMD_SSE
 		if (sub == 0 && use_simd_path && cref_count > 0) {
+			// Pre-compute batch layout: total count and per-color offsets.
 			int total_batches = 0;
-			for (int c = 0; c < color_count; c++) total_batches += (batch_starts[c+1] - batch_starts[c] + 3) / 4;
-			afit(simd_batches, total_batches);
 			apush(simd_color_batch_starts, 0);
 			for (int c = 0; c < color_count; c++) {
+				total_batches += (batch_starts[c+1] - batch_starts[c] + 3) / 4;
+				apush(simd_color_batch_starts, total_batches);
+			}
+			afit(simd_batches, total_batches); asetlen(simd_batches, total_batches);
+			// Fill batches (each batch writes to a unique pre-allocated slot).
+			for (int c = 0; c < color_count; c++) {
 				int start = batch_starts[c], end = batch_starts[c + 1];
+				int bi_out = simd_color_batch_starts[c];
 				for (int i = start; i + 3 < end; i += 4) {
 					int idx[4] = { crefs[i].index, crefs[i+1].index, crefs[i+2].index, crefs[i+3].index };
-					PGS_Batch4 bt;
-					pgs_batch4_prepare(&bt, sm, idx, 4, sc);
-					apush(simd_batches, bt);
+					pgs_batch4_prepare(&simd_batches[bi_out++], sm, idx, 4, sc);
 				}
 				int rem_start = start + ((end - start) / 4) * 4;
 				if (rem_start < end) {
 					int idx[4] = {0};
 					int rem_count = end - rem_start;
 					for (int j = 0; j < rem_count; j++) idx[j] = crefs[rem_start + j].index;
-					PGS_Batch4 bt;
-					pgs_batch4_prepare(&bt, sm, idx, rem_count, sc);
-					apush(simd_batches, bt);
+					pgs_batch4_prepare(&simd_batches[bi_out++], sm, idx, rem_count, sc);
 				}
-				apush(simd_color_batch_starts, asize(simd_batches));
 			}
 			simd_batch_count = asize(simd_batches);
 		}
