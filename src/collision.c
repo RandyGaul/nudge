@@ -2629,7 +2629,6 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	// Sweep: test overlapping awake-awake pairs.
 	double t2 = perf_now();
 	CK_DYNA BroadPair* dd_pairs = NULL;
-	afit(dd_pairs, sap_count * 4); // pre-alloc: ~4 contacts per body typical
 	for (int i = 0; i < sap_count; i++) {
 		float max_val = sap[i].max_val;
 		int a = sap[i].body_idx;
