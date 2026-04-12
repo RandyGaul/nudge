@@ -517,8 +517,10 @@ void world_step(World world, float dt)
 		// No post-step bvh_refit needed — bodies didn't move (solver skipped).
 		// The broadphase already refitted at start of this frame.
 		double t4 = perf_now();
-		islands_try_splits(w);
-		if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
+		if (w->sleep_enabled) {
+			islands_try_splits(w);
+			islands_evaluate_sleep(w, dt);
+		}
 		w->perf.islands = perf_now() - t4;
 		afree(manifolds);
 		w->perf.total = perf_now() - t_total;
@@ -825,8 +827,10 @@ void world_step(World world, float dt)
 	bvh_refit(w->bvh_dynamic, w);
 
 	double t4 = perf_now();
-	islands_try_splits(w);
-	if (w->sleep_enabled) islands_evaluate_sleep(w, dt);
+	if (w->sleep_enabled) {
+		islands_try_splits(w);
+		islands_evaluate_sleep(w, dt);
+	}
 	w->perf.islands = perf_now() - t4;
 
 	afree(manifolds);
