@@ -814,8 +814,9 @@ static void bvh_refit(BVH_Tree* t, WorldInternal* w)
 	if (t->root == -1) return;
 
 	int cap = asize(t->nodes);
-	BVHNode* new_nodes = CK_ALLOC(sizeof(BVHNode) * cap);
-	BVHMeta* new_meta = CK_ALLOC(sizeof(BVHMeta) * cap);
+	BVHNode stack_nodes[256]; BVHMeta stack_meta[256];
+	BVHNode* new_nodes = (cap <= 256) ? stack_nodes : CK_ALLOC(sizeof(BVHNode) * cap);
+	BVHMeta* new_meta = (cap <= 256) ? stack_meta : CK_ALLOC(sizeof(BVHMeta) * cap);
 
 	BVHRefit r = { t->nodes, t->meta, new_nodes, new_meta, t, w };
 	int changed = 0;
@@ -831,8 +832,8 @@ static void bvh_refit(BVH_Tree* t, WorldInternal* w)
 	aclear(t->node_free);
 	t->root = 0;
 
-	CK_FREE(new_nodes);
-	CK_FREE(new_meta);
+	if (new_nodes != stack_nodes) CK_FREE(new_nodes);
+	if (new_meta != stack_meta) CK_FREE(new_meta);
 }
 
 // -----------------------------------------------------------------------------
