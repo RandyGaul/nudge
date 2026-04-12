@@ -338,25 +338,30 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 
 			// Manifold-level 2D friction at centroid, clamped by aggregate normal force
 			float max_f = m->friction * total_lambda_n;
-			float vt1 = dot(sub(b->velocity, a->velocity), m->tangent1) + dot(b->angular_velocity, m->rct1_b) - dot(a->angular_velocity, m->rct1_a);
+			v3 rct1_a = cross(m->centroid_r_a, m->tangent1), rct1_b = cross(m->centroid_r_b, m->tangent1);
+			v3 wt1_a = inv_inertia_world_mul(a, rct1_a), wt1_b = inv_inertia_world_mul(b, rct1_b);
+			float vt1 = dot(sub(b->velocity, a->velocity), m->tangent1) + dot(b->angular_velocity, rct1_b) - dot(a->angular_velocity, rct1_a);
 			float old_t1 = m->lambda_t1;
 			m->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + m->eff_mass_t1 * (-vt1), max_f));
-			apply_impulse_row(a, b, m->tangent1, m->w_t1_a, m->w_t1_b, m->lambda_t1 - old_t1);
+			apply_impulse_row(a, b, m->tangent1, wt1_a, wt1_b, m->lambda_t1 - old_t1);
 
-			float vt2 = dot(sub(b->velocity, a->velocity), m->tangent2) + dot(b->angular_velocity, m->rct2_b) - dot(a->angular_velocity, m->rct2_a);
+			v3 rct2_a = cross(m->centroid_r_a, m->tangent2), rct2_b = cross(m->centroid_r_b, m->tangent2);
+			v3 wt2_a = inv_inertia_world_mul(a, rct2_a), wt2_b = inv_inertia_world_mul(b, rct2_b);
+			float vt2 = dot(sub(b->velocity, a->velocity), m->tangent2) + dot(b->angular_velocity, rct2_b) - dot(a->angular_velocity, rct2_a);
 			float old_t2 = m->lambda_t2;
 			m->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + m->eff_mass_t2 * (-vt2), max_f));
-			apply_impulse_row(a, b, m->tangent2, m->w_t2_a, m->w_t2_b, m->lambda_t2 - old_t2);
+			apply_impulse_row(a, b, m->tangent2, wt2_a, wt2_b, m->lambda_t2 - old_t2);
 
 			// Torsional friction: resist spin around contact normal
 			float max_twist = m->friction * total_lambda_n * m->patch_radius;
+			v3 wtw_a = inv_inertia_world_mul(a, m->normal), wtw_b = inv_inertia_world_mul(b, m->normal);
 			float w_rel = dot(sub(b->angular_velocity, a->angular_velocity), m->normal);
 			float lambda_tw = m->eff_mass_twist * (-w_rel);
 			float old_tw = m->lambda_twist;
 			m->lambda_twist = fmaxf(-max_twist, fminf(old_tw + lambda_tw, max_twist));
 			float delta_tw = m->lambda_twist - old_tw;
-			a->angular_velocity = sub(a->angular_velocity, scale(m->w_tw_a, delta_tw));
-			b->angular_velocity = add(b->angular_velocity, scale(m->w_tw_b, delta_tw));
+			a->angular_velocity = sub(a->angular_velocity, scale(wtw_a, delta_tw));
+			b->angular_velocity = add(b->angular_velocity, scale(wtw_b, delta_tw));
 		}
 		break;
 	}
@@ -421,17 +426,22 @@ static SIMD_FORCEINLINE void solve_contact_patch_sv(BodyHot* bodies, SolverManif
 	// then apply all deltas in one combined pass. Fewer velocity read/write round-trips.
 	v3 dv = sub(b->velocity, a->velocity);
 	v3 wa_snap = a->angular_velocity, wb_snap = b->angular_velocity;
-	float vt1 = dot(dv, m->tangent1) + dot(wb_snap, m->rct1_b) - dot(wa_snap, m->rct1_a);
+	v3 rct1_a = cross(m->centroid_r_a, m->tangent1), rct1_b = cross(m->centroid_r_b, m->tangent1);
+	v3 wt1_a = sv_inertia_mul(a, rct1_a), wt1_b = sv_inertia_mul(b, rct1_b);
+	float vt1 = dot(dv, m->tangent1) + dot(wb_snap, rct1_b) - dot(wa_snap, rct1_a);
 	float old_t1 = m->lambda_t1;
 	m->lambda_t1 = fmaxf(-max_f, fminf(old_t1 + m->eff_mass_t1 * (-vt1), max_f));
 	float dt1 = m->lambda_t1 - old_t1;
 
-	float vt2 = dot(dv, m->tangent2) + dot(wb_snap, m->rct2_b) - dot(wa_snap, m->rct2_a);
+	v3 rct2_a = cross(m->centroid_r_a, m->tangent2), rct2_b = cross(m->centroid_r_b, m->tangent2);
+	v3 wt2_a = sv_inertia_mul(a, rct2_a), wt2_b = sv_inertia_mul(b, rct2_b);
+	float vt2 = dot(dv, m->tangent2) + dot(wb_snap, rct2_b) - dot(wa_snap, rct2_a);
 	float old_t2 = m->lambda_t2;
 	m->lambda_t2 = fmaxf(-max_f, fminf(old_t2 + m->eff_mass_t2 * (-vt2), max_f));
 	float dt2 = m->lambda_t2 - old_t2;
 
 	float max_twist = m->friction * total_lambda_n * m->patch_radius;
+	v3 wtw_a = sv_inertia_mul(a, m->normal), wtw_b = sv_inertia_mul(b, m->normal);
 	float w_rel = dot(sub(wb_snap, wa_snap), m->normal);
 	float old_tw = m->lambda_twist;
 	m->lambda_twist = fmaxf(-max_twist, fminf(old_tw + m->eff_mass_twist * (-w_rel), max_twist));
@@ -441,8 +451,8 @@ static SIMD_FORCEINLINE void solve_contact_patch_sv(BodyHot* bodies, SolverManif
 	v3 lin_impulse = add(scale(m->tangent1, dt1), scale(m->tangent2, dt2));
 	a->velocity = sub(a->velocity, scale(lin_impulse, ima));
 	b->velocity = add(b->velocity, scale(lin_impulse, imb));
-	v3 ang_a = add(add(scale(m->w_t1_a, dt1), scale(m->w_t2_a, dt2)), scale(m->w_tw_a, dtw));
-	v3 ang_b = add(add(scale(m->w_t1_b, dt1), scale(m->w_t2_b, dt2)), scale(m->w_tw_b, dtw));
+	v3 ang_a = add(add(scale(wt1_a, dt1), scale(wt2_a, dt2)), scale(wtw_a, dtw));
+	v3 ang_b = add(add(scale(wt1_b, dt1), scale(wt2_b, dt2)), scale(wtw_b, dtw));
 	a->angular_velocity = sub(a->angular_velocity, ang_a);
 	b->angular_velocity = add(b->angular_velocity, ang_b);
 }

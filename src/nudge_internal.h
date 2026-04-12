@@ -409,13 +409,6 @@ typedef struct SolverManifold
 	float lambda_twist;
 	float patch_area;
 	float patch_radius;
-	// Precomputed cross(centroid_r, direction) for fast dv dot product (patch mode)
-	v3 rct1_a, rct1_b;    // cross(centroid_r, tangent1)
-	v3 rct2_a, rct2_b;    // cross(centroid_r, tangent2)
-	// Precomputed angular impulse for manifold-level friction (patch mode)
-	v3 w_t1_a, w_t1_b;   // tangent1 at centroid
-	v3 w_t2_a, w_t2_b;   // tangent2 at centroid
-	v3 w_tw_a, w_tw_b;   // torsional (normal direction)
 } SolverManifold;
 
 // Warm starting: cached impulses from previous frame, keyed by body pair.

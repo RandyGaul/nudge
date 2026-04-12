@@ -75,17 +75,18 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	contact_tangent_basis(n, &smf.tangent1, &smf.tangent2);
 	smf.patch_area = estimate_patch_area(im->m.contacts, im->m.count);
 	smf.patch_radius = 0.6667f * sqrtf(smf.patch_area * (1.0f / 3.14159265f));
-	// Compute cross(r, dir) and I_w * cross(r, dir) once, reuse for effective mass.
-	smf.rct1_a = cross(smf.centroid_r_a, smf.tangent1); smf.rct1_b = cross(smf.centroid_r_b, smf.tangent1);
-	smf.rct2_a = cross(smf.centroid_r_a, smf.tangent2); smf.rct2_b = cross(smf.centroid_r_b, smf.tangent2);
-	smf.w_t1_a = inv_inertia_world_mul(a, smf.rct1_a); smf.w_t1_b = inv_inertia_world_mul(b, smf.rct1_b);
-	smf.w_t2_a = inv_inertia_world_mul(a, smf.rct2_a); smf.w_t2_b = inv_inertia_world_mul(b, smf.rct2_b);
-	smf.w_tw_a = inv_inertia_world_mul(a, n); smf.w_tw_b = inv_inertia_world_mul(b, n);
-	float k_t1 = inv_mass_sum + dot(smf.w_t1_a, smf.rct1_a) + dot(smf.w_t1_b, smf.rct1_b);
+	// Compute cross(r, dir) and I_w * cross(r, dir) for effective mass computation.
+	// Not stored in SolverManifold -- both scalar and SIMD solve paths recompute inline.
+	v3 rct1_a = cross(smf.centroid_r_a, smf.tangent1), rct1_b = cross(smf.centroid_r_b, smf.tangent1);
+	v3 rct2_a = cross(smf.centroid_r_a, smf.tangent2), rct2_b = cross(smf.centroid_r_b, smf.tangent2);
+	v3 wt1_a = inv_inertia_world_mul(a, rct1_a), wt1_b = inv_inertia_world_mul(b, rct1_b);
+	v3 wt2_a = inv_inertia_world_mul(a, rct2_a), wt2_b = inv_inertia_world_mul(b, rct2_b);
+	v3 wtw_a = inv_inertia_world_mul(a, n), wtw_b = inv_inertia_world_mul(b, n);
+	float k_t1 = inv_mass_sum + dot(wt1_a, rct1_a) + dot(wt1_b, rct1_b);
 	smf.eff_mass_t1 = k_t1 > 1e-12f ? 1.0f / k_t1 : 0.0f;
-	float k_t2 = inv_mass_sum + dot(smf.w_t2_a, smf.rct2_a) + dot(smf.w_t2_b, smf.rct2_b);
+	float k_t2 = inv_mass_sum + dot(wt2_a, rct2_a) + dot(wt2_b, rct2_b);
 	smf.eff_mass_t2 = k_t2 > 1e-12f ? 1.0f / k_t2 : 0.0f;
-	float k_twist = dot(smf.w_tw_a, n) + dot(smf.w_tw_b, n);
+	float k_twist = dot(wtw_a, n) + dot(wtw_b, n);
 	smf.eff_mass_twist = k_twist > 1e-12f ? 1.0f / k_twist : 0.0f;
 
 	// Warm start matching
