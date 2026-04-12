@@ -926,7 +926,8 @@ static void scene_cylinder_playground_setup()
 			.type = SHAPE_CYLINDER,
 			.cylinder = { .half_height = 0.8f, .radius = 0.4f },
 		});
-		apush(g_draw_list, ((DrawEntry){ c, g_mesh_cylinder, V3(1, 1, 1), V3(0.9f, 0.6f, 0.3f) }));
+		int side_mesh = render_create_cylinder_mesh(0.4f, 0.8f);
+		apush(g_draw_list, ((DrawEntry){ c, side_mesh, V3(1, 1, 1), V3(0.9f, 0.6f, 0.3f) }));
 	}
 
 	// --- Boxes (test cyl-box pairs) ---

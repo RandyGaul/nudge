@@ -561,93 +561,15 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 	return 1;
 }
 
-// Analytical capsule-box: transform capsule to box local space, clamp segment to box,
-// compute closest point, then project back. Much faster than capsule_hull (GJK + SAT).
+// Capsule-box: route through capsule-hull with the unit box hull.
+// The previous analytical approach (iterative segment-box clamping) failed for
+// tilted capsules in deep penetration — the 2-iteration clamp didn't converge,
+// giving wildly underreported penetration and flickering contacts. The hull path
+// (GJK + SAT) handles all orientations robustly.
 int collide_capsule_box(Capsule a, Box b, Manifold* manifold)
 {
-	quat inv_rot = inv(b.rotation);
-	v3 lp = rotate(inv_rot, sub(a.p, b.center));
-	v3 lq = rotate(inv_rot, sub(a.q, b.center));
-	v3 he = b.half_extents;
-
-	// Find closest point on segment to box (in box local space).
-	// Clamp segment endpoints to box extents to get approximate closest point on box.
-	v3 seg_dir = sub(lq, lp);
-	float seg_len2 = len2(seg_dir);
-
-	// Find closest point on segment to box surface using iterative clamping.
-	// Start with segment closest point to box center, then clamp to box.
-	float t = seg_len2 > 1e-12f ? -dot(lp, seg_dir) / seg_len2 : 0.5f;
-	t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
-	v3 seg_pt = add(lp, scale(seg_dir, t));
-
-	// Clamp to box = closest point on box to seg_pt.
-	v3 box_pt = V3(seg_pt.x < -he.x ? -he.x : (seg_pt.x > he.x ? he.x : seg_pt.x), seg_pt.y < -he.y ? -he.y : (seg_pt.y > he.y ? he.y : seg_pt.y), seg_pt.z < -he.z ? -he.z : (seg_pt.z > he.z ? he.z : seg_pt.z));
-
-	// Re-project: find closest point on segment to box_pt.
-	float t2 = seg_len2 > 1e-12f ? dot(sub(box_pt, lp), seg_dir) / seg_len2 : 0.5f;
-	t2 = t2 < 0.0f ? 0.0f : (t2 > 1.0f ? 1.0f : t2);
-	v3 seg_pt2 = add(lp, scale(seg_dir, t2));
-
-	// Re-clamp box point to segment's new closest point.
-	v3 box_pt2 = V3(seg_pt2.x < -he.x ? -he.x : (seg_pt2.x > he.x ? he.x : seg_pt2.x), seg_pt2.y < -he.y ? -he.y : (seg_pt2.y > he.y ? he.y : seg_pt2.y), seg_pt2.z < -he.z ? -he.z : (seg_pt2.z > he.z ? he.z : seg_pt2.z));
-
-	v3 diff = sub(seg_pt2, box_pt2);
-	float dist2 = len2(diff);
-
-	if (dist2 > a.radius * a.radius && dist2 > 1e-12f) return 0;
-
-	if (dist2 > 1e-12f) {
-		// diff points from box toward capsule (B->A). Negate for A->B convention.
-		float dist = sqrtf(dist2);
-		v3 local_n = scale(diff, -1.0f / dist);
-		v3 world_n = rotate(b.rotation, local_n);
-		v3 world_pt = add(b.center, rotate(b.rotation, box_pt2));
-		manifold->count = 1;
-		manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius - dist, .feature_id = 0 };
-		return 1;
-	}
-
-	// Deep penetration: capsule segment inside box. Negate face normal for A->B convention.
-	float best_depth = he.x - fabsf(seg_pt2.x);
-	int best_face = seg_pt2.x > 0 ? 3 : 2;
-	float dy = he.y - fabsf(seg_pt2.y);
-	if (dy < best_depth) { best_depth = dy; best_face = seg_pt2.y > 0 ? 5 : 4; }
-	float dz = he.z - fabsf(seg_pt2.z);
-	if (dz < best_depth) { best_depth = dz; best_face = seg_pt2.z > 0 ? 1 : 0; }
-
-	v3 local_n = V3(0, 0, 0);
-	static const int face_axis[6] = {2, 2, 0, 0, 1, 1};
-	static const float face_sign[6] = {-1, 1, -1, 1, -1, 1};
-	int axis = face_axis[best_face];
-	float sign = face_sign[best_face];
-	(&local_n.x)[axis] = -sign;
-	v3 world_n = rotate(b.rotation, local_n);
-
-	// 2-contact manifold: if both capsule endpoints lie inside the box on the same
-	// best face (segment parallel to face), emit a contact per endpoint. Prevents
-	// a capsule resting on a surface from pivoting around a single midpoint contact.
-	int inside_p = fabsf(lp.x) <= he.x && fabsf(lp.y) <= he.y && fabsf(lp.z) <= he.z;
-	int inside_q = fabsf(lq.x) <= he.x && fabsf(lq.y) <= he.y && fabsf(lq.z) <= he.z;
-	if (inside_p && inside_q) {
-		float he_axis = (&he.x)[axis];
-		float dp = he_axis - (&lp.x)[axis] * sign;
-		float dq = he_axis - (&lq.x)[axis] * sign;
-		if (dp >= 0.0f && dq >= 0.0f) {
-			v3 world_p = add(b.center, rotate(b.rotation, lp));
-			v3 world_q = add(b.center, rotate(b.rotation, lq));
-			manifold->count = 2;
-			manifold->contacts[0] = (Contact){ .point = add(world_p, scale(world_n, a.radius)), .normal = world_n, .penetration = a.radius + dp, .feature_id = 0 };
-			manifold->contacts[1] = (Contact){ .point = add(world_q, scale(world_n, a.radius)), .normal = world_n, .penetration = a.radius + dq, .feature_id = 1 };
-			return 1;
-		}
-	}
-
-	v3 world_seg = add(b.center, rotate(b.rotation, seg_pt2));
-	v3 world_pt = add(world_seg, scale(world_n, a.radius));
-	manifold->count = 1;
-	manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius + best_depth, .feature_id = 0 };
-	return 1;
+	ConvexHull bh = { &s_unit_box_hull, b.center, b.rotation, b.half_extents };
+	return collide_capsule_hull(a, bh, manifold);
 }
 
 // -----------------------------------------------------------------------------
@@ -1984,19 +1906,81 @@ static int collide_cylinder_hull_ana(Cylinder a, ConvexHull b, Manifold* manifol
 	// --- Manifold generation by axis type ---
 
 	if (best_type == 0) {
-		// Hull face is reference. Project cylinder axis endpoints onto face plane,
-		// keep those that penetrate (same as capsule-hull contact generation).
+		// Hull face is reference. Two sub-paths depending on the angle between
+		// the face normal and the cylinder axis:
+		//
+		// CAP path (|dot| > 0.7): face is roughly parallel to a cylinder cap.
+		// A single rim-point contact would cause pivoting/instability. Instead,
+		// project hull verts onto the cap plane and clip against the cap disk,
+		// giving up to MAX_CONTACTS multi-point support (same as Family 2).
+		//
+		// SIDE path (|dot| < 0.7): face is roughly perpendicular to the axis.
+		// Use the capsule-style approach: offset axis endpoints by full radius
+		// toward the face, giving a 2-point contact strip.
+		v3 neg_n = neg(best_n);
+		float axis_alignment = fabsf(dot(best_n, cyl_axis));
+
+		if (axis_alignment > 0.7f) {
+			// CAP path: pick the cap whose outward normal faces the hull face.
+			// cap_n points outward from the chosen cap (toward the hull).
+			v3 cap_n = dot(best_n, cyl_axis) > 0.0f ? neg(cyl_axis) : cyl_axis;
+			v3 cap_center = add(a.center, scale(cap_n, a.half_height));
+			float cap_d = dot(cap_center, cap_n); // cap plane offset
+
+			// Try projecting hull verts onto cap plane, keep those inside the disk.
+			int cp = 0;
+			v3 points[MAX_CONTACTS]; float depths[MAX_CONTACTS];
+			for (int j = 0; j < hull->vert_count && cp < MAX_CONTACTS; j++) {
+				v3 wv = add(b.center, rotate(b.rotation, hmul(hull->verts[j], b.scale)));
+				float d = dot(wv, cap_n) - cap_d;
+				if (d > 0.0f) continue; // outside cap plane
+				v3 on_cap = sub(wv, scale(cap_n, d));
+				v3 radial = sub(on_cap, cap_center);
+				if (len2(radial) > a.radius * a.radius) continue;
+				points[cp] = wv; depths[cp] = -d; cp++;
+			}
+			// Fallback for large hulls (no verts inside cap disk): project cap
+			// center onto the hull face and use that as the contact point.
+			if (cp == 0) {
+				float face_d = dot(cap_center, best_n) - best_face_plane.offset;
+				if (face_d < 0.0f) {
+					// Cap center is behind the face — contact at cap center projected onto face.
+					points[0] = sub(cap_center, scale(best_n, face_d));
+					depths[0] = -face_d;
+				} else {
+					// Cap center is above the face — use cap center directly.
+					points[0] = cap_center;
+					depths[0] = -best_sep;
+				}
+				cp = 1;
+			}
+			manifold->count = cp;
+			for (int i = 0; i < cp; i++)
+				manifold->contacts[i] = (Contact){ .point = points[i], .normal = neg_n, .penetration = depths[i] };
+			return 1;
+		}
+
+		// SIDE path: project axis endpoints offset by full radius toward face.
+		float axial_proj = dot(neg_n, cyl_axis);
+		v3 perp = sub(neg_n, scale(cyl_axis, axial_proj));
+		float perp_len2 = len2(perp);
+		v3 surface_offset;
+		if (perp_len2 > 1e-8f) surface_offset = scale(perp, a.radius / sqrtf(perp_len2));
+		else surface_offset = V3(0, 0, 0);
+
 		float plane_d = best_face_plane.offset;
-		float dp = dot(cyl_p, best_n) - plane_d;
-		float dq = dot(cyl_q, best_n) - plane_d;
+		v3 sp = add(cyl_p, surface_offset);
+		v3 sq = add(cyl_q, surface_offset);
+		float dp = dot(sp, best_n);
+		float dq = dot(sq, best_n);
 		int cp = 0;
 		v3 points[2]; float depths[2];
-		if (dp < a.radius) { points[cp] = sub(cyl_p, scale(best_n, a.radius)); depths[cp] = a.radius - dp; cp++; }
-		if (dq < a.radius) { points[cp] = sub(cyl_q, scale(best_n, a.radius)); depths[cp] = a.radius - dq; cp++; }
-		if (cp == 0) { cp = 1; points[0] = sub(dp < dq ? cyl_p : cyl_q, scale(best_n, a.radius)); depths[0] = -best_sep; }
+		if (dp < plane_d) { points[cp] = sp; depths[cp] = plane_d - dp; cp++; }
+		if (dq < plane_d) { points[cp] = sq; depths[cp] = plane_d - dq; cp++; }
+		if (cp == 0) { cp = 1; points[0] = dp < dq ? sp : sq; depths[0] = -best_sep; }
 		manifold->count = cp;
 		for (int i = 0; i < cp; i++)
-			manifold->contacts[i] = (Contact){ .point = points[i], .normal = neg(best_n), .penetration = depths[i] };
+			manifold->contacts[i] = (Contact){ .point = points[i], .normal = neg_n, .penetration = depths[i] };
 		return 1;
 	}
 
@@ -2155,26 +2139,30 @@ static int collide_cylinder_cylinder_ana(Cylinder a, Cylinder b, Manifold* manif
 
 	// --- Contact generation ---
 	if (best_type == 0) {
-		// A's axis wins: cap of A is the reference. Project B's axis endpoints
-		// onto A's cap plane and keep those within disk radius.
+		// A's cap wins as reference. Project B's cylinder surface onto A's cap plane.
+		// B's surface offset uses the same perp-to-axis formula as cyl-hull face gen.
 		v3 cap_n = scale(axis_a, (float)best_sign);
 		float cap_d = dot(a.center, cap_n) + a.half_height;
-		// Project b's endpoints onto cap plane.
-		float d_bp = dot(b_p, cap_n) - cap_d;
-		float d_bq = dot(b_q, cap_n) - cap_d;
+		v3 neg_cap = neg(cap_n);
+		float b_axial = dot(neg_cap, axis_b);
+		v3 b_perp = sub(neg_cap, scale(axis_b, b_axial));
+		float bp2 = len2(b_perp);
+		v3 b_off = bp2 > 1e-8f ? scale(b_perp, b.radius / sqrtf(bp2)) : V3(0,0,0);
+		v3 bsp = add(b_p, b_off);
+		v3 bsq = add(b_q, b_off);
+		float d_bp = dot(bsp, cap_n);
+		float d_bq = dot(bsq, cap_n);
 		int cp = 0;
 		v3 points[2]; float depths[2];
-		if (d_bp < b.radius) {
-			v3 pt = sub(b_p, scale(cap_n, b.radius));
-			v3 radial = sub(pt, add(a.center, scale(cap_n, a.half_height)));
+		if (d_bp < cap_d) {
+			v3 radial = sub(bsp, add(a.center, scale(cap_n, a.half_height)));
 			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
-			if (len2(radial) <= a.radius * a.radius) { points[cp] = pt; depths[cp] = b.radius - d_bp; cp++; }
+			if (len2(radial) <= a.radius * a.radius) { points[cp] = bsp; depths[cp] = cap_d - d_bp; cp++; }
 		}
-		if (d_bq < b.radius) {
-			v3 pt = sub(b_q, scale(cap_n, b.radius));
-			v3 radial = sub(pt, add(a.center, scale(cap_n, a.half_height)));
+		if (d_bq < cap_d) {
+			v3 radial = sub(bsq, add(a.center, scale(cap_n, a.half_height)));
 			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
-			if (len2(radial) <= a.radius * a.radius) { points[cp] = pt; depths[cp] = b.radius - d_bq; cp++; }
+			if (len2(radial) <= a.radius * a.radius) { points[cp] = bsq; depths[cp] = cap_d - d_bq; cp++; }
 		}
 		if (cp == 0) { cp = 1; points[0] = add(a.center, scale(cap_n, a.half_height)); depths[0] = -best_sep; }
 		manifold->count = cp;
@@ -2184,25 +2172,29 @@ static int collide_cylinder_cylinder_ana(Cylinder a, Cylinder b, Manifold* manif
 	}
 
 	if (best_type == 1) {
-		// B's axis wins: cap of B is the reference. Same as above with A/B swapped,
-		// but we keep the A->B normal convention.
+		// B's cap wins as reference. Same as type 0 with A/B roles swapped.
 		v3 cap_n = scale(axis_b, (float)best_sign);
 		float cap_d = dot(b.center, cap_n) + b.half_height;
-		float d_ap = dot(a_p, cap_n) - cap_d;
-		float d_aq = dot(a_q, cap_n) - cap_d;
+		v3 neg_cap = neg(cap_n);
+		float a_axial = dot(neg_cap, axis_a);
+		v3 a_perp = sub(neg_cap, scale(axis_a, a_axial));
+		float ap2 = len2(a_perp);
+		v3 a_off = ap2 > 1e-8f ? scale(a_perp, a.radius / sqrtf(ap2)) : V3(0,0,0);
+		v3 asp = add(a_p, a_off);
+		v3 asq = add(a_q, a_off);
+		float d_ap = dot(asp, cap_n);
+		float d_aq = dot(asq, cap_n);
 		int cp = 0;
 		v3 points[2]; float depths[2];
-		if (d_ap < a.radius) {
-			v3 pt = sub(a_p, scale(cap_n, a.radius));
-			v3 radial = sub(pt, add(b.center, scale(cap_n, b.half_height)));
+		if (d_ap < cap_d) {
+			v3 radial = sub(asp, add(b.center, scale(cap_n, b.half_height)));
 			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
-			if (len2(radial) <= b.radius * b.radius) { points[cp] = pt; depths[cp] = a.radius - d_ap; cp++; }
+			if (len2(radial) <= b.radius * b.radius) { points[cp] = asp; depths[cp] = cap_d - d_ap; cp++; }
 		}
-		if (d_aq < a.radius) {
-			v3 pt = sub(a_q, scale(cap_n, a.radius));
-			v3 radial = sub(pt, add(b.center, scale(cap_n, b.half_height)));
+		if (d_aq < cap_d) {
+			v3 radial = sub(asq, add(b.center, scale(cap_n, b.half_height)));
 			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
-			if (len2(radial) <= b.radius * b.radius) { points[cp] = pt; depths[cp] = a.radius - d_aq; cp++; }
+			if (len2(radial) <= b.radius * b.radius) { points[cp] = asq; depths[cp] = cap_d - d_aq; cp++; }
 		}
 		if (cp == 0) { cp = 1; points[0] = add(b.center, scale(cap_n, b.half_height)); depths[0] = -best_sep; }
 		manifold->count = cp;

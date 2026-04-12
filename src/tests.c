@@ -332,6 +332,89 @@ static void test_floor_contacts()
 	TEST_ASSERT(m.contacts[0].penetration > 0.0f);
 }
 
+// Multi-frame simulation: capsule should settle on floor, not fall through.
+static void test_capsule_settles_on_floor()
+{
+	float dt = 1.0f / 60.0f;
+
+	TEST_BEGIN("capsule settles on floor (vertical)");
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+	Body cap_b = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, cap_b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.5f, .radius = 0.3f } });
+	for (int i = 0; i < 300; i++) {
+		world_step(w, dt);
+		float y = body_get_position(w, cap_b).y;
+		if (i % 60 == 0) printf("  vcap f=%d y=%.4f\n", i, y);
+	}
+	float y = body_get_position(w, cap_b).y;
+	TEST_ASSERT(y > 1.0f);
+	TEST_ASSERT(y < 3.0f);
+	destroy_world(w);
+
+	TEST_BEGIN("capsule settles on floor (tilted 30 deg)");
+	w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+	{
+		float ang30 = 30.0f * 3.14159265f / 180.0f;
+		quat tilt30 = { 0, 0, sinf(ang30 * 0.5f), cosf(ang30 * 0.5f) };
+		cap_b = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = tilt30, .mass = 1.0f });
+		body_add_shape(w, cap_b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.5f, .radius = 0.3f } });
+	}
+	for (int i = 0; i < 300; i++) {
+		world_step(w, dt);
+		y = body_get_position(w, cap_b).y;
+		if (i < 5 || i % 30 == 0 || y < 0.0f)
+			printf("  tilt30cap f=%d y=%.4f\n", i, y);
+		if (y < -1.0f) { printf("  CAPSULE FELL THROUGH at frame %d y=%.4f\n", i, y); break; }
+	}
+	TEST_ASSERT(y > 0.5f);
+	TEST_ASSERT(y < 3.0f);
+	destroy_world(w);
+
+	// Direct narrowphase check: exact geometry where the bug manifests.
+	TEST_BEGIN("capsule-hull tilted -45 direct manifold check");
+	{
+		float a45 = -45.0f * 3.14159265f / 180.0f;
+		quat r45 = { 0, 0, sinf(a45 * 0.5f), cosf(a45 * 0.5f) };
+		v3 ctr = V3(0, 0.629f, 0);
+		v3 wp = add(ctr, rotate(r45, V3(0, -0.5f, 0)));
+		v3 wq = add(ctr, rotate(r45, V3(0, 0.5f, 0)));
+		Capsule tc = { wp, wq, 0.3f };
+		ConvexHull bh = { hull_unit_box(), V3(0,-1,0), quat_identity(), V3(10,1,10) };
+		printf("  cap.p=(%.4f, %.4f) cap.q=(%.4f, %.4f) rad=0.3\n", tc.p.x, tc.p.y, tc.q.x, tc.q.y);
+		printf("  expected bottom of hemisphere: y=%.4f\n", tc.p.y - 0.3f);
+		GJK_Result gjk = gjk_query_segment_hull(tc.p, tc.q, bh);
+		printf("  GJK seg-hull: dist=%.5f\n", gjk.distance);
+		printf("  expected pen = radius - dist = %.5f\n", 0.3f - gjk.distance);
+		Manifold m = {0};
+		int hit = collide_capsule_hull(tc, bh, &m);
+		printf("  capsule_hull: hit=%d count=%d\n", hit, m.count);
+		for (int c = 0; c < m.count; c++)
+			printf("    c%d: n=(%.4f,%.4f,%.4f) pen=%.5f pt=(%.4f,%.4f,%.4f)\n", c, m.contacts[c].normal.x, m.contacts[c].normal.y, m.contacts[c].normal.z, m.contacts[c].penetration, m.contacts[c].point.x, m.contacts[c].point.y, m.contacts[c].point.z);
+		TEST_ASSERT(hit);
+		if (hit) TEST_ASSERT(m.contacts[0].penetration > 0.01f);
+	}
+
+	TEST_BEGIN("capsule settles on floor (horizontal)");
+	w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+	float ang = 3.14159265f * 0.5f;
+	cap_b = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = { 0, 0, sinf(ang*0.5f), cosf(ang*0.5f) }, .mass = 1.0f });
+	body_add_shape(w, cap_b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.5f, .radius = 0.3f } });
+	for (int i = 0; i < 300; i++) {
+		world_step(w, dt);
+		y = body_get_position(w, cap_b).y;
+		if (i % 60 == 0) printf("  hcap f=%d y=%.4f\n", i, y);
+	}
+	TEST_ASSERT(y > 1.0f);
+	TEST_ASSERT(y < 3.0f);
+	destroy_world(w);
+}
+
 // Multi-frame simulation: sphere should settle on floor, not fall through.
 static void test_sphere_settles_on_floor()
 {
@@ -1645,6 +1728,42 @@ static void test_cyl_box_native()
 		}
 		run_cyl_case(cases[i]);
 	}
+}
+
+// ============================================================================
+// Debug: tilted cylinder on floor — repro for fall-through bug.
+
+static void test_tilted_cyl_on_floor()
+{
+	TEST_BEGIN("tilted cylinder settles on floor");
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+
+	float ang = 10.0f * 3.14159265f / 180.0f;
+	quat tilt = { 0, 0, sinf(ang * 0.5f), cosf(ang * 0.5f) };
+	Body cyl_b = create_body(w, (BodyParams){ .position = V3(0, 2, 0), .rotation = tilt, .mass = 1.0f, .friction = 0.5f });
+	body_add_shape(w, cyl_b, (ShapeParams){ .type = SHAPE_CYLINDER, .cylinder = { .half_height = 0.5f, .radius = 0.4f } });
+
+	float dt = 1.0f / 60.0f;
+	int fell = 0;
+	for (int i = 0; i < 180; i++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, cyl_b);
+		if (i < 60 || i % 30 == 0 || pos.y < 0.0f) {
+			const Contact* contacts;
+			int nc = world_get_contacts(w, &contacts);
+			printf("  tilt f=%d pos=(%.3f,%.3f,%.3f) nc=%d", i, pos.x, pos.y, pos.z, nc);
+			for (int c = 0; c < nc && c < 4; c++)
+				printf(" [n=(%.2f,%.2f,%.2f) pen=%.4f pt=(%.2f,%.2f,%.2f)]", contacts[c].normal.x, contacts[c].normal.y, contacts[c].normal.z, contacts[c].penetration, contacts[c].point.x, contacts[c].point.y, contacts[c].point.z);
+			printf("\n");
+		}
+		if (pos.y < -1.0f) { printf("  FELL THROUGH at frame %d\n", i); fell = 1; break; }
+	}
+	float y = body_get_position(w, cyl_b).y;
+	TEST_ASSERT(!fell);
+	TEST_ASSERT(y > 0.0f);
+	destroy_world(w);
 }
 
 // ============================================================================
@@ -11717,6 +11836,7 @@ static void run_tests()
 	test_sphere_box();
 	test_capsule_box();
 	test_floor_contacts();
+	test_capsule_settles_on_floor();
 	test_sphere_settles_on_floor();
 	test_gjk_dispatch();
 	test_gjk_distance();
@@ -11732,6 +11852,7 @@ static void run_tests()
 	test_cyl_hull_fuzz();
 	test_cyl_box_native();
 	test_cyl_cyl_native();
+	test_tilted_cyl_on_floor();
 	test_quickhull();
 
 	// Compact hull converters -- thorough correctness tests.
@@ -13450,4 +13571,41 @@ static void test_pyramid_yank(int base, int frames)
 	}
 	afree(bodies);
 	destroy_world(w);
+}
+
+static void test_capsule_box_tilted_direct()
+{
+	TEST_BEGIN("capsule-box tilted -45 direct manifold");
+	// Exact geometry from frame 41: capsule at y=0.629, tilted -45 degrees
+	float ang = -45.0f * 3.14159265f / 180.0f;
+	float s45 = sinf(ang * 0.5f), c45 = cosf(ang * 0.5f);
+	// Capsule endpoints
+	v3 center = V3(0, 0.629f, 0);
+	quat rot = { 0, 0, s45, c45 };
+	v3 lp_local = V3(0, -0.5f, 0), lq_local = V3(0, 0.5f, 0);
+	v3 wp = add(center, rotate(rot, lp_local));
+	v3 wq = add(center, rotate(rot, lq_local));
+	Capsule cap = { wp, wq, 0.3f };
+	Box floor_box = { V3(0, -1, 0), quat_identity(), V3(10, 1, 10) };
+
+	printf("  cap.p = (%.4f, %.4f, %.4f)\n", cap.p.x, cap.p.y, cap.p.z);
+	printf("  cap.q = (%.4f, %.4f, %.4f)\n", cap.q.x, cap.q.y, cap.q.z);
+	printf("  floor top = y=0\n");
+
+	// Test via capsule_hull (what capsule_box now routes to)
+	Manifold m = {0};
+	ConvexHull bh = { hull_unit_box(), floor_box.center, floor_box.rotation, floor_box.half_extents };
+	int hit = collide_capsule_hull(cap, bh, &m);
+	printf("  capsule_hull: hit=%d count=%d\n", hit, m.count);
+	for (int i = 0; i < m.count; i++)
+		printf("    [%d] n=(%.3f,%.3f,%.3f) pen=%.5f pt=(%.3f,%.3f,%.3f)\n", i, m.contacts[i].normal.x, m.contacts[i].normal.y, m.contacts[i].normal.z, m.contacts[i].penetration, m.contacts[i].point.x, m.contacts[i].point.y, m.contacts[i].point.z);
+
+	// Expected: capsule bottom hemisphere at y = wp.y - 0.3 = 0.275 - 0.3 = -0.025
+	// Penetration should be ~0.025
+	TEST_ASSERT(hit);
+	TEST_ASSERT(m.contacts[0].penetration > 0.01f);
+
+	// Also test GJK distance directly
+	GJK_Result r = gjk_query_segment_hull(cap.p, cap.q, bh);
+	printf("  GJK seg-hull: distance=%.5f pt1=(%.3f,%.3f,%.3f) pt2=(%.3f,%.3f,%.3f)\n", r.distance, r.point1.x, r.point1.y, r.point1.z, r.point2.x, r.point2.y, r.point2.z);
 }
