@@ -43,10 +43,12 @@ static void test_pgs_vs_ldl_single_rigid()
 
 	// Two bodies: A static, B dynamic hanging below
 	BodyHot bodies_pgs[2];
+	BodyState states_pgs[2] = {0};
+	states_pgs[0].rotation = quat_identity();
+	states_pgs[1].rotation = quat_identity();
 	bodies_pgs[0] = (BodyHot){0}; // static
-	bodies_pgs[0].rotation = quat_identity();
-	bodies_pgs[1] = make_body(1, 1);
-	bodies_pgs[1].position = V3(0, -1, 0);
+	bodies_pgs[1] = make_body(1, 1).hot;
+	states_pgs[1].position = V3(0, -1, 0);
 	// Apply gravity to B's velocity
 	bodies_pgs[1].velocity.y += gravity_y * sub_dt;
 
@@ -68,9 +70,9 @@ static void test_pgs_vs_ldl_single_rigid()
 	SoftTestWorld sw = {0};
 	sw.body_count = 2;
 	sw.bodies[0] = (BodyHot){0};
-	sw.bodies[0].rotation = quat_identity();
-	sw.bodies[1] = make_body(1, 1);
-	sw.bodies[1].position = V3(0, -1, 0);
+	sw.states[0].rotation = quat_identity();
+	sw.bodies[1] = make_body(1, 1).hot;
+	sw.states[1].position = V3(0, -1, 0);
 	sw.bodies[1].velocity.y += gravity_y * sub_dt;
 
 	sw.joint_count = 1;
@@ -133,13 +135,14 @@ static void test_pgs_vs_ldl_chain_gravity()
 
 	// PGS path
 	BodyHot bodies_pgs[3];
+	BodyState states_pgs[3] = {0};
+	for (int si = 0; si < 3; si++) states_pgs[si].rotation = quat_identity();
 	bodies_pgs[0] = (BodyHot){0}; // static
-	bodies_pgs[0].rotation = quat_identity();
-	bodies_pgs[1] = make_body(1, 1);
-	bodies_pgs[1].position = V3(0, -1, 0);
+	bodies_pgs[1] = make_body(1, 1).hot;
+	states_pgs[1].position = V3(0, -1, 0);
 	bodies_pgs[1].velocity.y += g * sub_dt;
-	bodies_pgs[2] = make_body(1, 1);
-	bodies_pgs[2].position = V3(0, -2, 0);
+	bodies_pgs[2] = make_body(1, 1).hot;
+	states_pgs[2].position = V3(0, -2, 0);
 	bodies_pgs[2].velocity.y += g * sub_dt;
 
 	SolverJoint pgs_sols[2] = {
@@ -169,12 +172,12 @@ static void test_pgs_vs_ldl_chain_gravity()
 	SoftTestWorld sw = {0};
 	sw.body_count = 3;
 	sw.bodies[0] = (BodyHot){0};
-	sw.bodies[0].rotation = quat_identity();
-	sw.bodies[1] = make_body(1, 1);
-	sw.bodies[1].position = V3(0, -1, 0);
+	sw.states[0].rotation = quat_identity();
+	sw.bodies[1] = make_body(1, 1).hot;
+	sw.states[1].position = V3(0, -1, 0);
 	sw.bodies[1].velocity.y += g * sub_dt;
-	sw.bodies[2] = make_body(1, 1);
-	sw.bodies[2].position = V3(0, -2, 0);
+	sw.bodies[2] = make_body(1, 1).hot;
+	sw.states[2].position = V3(0, -2, 0);
 	sw.bodies[2].velocity.y += g * sub_dt;
 
 	sw.joint_count = 2;
@@ -238,19 +241,20 @@ static void test_pgs_vs_ldl_star_gravity()
 
 	// PGS path
 	BodyHot bodies_pgs[5];
+	BodyState states_pgs[5] = {0};
+	for (int si = 0; si < 5; si++) states_pgs[si].rotation = quat_identity();
 	bodies_pgs[0] = (BodyHot){0}; // static anchor
-	bodies_pgs[0].rotation = quat_identity();
-	bodies_pgs[1] = make_body(5, 5); // hub
-	bodies_pgs[1].position = V3(0, -1, 0);
+	bodies_pgs[1] = make_body(5, 5).hot; // hub
+	states_pgs[1].position = V3(0, -1, 0);
 	bodies_pgs[1].velocity.y += g * sub_dt;
-	bodies_pgs[2] = make_body(1, 1);
-	bodies_pgs[2].position = V3(1, -1, 0);
+	bodies_pgs[2] = make_body(1, 1).hot;
+	states_pgs[2].position = V3(1, -1, 0);
 	bodies_pgs[2].velocity.y += g * sub_dt;
-	bodies_pgs[3] = make_body(1, 1);
-	bodies_pgs[3].position = V3(-1, -1, 0);
+	bodies_pgs[3] = make_body(1, 1).hot;
+	states_pgs[3].position = V3(-1, -1, 0);
 	bodies_pgs[3].velocity.y += g * sub_dt;
-	bodies_pgs[4] = make_body(1, 1);
-	bodies_pgs[4].position = V3(0, -1, 1);
+	bodies_pgs[4] = make_body(1, 1).hot;
+	states_pgs[4].position = V3(0, -1, 1);
 	bodies_pgs[4].velocity.y += g * sub_dt;
 
 	SolverJoint pgs_sols[4] = {
@@ -282,18 +286,18 @@ static void test_pgs_vs_ldl_star_gravity()
 	SoftTestWorld sw = {0};
 	sw.body_count = 5;
 	sw.bodies[0] = (BodyHot){0};
-	sw.bodies[0].rotation = quat_identity();
-	sw.bodies[1] = make_body(5, 5);
-	sw.bodies[1].position = V3(0, -1, 0);
+	sw.states[0].rotation = quat_identity();
+	sw.bodies[1] = make_body(5, 5).hot;
+	sw.states[1].position = V3(0, -1, 0);
 	sw.bodies[1].velocity.y += g * sub_dt;
-	sw.bodies[2] = make_body(1, 1);
-	sw.bodies[2].position = V3(1, -1, 0);
+	sw.bodies[2] = make_body(1, 1).hot;
+	sw.states[2].position = V3(1, -1, 0);
 	sw.bodies[2].velocity.y += g * sub_dt;
-	sw.bodies[3] = make_body(1, 1);
-	sw.bodies[3].position = V3(-1, -1, 0);
+	sw.bodies[3] = make_body(1, 1).hot;
+	sw.states[3].position = V3(-1, -1, 0);
 	sw.bodies[3].velocity.y += g * sub_dt;
-	sw.bodies[4] = make_body(1, 1);
-	sw.bodies[4].position = V3(0, -1, 1);
+	sw.bodies[4] = make_body(1, 1).hot;
+	sw.states[4].position = V3(0, -1, 1);
 	sw.bodies[4].velocity.y += g * sub_dt;
 
 	sw.joint_count = 4;
@@ -357,14 +361,15 @@ static void test_pgs_vs_ldl_star_shattering()
 
 	// PGS path
 	BodyHot bodies_pgs[9];
+	BodyState states_pgs[9] = {0};
+	for (int si = 0; si < 9; si++) states_pgs[si].rotation = quat_identity();
 	bodies_pgs[0] = (BodyHot){0};
-	bodies_pgs[0].rotation = quat_identity();
-	bodies_pgs[1] = make_body(5, 5);
-	bodies_pgs[1].position = V3(0, -1, 0);
+	bodies_pgs[1] = make_body(5, 5).hot;
+	states_pgs[1].position = V3(0, -1, 0);
 	bodies_pgs[1].velocity.y += g * sub_dt;
 	for (int i = 2; i < nb; i++) {
-		bodies_pgs[i] = make_body(1, 1);
-		bodies_pgs[i].position = V3((float)(i - 5), -1, (float)(i % 3 - 1));
+		bodies_pgs[i] = make_body(1, 1).hot;
+		states_pgs[i].position = V3((float)(i - 5), -1, (float)(i % 3 - 1));
 		bodies_pgs[i].velocity.y += g * sub_dt;
 	}
 
@@ -397,13 +402,13 @@ static void test_pgs_vs_ldl_star_shattering()
 	SoftTestWorld sw = {0};
 	sw.body_count = nb;
 	sw.bodies[0] = (BodyHot){0};
-	sw.bodies[0].rotation = quat_identity();
-	sw.bodies[1] = make_body(5, 5);
-	sw.bodies[1].position = V3(0, -1, 0);
+	sw.states[0].rotation = quat_identity();
+	sw.bodies[1] = make_body(5, 5).hot;
+	sw.states[1].position = V3(0, -1, 0);
 	sw.bodies[1].velocity.y += g * sub_dt;
 	for (int i = 2; i < nb; i++) {
-		sw.bodies[i] = make_body(1, 1);
-		sw.bodies[i].position = V3((float)(i - 5), -1, (float)(i % 3 - 1));
+		sw.bodies[i] = make_body(1, 1).hot;
+		sw.states[i].position = V3((float)(i - 5), -1, (float)(i % 3 - 1));
 		sw.bodies[i].velocity.y += g * sub_dt;
 	}
 

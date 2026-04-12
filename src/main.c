@@ -362,7 +362,7 @@ static void mouse_update_drag(float mx, float my)
 	// Move anchor body to new target
 	WorldInternal* w = (WorldInternal*)g_world.id;
 	int anchor_idx = handle_index(g_mouse_anchor);
-	w->body_hot[anchor_idx].position = target;
+	w->body_state[anchor_idx].position = target;
 
 	// Keep dragged body's island awake
 	int joint_idx = handle_index(g_mouse_joint);
@@ -475,7 +475,7 @@ void update()
 					}
 					WorldInternal* rw = (WorldInternal*)g_world.id;
 					int ai = handle_index(g_mouse_anchor);
-					RecordedFrame rf = { .type = 1, .body_draw_idx = g_rec_body_draw_idx, .local_hit = g_mouse_local_hit, .anchor_pos = rw->body_hot[ai].position, .ray_dist = g_mouse_ray_dist };
+					RecordedFrame rf = { .type = 1, .body_draw_idx = g_rec_body_draw_idx, .local_hit = g_mouse_local_hit, .anchor_pos = rw->body_state[ai].position, .ray_dist = g_mouse_ray_dist };
 					apush(g_recorded_frames, rf);
 				} else if (g_recording) {
 					apush(g_recorded_frames, ((RecordedFrame){ .type = 0 }));
@@ -485,7 +485,7 @@ void update()
 				if (g_recording && g_mouse_body.id) {
 					WorldInternal* rw = (WorldInternal*)g_world.id;
 					int ai = handle_index(g_mouse_anchor);
-					RecordedFrame rf = { .type = 2, .anchor_pos = rw->body_hot[ai].position };
+					RecordedFrame rf = { .type = 2, .anchor_pos = rw->body_state[ai].position };
 					apush(g_recorded_frames, rf);
 				} else if (g_recording) {
 					apush(g_recorded_frames, ((RecordedFrame){ .type = 0 }));
@@ -564,7 +564,7 @@ void update()
 				g_mouse_joint = create_ball_socket(g_world, (BallSocketParams){ .body_a = g_mouse_anchor, .body_b = target, .local_offset_a = V3(0,0,0), .local_offset_b = rf->local_hit, .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
 				g_mouse_body = target;
 			} else if (rf->type == 2 && g_mouse_anchor.id) {
-				pw->body_hot[handle_index(g_mouse_anchor)].position = rf->anchor_pos;
+				pw->body_state[handle_index(g_mouse_anchor)].position = rf->anchor_pos;
 			} else if (rf->type == 3 && g_mouse_anchor.id) {
 				mouse_end_drag();
 			}
@@ -774,8 +774,8 @@ void draw()
 		while (ji >= 0) {
 			JointInternal* j = &draw_w->joints[ji];
 			int ba = j->body_a, bb = j->body_b;
-			v3 pa = draw_w->body_hot[ba].position;
-			v3 pb = draw_w->body_hot[bb].position;
+			v3 pa = draw_w->body_state[ba].position;
+			v3 pb = draw_w->body_state[bb].position;
 			render_debug_line(pa, pb, V3(1.0f, 0.7f, 0.2f));
 			ji = j->island_next;
 		}
@@ -790,7 +790,7 @@ void draw()
 	if (g_mouse_body.id) {
 		WorldInternal* w = (WorldInternal*)g_world.id;
 		int anchor_idx = handle_index(g_mouse_anchor);
-		v3 target = w->body_hot[anchor_idx].position;
+		v3 target = w->body_state[anchor_idx].position;
 		v3 body_pos = body_get_position(g_world, g_mouse_body);
 		quat body_rot = body_get_rotation(g_world, g_mouse_body);
 		v3 attach = add(body_pos, rotate(body_rot, g_mouse_local_hit));
@@ -837,7 +837,7 @@ void draw()
 			if (pw->body_hot[i].inv_mass == 0.0f) continue;
 			int leaf = pw->body_cold[i].bvh_leaf;
 			if (leaf < 0) continue;
-			AABB tight_bb = body_aabb(&pw->body_hot[i], &pw->body_cold[i]);
+			AABB tight_bb = body_aabb(&pw->body_state[i], &pw->body_cold[i]);
 			v3 fmin = pw->bvh_dynamic->leaves[leaf].fat_min;
 			v3 fmax = pw->bvh_dynamic->leaves[leaf].fat_max;
 			int stale = tight_bb.min.x < fmin.x || tight_bb.min.y < fmin.y || tight_bb.min.z < fmin.z || tight_bb.max.x > fmax.x || tight_bb.max.y > fmax.y || tight_bb.max.z > fmax.z;

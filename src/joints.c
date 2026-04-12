@@ -4,7 +4,7 @@
 // Accumulates one body's contribution to the packed symmetric K block:
 //   K[BTRI(r,c)] += J_r * M^{-1} * J_c  (for the given side: 0=A, 1=B).
 // Call twice (side=0, side=1) to get the full K = J M^{-1} J^T.
-static void block_K_body_f(const JacobianRow* rows, int dof, int side, const BodyHot* body, float* K_packed)
+static void block_K_body_f(const JacobianRow* rows, int dof, int side, const BodyHot* body, const BodyState* bs, float* K_packed)
 {
 	float im = body->inv_mass;
 	float W[6 * BLOCK_MAX_DOF]; // W[6][dof]: M^{-1} * J^T columns
@@ -14,7 +14,7 @@ static void block_K_body_f(const JacobianRow* rows, int dof, int side, const Bod
 		W[1*dof+d] = im * J[1];
 		W[2*dof+d] = im * J[2];
 		v3 j_ang = V3(J[3], J[4], J[5]);
-		v3 w_ang = inv_inertia_mul(body->rotation, body->inv_inertia_local, j_ang);
+		v3 w_ang = inv_inertia_mul(bs->rotation, bs->inv_inertia_local, j_ang);
 		W[3*dof+d] = w_ang.x;
 		W[4*dof+d] = w_ang.y;
 		W[5*dof+d] = w_ang.z;
@@ -73,16 +73,16 @@ static void spring_compute(SpringParams sp, float dt, float* pos_to_vel, float* 
 
 // Build ball socket effective mass (symmetric 3x3).
 // K = (inv_mass_a + inv_mass_b)*I + skew(r_a)^T * I_a^-1 * skew(r_a) + same for B.
-static void ball_socket_eff_mass(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, float softness, float* out)
+static void ball_socket_eff_mass(BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb, v3 r_a, v3 r_b, float softness, float* out)
 {
 	float inv_m = a->inv_mass + b->inv_mass;
 	float K[6] = { inv_m, 0, 0, inv_m, 0, inv_m };
 
-	v3 ia = a->inv_inertia_local;
+	v3 ia = sa->inv_inertia_local;
 	if (ia.x > 0 || ia.y > 0 || ia.z > 0) {
-		v3 e0 = inv_inertia_mul(a->rotation, ia, V3(0, -r_a.z, r_a.y));
-		v3 e1 = inv_inertia_mul(a->rotation, ia, V3(r_a.z, 0, -r_a.x));
-		v3 e2 = inv_inertia_mul(a->rotation, ia, V3(-r_a.y, r_a.x, 0));
+		v3 e0 = inv_inertia_mul(sa->rotation, ia, V3(0, -r_a.z, r_a.y));
+		v3 e1 = inv_inertia_mul(sa->rotation, ia, V3(r_a.z, 0, -r_a.x));
+		v3 e2 = inv_inertia_mul(sa->rotation, ia, V3(-r_a.y, r_a.x, 0));
 		K[0] += -r_a.z*e0.y + r_a.y*e0.z;
 		K[1] += -r_a.z*e1.y + r_a.y*e1.z;
 		K[2] += -r_a.z*e2.y + r_a.y*e2.z;
@@ -91,11 +91,11 @@ static void ball_socket_eff_mass(BodyHot* a, BodyHot* b, v3 r_a, v3 r_b, float s
 		K[5] += -r_a.y*e2.x + r_a.x*e2.y;
 	}
 
-	v3 ib = b->inv_inertia_local;
+	v3 ib = sb->inv_inertia_local;
 	if (ib.x > 0 || ib.y > 0 || ib.z > 0) {
-		v3 e0 = inv_inertia_mul(b->rotation, ib, V3(0, -r_b.z, r_b.y));
-		v3 e1 = inv_inertia_mul(b->rotation, ib, V3(r_b.z, 0, -r_b.x));
-		v3 e2 = inv_inertia_mul(b->rotation, ib, V3(-r_b.y, r_b.x, 0));
+		v3 e0 = inv_inertia_mul(sb->rotation, ib, V3(0, -r_b.z, r_b.y));
+		v3 e1 = inv_inertia_mul(sb->rotation, ib, V3(r_b.z, 0, -r_b.x));
+		v3 e2 = inv_inertia_mul(sb->rotation, ib, V3(-r_b.y, r_b.x, 0));
 		K[0] += -r_b.z*e0.y + r_b.y*e0.z;
 		K[1] += -r_b.z*e1.y + r_b.y*e1.z;
 		K[2] += -r_b.z*e2.y + r_b.y*e2.z;
@@ -137,12 +137,12 @@ static void jac_apply(JacobianRow* row, float lambda, BodyHot* a, BodyHot* b)
 	a->velocity.x += ima * row->J_a[0] * lambda;
 	a->velocity.y += ima * row->J_a[1] * lambda;
 	a->velocity.z += ima * row->J_a[2] * lambda;
-	v3 ang_a = inv_inertia_mul(a->rotation, a->inv_inertia_local, V3(row->J_a[3]*lambda, row->J_a[4]*lambda, row->J_a[5]*lambda));
+	v3 ang_a = inv_inertia_world_mul(a, V3(row->J_a[3]*lambda, row->J_a[4]*lambda, row->J_a[5]*lambda));
 	a->angular_velocity = add(a->angular_velocity, ang_a);
 	b->velocity.x += imb * row->J_b[0] * lambda;
 	b->velocity.y += imb * row->J_b[1] * lambda;
 	b->velocity.z += imb * row->J_b[2] * lambda;
-	v3 ang_b = inv_inertia_mul(b->rotation, b->inv_inertia_local, V3(row->J_b[3]*lambda, row->J_b[4]*lambda, row->J_b[5]*lambda));
+	v3 ang_b = inv_inertia_world_mul(b, V3(row->J_b[3]*lambda, row->J_b[4]*lambda, row->J_b[5]*lambda));
 	b->angular_velocity = add(b->angular_velocity, ang_b);
 }
 
@@ -151,9 +151,9 @@ static float jac_eff_mass(JacobianRow* row, BodyHot* a, BodyHot* b, float softne
 {
 	float ima = a->inv_mass, imb = b->inv_mass;
 	float k = ima * (row->J_a[0]*row->J_a[0] + row->J_a[1]*row->J_a[1] + row->J_a[2]*row->J_a[2]) + imb * (row->J_b[0]*row->J_b[0] + row->J_b[1]*row->J_b[1] + row->J_b[2]*row->J_b[2]);
-	v3 wa = inv_inertia_mul(a->rotation, a->inv_inertia_local, V3(row->J_a[3], row->J_a[4], row->J_a[5]));
+	v3 wa = inv_inertia_world_mul(a, V3(row->J_a[3], row->J_a[4], row->J_a[5]));
 	k += row->J_a[3]*wa.x + row->J_a[4]*wa.y + row->J_a[5]*wa.z;
-	v3 wb = inv_inertia_mul(b->rotation, b->inv_inertia_local, V3(row->J_b[3], row->J_b[4], row->J_b[5]));
+	v3 wb = inv_inertia_world_mul(b, V3(row->J_b[3], row->J_b[4], row->J_b[5]));
 	k += row->J_b[3]*wb.x + row->J_b[4]*wb.y + row->J_b[5]*wb.z;
 	k += softness;
 	return k > 1e-12f ? 1.0f / k : 0.0f;
@@ -163,7 +163,7 @@ static float jac_eff_mass(JacobianRow* row, BodyHot* a, BodyHot* b, float softne
 // Centralized Jacobian fill: the ONE function that knows about joint types.
 // Fills s->r_a, s->r_b, s->rows[], s->bias[], s->rows[].eff_mass from current body state.
 
-static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInternal* w, float dt)
+static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb, WorldInternal* w, float dt)
 {
 	float ptv, soft;
 	JointInternal* j = &w->joints[s->joint_idx];
@@ -171,8 +171,8 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 	for (int d = 0; d < s->dof; d++) { memset(s->rows[d].J_a, 0, 6 * sizeof(float)); memset(s->rows[d].J_b, 0, 6 * sizeof(float)); }
 
 	if (s->type == JOINT_BALL_SOCKET) {
-		s->r_a = rotate(a->rotation, j->ball_socket.local_a);
-		s->r_b = rotate(b->rotation, j->ball_socket.local_b);
+		s->r_a = rotate(sa->rotation, j->ball_socket.local_a);
+		s->r_b = rotate(sb->rotation, j->ball_socket.local_b);
 		spring_compute(j->ball_socket.spring, dt, &ptv, &soft);
 		s->softness = soft;
 
@@ -185,18 +185,18 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 		s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
 		s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
 
-		v3 anchor_a = add(a->position, s->r_a);
-		v3 anchor_b = add(b->position, s->r_b);
+		v3 anchor_a = add(sa->position, s->r_a);
+		v3 anchor_b = add(sb->position, s->r_b);
 		v3 err = sub(anchor_b, anchor_a);
 		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
 	} else if (s->type == JOINT_DISTANCE) {
-		s->r_a = rotate(a->rotation, j->distance.local_a);
-		s->r_b = rotate(b->rotation, j->distance.local_b);
+		s->r_a = rotate(sa->rotation, j->distance.local_a);
+		s->r_b = rotate(sb->rotation, j->distance.local_b);
 		spring_compute(j->distance.spring, dt, &ptv, &soft);
 		s->softness = soft;
 
-		v3 anchor_a = add(a->position, s->r_a);
-		v3 anchor_b = add(b->position, s->r_b);
+		v3 anchor_a = add(sa->position, s->r_a);
+		v3 anchor_b = add(sb->position, s->r_b);
 		v3 delta = sub(anchor_b, anchor_a);
 		float dist_val = len(delta);
 		v3 axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
@@ -224,8 +224,8 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 			}
 		}
 	} else if (s->type == JOINT_HINGE) {
-		s->r_a = rotate(a->rotation, j->hinge.local_a);
-		s->r_b = rotate(b->rotation, j->hinge.local_b);
+		s->r_a = rotate(sa->rotation, j->hinge.local_a);
+		s->r_b = rotate(sb->rotation, j->hinge.local_b);
 		spring_compute(j->hinge.spring, dt, &ptv, &soft);
 		s->softness = soft;
 
@@ -239,8 +239,8 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 		s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
 
 		// Angular rows 3-4
-		v3 axis_a = norm(rotate(a->rotation, j->hinge.local_axis_a));
-		v3 axis_b = norm(rotate(b->rotation, j->hinge.local_axis_b));
+		v3 axis_a = norm(rotate(sa->rotation, j->hinge.local_axis_a));
+		v3 axis_b = norm(rotate(sb->rotation, j->hinge.local_axis_b));
 		v3 t1, t2;
 		hinge_tangent_basis(axis_a, &t1, &t2);
 		v3 u1 = cross(t1, axis_b);
@@ -251,8 +251,8 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 		s->rows[4].J_a[3] =  u2.x; s->rows[4].J_a[4] =  u2.y; s->rows[4].J_a[5] =  u2.z;
 		s->rows[4].J_b[3] = -u2.x; s->rows[4].J_b[4] = -u2.y; s->rows[4].J_b[5] = -u2.z;
 
-		v3 anchor_a = add(a->position, s->r_a);
-		v3 anchor_b = add(b->position, s->r_b);
+		v3 anchor_a = add(sa->position, s->r_a);
+		v3 anchor_b = add(sb->position, s->r_b);
 		v3 err = sub(anchor_b, anchor_a);
 		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
 		s->pos_error[3] = dot(t1, axis_b);
@@ -281,8 +281,8 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 
 			// Limit: clamp bounds to prevent exceeding angle range.
 			if (has_limit) {
-				v3 ref_a_w = rotate(a->rotation, j->hinge.local_ref_a);
-				v3 ref_b_w = rotate(b->rotation, j->hinge.local_ref_b);
+				v3 ref_a_w = rotate(sa->rotation, j->hinge.local_ref_a);
+				v3 ref_b_w = rotate(sb->rotation, j->hinge.local_ref_b);
 				float angle = atan2f(dot(cross(ref_a_w, ref_b_w), axis_a), dot(ref_a_w, ref_b_w));
 				if (hmin != 0.0f && angle <= hmin) {
 					s->pos_error[5] = hmin - angle;
@@ -297,8 +297,8 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 			}
 		}
 	} else if (s->type == JOINT_FIXED) {
-		s->r_a = rotate(a->rotation, j->fixed.local_a);
-		s->r_b = rotate(b->rotation, j->fixed.local_b);
+		s->r_a = rotate(sa->rotation, j->fixed.local_a);
+		s->r_b = rotate(sb->rotation, j->fixed.local_b);
 		spring_compute(j->fixed.spring, dt, &ptv, &soft);
 		s->softness = soft;
 
@@ -317,26 +317,26 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 		s->rows[5].J_a[5] = 1; s->rows[5].J_b[5] = -1;
 
 		// Linear position error
-		v3 anchor_a = add(a->position, s->r_a);
-		v3 anchor_b = add(b->position, s->r_b);
+		v3 anchor_a = add(sa->position, s->r_a);
+		v3 anchor_b = add(sb->position, s->r_b);
 		v3 err = sub(anchor_b, anchor_a);
 		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
 
 		// Angular error from relative quaternion
-		quat q_rel = mul(inv(a->rotation), b->rotation);
+		quat q_rel = mul(inv(sa->rotation), sb->rotation);
 		quat q_err = mul(inv(j->fixed.local_rel_quat), q_rel);
 		float sign_w = q_err.w >= 0.0f ? 1.0f : -1.0f;
 		s->pos_error[3] = 2.0f * q_err.x * sign_w;
 		s->pos_error[4] = 2.0f * q_err.y * sign_w;
 		s->pos_error[5] = 2.0f * q_err.z * sign_w;
 	} else if (s->type == JOINT_PRISMATIC) {
-		s->r_a = rotate(a->rotation, j->prismatic.local_a);
-		s->r_b = rotate(b->rotation, j->prismatic.local_b);
+		s->r_a = rotate(sa->rotation, j->prismatic.local_a);
+		s->r_b = rotate(sb->rotation, j->prismatic.local_b);
 		spring_compute(j->prismatic.spring, dt, &ptv, &soft);
 		s->softness = soft;
 
 		// Slide axis in world space, tangent plane perpendicular to it
-		v3 slide_axis = norm(rotate(a->rotation, j->prismatic.local_axis_a));
+		v3 slide_axis = norm(rotate(sa->rotation, j->prismatic.local_axis_a));
 		v3 t1, t2;
 		hinge_tangent_basis(slide_axis, &t1, &t2);
 
@@ -361,14 +361,14 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 		s->rows[4].J_a[5] = 1; s->rows[4].J_b[5] = -1;
 
 		// Lateral position error
-		v3 anchor_a = add(a->position, s->r_a);
-		v3 anchor_b = add(b->position, s->r_b);
+		v3 anchor_a = add(sa->position, s->r_a);
+		v3 anchor_b = add(sb->position, s->r_b);
 		v3 delta = sub(anchor_b, anchor_a);
 		s->pos_error[0] = dot(delta, t1);
 		s->pos_error[1] = dot(delta, t2);
 
 		// Angular error from relative quaternion
-		quat q_rel = mul(inv(a->rotation), b->rotation);
+		quat q_rel = mul(inv(sa->rotation), sb->rotation);
 		quat q_err = mul(inv(j->prismatic.local_rel_quat), q_rel);
 		float sign_w = q_err.w >= 0.0f ? 1.0f : -1.0f;
 		s->pos_error[2] = 2.0f * q_err.x * sign_w;
@@ -408,9 +408,9 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, WorldInterna
 			// Jv = omega_a.axis - omega_b.axis = -d(angle)/dt. Convergence: d(angle)/dt = bias.
 			// So bias = speed drives angle at +speed. Clamp to keep within [hmin, hmax].
 			if (hmin != 0.0f || hmax != 0.0f) {
-				v3 axis_a_w = norm(rotate(a->rotation, j->hinge.local_axis_a));
-				v3 ref_a_w = rotate(a->rotation, j->hinge.local_ref_a);
-				v3 ref_b_w = rotate(b->rotation, j->hinge.local_ref_b);
+				v3 axis_a_w = norm(rotate(sa->rotation, j->hinge.local_axis_a));
+				v3 ref_a_w = rotate(sa->rotation, j->hinge.local_ref_a);
+				v3 ref_b_w = rotate(sb->rotation, j->hinge.local_ref_b);
 				float angle = atan2f(dot(cross(ref_a_w, ref_b_w), axis_a_w), dot(ref_a_w, ref_b_w));
 				if (hmax != 0.0f) { float max_speed = (hmax - angle) / dt; if (speed > max_speed) speed = fmaxf(max_speed, 0.0f); }
 				if (hmin != 0.0f) { float min_speed = (hmin - angle) / dt; if (speed < min_speed) speed = fminf(min_speed, 0.0f); }
@@ -441,6 +441,8 @@ static void joints_pre_solve(WorldInternal* w, float dt, SolverJoint** out_joint
 		JointInternal* j = &w->joints[i];
 		BodyHot* a = &w->body_hot[j->body_a];
 		BodyHot* b = &w->body_hot[j->body_b];
+		BodyState* sa = &w->body_state[j->body_a];
+		BodyState* sb = &w->body_state[j->body_b];
 
 		SolverJoint s = {0};
 		s.body_a = j->body_a;
@@ -453,7 +455,7 @@ static void joints_pre_solve(WorldInternal* w, float dt, SolverJoint** out_joint
 		s.dof = base_dof;
 		solver_joint_init_bounds(&s);
 
-		joint_fill_rows(&s, a, b, w, dt);
+		joint_fill_rows(&s, a, b, sa, sb, w, dt);
 
 		// Warm start from persistent storage
 		for (int d = 0; d < s.dof; d++) s.lambda[d] = j->warm_lambda[d];
@@ -479,6 +481,8 @@ static void joints_refresh_substep(WorldInternal* w, SolverJoint* joints, int co
 		if (!has_dof5) continue;
 		BodyHot* a = &w->body_hot[s->body_a];
 		BodyHot* b = &w->body_hot[s->body_b];
+		BodyState* sa = &w->body_state[s->body_a];
+		BodyState* sb = &w->body_state[s->body_b];
 		int old_dof = s->dof;
 		// Reset DOF to base (joint_fill_rows will set final dof including limits/motors)
 		s->dof = j->type == JOINT_DISTANCE ? 1 : 6; // hinge with limits or prismatic with motor = 6
@@ -486,7 +490,7 @@ static void joints_refresh_substep(WorldInternal* w, SolverJoint* joints, int co
 		solver_joint_init_bounds(s);
 		float saved_lambda[JOINT_MAX_DOF];
 		memcpy(saved_lambda, s->lambda, sizeof(saved_lambda));
-		joint_fill_rows(s, a, b, w, dt);
+		joint_fill_rows(s, a, b, sa, sb, w, dt);
 		memcpy(s->lambda, saved_lambda, sizeof(saved_lambda));
 		if (s->dof < old_dof) {
 			for (int d = s->dof; d < old_dof; d++) s->lambda[d] = 0;
@@ -507,6 +511,8 @@ static void joints_solve_limits(WorldInternal* w, SolverJoint* joints, int count
 		if (!solver_joint_has_limits(s)) continue;
 		BodyHot* a = &w->body_hot[s->body_a];
 		BodyHot* b = &w->body_hot[s->body_b];
+		BodyState* sa = &w->body_state[s->body_a];
+		BodyState* sb = &w->body_state[s->body_b];
 		JointInternal* j = &w->joints[s->joint_idx];
 
 		// Hinge DOF 5: motor and/or limit. Bounds are recomputed from the
@@ -540,6 +546,8 @@ static void joints_warm_start(WorldInternal* w, SolverJoint* joints, int count)
 		SolverJoint* s = &joints[i];
 		BodyHot* a = &w->body_hot[s->body_a];
 		BodyHot* b = &w->body_hot[s->body_b];
+		BodyState* sa = &w->body_state[s->body_a];
+		BodyState* sb = &w->body_state[s->body_b];
 		for (int d = 0; d < s->dof; d++) {
 			if (s->lambda[d] == 0) continue;
 			jac_apply(&s->rows[d], s->lambda[d], a, b);
@@ -563,6 +571,8 @@ static void solve_joint(WorldInternal* w, SolverJoint* s)
 {
 	BodyHot* a = &w->body_hot[s->body_a];
 	BodyHot* b = &w->body_hot[s->body_b];
+	BodyState* sa = &w->body_state[s->body_a];
+	BodyState* sb = &w->body_state[s->body_b];
 	if (s->dof == 1) {
 		// Scalar path (distance joints, possibly with limits)
 		float vel_err = jac_velocity_f(&s->rows[0], a, b);
@@ -587,8 +597,8 @@ static void solve_joint(WorldInternal* w, SolverJoint* s)
 	if (base_dof > 1) {
 		float K[BLOCK_MAX_DOF * (BLOCK_MAX_DOF + 1) / 2];
 		memset(K, 0, sizeof(K));
-		block_K_body_f(s->rows, base_dof, 0, a, K);
-		block_K_body_f(s->rows, base_dof, 1, b, K);
+		block_K_body_f(s->rows, base_dof, 0, a, sa, K);
+		block_K_body_f(s->rows, base_dof, 1, b, sb, K);
 		for (int d = 0; d < base_dof; d++) K[BTRI(d,d)] += s->softness;
 		float D[JOINT_MAX_DOF], rhs[JOINT_MAX_DOF], delta[JOINT_MAX_DOF];
 		if (block_ldl_f(K, D, base_dof) == 0) {
@@ -660,7 +670,9 @@ static void joints_split_impulse(WorldInternal* w, SolverJoint* joints, int join
 		if (s->softness != 0.0f) continue;
 		BodyHot* a = &w->body_hot[s->body_a];
 		BodyHot* b = &w->body_hot[s->body_b];
-		joint_fill_rows(s, a, b, w, dt);
+		BodyState* sa = &w->body_state[s->body_a];
+		BodyState* sb = &w->body_state[s->body_b];
+		joint_fill_rows(s, a, b, sa, sb, w, dt);
 		// Override bias: joint_fill_rows uses spring ptv (0 for rigid), we want SI gain
 		for (int d = 0; d < s->dof; d++) s->bias[d] = ptv * s->pos_error[d];
 	}
@@ -677,16 +689,17 @@ static void joints_split_impulse(WorldInternal* w, SolverJoint* joints, int join
 	for (int i = 0; i < body_count; i++) {
 		BodyHot* h = &w->body_hot[i];
 		if (h->inv_mass == 0.0f || !split_alive(w->body_gen, i)) continue;
-		h->position = add(h->position, scale(h->velocity, dt));
+		BodyState* s = &w->body_state[i];
+		s->position = add(s->position, scale(h->velocity, dt));
 		v3 ww = h->angular_velocity;
 		if (ww.x != 0 || ww.y != 0 || ww.z != 0) {
 			quat spin = { ww.x, ww.y, ww.z, 0.0f };
-			quat dq = mul(spin, h->rotation);
-			h->rotation.x += 0.5f * dt * dq.x; h->rotation.y += 0.5f * dt * dq.y;
-			h->rotation.z += 0.5f * dt * dq.z; h->rotation.w += 0.5f * dt * dq.w;
-			float ql = sqrtf(h->rotation.x*h->rotation.x + h->rotation.y*h->rotation.y + h->rotation.z*h->rotation.z + h->rotation.w*h->rotation.w);
+			quat dq = mul(spin, s->rotation);
+			s->rotation.x += 0.5f * dt * dq.x; s->rotation.y += 0.5f * dt * dq.y;
+			s->rotation.z += 0.5f * dt * dq.z; s->rotation.w += 0.5f * dt * dq.w;
+			float ql = sqrtf(s->rotation.x*s->rotation.x + s->rotation.y*s->rotation.y + s->rotation.z*s->rotation.z + s->rotation.w*s->rotation.w);
 			float inv_ql = 1.0f / (ql > 1e-15f ? ql : 1.0f);
-			h->rotation.x *= inv_ql; h->rotation.y *= inv_ql; h->rotation.z *= inv_ql; h->rotation.w *= inv_ql;
+			s->rotation.x *= inv_ql; s->rotation.y *= inv_ql; s->rotation.z *= inv_ql; s->rotation.w *= inv_ql;
 		}
 	}
 
@@ -720,14 +733,16 @@ static void joints_position_correct(WorldInternal* w, SolverJoint* joints, int j
 			if (s->softness != 0.0f) continue;
 			BodyHot* a = &w->body_hot[s->body_a];
 			BodyHot* b = &w->body_hot[s->body_b];
+			BodyState* sa = &w->body_state[s->body_a];
+			BodyState* sb = &w->body_state[s->body_b];
 			if (s->type == JOINT_BALL_SOCKET || s->type == JOINT_HINGE || s->type == JOINT_FIXED) {
 				v3 local_a, local_b;
 				if (s->type == JOINT_BALL_SOCKET) { local_a = w->joints[s->joint_idx].ball_socket.local_a; local_b = w->joints[s->joint_idx].ball_socket.local_b; }
 				else if (s->type == JOINT_HINGE) { local_a = w->joints[s->joint_idx].hinge.local_a; local_b = w->joints[s->joint_idx].hinge.local_b; }
 				else { local_a = w->joints[s->joint_idx].fixed.local_a; local_b = w->joints[s->joint_idx].fixed.local_b; }
-				v3 r_a = rotate(a->rotation, local_a);
-				v3 r_b = rotate(b->rotation, local_b);
-				v3 error = sub(add(b->position, r_b), add(a->position, r_a));
+				v3 r_a = rotate(sa->rotation, local_a);
+				v3 r_b = rotate(sb->rotation, local_b);
+				v3 error = sub(add(sb->position, r_b), add(sa->position, r_a));
 				float err_len = len(error);
 				if (err_len < 1e-6f) continue;
 				float inv_mass_sum = a->inv_mass + b->inv_mass;
@@ -736,13 +751,13 @@ static void joints_position_correct(WorldInternal* w, SolverJoint* joints, int j
 				if (correction > SOLVER_POS_MAX_CORRECTION) correction = SOLVER_POS_MAX_CORRECTION;
 				v3 n = scale(error, 1.0f / err_len);
 				float P = correction / inv_mass_sum;
-				a->position = add(a->position, scale(n, P * a->inv_mass));
-				b->position = sub(b->position, scale(n, P * b->inv_mass));
+				sa->position = add(sa->position, scale(n, P * a->inv_mass));
+				sb->position = sub(sb->position, scale(n, P * b->inv_mass));
 			} else if (s->type == JOINT_PRISMATIC) {
-				v3 r_a = rotate(a->rotation, w->joints[s->joint_idx].prismatic.local_a);
-				v3 r_b = rotate(b->rotation, w->joints[s->joint_idx].prismatic.local_b);
-				v3 delta = sub(add(b->position, r_b), add(a->position, r_a));
-				v3 slide_axis = norm(rotate(a->rotation, w->joints[s->joint_idx].prismatic.local_axis_a));
+				v3 r_a = rotate(sa->rotation, w->joints[s->joint_idx].prismatic.local_a);
+				v3 r_b = rotate(sb->rotation, w->joints[s->joint_idx].prismatic.local_b);
+				v3 delta = sub(add(sb->position, r_b), add(sa->position, r_a));
+				v3 slide_axis = norm(rotate(sa->rotation, w->joints[s->joint_idx].prismatic.local_axis_a));
 				v3 lateral_error = sub(delta, scale(slide_axis, dot(delta, slide_axis)));
 				float err_len = len(lateral_error);
 				if (err_len < 1e-6f) continue;
@@ -752,12 +767,12 @@ static void joints_position_correct(WorldInternal* w, SolverJoint* joints, int j
 				if (correction > SOLVER_POS_MAX_CORRECTION) correction = SOLVER_POS_MAX_CORRECTION;
 				v3 n = scale(lateral_error, 1.0f / err_len);
 				float P = correction / inv_mass_sum;
-				a->position = add(a->position, scale(n, P * a->inv_mass));
-				b->position = sub(b->position, scale(n, P * b->inv_mass));
+				sa->position = add(sa->position, scale(n, P * a->inv_mass));
+				sb->position = sub(sb->position, scale(n, P * b->inv_mass));
 			} else if (s->type == JOINT_DISTANCE) {
-				v3 r_a = rotate(a->rotation, w->joints[s->joint_idx].distance.local_a);
-				v3 r_b = rotate(b->rotation, w->joints[s->joint_idx].distance.local_b);
-				v3 delta = sub(add(b->position, r_b), add(a->position, r_a));
+				v3 r_a = rotate(sa->rotation, w->joints[s->joint_idx].distance.local_a);
+				v3 r_b = rotate(sb->rotation, w->joints[s->joint_idx].distance.local_b);
+				v3 delta = sub(add(sb->position, r_b), add(sa->position, r_a));
 				float dist_val = len(delta);
 				if (dist_val < 1e-6f) continue;
 				v3 axis = scale(delta, 1.0f / dist_val);
@@ -768,8 +783,8 @@ static void joints_position_correct(WorldInternal* w, SolverJoint* joints, int j
 				float correction = SOLVER_POS_BAUMGARTE * error;
 				if (fabsf(correction) > SOLVER_POS_MAX_CORRECTION) correction = correction > 0 ? SOLVER_POS_MAX_CORRECTION : -SOLVER_POS_MAX_CORRECTION;
 				float P = correction / inv_mass_sum;
-				a->position = add(a->position, scale(axis, P * a->inv_mass));
-				b->position = sub(b->position, scale(axis, P * b->inv_mass));
+				sa->position = add(sa->position, scale(axis, P * a->inv_mass));
+				sb->position = sub(sb->position, scale(axis, P * b->inv_mass));
 			}
 		}
 	}

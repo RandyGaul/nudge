@@ -1370,8 +1370,9 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 			if (con->is_synthetic) continue;
 			int ra = con->real_body_a, rb = con->real_body_b;
 			BodyHot* a = &w->body_hot[ra]; BodyHot* b = &w->body_hot[rb];
-			if (a->inv_mass > 0) printf("    body[%d] pos=(%.3f,%.3f,%.3f) vel=(%.2f,%.2f,%.2f) angvel=(%.2f,%.2f,%.2f)\n", ra, a->position.x, a->position.y, a->position.z, a->velocity.x, a->velocity.y, a->velocity.z, a->angular_velocity.x, a->angular_velocity.y, a->angular_velocity.z);
-			if (b->inv_mass > 0) printf("    body[%d] pos=(%.3f,%.3f,%.3f) vel=(%.2f,%.2f,%.2f) angvel=(%.2f,%.2f,%.2f)\n", rb, b->position.x, b->position.y, b->position.z, b->velocity.x, b->velocity.y, b->velocity.z, b->angular_velocity.x, b->angular_velocity.y, b->angular_velocity.z);
+			BodyState* sa_dbg = &w->body_state[ra]; BodyState* sb_dbg = &w->body_state[rb];
+			if (a->inv_mass > 0) printf("    body[%d] pos=(%.3f,%.3f,%.3f) vel=(%.2f,%.2f,%.2f) angvel=(%.2f,%.2f,%.2f)\n", ra, sa_dbg->position.x, sa_dbg->position.y, sa_dbg->position.z, a->velocity.x, a->velocity.y, a->velocity.z, a->angular_velocity.x, a->angular_velocity.y, a->angular_velocity.z);
+			if (b->inv_mass > 0) printf("    body[%d] pos=(%.3f,%.3f,%.3f) vel=(%.2f,%.2f,%.2f) angvel=(%.2f,%.2f,%.2f)\n", rb, sb_dbg->position.x, sb_dbg->position.y, sb_dbg->position.z, b->velocity.x, b->velocity.y, b->velocity.z, b->angular_velocity.x, b->angular_velocity.y, b->angular_velocity.z);
 		}
 	}
 
@@ -1475,8 +1476,8 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 
 		for (int bi = 0; bi < body_count; bi++) {
 			if (w->body_hot[bi].inv_mass == 0.0f) continue;
-			w->body_hot[bi].position = add(w->body_hot[bi].position, dv3_to_v3(pos_delta[bi]));
-			apply_rotation_delta(&w->body_hot[bi].rotation, ang_delta[bi]);
+			w->body_state[bi].position = add(w->body_state[bi].position, dv3_to_v3(pos_delta[bi]));
+			apply_rotation_delta(&w->body_state[bi].rotation, ang_delta[bi]);
 		}
 
 	}
@@ -1496,10 +1497,12 @@ static void ldl_refresh_lever_arms(WorldInternal* w, SolverJoint* sol_joints, in
 		SolverJoint* s = &sol_joints[i];
 		BodyHot* a = &w->body_hot[s->body_a];
 		BodyHot* b = &w->body_hot[s->body_b];
+		BodyState* sa = &w->body_state[s->body_a];
+		BodyState* sb = &w->body_state[s->body_b];
 		float saved_softness = s->softness;
 		float saved_lambda[JOINT_MAX_DOF];
 		for (int d = 0; d < JOINT_MAX_DOF; d++) saved_lambda[d] = s->lambda[d];
-		joint_fill_rows(s, a, b, w, sub_dt);
+		joint_fill_rows(s, a, b, sa, sb, w, sub_dt);
 		// Restore lambda (joint_fill_rows may zero-init the struct fields we don't want to lose)
 		for (int d = 0; d < JOINT_MAX_DOF; d++) s->lambda[d] = saved_lambda[d];
 	}
@@ -1516,15 +1519,17 @@ static void ldl_refresh_lever_arms_light(WorldInternal* w, SolverJoint* sol_join
 		SolverJoint* s = &sol_joints[i];
 		BodyHot* a = &w->body_hot[s->body_a];
 		BodyHot* b = &w->body_hot[s->body_b];
+		BodyState* sa = &w->body_state[s->body_a];
+		BodyState* sb = &w->body_state[s->body_b];
 		JointInternal* j = &w->joints[s->joint_idx];
 
 		if (s->type == JOINT_DISTANCE) {
 			// Fast path: all 12 J values set explicitly, no memset needed.
 			// Softness unchanged from sub 0 — skip spring_compute.
-			s->r_a = rotate(a->rotation, j->distance.local_a);
-			s->r_b = rotate(b->rotation, j->distance.local_b);
-			v3 anchor_a = add(a->position, s->r_a);
-			v3 anchor_b = add(b->position, s->r_b);
+			s->r_a = rotate(sa->rotation, j->distance.local_a);
+			s->r_b = rotate(sb->rotation, j->distance.local_b);
+			v3 anchor_a = add(sa->position, s->r_a);
+			v3 anchor_b = add(sb->position, s->r_b);
 			v3 delta = sub(anchor_b, anchor_a);
 			float dist_val = len(delta);
 			v3 axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
@@ -1541,8 +1546,8 @@ static void ldl_refresh_lever_arms_light(WorldInternal* w, SolverJoint* sol_join
 				else s->pos_error[0] = 0;
 			}
 		} else if (s->type == JOINT_BALL_SOCKET) {
-			s->r_a = rotate(a->rotation, j->ball_socket.local_a);
-			s->r_b = rotate(b->rotation, j->ball_socket.local_b);
+			s->r_a = rotate(sa->rotation, j->ball_socket.local_a);
+			s->r_b = rotate(sb->rotation, j->ball_socket.local_b);
 			v3 ra = s->r_a, rb = s->r_b;
 			s->rows[0].J_a[0] = -1; s->rows[0].J_a[1] = 0; s->rows[0].J_a[2] = 0; s->rows[0].J_a[3] = 0; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
 			s->rows[0].J_b[0] =  1; s->rows[0].J_b[1] = 0; s->rows[0].J_b[2] = 0; s->rows[0].J_b[3] = 0; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
@@ -1550,14 +1555,14 @@ static void ldl_refresh_lever_arms_light(WorldInternal* w, SolverJoint* sol_join
 			s->rows[1].J_b[0] = 0; s->rows[1].J_b[1] =  1; s->rows[1].J_b[2] = 0; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[4] = 0; s->rows[1].J_b[5] =  rb.x;
 			s->rows[2].J_a[0] = 0; s->rows[2].J_a[1] = 0; s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x; s->rows[2].J_a[5] = 0;
 			s->rows[2].J_b[0] = 0; s->rows[2].J_b[1] = 0; s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x; s->rows[2].J_b[5] = 0;
-			v3 err = sub(add(b->position, rb), add(a->position, ra));
+			v3 err = sub(add(sb->position, rb), add(sa->position, ra));
 			s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
 		} else {
 			// Complex joints (hinge, fixed, prismatic): fall back to full refresh.
 			float saved_softness = s->softness;
 			float saved_lambda[JOINT_MAX_DOF];
 			for (int d = 0; d < JOINT_MAX_DOF; d++) saved_lambda[d] = s->lambda[d];
-			joint_fill_rows(s, a, b, w, sub_dt);
+			joint_fill_rows(s, a, b, sa, sb, w, sub_dt);
 			for (int d = 0; d < JOINT_MAX_DOF; d++) s->lambda[d] = saved_lambda[d];
 		}
 	}

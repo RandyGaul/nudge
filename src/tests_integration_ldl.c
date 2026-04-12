@@ -207,8 +207,8 @@ static void test_integ_single_ball_socket()
 	TEST_BEGIN("integ_single_ball_socket");
 	IntegrationWorld iw = {0};
 	iw.body_count = 2;
-	iw.bodies[0] = make_body(2, 4);
-	iw.bodies[1] = make_body(5, 10);
+	iw.bodies[0] = make_body(2, 4).hot;
+	iw.bodies[1] = make_body(5, 10).hot;
 	// joint_count set below (was bs: 1
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(0,1,0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&iw.sol_joints[0]);
@@ -235,9 +235,9 @@ static void test_integ_chain_2()
 	TEST_BEGIN("integ_chain_2");
 	IntegrationWorld iw = {0};
 	iw.body_count = 3;
-	iw.bodies[0] = make_body(2, 4);
-	iw.bodies[1] = make_body(5, 10);
-	iw.bodies[2] = make_body(3, 6);
+	iw.bodies[0] = make_body(2, 4).hot;
+	iw.bodies[1] = make_body(5, 10).hot;
+	iw.bodies[2] = make_body(3, 6).hot;
 	// joint_count set below (was bs: 2
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&iw.sol_joints[0]);
@@ -268,7 +268,7 @@ static void test_integ_chain_3()
 	TEST_BEGIN("integ_chain_3");
 	IntegrationWorld iw = {0};
 	iw.body_count = 4;
-	for (int i = 0; i < 4; i++) iw.bodies[i] = make_body((float)(2 + i), (float)(4 + i));
+	for (int i = 0; i < 4; i++) iw.bodies[i] = make_body((float)(2 + i), (float)(4 + i)).hot;
 	// joint_count set below (was bs: 3
 	for (int i = 0; i < 3; i++) {
 		iw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = i, .body_b = i + 1 };
@@ -298,7 +298,7 @@ static void test_integ_chain_5()
 	TEST_BEGIN("integ_chain_5");
 	IntegrationWorld iw = {0};
 	iw.body_count = 6;
-	for (int i = 0; i < 6; i++) iw.bodies[i] = make_body((float)(1 + i), (float)(2 + i));
+	for (int i = 0; i < 6; i++) iw.bodies[i] = make_body((float)(1 + i), (float)(2 + i)).hot;
 	// joint_count set below (was bs: 5
 	for (int i = 0; i < 5; i++) {
 		iw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = i, .body_b = i + 1 };
@@ -330,9 +330,9 @@ static void test_integ_triangle()
 	// 3 bodies, 3 joints: 0-1, 1-2, 0-2. Every pair coupled.
 	IntegrationWorld iw = {0};
 	iw.body_count = 3;
-	iw.bodies[0] = make_body(2, 4);
-	iw.bodies[1] = make_body(3, 6);
-	iw.bodies[2] = make_body(4, 8);
+	iw.bodies[0] = make_body(2, 4).hot;
+	iw.bodies[1] = make_body(3, 6).hot;
+	iw.bodies[2] = make_body(4, 8).hot;
 	// joint_count set below (was bs: 3
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(0.5f,0,0), .r_b = V3(-0.5f,0,0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&iw.sol_joints[0]);
@@ -367,10 +367,10 @@ static void test_integ_star_4()
 	// Hub body 0, leaves 1,2,3. Joints: 0-1, 0-2, 0-3.
 	IntegrationWorld iw = {0};
 	iw.body_count = 4;
-	iw.bodies[0] = make_body(5, 10); // hub
-	iw.bodies[1] = make_body(2, 4);
-	iw.bodies[2] = make_body(3, 6);
-	iw.bodies[3] = make_body(4, 8);
+	iw.bodies[0] = make_body(5, 10).hot; // hub
+	iw.bodies[1] = make_body(2, 4).hot;
+	iw.bodies[2] = make_body(3, 6).hot;
+	iw.bodies[3] = make_body(4, 8).hot;
 	// joint_count set below (was bs: 3
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&iw.sol_joints[0]);
@@ -405,8 +405,8 @@ static void test_integ_star_6()
 	// when the hub is eliminated (or when leaves reduce hub degree to tie).
 	IntegrationWorld iw = {0};
 	iw.body_count = 7;
-	iw.bodies[0] = make_body(10, 20); // hub
-	for (int i = 1; i <= 6; i++) iw.bodies[i] = make_body((float)(1 + i), (float)(2 + i));
+	iw.bodies[0] = make_body(10, 20).hot; // hub
+	for (int i = 1; i <= 6; i++) iw.bodies[i] = make_body((float)(1 + i), (float)(2 + i)).hot;
 	// joint_count set below (was bs: 6
 	v3 dirs[6] = { V3(1,0,0), V3(-1,0,0), V3(0,1,0), V3(0,-1,0), V3(0,0,1), V3(0,0,-1) };
 	for (int i = 0; i < 6; i++) {
@@ -440,8 +440,8 @@ static void test_integ_star_extreme_mass()
 	// nothing to K, so off-diagonal coupling through hub is tiny.
 	IntegrationWorld iw = {0};
 	iw.body_count = 5;
-	iw.bodies[0] = make_body(10000, 10000); // heavy hub
-	for (int i = 1; i <= 4; i++) iw.bodies[i] = make_body(1, 1);
+	iw.bodies[0] = make_body(10000, 10000).hot; // heavy hub
+	for (int i = 1; i <= 4; i++) iw.bodies[i] = make_body(1, 1).hot;
 	// joint_count set below (was bs: 4
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(2,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&iw.sol_joints[0]);
@@ -478,10 +478,10 @@ static void test_integ_star_mixed_types()
 	// 9 total DOF, 3 different block sizes coupling through hub.
 	IntegrationWorld iw = {0};
 	iw.body_count = 4;
-	iw.bodies[0] = make_body(5, 10); // hub
-	iw.bodies[1] = make_body(2, 4);
-	iw.bodies[2] = make_body(3, 6);
-	iw.bodies[3] = make_body(4, 8);
+	iw.bodies[0] = make_body(5, 10).hot; // hub
+	iw.bodies[1] = make_body(2, 4).hot;
+	iw.bodies[2] = make_body(3, 6).hot;
+	iw.bodies[3] = make_body(4, 8).hot;
 	// joint_count set below (was bs: 1
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&iw.sol_joints[0]);
@@ -519,9 +519,9 @@ static void test_integ_chain_2_extreme_mass()
 	TEST_BEGIN("integ_chain_2_extreme_mass");
 	IntegrationWorld iw = {0};
 	iw.body_count = 3;
-	iw.bodies[0] = make_body(1, 1);        // light
-	iw.bodies[1] = make_body(10000, 10000); // heavy
-	iw.bodies[2] = make_body(1, 1);         // light
+	iw.bodies[0] = make_body(1, 1).hot;        // light
+	iw.bodies[1] = make_body(10000, 10000).hot; // heavy
+	iw.bodies[2] = make_body(1, 1).hot;         // light
 	// joint_count set below (was bs: 2
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&iw.sol_joints[0]);
@@ -553,7 +553,7 @@ static void test_integ_chain_2_large_levers()
 	TEST_BEGIN("integ_chain_2_large_levers");
 	IntegrationWorld iw = {0};
 	iw.body_count = 3;
-	for (int i = 0; i < 3; i++) iw.bodies[i] = make_body(1, 1);
+	for (int i = 0; i < 3; i++) iw.bodies[i] = make_body(1, 1).hot;
 	// joint_count set below (was bs: 2
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(50,0,0), .r_b = V3(-50,0,0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&iw.sol_joints[0]);
@@ -586,9 +586,9 @@ static void test_integ_chain_2_rotated_asymmetric()
 	iw.body_count = 3;
 	quat r1 = quat_axis_angle(norm(V3(1, 2, -1)), 0.8f);
 	quat r2 = quat_axis_angle(norm(V3(-1, 0, 3)), 1.2f);
-	iw.bodies[0] = make_body_full(2, V3(0.5f, 5, 20), r1);
-	iw.bodies[1] = make_body_full(8, V3(3, 10, 1), r2);
-	iw.bodies[2] = make_body_full(1, V3(1, 1, 1), quat_identity());
+	iw.bodies[0] = make_body_full(2, V3(0.5f, 5, 20), r1).hot;
+	iw.bodies[1] = make_body_full(8, V3(3, 10, 1), r2).hot;
+	iw.bodies[2] = make_body_full(1, V3(1, 1, 1), quat_identity()).hot;
 	// joint_count set below (was bs: 2
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(3,-1,2), .r_b = V3(-2,1,0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&iw.sol_joints[0]);
@@ -620,10 +620,10 @@ static void test_integ_chain_3_mixed_mass()
 	// 1:100:1 pattern: light-heavy-light-heavy
 	IntegrationWorld iw = {0};
 	iw.body_count = 4;
-	iw.bodies[0] = make_body(1, 1);
-	iw.bodies[1] = make_body(100, 100);
-	iw.bodies[2] = make_body(1, 1);
-	iw.bodies[3] = make_body(100, 100);
+	iw.bodies[0] = make_body(1, 1).hot;
+	iw.bodies[1] = make_body(100, 100).hot;
+	iw.bodies[2] = make_body(1, 1).hot;
+	iw.bodies[3] = make_body(100, 100).hot;
 	// joint_count set below (was bs: 3
 	for (int i = 0; i < 3; i++) {
 		iw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = i, .body_b = i + 1 };
@@ -653,9 +653,9 @@ static void test_integ_triangle_extreme_mass()
 	TEST_BEGIN("integ_triangle_extreme_mass");
 	IntegrationWorld iw = {0};
 	iw.body_count = 3;
-	iw.bodies[0] = make_body(1, 1);
-	iw.bodies[1] = make_body(10000, 10000);
-	iw.bodies[2] = make_body(1, 1);
+	iw.bodies[0] = make_body(1, 1).hot;
+	iw.bodies[1] = make_body(10000, 10000).hot;
+	iw.bodies[2] = make_body(1, 1).hot;
 	// joint_count set below (was bs: 3
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&iw.sol_joints[0]);
@@ -693,7 +693,7 @@ static void test_integ_chain_distance()
 	// Two distance constraints (1 DOF each). Total DOF = 2.
 	IntegrationWorld iw = {0};
 	iw.body_count = 3;
-	for (int i = 0; i < 3; i++) iw.bodies[i] = make_body(2, 4);
+	for (int i = 0; i < 3; i++) iw.bodies[i] = make_body(2, 4).hot;
 	// joint_count set below (was dist: 2
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_DISTANCE, .dof = 1, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
 	test_fill_dist_rows(&iw.sol_joints[0], norm(V3(1,0,0)));
@@ -725,7 +725,7 @@ static void test_integ_chain_hinge()
 	// Two hinge constraints (5 DOF each). Total DOF = 10.
 	IntegrationWorld iw = {0};
 	iw.body_count = 3;
-	for (int i = 0; i < 3; i++) iw.bodies[i] = make_body(3, 6);
+	for (int i = 0; i < 3; i++) iw.bodies[i] = make_body(3, 6).hot;
 	// joint_count set below (was hinge: 2
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_HINGE, .dof = 5, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
 	test_fill_hinge_rows(&iw.sol_joints[0], V3(1,0,0), V3(0,1,0));
@@ -757,7 +757,7 @@ static void test_integ_mixed_all()
 	// BS(3) + Distance(1) + Hinge(5) = 9 DOF, 3 constraints on 4 bodies.
 	IntegrationWorld iw = {0};
 	iw.body_count = 4;
-	for (int i = 0; i < 4; i++) iw.bodies[i] = make_body((float)(2 + i), (float)(4 + i * 2));
+	for (int i = 0; i < 4; i++) iw.bodies[i] = make_body((float)(2 + i), (float)(4 + i * 2)).hot;
 	// joint_count set below (was bs: 1
 	iw.sol_joints[0] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1,0,0), .r_b = V3(-1,0,0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&iw.sol_joints[0]);

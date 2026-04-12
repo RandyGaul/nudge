@@ -6,11 +6,13 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 {
 	BodyHot* a = &w->body_hot[im->body_a];
 	BodyHot* b = &w->body_hot[im->body_b];
+	BodyState* sa = &w->body_state[im->body_a];
+	BodyState* sb = &w->body_state[im->body_b];
 	float inv_mass_sum = a->inv_mass + b->inv_mass;
 	if (inv_mass_sum == 0.0f) return; // sm[idx] stays zeroed (contact_count=0)
 
-	float mu = sqrtf(a->friction * b->friction);
-	float rest = a->restitution > b->restitution ? a->restitution : b->restitution;
+	float mu = sqrtf(sa->friction * sb->friction);
+	float rest = sa->restitution > sb->restitution ? sa->restitution : sb->restitution;
 	WarmManifold* wm = im->warm; // cached from narrowphase (avoids duplicate hash lookup)
 	int contact_base = idx * MAX_CONTACTS;
 
@@ -28,8 +30,8 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	// Per-contact setup. Only initialize fields used by patch-mode PGS and post-solve.
 	for (int c = 0; c < im->m.count; c++) {
 		Contact* ct = &im->m.contacts[c];
-		v3 r_a = sub(ct->point, a->position);
-		v3 r_b = sub(ct->point, b->position);
+		v3 r_a = sub(ct->point, sa->position);
+		v3 r_b = sub(ct->point, sb->position);
 		v3 rn_a = cross(r_a, ct->normal);
 		v3 rn_b = cross(r_b, ct->normal);
 		v3 w_n_a = inv_inertia_world_mul(a, rn_a);

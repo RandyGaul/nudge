@@ -192,12 +192,12 @@ int collide_sphere_sphere(Sphere a, Sphere b, Manifold* manifold)
 // now in vmath.h.
 
 // Get capsule segment endpoints in world space.
-static void capsule_world_segment(BodyHot* h, ShapeInternal* s, v3* P, v3* Q)
+static void capsule_world_segment(BodyState* bs, ShapeInternal* s, v3* P, v3* Q)
 {
 	v3 local_p = add(s->local_pos, V3(0, -s->capsule.half_height, 0));
 	v3 local_q = add(s->local_pos, V3(0,  s->capsule.half_height, 0));
-	*P = add(h->position, rotate(h->rotation, local_p));
-	*Q = add(h->position, rotate(h->rotation, local_q));
+	*P = add(bs->position, rotate(bs->rotation, local_p));
+	*Q = add(bs->position, rotate(bs->rotation, local_q));
 }
 
 // -----------------------------------------------------------------------------
@@ -1697,32 +1697,32 @@ static int refresh_hull_hull_face(ConvexHull a, ConvexHull b, Manifold* manifold
 // N^2 broadphase + narrowphase dispatch.
 
 // Build a Sphere/Capsule/Box from internal body+shape for broadphase dispatch.
-static Sphere make_sphere(BodyHot* h, ShapeInternal* s)
+static Sphere make_sphere(BodyState* bs, ShapeInternal* s)
 {
-	return (Sphere){ add(h->position, rotate(h->rotation, s->local_pos)), s->sphere.radius };
+	return (Sphere){ add(bs->position, rotate(bs->rotation, s->local_pos)), s->sphere.radius };
 }
 
-static Capsule make_capsule(BodyHot* h, ShapeInternal* s)
+static Capsule make_capsule(BodyState* bs, ShapeInternal* s)
 {
 	v3 lp = add(s->local_pos, V3(0, -s->capsule.half_height, 0));
 	v3 lq = add(s->local_pos, V3(0,  s->capsule.half_height, 0));
-	return (Capsule){ add(h->position, rotate(h->rotation, lp)), add(h->position, rotate(h->rotation, lq)), s->capsule.radius };
+	return (Capsule){ add(bs->position, rotate(bs->rotation, lp)), add(bs->position, rotate(bs->rotation, lq)), s->capsule.radius };
 }
 
-static Box make_box(BodyHot* h, ShapeInternal* s)
+static Box make_box(BodyState* bs, ShapeInternal* s)
 {
-	return (Box){ h->position, h->rotation, s->box.half_extents };
+	return (Box){ bs->position, bs->rotation, s->box.half_extents };
 }
 
-static ConvexHull make_convex_hull(BodyHot* h, ShapeInternal* s)
+static ConvexHull make_convex_hull(BodyState* bs, ShapeInternal* s)
 {
-	return (ConvexHull){ s->hull.hull, h->position, h->rotation, s->hull.scale };
+	return (ConvexHull){ s->hull.hull, bs->position, bs->rotation, s->hull.scale };
 }
 
 // Build a Cylinder from an internal body+shape (mirror of make_box/make_sphere).
-static Cylinder make_cylinder(BodyHot* h, ShapeInternal* s)
+static Cylinder make_cylinder(BodyState* bs, ShapeInternal* s)
 {
-	return (Cylinder){ h->position, h->rotation, s->cylinder.half_height, s->cylinder.radius };
+	return (Cylinder){ bs->position, bs->rotation, s->cylinder.half_height, s->cylinder.radius };
 }
 
 // -----------------------------------------------------------------------------
@@ -2261,8 +2261,8 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 
 	ShapeInternal* s0 = &w->body_cold[i].shapes[0];
 	ShapeInternal* s1 = &w->body_cold[j].shapes[0];
-	BodyHot* h0 = &w->body_hot[i];
-	BodyHot* h1 = &w->body_hot[j];
+	BodyState* bs0 = &w->body_state[i];
+	BodyState* bs1 = &w->body_state[j];
 	InternalManifold im = { .body_a = i, .body_b = j };
 
 	// Warm cache lookup: used for SAT hints, geometry caching, and passed to pre_solve.
@@ -2280,9 +2280,9 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	if (wm && wm->cached_pair.type == 1 && uses_sat && w->incremental_np_enabled) {
 		int refreshed = 0;
 		if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull)
-			refreshed = refresh_box_box_face(make_box(h0, s0), make_box(h1, s1), &im.m, &wm->cached_pair);
+			refreshed = refresh_box_box_face(make_box(bs0, s0), make_box(bs1, s1), &im.m, &wm->cached_pair);
 		else
-			refreshed = refresh_hull_hull_face((ConvexHull){ s0->type == SHAPE_BOX ? &s_unit_box_hull : s0->hull.hull, h0->position, h0->rotation, s0->type == SHAPE_BOX ? s0->box.half_extents : s0->hull.scale }, (ConvexHull){ s1->type == SHAPE_BOX ? &s_unit_box_hull : s1->hull.hull, h1->position, h1->rotation, s1->type == SHAPE_BOX ? s1->box.half_extents : s1->hull.scale }, &im.m, &wm->cached_pair);
+			refreshed = refresh_hull_hull_face((ConvexHull){ s0->type == SHAPE_BOX ? &s_unit_box_hull : s0->hull.hull, bs0->position, bs0->rotation, s0->type == SHAPE_BOX ? s0->box.half_extents : s0->hull.scale }, (ConvexHull){ s1->type == SHAPE_BOX ? &s_unit_box_hull : s1->hull.hull, bs1->position, bs1->rotation, s1->type == SHAPE_BOX ? s1->box.half_extents : s1->hull.scale }, &im.m, &wm->cached_pair);
 		if (refreshed) {
 			im.warm = wm;
 			wm->stale = 0;
@@ -2300,48 +2300,48 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	CachedFeaturePair out_pair = {0};
 
 	if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE)
-		hit = collide_sphere_sphere(make_sphere(h0, s0), make_sphere(h1, s1), &im.m);
+		hit = collide_sphere_sphere(make_sphere(bs0, s0), make_sphere(bs1, s1), &im.m);
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CAPSULE)
-		hit = collide_sphere_capsule(make_sphere(h0, s0), make_capsule(h1, s1), &im.m);
+		hit = collide_sphere_capsule(make_sphere(bs0, s0), make_capsule(bs1, s1), &im.m);
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_BOX)
-		hit = collide_sphere_box(make_sphere(h0, s0), make_box(h1, s1), &im.m);
+		hit = collide_sphere_box(make_sphere(bs0, s0), make_box(bs1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CAPSULE)
-		hit = collide_capsule_capsule(make_capsule(h0, s0), make_capsule(h1, s1), &im.m);
+		hit = collide_capsule_capsule(make_capsule(bs0, s0), make_capsule(bs1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX)
-		hit = collide_capsule_box(make_capsule(h0, s0), make_box(h1, s1), &im.m);
+		hit = collide_capsule_box(make_capsule(bs0, s0), make_box(bs1, s1), &im.m);
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) {
-		if (w->box_use_hull) hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, (ConvexHull){ &s_unit_box_hull, h1->position, h1->rotation, s1->box.half_extents }, &im.m, hp, &out_pair);
-		else hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, hp, &out_pair);
+		if (w->box_use_hull) hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, bs0->position, bs0->rotation, s0->box.half_extents }, (ConvexHull){ &s_unit_box_hull, bs1->position, bs1->rotation, s1->box.half_extents }, &im.m, hp, &out_pair);
+		else hit = collide_box_box_ex(make_box(bs0, s0), make_box(bs1, s1), &im.m, hp, &out_pair);
 	}
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL)
-		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m, hp, &out_pair);
+		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, bs0->position, bs0->rotation, s0->box.half_extents }, make_convex_hull(bs1, s1), &im.m, hp, &out_pair);
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL)
-		hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
+		hit = collide_sphere_hull(make_sphere(bs0, s0), make_convex_hull(bs1, s1), &im.m);
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL)
-		hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
+		hit = collide_capsule_hull(make_capsule(bs0, s0), make_convex_hull(bs1, s1), &im.m);
 	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL)
-		hit = collide_hull_hull_ex(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m, hp, &out_pair);
+		hit = collide_hull_hull_ex(make_convex_hull(bs0, s0), make_convex_hull(bs1, s1), &im.m, hp, &out_pair);
 
 	// Cylinder pairs: native narrowphase with cylinder as shape A.
 	// Dispatch puts cyl as s1 (higher enum). Call with cyl as first arg, flip normals.
 	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER) {
-		hit = collide_cylinder_sphere(make_cylinder(h1, s1), make_sphere(h0, s0), &im.m);
+		hit = collide_cylinder_sphere(make_cylinder(bs1, s1), make_sphere(bs0, s0), &im.m);
 		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
 	}
 	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER) {
-		hit = collide_cylinder_capsule(make_cylinder(h1, s1), make_capsule(h0, s0), &im.m);
+		hit = collide_cylinder_capsule(make_cylinder(bs1, s1), make_capsule(bs0, s0), &im.m);
 		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
 	}
 	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER) {
-		hit = collide_cylinder_box(make_cylinder(h1, s1), make_box(h0, s0), &im.m);
+		hit = collide_cylinder_box(make_cylinder(bs1, s1), make_box(bs0, s0), &im.m);
 		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
 	}
 	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER) {
-		hit = collide_cylinder_hull(make_cylinder(h1, s1), make_convex_hull(h0, s0), &im.m);
+		hit = collide_cylinder_hull(make_cylinder(bs1, s1), make_convex_hull(bs0, s0), &im.m);
 		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
 	}
 	else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) {
-		hit = collide_cylinder_cylinder(make_cylinder(h0, s0), make_cylinder(h1, s1), &im.m);
+		hit = collide_cylinder_cylinder(make_cylinder(bs0, s0), make_cylinder(bs1, s1), &im.m);
 	}
 
 	// Store SAT hint back to warm cache
@@ -2556,7 +2556,7 @@ static int ray_cylinder(v3 ro, v3 rd, Cylinder cyl, float max_t, float* t_out, v
 
 static int ray_body(WorldInternal* w, int body_idx, v3 origin, v3 dir, float max_t, float* t_out, v3* n_out)
 {
-	BodyHot* bh = &w->body_hot[body_idx];
+	BodyState* bs = &w->body_state[body_idx];
 	BodyCold* bc = &w->body_cold[body_idx];
 	float best_t = max_t;
 	v3 best_n = {0};
@@ -2566,11 +2566,11 @@ static int ray_body(WorldInternal* w, int body_idx, v3 origin, v3 dir, float max
 		float t; v3 n;
 		int hit = 0;
 		switch (s->type) {
-		case SHAPE_SPHERE:   hit = ray_sphere(origin, dir, make_sphere(bh, s), best_t, &t, &n); break;
-		case SHAPE_CAPSULE:  hit = ray_capsule(origin, dir, make_capsule(bh, s), best_t, &t, &n); break;
-		case SHAPE_BOX:      hit = ray_box(origin, dir, make_box(bh, s), best_t, &t, &n); break;
-		case SHAPE_HULL:     hit = ray_hull(origin, dir, make_convex_hull(bh, s), best_t, &t, &n); break;
-		case SHAPE_CYLINDER: hit = ray_cylinder(origin, dir, make_cylinder(bh, s), best_t, &t, &n); break;
+		case SHAPE_SPHERE:   hit = ray_sphere(origin, dir, make_sphere(bs, s), best_t, &t, &n); break;
+		case SHAPE_CAPSULE:  hit = ray_capsule(origin, dir, make_capsule(bs, s), best_t, &t, &n); break;
+		case SHAPE_BOX:      hit = ray_box(origin, dir, make_box(bs, s), best_t, &t, &n); break;
+		case SHAPE_HULL:     hit = ray_hull(origin, dir, make_convex_hull(bs, s), best_t, &t, &n); break;
+		case SHAPE_CYLINDER: hit = ray_cylinder(origin, dir, make_cylinder(bs, s), best_t, &t, &n); break;
 		}
 		if (hit && t < best_t) { best_t = t; best_n = n; found = 1; }
 	}

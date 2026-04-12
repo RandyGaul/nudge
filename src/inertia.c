@@ -9,13 +9,13 @@ static v3 inv_inertia_mul(quat rot, v3 inv_i, v3 v)
 }
 
 // Precompute world-space inverse inertia as symmetric 3x3 matrix: I_w = R * diag(inv_i) * R^T.
-// Stored as diagonal (xx,yy,zz) + off-diagonal (xy,xz,yz) in BodyHot.
-static void body_compute_inv_inertia_world(BodyHot* h)
+// Reads inv_inertia_local and rotation from BodyState, writes iw_diag/iw_off to BodyHot.
+static void body_compute_inv_inertia_world(BodyHot* h, BodyState* s)
 {
-	float a = h->inv_inertia_local.x, b = h->inv_inertia_local.y, c = h->inv_inertia_local.z;
+	float a = s->inv_inertia_local.x, b = s->inv_inertia_local.y, c = s->inv_inertia_local.z;
 	// Uniform inertia (cubes, spheres): I_w = a*I, rotation cancels out.
 	if (a == b && b == c) { h->iw_diag = V3(a, a, a); h->iw_off = V3(0, 0, 0); return; }
-	quat q = h->rotation;
+	quat q = s->rotation;
 	float xx = q.x*q.x, yy = q.y*q.y, zz = q.z*q.z;
 	float xy = q.x*q.y, xz = q.x*q.z, yz = q.y*q.z;
 	float wx = q.w*q.x, wy = q.w*q.y, wz = q.w*q.z;
@@ -164,7 +164,7 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 {
 	float mass = w->body_cold[idx].mass;
 	if (mass <= 0.0f) {
-		w->body_hot[idx].inv_inertia_local = V3(0, 0, 0);
+		w->body_state[idx].inv_inertia_local = V3(0, 0, 0);
 		return;
 	}
 
@@ -176,7 +176,7 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 		total_vol += shape_volume(&shapes[i]);
 	}
 	if (total_vol <= 0.0f) {
-		w->body_hot[idx].inv_inertia_local = V3(0, 0, 0);
+		w->body_state[idx].inv_inertia_local = V3(0, 0, 0);
 		return;
 	}
 
@@ -193,5 +193,5 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 		total.z += li.z + sm * (d.x*d.x + d.y*d.y);
 	}
 
-	w->body_hot[idx].inv_inertia_local = inertia_to_inv(total);
+	w->body_state[idx].inv_inertia_local = inertia_to_inv(total);
 }

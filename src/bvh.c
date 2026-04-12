@@ -19,35 +19,35 @@ static float aabb_surface_area(AABB a) { v3 d = sub(a.max, a.min); return d.x*d.
 static int aabb_overlaps(AABB a, AABB b) { int no = simd_movemask(simd_or(simd_cmpgt(a.min.m, b.max.m), simd_cmpgt(b.min.m, a.max.m))); return (no & 0x7) == 0; }
 
 // Compute world-space AABB for a single shape on a body.
-static AABB shape_aabb(BodyHot* h, ShapeInternal* s)
+static AABB shape_aabb(BodyState* s, ShapeInternal* sh)
 {
-	v3 world_pos = add(h->position, rotate(h->rotation, s->local_pos));
-	switch (s->type) {
+	v3 world_pos = add(s->position, rotate(s->rotation, sh->local_pos));
+	switch (sh->type) {
 	case SHAPE_SPHERE: {
-		v3 r = V3(s->sphere.radius, s->sphere.radius, s->sphere.radius);
+		v3 r = V3(sh->sphere.radius, sh->sphere.radius, sh->sphere.radius);
 		return (AABB){ sub(world_pos, r), add(world_pos, r) };
 	}
 	case SHAPE_CAPSULE: {
-		v3 up = rotate(h->rotation, V3(0, s->capsule.half_height, 0));
+		v3 up = rotate(s->rotation, V3(0, sh->capsule.half_height, 0));
 		v3 p = sub(world_pos, up), q = add(world_pos, up);
-		v3 r = V3(s->capsule.radius, s->capsule.radius, s->capsule.radius);
+		v3 r = V3(sh->capsule.radius, sh->capsule.radius, sh->capsule.radius);
 		return (AABB){ sub(v3_min(p, q), r), add(v3_max(p, q), r) };
 	}
 	case SHAPE_BOX: {
 		// OBB -> AABB: project rotated half-extents onto each world axis.
-		v3 e = s->box.half_extents;
-		v3 ax = rotate(h->rotation, V3(e.x, 0, 0));
-		v3 ay = rotate(h->rotation, V3(0, e.y, 0));
-		v3 az = rotate(h->rotation, V3(0, 0, e.z));
+		v3 e = sh->box.half_extents;
+		v3 ax = rotate(s->rotation, V3(e.x, 0, 0));
+		v3 ay = rotate(s->rotation, V3(0, e.y, 0));
+		v3 az = rotate(s->rotation, V3(0, 0, e.z));
 		v3 half = V3(fabsf(ax.x) + fabsf(ay.x) + fabsf(az.x), fabsf(ax.y) + fabsf(ay.y) + fabsf(az.y), fabsf(ax.z) + fabsf(ay.z) + fabsf(az.z));
 		return (AABB){ sub(world_pos, half), add(world_pos, half) };
 	}
 	case SHAPE_HULL: {
-		const Hull* hull = s->hull.hull;
-		v3 sc = s->hull.scale;
-		AABB box = aabb_from_point(add(world_pos, rotate(h->rotation, V3(hull->verts[0].x*sc.x, hull->verts[0].y*sc.y, hull->verts[0].z*sc.z))));
+		const Hull* hull = sh->hull.hull;
+		v3 sc = sh->hull.scale;
+		AABB box = aabb_from_point(add(world_pos, rotate(s->rotation, V3(hull->verts[0].x*sc.x, hull->verts[0].y*sc.y, hull->verts[0].z*sc.z))));
 		for (int i = 1; i < hull->vert_count; i++) {
-			v3 v = add(world_pos, rotate(h->rotation, V3(hull->verts[i].x*sc.x, hull->verts[i].y*sc.y, hull->verts[i].z*sc.z)));
+			v3 v = add(world_pos, rotate(s->rotation, V3(hull->verts[i].x*sc.x, hull->verts[i].y*sc.y, hull->verts[i].z*sc.z)));
 			box.min = v3_min(box.min, v);
 			box.max = v3_max(box.max, v);
 		}
@@ -55,8 +55,8 @@ static AABB shape_aabb(BodyHot* h, ShapeInternal* s)
 	}
 	case SHAPE_CYLINDER: {
 		// Tight AABB for cylinder along local Y: half_extent[k] = |ay.k|*hh + sqrt(1 - ay.k^2)*r
-		float hh = s->cylinder.half_height, r = s->cylinder.radius;
-		v3 ay = rotate(h->rotation, V3(0, 1, 0));
+		float hh = sh->cylinder.half_height, r = sh->cylinder.radius;
+		v3 ay = rotate(s->rotation, V3(0, 1, 0));
 		float ex2 = 1.0f - ay.x*ay.x; if (ex2 < 0.0f) ex2 = 0.0f;
 		float ey2 = 1.0f - ay.y*ay.y; if (ey2 < 0.0f) ey2 = 0.0f;
 		float ez2 = 1.0f - ay.z*ay.z; if (ez2 < 0.0f) ez2 = 0.0f;
@@ -68,11 +68,11 @@ static AABB shape_aabb(BodyHot* h, ShapeInternal* s)
 }
 
 // Compute world-space AABB for an entire body (union of all shapes).
-static AABB body_aabb(BodyHot* h, BodyCold* c)
+static AABB body_aabb(BodyState* s, BodyCold* c)
 {
-	AABB box = shape_aabb(h, &c->shapes[0]);
+	AABB box = shape_aabb(s, &c->shapes[0]);
 	for (int i = 1; i < asize(c->shapes); i++) {
-		box = aabb_merge(box, shape_aabb(h, &c->shapes[i]));
+		box = aabb_merge(box, shape_aabb(s, &c->shapes[i]));
 	}
 	return box;
 }
@@ -749,7 +749,7 @@ static BVHChild bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int p
 		dst->a = sa;
 		if (!bvh_body_sleeping(r->world, bi)) {
 			all_sleeping = 0;
-			AABB tight = aabb_expand(body_aabb(&r->world->body_hot[bi], &r->world->body_cold[bi]), BVH_AABB_MARGIN);
+			AABB tight = aabb_expand(body_aabb(&r->world->body_state[bi], &r->world->body_cold[bi]), BVH_AABB_MARGIN);
 			v3 fmin = r->tree->leaves[li].fat_min, fmax = r->tree->leaves[li].fat_max;
 			if (!(tight.min.x >= fmin.x && tight.min.y >= fmin.y && tight.min.z >= fmin.z && tight.max.x <= fmax.x && tight.max.y <= fmax.y && tight.max.z <= fmax.z)) {
 				AABB fat = aabb_expand(tight, BVH_FAT_MARGIN);
@@ -778,7 +778,7 @@ static BVHChild bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int p
 		dst->b = sb;
 		if (!bvh_body_sleeping(r->world, bi)) {
 			all_sleeping = 0;
-			AABB tight = aabb_expand(body_aabb(&r->world->body_hot[bi], &r->world->body_cold[bi]), BVH_AABB_MARGIN);
+			AABB tight = aabb_expand(body_aabb(&r->world->body_state[bi], &r->world->body_cold[bi]), BVH_AABB_MARGIN);
 			v3 fmin = r->tree->leaves[li].fat_min, fmax = r->tree->leaves[li].fat_max;
 			if (!(tight.min.x >= fmin.x && tight.min.y >= fmin.y && tight.min.z >= fmin.z && tight.max.x <= fmax.x && tight.max.y <= fmax.y && tight.max.z <= fmax.z)) {
 				AABB fat = aabb_expand(tight, BVH_FAT_MARGIN);
@@ -847,7 +847,7 @@ static int bvh_validate_leaves(BVH_Tree* t, WorldInternal* w)
 		int bi = t->leaves[i].body_idx;
 		if (!split_alive(w->body_gen, bi)) continue;
 		if (asize(w->body_cold[bi].shapes) == 0) continue;
-		AABB bb = body_aabb(&w->body_hot[bi], &w->body_cold[bi]);
+		AABB bb = body_aabb(&w->body_state[bi], &w->body_cold[bi]);
 		v3 fmin = t->leaves[i].fat_min, fmax = t->leaves[i].fat_max;
 		if (bb.min.x < fmin.x || bb.min.y < fmin.y || bb.min.z < fmin.z || bb.max.x > fmax.x || bb.max.y > fmax.y || bb.max.z > fmax.z)
 			stale++;

@@ -37,7 +37,7 @@ static void draw_ldl_overview(WorldInternal* w, Island* isl, LDL_Cache* c)
 			if (w->body_hot[bi].inv_mass == 0) {
 				ImGui_Text("  [%d] static", bi);
 			} else {
-				v3 inv_I = w->body_hot[bi].inv_inertia_local;
+				v3 inv_I = w->body_state[bi].inv_inertia_local;
 				ImGui_Text("  [%d] mass=%.1f  inv_I=(%.2f, %.2f, %.2f)", bi, (double)mass, (double)inv_I.x, (double)inv_I.y, (double)inv_I.z);
 			}
 			if (ImGui_IsItemHovered(0)) {

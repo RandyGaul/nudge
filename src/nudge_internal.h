@@ -40,38 +40,32 @@ typedef struct BodyCold
 	int island_next;  // next body in island body list, -1 = tail
 } BodyCold;
 
-// Hot: solver working set, iterated every step, packed for cache.
+// Hot: solver working set, iterated every PGS step, packed for cache.
+// Layout matches old SolverBodyVel so the SIMD gather/scatter macros work directly.
 typedef struct BodyHot
+{
+	v3 velocity;
+	v3 angular_velocity;
+	v3 iw_diag;           // precomputed world-space inverse inertia (xx,yy,zz)
+	v3 iw_off;            // precomputed world-space inverse inertia (xy,xz,yz)
+	float inv_mass;
+	float _pad[3];
+} BodyHot;
+
+// State: per-body data needed outside the inner PGS loop (integration, collision,
+// joint geometry, sleep bookkeeping). Parallel array indexed the same as body_hot.
+typedef struct BodyState
 {
 	v3 position;
 	quat rotation;
-	v3 velocity;
-	v3 angular_velocity;
-	float inv_mass;
 	v3 inv_inertia_local; // diagonal of local-space inverse inertia tensor
-	v3 iw_diag;           // precomputed world-space inverse inertia (xx,yy,zz)
-	v3 iw_off;            // precomputed world-space inverse inertia (xy,xz,yz)
 	float friction;
 	float restitution;
 	float linear_damping;
 	float angular_damping;
-	float sleep_time; // accumulated seconds below velocity threshold
-	int sleep_allowed; // 1 = can sleep (default), 0 = never sleep
-} BodyHot;
-
-// Solver velocity state: compact copy of just the fields the PGS inner loop
-// reads/writes. 32 bytes = half a cache line. The solver iterates this array
-// instead of the 120-byte BodyHot array during PGS iterations.
-// Synced from body_hot before PGS, synced back after.
-typedef struct SolverBodyVel
-{
-	v3 velocity;
-	v3 angular_velocity;
-	v3 iw_diag;           // cached world-space inverse inertia (diagonal)
-	v3 iw_off;            // cached world-space inverse inertia (off-diagonal)
-	float inv_mass;
-	float _pad[3];
-} SolverBodyVel;
+	float sleep_time;     // accumulated seconds below velocity threshold
+	int sleep_allowed;    // 1 = can sleep (default), 0 = never sleep
+} BodyState;
 
 // Cached narrowphase feature pair for incremental manifold refresh.
 // type=0: cold (no cache), type=1: face-face, type=2: edge-edge.
@@ -280,9 +274,9 @@ typedef struct WorldInternal
 	v3 gravity;
 	CK_DYNA BodyCold*    body_cold;
 	CK_DYNA BodyHot*     body_hot;
+	CK_DYNA BodyState*   body_state;
 	CK_DYNA uint32_t*    body_gen;
 	CK_DYNA int*         body_free;
-	CK_DYNA SolverBodyVel* body_vel; // compact solver velocity state (synced during PGS)
 	CK_DYNA Contact*     debug_contacts;
 	CK_MAP(WarmManifold) warm_cache;
 	// Joints

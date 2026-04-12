@@ -162,7 +162,7 @@ static void bvh_transfer_body(WorldInternal* w, int body_idx, BVH_Tree* from, BV
 	assert(from->leaves[leaf].body_idx == body_idx && "bvh_transfer: leaf doesn't belong to this body");
 	int moved = bvh_remove(from, leaf);
 	if (moved >= 0) w->body_cold[moved].bvh_leaf = leaf;
-	AABB box = aabb_expand(body_aabb(&w->body_hot[body_idx], &w->body_cold[body_idx]), BVH_AABB_MARGIN);
+	AABB box = aabb_expand(body_aabb(&w->body_state[body_idx], &w->body_cold[body_idx]), BVH_AABB_MARGIN);
 	w->body_cold[body_idx].bvh_leaf = bvh_insert(to, body_idx, box);
 }
 
@@ -172,7 +172,7 @@ static void island_wake(WorldInternal* w, int island_id)
 	isl->awake = 1;
 	int bi = isl->head_body;
 	while (bi >= 0) {
-		w->body_hot[bi].sleep_time = 0.0f;
+		w->body_state[bi].sleep_time = 0.0f;
 		bi = w->body_cold[bi].island_next;
 	}
 }
@@ -337,14 +337,15 @@ static void islands_evaluate_sleep(WorldInternal* w, float dt)
 		int bi = isl->head_body;
 		while (bi >= 0) {
 			BodyHot* h = &w->body_hot[bi];
-			if (!h->sleep_allowed) { all_sleepy = 0; bi = w->body_cold[bi].island_next; continue; }
+			BodyState* s = &w->body_state[bi];
+			if (!s->sleep_allowed) { all_sleepy = 0; bi = w->body_cold[bi].island_next; continue; }
 			float v2 = len2(h->velocity) + len2(h->angular_velocity);
 			if (v2 > SLEEP_VEL_THRESHOLD) {
-				h->sleep_time = fmaxf(h->sleep_time - dt * 2.0f, 0.0f);
+				s->sleep_time = fmaxf(s->sleep_time - dt * 2.0f, 0.0f);
 				all_sleepy = 0;
 			} else {
-				h->sleep_time += dt;
-				if (h->sleep_time < SLEEP_TIME_THRESHOLD)
+				s->sleep_time += dt;
+				if (s->sleep_time < SLEEP_TIME_THRESHOLD)
 					all_sleepy = 0;
 			}
 			bi = w->body_cold[bi].island_next;

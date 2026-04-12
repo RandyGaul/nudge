@@ -114,8 +114,9 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 		// Warm start torsional friction (pure angular impulse along normal)
 		if (m->lambda_twist != 0.0f) {
 			v3 twist_impulse = scale(m->normal, m->lambda_twist);
-			a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, twist_impulse));
-			b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, twist_impulse));
+			BodyState* sa = &w->body_state[m->body_a]; BodyState* sb = &w->body_state[m->body_b];
+			a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, twist_impulse));
+			b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, twist_impulse));
 		}
 	}
 
@@ -134,6 +135,8 @@ static void solver_position_correct(WorldInternal* w, SolverManifold* sm, int sm
 			if (m->contact_count == 0) continue;
 			BodyHot* a = &w->body_hot[m->body_a];
 			BodyHot* b = &w->body_hot[m->body_b];
+			BodyState* sa = &w->body_state[m->body_a];
+			BodyState* sb = &w->body_state[m->body_b];
 			float inv_mass_sum = a->inv_mass + b->inv_mass;
 
 			for (int ci = 0; ci < m->contact_count; ci++) {
@@ -141,8 +144,8 @@ static void solver_position_correct(WorldInternal* w, SolverManifold* sm, int sm
 
 				// Recompute separation from current positions (r_a/r_b are close enough
 				// after small position corrections — matches solver_relax_contacts approach).
-				v3 p_a = add(a->position, s->r_a);
-				v3 p_b = add(b->position, s->r_b);
+				v3 p_a = add(sa->position, s->r_a);
+				v3 p_b = add(sb->position, s->r_b);
 				float separation = dot(sub(p_b, p_a), s->normal) - s->penetration;
 
 				float C = fminf(0.0f, separation + SOLVER_SLOP);
@@ -157,8 +160,8 @@ static void solver_position_correct(WorldInternal* w, SolverManifold* sm, int sm
 				float delta = correction / k;
 
 				v3 P = scale(s->normal, delta);
-				a->position = sub(a->position, scale(P, a->inv_mass));
-				b->position = add(b->position, scale(P, b->inv_mass));
+				sa->position = sub(sa->position, scale(P, a->inv_mass));
+				sb->position = add(sb->position, scale(P, b->inv_mass));
 			}
 		}
 	}
@@ -189,14 +192,14 @@ static void solver_relax_contacts(WorldInternal* w, SolverManifold* sm, int sm_c
 	for (int i = 0; i < sm_count; i++) {
 		SolverManifold* m = &sm[i];
 		if (m->contact_count == 0) continue;
-		BodyHot* a = &w->body_hot[m->body_a];
-		BodyHot* b = &w->body_hot[m->body_b];
+		BodyState* sa = &w->body_state[m->body_a];
+		BodyState* sb = &w->body_state[m->body_b];
 		float bias_rate = (m->inv_mass_a == 0.0f || m->inv_mass_b == 0.0f) ? bias_rate_ds : bias_rate_dd;
 		for (int ci = 0; ci < m->contact_count; ci++) {
 			SolverContact* s = &sc[m->contact_start + ci];
 
-			v3 p_a = add(a->position, s->r_a);
-			v3 p_b = add(b->position, s->r_b);
+			v3 p_a = add(sa->position, s->r_a);
+			v3 p_b = add(sb->position, s->r_b);
 			float separation = dot(sub(p_b, p_a), s->normal) - s->penetration;
 
 			float pen = -separation - SOLVER_SLOP;
@@ -364,37 +367,13 @@ static void solve_constraint(WorldInternal* w, ConstraintRef* ref, SolverManifol
 	}
 }
 
-// --- SolverBodyVel fast path: compact 32-byte body state for PGS iteration ---
+// --- BodyHot fast path: lean 80-byte body state for PGS iteration ---
 
-// Sync body_hot velocity → body_vel (before PGS).
-static void solver_sync_vel_in(WorldInternal* w)
-{
-	int count = asize(w->body_hot);
-	split_ensure(w->body_vel, count - 1);
-	for (int i = 0; i < count; i++) {
-		w->body_vel[i].velocity = w->body_hot[i].velocity;
-		w->body_vel[i].angular_velocity = w->body_hot[i].angular_velocity;
-		w->body_vel[i].inv_mass = w->body_hot[i].inv_mass;
-		w->body_vel[i].iw_diag = w->body_hot[i].iw_diag;
-		w->body_vel[i].iw_off = w->body_hot[i].iw_off;
-	}
-}
-
-// Sync body_vel → body_hot velocity (after PGS).
-static void solver_sync_vel_out(WorldInternal* w)
-{
-	int count = asize(w->body_hot);
-	for (int i = 0; i < count; i++) {
-		w->body_hot[i].velocity = w->body_vel[i].velocity;
-		w->body_hot[i].angular_velocity = w->body_vel[i].angular_velocity;
-	}
-}
-
-// World-space inverse inertia multiply for SolverBodyVel (macro to guarantee inlining).
+// World-space inverse inertia multiply for BodyHot (macro to guarantee inlining).
 #define sv_inertia_mul(h, v) V3((h)->iw_diag.x*(v).x + (h)->iw_off.x*(v).y + (h)->iw_off.y*(v).z, (h)->iw_off.x*(v).x + (h)->iw_diag.y*(v).y + (h)->iw_off.z*(v).z, (h)->iw_off.y*(v).x + (h)->iw_off.z*(v).y + (h)->iw_diag.z*(v).z)
 
 // Apply impulse row to velocity-only body state. inv_mass comes from the manifold (cached).
-static SIMD_FORCEINLINE void apply_impulse_row_sv(SolverBodyVel* a, SolverBodyVel* b, float ima, float imb, v3 direction, v3 w_a, v3 w_b, float delta)
+static SIMD_FORCEINLINE void apply_impulse_row_sv(BodyHot* a, BodyHot* b, float ima, float imb, v3 direction, v3 w_a, v3 w_b, float delta)
 {
 	v3 P = scale(direction, delta);
 	a->velocity = sub(a->velocity, scale(P, ima));
@@ -403,15 +382,15 @@ static SIMD_FORCEINLINE void apply_impulse_row_sv(SolverBodyVel* a, SolverBodyVe
 	b->angular_velocity = add(b->angular_velocity, scale(w_b, delta));
 }
 
-// Solve one patch-friction manifold using compact SolverBodyVel arrays.
+// Solve one patch-friction manifold using BodyHot arrays directly.
 // Body inv_mass is read from the manifold (cached in pre_solve), never from body arrays.
 // BEPU-style: recompute cross+inertia inline instead of reading precomputed data.
 // Trades ALU (cheap in Release) for bandwidth (expensive at 10K+ bodies).
 // SolverContact only needs: r_a, r_b, eff_mass_n, bias, bounce, softness, lambda_n.
-static SIMD_FORCEINLINE void solve_contact_patch_sv(SolverBodyVel* bodies, SolverManifold* m, PatchContact* pc)
+static SIMD_FORCEINLINE void solve_contact_patch_sv(BodyHot* bodies, SolverManifold* m, PatchContact* pc)
 {
-	SolverBodyVel* a = &bodies[m->body_a];
-	SolverBodyVel* b = &bodies[m->body_b];
+	BodyHot* a = &bodies[m->body_a];
+	BodyHot* b = &bodies[m->body_b];
 	float ima = m->inv_mass_a, imb = m->inv_mass_b;
 
 	v3 normal = m->normal;
@@ -500,12 +479,12 @@ typedef struct PGS_Batch4
 	int lane_count;
 } PGS_Batch4;
 
-// Gather a v3 field from 4 SolverBodyVel entries into SoA v3w via transpose.
+// Gather a v3 field from 4 BodyHot entries into SoA v3w via transpose.
 #define GATHER_V3(out, arr, i0, i1, i2, i3, field) do { \
 	simd4f _r0=(arr)[i0].field.m, _r1=(arr)[i1].field.m, _r2=(arr)[i2].field.m, _r3=(arr)[i3].field.m; \
 	simd_transpose4(&_r0,&_r1,&_r2,&_r3); (out).x=_r0; (out).y=_r1; (out).z=_r2; } while(0)
 
-// Scatter SoA v3w back to 4 SolverBodyVel entries via reverse transpose.
+// Scatter SoA v3w back to 4 BodyHot entries via reverse transpose.
 #define SCATTER_V3(arr, i0, i1, i2, i3, field, src) do { \
 	simd4f _r0=(src).x, _r1=(src).y, _r2=(src).z, _r3=simd_zero(); \
 	simd_transpose4(&_r0,&_r1,&_r2,&_r3); \
@@ -586,7 +565,7 @@ static void pgs_batch4_refresh(PGS_Batch4* bt, SolverManifold* sm, PatchContact*
 	}
 }
 
-static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b)
+static void solve_contact_batch4_sv(BodyHot* bodies, PGS_Batch4* b)
 {
 	int i0a=b->body_a[0], i1a=b->body_a[1], i2a=b->body_a[2], i3a=b->body_a[3];
 	int i0b=b->body_b[0], i1b=b->body_b[1], i2b=b->body_b[2], i3b=b->body_b[3];

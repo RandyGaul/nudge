@@ -53,7 +53,7 @@ void destroy_world(World world)
 		afree(w->body_cold[i].shapes);
 	}
 	afree(w->debug_contacts);
-	afree(w->body_vel);
+	afree(w->body_state);
 	map_free(w->warm_cache);
 	bvh_free(w->bvh_static); CK_FREE(w->bvh_static);
 	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
@@ -75,15 +75,16 @@ static void integrate_velocities_and_inertia(WorldInternal* w, float dt)
 	for (int i = 0; i < count; i++) {
 		if (!split_alive(w->body_gen, i)) continue;
 		BodyHot* h = &w->body_hot[i];
-		body_compute_inv_inertia_world(h);
+		BodyState* s = &w->body_state[i];
+		body_compute_inv_inertia_world(h, s);
 		if (h->inv_mass == 0.0f) continue;
 		int isl = w->body_cold[i].island_id;
 		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake) continue;
 		h->velocity = add(h->velocity, scale(w->gravity, dt));
-		if (h->linear_damping > 0.0f)
-			h->velocity = scale(h->velocity, 1.0f / (1.0f + h->linear_damping * dt));
-		if (h->angular_damping > 0.0f)
-			h->angular_velocity = scale(h->angular_velocity, 1.0f / (1.0f + h->angular_damping * dt));
+		if (s->linear_damping > 0.0f)
+			h->velocity = scale(h->velocity, 1.0f / (1.0f + s->linear_damping * dt));
+		if (s->angular_damping > 0.0f)
+			h->angular_velocity = scale(h->angular_velocity, 1.0f / (1.0f + s->angular_damping * dt));
 	}
 }
 
@@ -97,6 +98,7 @@ static void integrate_positions(WorldInternal* w, float dt)
 		if (h->inv_mass == 0.0f) continue;
 		int isl = w->body_cold[i].island_id;
 		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake) continue;
+		BodyState* s = &w->body_state[i];
 
 		float lv2 = len2(h->velocity);
 		if (lv2 > SOLVER_MAX_LINEAR_VEL * SOLVER_MAX_LINEAR_VEL)
@@ -105,25 +107,25 @@ static void integrate_positions(WorldInternal* w, float dt)
 		if (av2 > SOLVER_MAX_ANGULAR_VEL * SOLVER_MAX_ANGULAR_VEL)
 			h->angular_velocity = scale(h->angular_velocity, SOLVER_MAX_ANGULAR_VEL / sqrtf(av2));
 
-		h->position = add(h->position, scale(h->velocity, dt));
+		s->position = add(s->position, scale(h->velocity, dt));
 
 		// Skip gyroscopic for uniform inertia (cubes/spheres: cross(w,I*w)=0) or negligible angular vel.
-		if (av2 > 0.01f && !(h->inv_inertia_local.x == h->inv_inertia_local.y && h->inv_inertia_local.y == h->inv_inertia_local.z))
-			h->angular_velocity = solve_gyroscopic(h->rotation, h->inv_inertia_local, h->angular_velocity, dt);
+		if (av2 > 0.01f && !(s->inv_inertia_local.x == s->inv_inertia_local.y && s->inv_inertia_local.y == s->inv_inertia_local.z))
+			h->angular_velocity = solve_gyroscopic(s->rotation, s->inv_inertia_local, h->angular_velocity, dt);
 
 		v3 ww = h->angular_velocity;
 		quat spin = { ww.x, ww.y, ww.z, 0.0f };
-		quat dq = mul(spin, h->rotation);
-		h->rotation.x += 0.5f * dt * dq.x;
-		h->rotation.y += 0.5f * dt * dq.y;
-		h->rotation.z += 0.5f * dt * dq.z;
-		h->rotation.w += 0.5f * dt * dq.w;
-		float ql = sqrtf(h->rotation.x*h->rotation.x + h->rotation.y*h->rotation.y
-			+ h->rotation.z*h->rotation.z + h->rotation.w*h->rotation.w);
+		quat dq = mul(spin, s->rotation);
+		s->rotation.x += 0.5f * dt * dq.x;
+		s->rotation.y += 0.5f * dt * dq.y;
+		s->rotation.z += 0.5f * dt * dq.z;
+		s->rotation.w += 0.5f * dt * dq.w;
+		float ql = sqrtf(s->rotation.x*s->rotation.x + s->rotation.y*s->rotation.y
+			+ s->rotation.z*s->rotation.z + s->rotation.w*s->rotation.w);
 		if (ql < 1e-15f) ql = 1.0f;
 		float inv_ql = 1.0f / ql;
-		h->rotation.x *= inv_ql; h->rotation.y *= inv_ql;
-		h->rotation.z *= inv_ql; h->rotation.w *= inv_ql;
+		s->rotation.x *= inv_ql; s->rotation.y *= inv_ql;
+		s->rotation.z *= inv_ql; s->rotation.w *= inv_ql;
 	}
 }
 
@@ -234,7 +236,7 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 }
 
 // --- PGS solver work function (per-color) ---
-typedef struct PGS_WorkCtx { SolverBodyVel* bodies; PGS_Batch4* batches; } PGS_WorkCtx;
+typedef struct PGS_WorkCtx { BodyHot* bodies; PGS_Batch4* batches; } PGS_WorkCtx;
 static void pgs_work_fn(void* ctx, int start, int count)
 {
 	PGS_WorkCtx* p = (PGS_WorkCtx*)ctx;
@@ -252,10 +254,11 @@ static void integrate_vel_work_fn(void* ctx, int start, int count)
 		int i = ic->body_indices ? ic->body_indices[k] : k;
 		BodyHot* h = &ic->w->body_hot[i];
 		if (h->inv_mass == 0.0f) continue;
-		body_compute_inv_inertia_world(h);
+		BodyState* s = &ic->w->body_state[i];
+		body_compute_inv_inertia_world(h, s);
 		h->velocity = add(h->velocity, scale(ic->w->gravity, ic->dt));
-		if (h->linear_damping > 0.0f) h->velocity = scale(h->velocity, 1.0f / (1.0f + h->linear_damping * ic->dt));
-		if (h->angular_damping > 0.0f) h->angular_velocity = scale(h->angular_velocity, 1.0f / (1.0f + h->angular_damping * ic->dt));
+		if (s->linear_damping > 0.0f) h->velocity = scale(h->velocity, 1.0f / (1.0f + s->linear_damping * ic->dt));
+		if (s->angular_damping > 0.0f) h->angular_velocity = scale(h->angular_velocity, 1.0f / (1.0f + s->angular_damping * ic->dt));
 	}
 }
 
@@ -267,22 +270,23 @@ static void integrate_pos_work_fn(void* ctx, int start, int count)
 		int i = ic->body_indices ? ic->body_indices[k] : k;
 		BodyHot* h = &ic->w->body_hot[i];
 		if (h->inv_mass == 0.0f) continue;
+		BodyState* s = &ic->w->body_state[i];
 		float lv2 = len2(h->velocity);
 		if (lv2 > SOLVER_MAX_LINEAR_VEL * SOLVER_MAX_LINEAR_VEL) h->velocity = scale(h->velocity, SOLVER_MAX_LINEAR_VEL / sqrtf(lv2));
 		float av2 = len2(h->angular_velocity);
 		if (av2 > SOLVER_MAX_ANGULAR_VEL * SOLVER_MAX_ANGULAR_VEL) h->angular_velocity = scale(h->angular_velocity, SOLVER_MAX_ANGULAR_VEL / sqrtf(av2));
-		h->position = add(h->position, scale(h->velocity, dt));
+		s->position = add(s->position, scale(h->velocity, dt));
 		// Skip gyroscopic for uniform inertia (cubes/spheres: cross(w,I*w)=0) or negligible angular vel.
-		if (av2 > 0.01f && !(h->inv_inertia_local.x == h->inv_inertia_local.y && h->inv_inertia_local.y == h->inv_inertia_local.z))
-			h->angular_velocity = solve_gyroscopic(h->rotation, h->inv_inertia_local, h->angular_velocity, dt);
+		if (av2 > 0.01f && !(s->inv_inertia_local.x == s->inv_inertia_local.y && s->inv_inertia_local.y == s->inv_inertia_local.z))
+			h->angular_velocity = solve_gyroscopic(s->rotation, s->inv_inertia_local, h->angular_velocity, dt);
 		v3 ww = h->angular_velocity;
 		quat spin = { ww.x, ww.y, ww.z, 0.0f };
-		quat dq = mul(spin, h->rotation);
-		h->rotation.x += 0.5f * dt * dq.x; h->rotation.y += 0.5f * dt * dq.y; h->rotation.z += 0.5f * dt * dq.z; h->rotation.w += 0.5f * dt * dq.w;
-		float ql = sqrtf(h->rotation.x*h->rotation.x + h->rotation.y*h->rotation.y + h->rotation.z*h->rotation.z + h->rotation.w*h->rotation.w);
+		quat dq = mul(spin, s->rotation);
+		s->rotation.x += 0.5f * dt * dq.x; s->rotation.y += 0.5f * dt * dq.y; s->rotation.z += 0.5f * dt * dq.z; s->rotation.w += 0.5f * dt * dq.w;
+		float ql = sqrtf(s->rotation.x*s->rotation.x + s->rotation.y*s->rotation.y + s->rotation.z*s->rotation.z + s->rotation.w*s->rotation.w);
 		if (ql < 1e-15f) ql = 1.0f;
 		float inv_ql = 1.0f / ql;
-		h->rotation.x *= inv_ql; h->rotation.y *= inv_ql; h->rotation.z *= inv_ql; h->rotation.w *= inv_ql;
+		s->rotation.x *= inv_ql; s->rotation.y *= inv_ql; s->rotation.z *= inv_ql; s->rotation.w *= inv_ql;
 	}
 }
 
@@ -326,7 +330,7 @@ static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifo
 		BodyHot* a = &w->body_hot[m->body_a]; BodyHot* b = &w->body_hot[m->body_b];
 		for (int ci = 0; ci < m->contact_count; ci++) { SolverContact* s = &sc[m->contact_start + ci]; if (s->lambda_n == 0.0f) continue; apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n)); }
 		if (m->lambda_t1 != 0.0f || m->lambda_t2 != 0.0f) apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, add(scale(m->tangent1, m->lambda_t1), scale(m->tangent2, m->lambda_t2)));
-		if (m->lambda_twist != 0.0f) { v3 tw = scale(m->normal, m->lambda_twist); a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(a->rotation, a->inv_inertia_local, tw)); b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(b->rotation, b->inv_inertia_local, tw)); }
+		if (m->lambda_twist != 0.0f) { v3 tw = scale(m->normal, m->lambda_twist); BodyState* sa = &w->body_state[m->body_a]; BodyState* sb = &w->body_state[m->body_b]; a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, tw)); b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, tw)); }
 	}
 	*out_sm = sm; *out_sc = sc;
 	if (out_pc) *out_pc = pc; else afree(pc);
@@ -355,25 +359,25 @@ static void np_work_fn(void* ctx, int start, int count)
 		ShapeInternal* s1 = &np->w->body_cold[p->b].shapes[0];
 		int ia = p->a, ib = p->b;
 		if (s0->type > s1->type || (s0->type == s1->type && ia > ib)) { int tmp = ia; ia = ib; ib = tmp; s0 = &np->w->body_cold[ia].shapes[0]; s1 = &np->w->body_cold[ib].shapes[0]; }
-		BodyHot* h0 = &np->w->body_hot[ia];
-		BodyHot* h1 = &np->w->body_hot[ib];
+		BodyState* bs0 = &np->w->body_state[ia];
+		BodyState* bs1 = &np->w->body_state[ib];
 		InternalManifold im = { .body_a = ia, .body_b = ib };
 		int hit = 0;
-		if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE) hit = collide_sphere_sphere(make_sphere(h0, s0), make_sphere(h1, s1), &im.m);
-		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CAPSULE) hit = collide_sphere_capsule(make_sphere(h0, s0), make_capsule(h1, s1), &im.m);
-		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_BOX) hit = collide_sphere_box(make_sphere(h0, s0), make_box(h1, s1), &im.m);
-		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CAPSULE) hit = collide_capsule_capsule(make_capsule(h0, s0), make_capsule(h1, s1), &im.m);
-		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX) hit = collide_capsule_box(make_capsule(h0, s0), make_box(h1, s1), &im.m);
-		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) hit = collide_box_box_ex(make_box(h0, s0), make_box(h1, s1), &im.m, &(int){-1}, NULL);
-		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL) hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_convex_hull(h1, s1), &im.m);
-		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL) hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
-		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL) hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
-		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL) hit = collide_hull_hull(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m);
-		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_sphere(make_cylinder(h1, s1), make_sphere(h0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
-		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_capsule(make_cylinder(h1, s1), make_capsule(h0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
-		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_box(make_cylinder(h1, s1), make_box(h0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
-		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_hull(make_cylinder(h1, s1), make_convex_hull(h0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
-		else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) hit = collide_cylinder_cylinder(make_cylinder(h0, s0), make_cylinder(h1, s1), &im.m);
+		if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE) hit = collide_sphere_sphere(make_sphere(bs0, s0), make_sphere(bs1, s1), &im.m);
+		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CAPSULE) hit = collide_sphere_capsule(make_sphere(bs0, s0), make_capsule(bs1, s1), &im.m);
+		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_BOX) hit = collide_sphere_box(make_sphere(bs0, s0), make_box(bs1, s1), &im.m);
+		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CAPSULE) hit = collide_capsule_capsule(make_capsule(bs0, s0), make_capsule(bs1, s1), &im.m);
+		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX) hit = collide_capsule_box(make_capsule(bs0, s0), make_box(bs1, s1), &im.m);
+		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) hit = collide_box_box_ex(make_box(bs0, s0), make_box(bs1, s1), &im.m, &(int){-1}, NULL);
+		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL) hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, bs0->position, bs0->rotation, s0->box.half_extents }, make_convex_hull(bs1, s1), &im.m);
+		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL) hit = collide_sphere_hull(make_sphere(bs0, s0), make_convex_hull(bs1, s1), &im.m);
+		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL) hit = collide_capsule_hull(make_capsule(bs0, s0), make_convex_hull(bs1, s1), &im.m);
+		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL) hit = collide_hull_hull(make_convex_hull(bs0, s0), make_convex_hull(bs1, s1), &im.m);
+		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_sphere(make_cylinder(bs1, s1), make_sphere(bs0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
+		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_capsule(make_cylinder(bs1, s1), make_capsule(bs0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
+		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_box(make_cylinder(bs1, s1), make_box(bs0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
+		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_hull(make_cylinder(bs1, s1), make_convex_hull(bs0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
+		else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) hit = collide_cylinder_cylinder(make_cylinder(bs0, s0), make_cylinder(bs1, s1), &im.m);
 		if (hit) apush(local, im);
 	}
 	// Merge local manifolds into per-thread output (we just push to the global array with a lock).
@@ -596,7 +600,7 @@ void world_step(World world, float dt)
 	// K^-1 residual correction is applied at the configured iteration.
 	double t_pgs = 0, t_pos = 0, t_int_sub = 0;
 	double t_jlim = 0, t_ldl = 0, t_relax = 0, t_posJ = 0;
-	int use_body_vel = (asize(sol_joints) == 0);
+	int use_simd_path = (asize(sol_joints) == 0);
 #if SIMD_SSE
 	CK_DYNA PGS_Batch4* simd_batches = NULL;
 	CK_DYNA int* simd_color_batch_starts = NULL;
@@ -640,13 +644,12 @@ void world_step(World world, float dt)
 		t_ldl += perf_now() - tl0;
 
 		// PGS: iterate all constraints (contacts, and joints when LDL is off).
-		// Fast path: contacts with no joints use compact SolverBodyVel
-		// (32 bytes/body instead of 120 bytes — fits more bodies in cache).
-		if (use_body_vel) solver_sync_vel_in(w);
+		// PGS iteration: BodyHot is now the lean solver array (same layout
+		// as old SolverBodyVel), so no sync needed.
 
 		// Build SIMD batches on first substep; refresh only bias/lambda on substep 2+.
 #if SIMD_SSE
-		if (sub == 0 && use_body_vel && cref_count > 0) {
+		if (sub == 0 && use_simd_path && cref_count > 0) {
 			int total_batches = 0;
 			for (int c = 0; c < color_count; c++) total_batches += (batch_starts[c+1] - batch_starts[c] + 3) / 4;
 			afit(simd_batches, total_batches);
@@ -675,7 +678,7 @@ void world_step(World world, float dt)
 #endif
 
 		double tp = perf_now();
-		if (use_body_vel) {
+		if (use_simd_path) {
 #if SIMD_SSE
 			// On substep 2+, only refresh changing fields (bias + lambda).
 			if (sub > 0 && simd_batch_count > 0) {
@@ -692,13 +695,13 @@ void world_step(World world, float dt)
 					int n_color_batches = be - bs;
 #ifdef _WIN32
 					if (n_workers > 1 && n_color_batches >= n_workers * 2) {
-						PGS_WorkCtx pgs_ctx = { .bodies = w->body_vel, .batches = simd_batches + bs };
+						PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs };
 						pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
 					} else
 #endif
 					{
 						for (int bi = bs; bi < be; bi++) {
-							solve_contact_batch4_sv(w->body_vel, &simd_batches[bi]);
+							solve_contact_batch4_sv(w->body_hot, &simd_batches[bi]);
 						}
 					}
 				}
@@ -728,7 +731,7 @@ void world_step(World world, float dt)
 				for (int c = 0; c < color_count; c++) {
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++) {
 						if (crefs[i].type == CTYPE_CONTACT)
-							solve_contact_patch_sv(w->body_vel, &sm[crefs[i].index], pc);
+							solve_contact_patch_sv(w->body_hot, &sm[crefs[i].index], pc);
 					}
 				}
 				double tjl = perf_now();
@@ -750,8 +753,7 @@ void world_step(World world, float dt)
 		}
 		t_pgs += perf_now() - tp;
 
-		if (use_body_vel) {
-			solver_sync_vel_out(w);
+		if (use_simd_path) {
 			// Sync lambda_n from compact PatchContact back to SolverContact
 			for (int ci2 = 0; ci2 < asize(pc); ci2++) sc[ci2].lambda_n = pc[ci2].lambda_n;
 		}
@@ -858,6 +860,7 @@ Body create_body(World world, BodyParams params)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx;
 	split_add(w->body_cold, w->body_hot, w->body_gen, w->body_free, idx);
+	split_ensure(w->body_state, idx);
 
 	w->body_cold[idx] = (BodyCold){
 		.mass = params.mass,
@@ -872,9 +875,11 @@ Body create_body(World world, BodyParams params)
 	float ang_damp = params.angular_damping;
 	if (ang_damp == 0.0f) ang_damp = 0.03f; // default: 3%/s (BEPU-style)
 	w->body_hot[idx] = (BodyHot){
+		.inv_mass = params.mass > 0.0f ? 1.0f / params.mass : 0.0f,
+	};
+	w->body_state[idx] = (BodyState){
 		.position = params.position,
 		.rotation = params.rotation,
-		.inv_mass = params.mass > 0.0f ? 1.0f / params.mass : 0.0f,
 		.friction = fric,
 		.restitution = params.restitution,
 		.linear_damping = params.linear_damping,
@@ -910,6 +915,7 @@ void destroy_body(World world, Body body)
 		if (w->body_hot[idx].inv_mass == 0.0f) tree = w->bvh_static;
 		else if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake) tree = w->bvh_sleeping;
 		else tree = w->bvh_dynamic;
+		// body_state[idx] will be cleared by split_del below
 		int moved_body = bvh_remove(tree, w->body_cold[idx].bvh_leaf);
 		if (moved_body >= 0) w->body_cold[moved_body].bvh_leaf = w->body_cold[idx].bvh_leaf;
 	}
@@ -943,7 +949,7 @@ void body_add_shape(World world, Body body, ShapeParams params)
 
 	// Insert into BVH on first shape add.
 	if (w->broadphase_type == BROADPHASE_BVH && asize(w->body_cold[idx].shapes) == 1) {
-		AABB box = aabb_expand(body_aabb(&w->body_hot[idx], &w->body_cold[idx]), BVH_AABB_MARGIN);
+		AABB box = aabb_expand(body_aabb(&w->body_state[idx], &w->body_cold[idx]), BVH_AABB_MARGIN);
 		BVH_Tree* tree = w->body_hot[idx].inv_mass == 0.0f ? w->bvh_static : w->bvh_dynamic;
 		w->body_cold[idx].bvh_leaf = bvh_insert(tree, idx, box);
 	}
@@ -954,7 +960,7 @@ v3 body_get_position(World world, Body body)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
-	return w->body_hot[idx].position;
+	return w->body_state[idx].position;
 }
 
 quat body_get_rotation(World world, Body body)
@@ -962,7 +968,7 @@ quat body_get_rotation(World world, Body body)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
-	return w->body_hot[idx].rotation;
+	return w->body_state[idx].rotation;
 }
 
 void body_wake(World world, Body body)
@@ -1025,7 +1031,7 @@ void body_set_sleep_allowed(World world, Body body, int allowed)
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
-	w->body_hot[idx].sleep_allowed = allowed;
+	w->body_state[idx].sleep_allowed = allowed;
 	if (!allowed) {
 		int isl = w->body_cold[idx].island_id;
 		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
@@ -1100,10 +1106,10 @@ Joint create_distance(World world, DistanceParams params)
 	// Auto-compute rest length if not specified
 	float rest = params.rest_length;
 	if (rest <= 0.0f) {
-		BodyHot* a = &w->body_hot[ba];
-		BodyHot* b = &w->body_hot[bb];
-		v3 wa = add(a->position, rotate(a->rotation, params.local_offset_a));
-		v3 wb = add(b->position, rotate(b->rotation, params.local_offset_b));
+		BodyState* sa = &w->body_state[ba];
+		BodyState* sb = &w->body_state[bb];
+		v3 wa = add(sa->position, rotate(sa->rotation, params.local_offset_a));
+		v3 wb = add(sb->position, rotate(sb->rotation, params.local_offset_b));
 		rest = len(sub(wb, wa));
 	}
 
@@ -1156,8 +1162,8 @@ Joint create_hinge(World world, HingeParams params)
 	v3 ref_a, ref_a_t2;
 	hinge_tangent_basis(axis_a_local, &ref_a, &ref_a_t2);
 	// Transform ref_a into world, then into body B's local space
-	quat q_a = w->body_hot[ba].rotation;
-	quat q_b = w->body_hot[bb].rotation;
+	quat q_a = w->body_state[ba].rotation;
+	quat q_b = w->body_state[bb].rotation;
 	v3 ref_a_world = rotate(q_a, ref_a);
 	v3 ref_b = rotate(inv(q_b), ref_a_world);
 
@@ -1202,8 +1208,8 @@ Joint create_fixed(World world, FixedParams params)
 		apush(w->joint_gen, 1);
 	}
 
-	quat q_a = w->body_hot[ba].rotation;
-	quat q_b = w->body_hot[bb].rotation;
+	quat q_a = w->body_state[ba].rotation;
+	quat q_b = w->body_state[bb].rotation;
 	w->joints[idx] = (JointInternal){
 		.type = JOINT_FIXED,
 		.body_a = ba, .body_b = bb,
@@ -1244,8 +1250,8 @@ Joint create_prismatic(World world, PrismaticParams params)
 		apush(w->joint_gen, 1);
 	}
 
-	quat q_a = w->body_hot[ba].rotation;
-	quat q_b = w->body_hot[bb].rotation;
+	quat q_a = w->body_state[ba].rotation;
+	quat q_b = w->body_state[bb].rotation;
 	w->joints[idx] = (JointInternal){
 		.type = JOINT_PRISMATIC,
 		.body_a = ba, .body_b = bb,
@@ -1356,40 +1362,40 @@ void world_debug_joints(World world, JointDebugFn fn, void* user)
 	for (int i = 0; i < jcount; i++) {
 		if (!split_alive(w->joint_gen, i)) continue;
 		JointInternal* j = &w->joints[i];
-		BodyHot* a = &w->body_hot[j->body_a];
-		BodyHot* b = &w->body_hot[j->body_b];
+		BodyState* sa = &w->body_state[j->body_a];
+		BodyState* sb = &w->body_state[j->body_b];
 		JointDebugInfo info = {0};
 		info.type = j->type;
 		if (j->type == JOINT_BALL_SOCKET) {
-			info.anchor_a = add(a->position, rotate(a->rotation, j->ball_socket.local_a));
-			info.anchor_b = add(b->position, rotate(b->rotation, j->ball_socket.local_b));
+			info.anchor_a = add(sa->position, rotate(sa->rotation, j->ball_socket.local_a));
+			info.anchor_b = add(sb->position, rotate(sb->rotation, j->ball_socket.local_b));
 			info.is_soft = j->ball_socket.spring.frequency > 0;
 		} else if (j->type == JOINT_DISTANCE) {
-			info.anchor_a = add(a->position, rotate(a->rotation, j->distance.local_a));
-			info.anchor_b = add(b->position, rotate(b->rotation, j->distance.local_b));
+			info.anchor_a = add(sa->position, rotate(sa->rotation, j->distance.local_a));
+			info.anchor_b = add(sb->position, rotate(sb->rotation, j->distance.local_b));
 			info.is_soft = j->distance.spring.frequency > 0;
 		} else if (j->type == JOINT_HINGE) {
-			info.anchor_a = add(a->position, rotate(a->rotation, j->hinge.local_a));
-			info.anchor_b = add(b->position, rotate(b->rotation, j->hinge.local_b));
-			info.axis_a = norm(rotate(a->rotation, j->hinge.local_axis_a));
+			info.anchor_a = add(sa->position, rotate(sa->rotation, j->hinge.local_a));
+			info.anchor_b = add(sb->position, rotate(sb->rotation, j->hinge.local_b));
+			info.axis_a = norm(rotate(sa->rotation, j->hinge.local_axis_a));
 			info.is_soft = j->hinge.spring.frequency > 0;
 			info.motor_speed = j->hinge.motor_speed;
 			info.motor_max_impulse = j->hinge.motor_max_impulse;
 			info.limit_min = j->hinge.limit_min;
 			info.limit_max = j->hinge.limit_max;
-			info.ref_a = rotate(a->rotation, j->hinge.local_ref_a);
-			info.ref_b = rotate(b->rotation, j->hinge.local_ref_b);
+			info.ref_a = rotate(sa->rotation, j->hinge.local_ref_a);
+			info.ref_b = rotate(sb->rotation, j->hinge.local_ref_b);
 			float angle = atan2f(dot(cross(info.ref_a, info.ref_b), info.axis_a), dot(info.ref_a, info.ref_b));
 			info.current_angle = angle;
 			info.limit_active = (j->hinge.limit_min != 0 && angle <= j->hinge.limit_min) || (j->hinge.limit_max != 0 && angle >= j->hinge.limit_max);
 		} else if (j->type == JOINT_FIXED) {
-			info.anchor_a = add(a->position, rotate(a->rotation, j->fixed.local_a));
-			info.anchor_b = add(b->position, rotate(b->rotation, j->fixed.local_b));
+			info.anchor_a = add(sa->position, rotate(sa->rotation, j->fixed.local_a));
+			info.anchor_b = add(sb->position, rotate(sb->rotation, j->fixed.local_b));
 			info.is_soft = j->fixed.spring.frequency > 0;
 		} else if (j->type == JOINT_PRISMATIC) {
-			info.anchor_a = add(a->position, rotate(a->rotation, j->prismatic.local_a));
-			info.anchor_b = add(b->position, rotate(b->rotation, j->prismatic.local_b));
-			info.axis_a = norm(rotate(a->rotation, j->prismatic.local_axis_a));
+			info.anchor_a = add(sa->position, rotate(sa->rotation, j->prismatic.local_a));
+			info.anchor_b = add(sb->position, rotate(sb->rotation, j->prismatic.local_b));
+			info.axis_a = norm(rotate(sa->rotation, j->prismatic.local_axis_a));
 			info.is_soft = j->prismatic.spring.frequency > 0;
 			info.motor_speed = j->prismatic.motor_speed;
 			info.motor_max_impulse = j->prismatic.motor_max_impulse;
@@ -1430,7 +1436,7 @@ int world_query_aabb(World world, v3 lo, v3 hi, Body* results, int max_results)
 	int total = 0;
 	for (int i = 0; i < asize(candidates); i++) {
 		int idx = candidates[i];
-		AABB b = body_aabb(&w->body_hot[idx], &w->body_cold[idx]);
+		AABB b = body_aabb(&w->body_state[idx], &w->body_cold[idx]);
 		if (!aabb_overlaps(query, b)) continue;
 		if (total < max_results)
 			results[total] = split_handle(Body, w->body_gen, idx);

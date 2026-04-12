@@ -80,12 +80,12 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		if (w->body_hot[i].inv_mass > 0.0f) {
 			int isl = w->body_cold[i].island_id;
 			if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) {
-				tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]); // needed for wake detection
+				tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]); // needed for wake detection
 				apush(sleeping_bodies, i);
 				continue;
 			}
 		}
-		tight[i] = body_aabb(&w->body_hot[i], &w->body_cold[i]);
+		tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]);
 		if (w->body_hot[i].inv_mass > 0.0f) { scene_bounds = aabb_merge(scene_bounds, tight[i]); }
 	}
 	v3 extent = sub(scene_bounds.max, scene_bounds.min);

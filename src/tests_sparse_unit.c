@@ -195,9 +195,9 @@ static void test_sparse_K_roundtrip()
 
 	// Build bodies
 	BodyHot bodies[3];
-	bodies[0] = make_body(2, 4);   // B0
-	bodies[1] = make_body(5, 10);  // B1 (shared)
-	bodies[2] = make_body(3, 6);   // B2
+	bodies[0] = make_body(2, 4).hot;   // B0
+	bodies[1] = make_body(5, 10).hot;  // B1 (shared)
+	bodies[2] = make_body(3, 6).hot;   // B2
 
 	// Build solver data
 	SolverJoint sols[2] = {
@@ -290,9 +290,9 @@ static void test_sparse_K_roundtrip_extreme_mass()
 	// The off-diagonal coupling through B1 is well-conditioned,
 	// but the diagonal blocks have wildly different contributions.
 	BodyHot bodies[3];
-	bodies[0] = make_body(10000, 10000);
-	bodies[1] = make_body(10, 10);
-	bodies[2] = make_body(1, 1);
+	bodies[0] = make_body(10000, 10000).hot;
+	bodies[1] = make_body(10, 10).hot;
+	bodies[2] = make_body(1, 1).hot;
 
 	SolverJoint sols[2] = {
 		{ .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .body_a = 0, .body_b = 1 },
@@ -364,9 +364,9 @@ static void test_sparse_K_roundtrip_large_levers()
 	// Off-diagonal entries also large. Verify sparse storage handles big values
 	// and factorization still produces positive pivots.
 	BodyHot bodies[3];
-	bodies[0] = make_body(1, 1);
-	bodies[1] = make_body(1, 1);
-	bodies[2] = make_body(1, 1);
+	bodies[0] = make_body(1, 1).hot;
+	bodies[1] = make_body(1, 1).hot;
+	bodies[2] = make_body(1, 1).hot;
 
 	SolverJoint sols[2] = {
 		{ .r_a = V3(50, 0, 0), .r_b = V3(-50, 0, 0), .body_a = 0, .body_b = 1 },
@@ -436,9 +436,9 @@ static void test_sparse_K_roundtrip_mixed_types()
 	// Off-diagonal block is 3x1 and 1x3 -- non-square.
 	// Verifies mixed-DOF sparse storage with real physics values.
 	BodyHot bodies[3];
-	bodies[0] = make_body(2, 4);
-	bodies[1] = make_body(5, 10);
-	bodies[2] = make_body(3, 6);
+	bodies[0] = make_body(2, 4).hot;
+	bodies[1] = make_body(5, 10).hot;
+	bodies[2] = make_body(3, 6).hot;
 
 	SolverJoint sol_bs = { .type = JOINT_BALL_SOCKET, .dof = 3, .r_a = V3(1, 0, 0), .r_b = V3(-1, 0, 0), .body_a = 0, .body_b = 1 };
 	test_fill_bs_rows(&sol_bs);
@@ -519,9 +519,9 @@ static void test_sparse_K_roundtrip_rotated_asymmetric()
 	quat rot_a = quat_axis_angle(norm(V3(1, 2, -1)), 0.8f);
 	quat rot_b = quat_axis_angle(norm(V3(-1, 0, 3)), 1.2f);
 	BodyHot bodies[3];
-	bodies[0] = make_body_full(1, V3(0.5f, 5, 20), rot_a);
-	bodies[1] = make_body_full(100, V3(10, 50, 200), rot_b);
-	bodies[2] = make_body_full(1, V3(1, 1, 1), quat_identity());
+	bodies[0] = make_body_full(1, V3(0.5f, 5, 20), rot_a).hot;
+	bodies[1] = make_body_full(100, V3(10, 50, 200), rot_b).hot;
+	bodies[2] = make_body_full(1, V3(1, 1, 1), quat_identity()).hot;
 
 	SolverJoint sols[2] = {
 		{ .r_a = V3(5, -3, 2), .r_b = V3(-2, 8, 1), .body_a = 0, .body_b = 1 },

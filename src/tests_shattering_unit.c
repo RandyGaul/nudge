@@ -9,7 +9,7 @@ static void test_shatter_below_threshold()
 	TEST_BEGIN("shatter_below_threshold");
 	// 2 ball-sockets on hub = 6 DOF <= SHATTER_THRESHOLD (6). No shattering.
 	BodyHot bodies[3];
-	for (int i = 0; i < 3; i++) bodies[i] = make_body((float)(1 + i), (float)(2 + i));
+	for (int i = 0; i < 3; i++) bodies[i] = make_body((float)(1 + i), (float)(2 + i)).hot;
 	WorldInternal w = {0};
 	afit(w.body_hot, 3); asetlen(w.body_hot, 3);
 	for (int i = 0; i < 3; i++) w.body_hot[i] = bodies[i];
@@ -42,7 +42,7 @@ static void test_shatter_above_threshold()
 	// 6 ball-sockets on hub body 0 = 18 DOF > 15. Triggers shattering.
 	// S = ceil(18 / 6) = 3 shards.
 	BodyHot bodies[7];
-	for (int i = 0; i < 7; i++) bodies[i] = make_body((float)(1 + i), (float)(2 + i));
+	for (int i = 0; i < 7; i++) bodies[i] = make_body((float)(1 + i), (float)(2 + i)).hot;
 	WorldInternal w = {0};
 	afit(w.body_hot, 7); asetlen(w.body_hot, 7);
 	for (int i = 0; i < 7; i++) w.body_hot[i] = bodies[i];
@@ -84,8 +84,7 @@ static void test_shatter_static_hub_excluded()
 	// Static hub (inv_mass = 0): should NOT be shattered even if DOF > threshold.
 	BodyHot bodies[7];
 	bodies[0] = (BodyHot){0}; // static
-	bodies[0].rotation = quat_identity();
-	for (int i = 1; i < 7; i++) bodies[i] = make_body(1, 1);
+	for (int i = 1; i < 7; i++) bodies[i] = make_body(1, 1).hot;
 	WorldInternal w = {0};
 	afit(w.body_hot, 7); asetlen(w.body_hot, 7);
 	for (int i = 0; i < 7; i++) w.body_hot[i] = bodies[i];
@@ -116,8 +115,8 @@ static void test_shatter_hub_star_pipeline()
 	// topology -> numeric_factor -> solve. This is the crash scenario.
 	SoftTestWorld sw = {0};
 	sw.body_count = 7;
-	sw.bodies[0] = make_body(5, 10); // hub
-	for (int i = 1; i <= 6; i++) sw.bodies[i] = make_body(1, 1); // leaves
+	sw.bodies[0] = make_body(5, 10).hot; // hub
+	for (int i = 1; i <= 6; i++) sw.bodies[i] = make_body(1, 1).hot; // leaves
 	sw.joint_count = 6;
 	sw.sol_joint_count = 6;
 	v3 dirs[6] = { V3(1,0,0), V3(-1,0,0), V3(0,1,0), V3(0,-1,0), V3(0,0,1), V3(0,0,-1) };
@@ -178,8 +177,8 @@ static void test_shatter_hub_star_extreme_mass()
 	// Heavy hub (1000) + light leaves (1). Shattering weights amplify the ratio.
 	SoftTestWorld sw = {0};
 	sw.body_count = 7;
-	sw.bodies[0] = make_body(1000, 1000); // heavy hub
-	for (int i = 1; i <= 6; i++) sw.bodies[i] = make_body(1, 1);
+	sw.bodies[0] = make_body(1000, 1000).hot; // heavy hub
+	for (int i = 1; i <= 6; i++) sw.bodies[i] = make_body(1, 1).hot;
 	sw.joint_count = 6;
 	sw.sol_joint_count = 6;
 	v3 dirs[6] = { V3(1,0,0), V3(-1,0,0), V3(0,1,0), V3(0,-1,0), V3(0,0,1), V3(0,0,-1) };
@@ -232,11 +231,11 @@ static void test_shatter_hub_with_soft_springs()
 	// Hub star with soft springs on all joints. Shattering + softness.
 	SoftTestWorld sw = {0};
 	sw.body_count = 7;
-	sw.bodies[0] = make_body(5, 10);
-	sw.bodies[0].position = V3(0, 0, 0);
+	sw.bodies[0] = make_body(5, 10).hot;
+	sw.states[0].position = V3(0, 0, 0);
 	for (int i = 1; i <= 6; i++) {
-		sw.bodies[i] = make_body(1, 1);
-		sw.bodies[i].position = V3((float)(i % 3 - 1) * 2, (float)(i / 3) * 2, 0);
+		sw.bodies[i] = make_body(1, 1).hot;
+		sw.states[i].position = V3((float)(i % 3 - 1) * 2, (float)(i / 3) * 2, 0);
 	}
 	sw.joint_count = 6;
 	sw.sol_joint_count = 6;
@@ -246,7 +245,7 @@ static void test_shatter_hub_with_soft_springs()
 		float ptv, soft;
 		SpringParams sp = { .frequency = 30, .damping_ratio = 1 };
 		spring_compute(sp, sub_dt, &ptv, &soft);
-		v3 err = sub(sw.bodies[i + 1].position, sw.bodies[0].position);
+		v3 err = sub(sw.states[i + 1].position, sw.states[0].position);
 		sw.sol_joints[i] = (SolverJoint){ .type = JOINT_BALL_SOCKET, .dof = 3,
 			.r_a = dirs[i], .r_b = scale(dirs[i], -1),
 			.body_a = 0, .body_b = i + 1,

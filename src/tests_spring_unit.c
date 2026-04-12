@@ -119,6 +119,7 @@ static void test_spring_large_dt()
 typedef struct SoftTestWorld
 {
 	BodyHot bodies[16];
+	BodyState states[16];
 	int body_count;
 	JointInternal joints[16];
 	int joint_count;
@@ -133,6 +134,9 @@ static WorldInternal* soft_test_make_world(SoftTestWorld* sw)
 	afit(w->body_hot, sw->body_count);
 	asetlen(w->body_hot, sw->body_count);
 	for (int i = 0; i < sw->body_count; i++) w->body_hot[i] = sw->bodies[i];
+	afit(w->body_state, sw->body_count);
+	asetlen(w->body_state, sw->body_count);
+	for (int i = 0; i < sw->body_count; i++) w->body_state[i] = sw->states[i];
 	afit(w->joints, sw->joint_count);
 	asetlen(w->joints, sw->joint_count);
 	for (int i = 0; i < sw->joint_count; i++) w->joints[i] = sw->joints[i];
@@ -142,6 +146,7 @@ static WorldInternal* soft_test_make_world(SoftTestWorld* sw)
 static void soft_test_free_world(WorldInternal* w)
 {
 	afree(w->body_hot);
+	afree(w->body_state);
 	afree(w->joints);
 	CK_FREE(w);
 }
@@ -154,10 +159,10 @@ static void test_soft_spring_pulls_together()
 	// The spring should produce a lambda that pushes A toward +X and B toward -X.
 	SoftTestWorld sw = {0};
 	sw.body_count = 2;
-	sw.bodies[0] = make_body(1, 1);
-	sw.bodies[0].position = V3(0, 0, 0);
-	sw.bodies[1] = make_body(1, 1);
-	sw.bodies[1].position = V3(3, 0, 0);
+	sw.bodies[0] = make_body(1, 1).hot;
+	sw.states[0].position = V3(0, 0, 0);
+	sw.bodies[1] = make_body(1, 1).hot;
+	sw.states[1].position = V3(3, 0, 0);
 
 	sw.joint_count = 1;
 	sw.sol_joint_count = 1;
@@ -181,7 +186,7 @@ static void test_soft_spring_pulls_together()
 		.joint_idx = 0,
 	};
 	test_fill_bs_rows(&sw.sol_joints[0]);
-	{ v3 _b = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
+	{ v3 _b = scale(sub(sw.states[1].position, sw.states[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
 
 	LDL_Cache c = {0};
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .real_body_a = 0, .real_body_b = 1, .weight_a = 1, .weight_b = 1, .solver_idx = 0 };
@@ -215,10 +220,10 @@ static void test_soft_spring_no_overshoot()
 	// For a critically damped spring at 30Hz, the correction should be gentle.
 	SoftTestWorld sw = {0};
 	sw.body_count = 2;
-	sw.bodies[0] = make_body(1, 1);
-	sw.bodies[0].position = V3(0, 0, 0);
-	sw.bodies[1] = make_body(1, 1);
-	sw.bodies[1].position = V3(1, 0, 0); // 1 unit separation
+	sw.bodies[0] = make_body(1, 1).hot;
+	sw.states[0].position = V3(0, 0, 0);
+	sw.bodies[1] = make_body(1, 1).hot;
+	sw.states[1].position = V3(1, 0, 0); // 1 unit separation
 
 	sw.joint_count = 1;
 	sw.sol_joint_count = 1;
@@ -242,7 +247,7 @@ static void test_soft_spring_no_overshoot()
 		.joint_idx = 0,
 	};
 	test_fill_bs_rows(&sw.sol_joints[0]);
-	{ v3 _b = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
+	{ v3 _b = scale(sub(sw.states[1].position, sw.states[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
 
 	LDL_Cache c = {0};
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .real_body_a = 0, .real_body_b = 1, .weight_a = 1, .weight_b = 1, .solver_idx = 0 };
@@ -275,10 +280,10 @@ static void test_soft_spring_heavy_light()
 	// Heavy (1000) + light (1) with soft spring. Light body should move much more.
 	SoftTestWorld sw = {0};
 	sw.body_count = 2;
-	sw.bodies[0] = make_body(1000, 1000);
-	sw.bodies[0].position = V3(0, 0, 0);
-	sw.bodies[1] = make_body(1, 1);
-	sw.bodies[1].position = V3(2, 0, 0);
+	sw.bodies[0] = make_body(1000, 1000).hot;
+	sw.states[0].position = V3(0, 0, 0);
+	sw.bodies[1] = make_body(1, 1).hot;
+	sw.states[1].position = V3(2, 0, 0);
 
 	sw.joint_count = 1;
 	sw.sol_joint_count = 1;
@@ -302,7 +307,7 @@ static void test_soft_spring_heavy_light()
 		.joint_idx = 0,
 	};
 	test_fill_bs_rows(&sw.sol_joints[0]);
-	{ v3 _b = scale(sub(sw.bodies[1].position, sw.bodies[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
+	{ v3 _b = scale(sub(sw.states[1].position, sw.states[0].position), ptv); sw.sol_joints[0].bias[0] = _b.x; sw.sol_joints[0].bias[1] = _b.y; sw.sol_joints[0].bias[2] = _b.z; }
 
 	LDL_Cache c = {0};
 	LDL_Constraint con = { .type = JOINT_BALL_SOCKET, .dof = 3, .body_a = 0, .body_b = 1, .real_body_a = 0, .real_body_b = 1, .weight_a = 1, .weight_b = 1, .solver_idx = 0 };
@@ -334,11 +339,11 @@ static void test_rigid_constraint_zeroes_velocity()
 	// The solver should produce a lambda that exactly cancels the separation velocity.
 	SoftTestWorld sw = {0};
 	sw.body_count = 2;
-	sw.bodies[0] = make_body(1, 1);
-	sw.bodies[0].position = V3(0, 0, 0);
+	sw.bodies[0] = make_body(1, 1).hot;
+	sw.states[0].position = V3(0, 0, 0);
 	sw.bodies[0].velocity = V3(-1, 0, 0); // moving apart
-	sw.bodies[1] = make_body(1, 1);
-	sw.bodies[1].position = V3(1, 0, 0);
+	sw.bodies[1] = make_body(1, 1).hot;
+	sw.states[1].position = V3(1, 0, 0);
 	sw.bodies[1].velocity = V3(1, 0, 0); // moving apart
 
 	sw.joint_count = 1;
@@ -390,11 +395,11 @@ static void test_rigid_constraint_with_lever()
 	// Solver should cancel the constraint velocity.
 	SoftTestWorld sw = {0};
 	sw.body_count = 2;
-	sw.bodies[0] = make_body(1, 1);
-	sw.bodies[0].position = V3(0, 0, 0);
+	sw.bodies[0] = make_body(1, 1).hot;
+	sw.states[0].position = V3(0, 0, 0);
 	sw.bodies[0].angular_velocity = V3(0, 0, 2); // spinning about Z
-	sw.bodies[1] = make_body(1, 1);
-	sw.bodies[1].position = V3(2, 0, 0);
+	sw.bodies[1] = make_body(1, 1).hot;
+	sw.states[1].position = V3(2, 0, 0);
 
 	sw.joint_count = 1;
 	sw.sol_joint_count = 1;
