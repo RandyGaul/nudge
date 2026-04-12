@@ -340,6 +340,11 @@ void body_set_velocity(World world, Body body, v3 vel);
 void body_set_angular_velocity(World world, Body body, v3 avel);
 int body_is_asleep(World world, Body body);
 
+// Sleep control.
+void world_set_sleep_enabled(World world, int enabled);
+int world_get_sleep_enabled(World world);
+void body_set_sleep_allowed(World world, Body body, int allowed);  // per-body override: 0 = never sleep
+
 // Debug: contact points from last step. Returns count, *out valid until next step.
 int world_get_contacts(World world, const Contact** out);
 

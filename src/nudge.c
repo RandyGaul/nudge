@@ -847,6 +847,7 @@ Body create_body(World world, BodyParams params)
 		.restitution = params.restitution,
 		.linear_damping = params.linear_damping,
 		.angular_damping = ang_damp,
+		.sleep_allowed = 1,
 	};
 	return split_handle(Body, w->body_gen, idx);
 }
@@ -973,6 +974,31 @@ int body_is_asleep(World world, Body body)
 	int isl = w->body_cold[idx].island_id;
 	if (isl < 0 || !island_alive(w, isl)) return 0;
 	return !w->islands[isl].awake;
+}
+
+void world_set_sleep_enabled(World world, int enabled)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	w->sleep_enabled = enabled;
+}
+
+int world_get_sleep_enabled(World world)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	return w->sleep_enabled;
+}
+
+void body_set_sleep_allowed(World world, Body body, int allowed)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	assert(split_valid(w->body_gen, body));
+	w->body_hot[idx].sleep_allowed = allowed;
+	if (!allowed) {
+		int isl = w->body_cold[idx].island_id;
+		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
+			island_wake(w, isl);
+	}
 }
 
 // -----------------------------------------------------------------------------

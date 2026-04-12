@@ -84,6 +84,18 @@ EXPORT int nudge_body_is_asleep(uint64_t world, uint64_t body) {
 	return body_is_asleep((World){world}, (Body){body});
 }
 
+EXPORT void nudge_set_sleep_enabled(uint64_t world, int enabled) {
+	world_set_sleep_enabled((World){world}, enabled);
+}
+
+EXPORT int nudge_get_sleep_enabled(uint64_t world) {
+	return world_get_sleep_enabled((World){world});
+}
+
+EXPORT void nudge_body_set_sleep_allowed(uint64_t world, uint64_t body, int allowed) {
+	body_set_sleep_allowed((World){world}, (Body){body}, allowed);
+}
+
 EXPORT void nudge_get_perf(uint64_t world, double* out) {
 	PerfTimers t = world_get_perf((World){world});
 	// Top-level phases [0..6]
