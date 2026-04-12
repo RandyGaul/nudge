@@ -491,12 +491,9 @@ typedef struct PGS_Batch4
 	__m128 inv_mass_a, inv_mass_b, inv_mass_sum, friction, patch_radius;
 	__m128 normal_x, normal_y, normal_z;
 	__m128 tangent1_x, tangent1_y, tangent1_z, tangent2_x, tangent2_y, tangent2_z;
+	__m128 centroid_r_a_x, centroid_r_a_y, centroid_r_a_z;
+	__m128 centroid_r_b_x, centroid_r_b_y, centroid_r_b_z;
 	__m128 eff_mass_t1, eff_mass_t2, eff_mass_twist;
-	__m128 rct1_a_x, rct1_a_y, rct1_a_z, rct1_b_x, rct1_b_y, rct1_b_z;
-	__m128 rct2_a_x, rct2_a_y, rct2_a_z, rct2_b_x, rct2_b_y, rct2_b_z;
-	__m128 w_t1_a_x, w_t1_a_y, w_t1_a_z, w_t1_b_x, w_t1_b_y, w_t1_b_z;
-	__m128 w_t2_a_x, w_t2_a_y, w_t2_a_z, w_t2_b_x, w_t2_b_y, w_t2_b_z;
-	__m128 w_tw_a_x, w_tw_a_y, w_tw_a_z, w_tw_b_x, w_tw_b_y, w_tw_b_z;
 	__m128 lambda_t1, lambda_t2, lambda_twist;
 	PGS_ContactLayer4 cp[MAX_CONTACTS]; // pre-built contact layers
 	int manifold_idx[4]; // manifold indices for substep refresh
@@ -504,6 +501,8 @@ typedef struct PGS_Batch4
 } PGS_Batch4;
 
 #define SOA_DOT3(ax,ay,az,bx,by,bz) _mm_add_ps(_mm_add_ps(_mm_mul_ps(ax,bx), _mm_mul_ps(ay,by)), _mm_mul_ps(az,bz))
+#define SOA_CROSS3(ax,ay,az,bx,by,bz, rx,ry,rz) do { rx=_mm_sub_ps(_mm_mul_ps(ay,bz),_mm_mul_ps(az,by)); ry=_mm_sub_ps(_mm_mul_ps(az,bx),_mm_mul_ps(ax,bz)); rz=_mm_sub_ps(_mm_mul_ps(ax,by),_mm_mul_ps(ay,bx)); } while(0)
+#define SOA_IW_MUL(dx,dy,dz,ox,oy,oz, vx,vy,vz, rx,ry,rz) do { rx=_mm_add_ps(_mm_add_ps(_mm_mul_ps(dx,vx),_mm_mul_ps(ox,vy)),_mm_mul_ps(oy,vz)); ry=_mm_add_ps(_mm_add_ps(_mm_mul_ps(ox,vx),_mm_mul_ps(dy,vy)),_mm_mul_ps(oz,vz)); rz=_mm_add_ps(_mm_add_ps(_mm_mul_ps(oy,vx),_mm_mul_ps(oz,vy)),_mm_mul_ps(dz,vz)); } while(0)
 
 static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices, int count, PatchContact* pc)
 {
@@ -520,11 +519,8 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 	GATHER3(bt->normal_x, bt->normal_y, bt->normal_z, normal);
 	GATHER3(bt->tangent1_x, bt->tangent1_y, bt->tangent1_z, tangent1);
 	GATHER3(bt->tangent2_x, bt->tangent2_y, bt->tangent2_z, tangent2);
-	GATHER3(bt->rct1_a_x, bt->rct1_a_y, bt->rct1_a_z, rct1_a); GATHER3(bt->rct1_b_x, bt->rct1_b_y, bt->rct1_b_z, rct1_b);
-	GATHER3(bt->rct2_a_x, bt->rct2_a_y, bt->rct2_a_z, rct2_a); GATHER3(bt->rct2_b_x, bt->rct2_b_y, bt->rct2_b_z, rct2_b);
-	GATHER3(bt->w_t1_a_x, bt->w_t1_a_y, bt->w_t1_a_z, w_t1_a); GATHER3(bt->w_t1_b_x, bt->w_t1_b_y, bt->w_t1_b_z, w_t1_b);
-	GATHER3(bt->w_t2_a_x, bt->w_t2_a_y, bt->w_t2_a_z, w_t2_a); GATHER3(bt->w_t2_b_x, bt->w_t2_b_y, bt->w_t2_b_z, w_t2_b);
-	GATHER3(bt->w_tw_a_x, bt->w_tw_a_y, bt->w_tw_a_z, w_tw_a); GATHER3(bt->w_tw_b_x, bt->w_tw_b_y, bt->w_tw_b_z, w_tw_b);
+	GATHER3(bt->centroid_r_a_x, bt->centroid_r_a_y, bt->centroid_r_a_z, centroid_r_a);
+	GATHER3(bt->centroid_r_b_x, bt->centroid_r_b_y, bt->centroid_r_b_z, centroid_r_b);
 	#undef GATHER1
 	#undef GATHER3
 
@@ -612,37 +608,63 @@ static void solve_contact_batch4_sv(SolverBodyVel* bodies, PGS_Batch4* b)
 		total_lambda_n = _mm_add_ps(total_lambda_n, new_lam);
 	}
 
-	// Jacobi friction: compute all three rows from same velocity snapshot, apply once.
+	// Jacobi friction: recompute cross+inertia inline (BEPU style), apply once.
 	__m128 max_f = _mm_mul_ps(b->friction, total_lambda_n);
 	__m128 dvx=_mm_sub_ps(vb_x,va_x),dvy=_mm_sub_ps(vb_y,va_y),dvz=_mm_sub_ps(vb_z,va_z);
-	// Snapshot angular velocities for all friction rows
 	__m128 wa_sx=wa_x,wa_sy=wa_y,wa_sz=wa_z, wb_sx=wb_x,wb_sy=wb_y,wb_sz=wb_z;
 
-	__m128 vt1=_mm_add_ps(SOA_DOT3(dvx,dvy,dvz,b->tangent1_x,b->tangent1_y,b->tangent1_z),_mm_sub_ps(SOA_DOT3(wb_sx,wb_sy,wb_sz,b->rct1_b_x,b->rct1_b_y,b->rct1_b_z),SOA_DOT3(wa_sx,wa_sy,wa_sz,b->rct1_a_x,b->rct1_a_y,b->rct1_a_z)));
+	// Gather body inertia for friction (transpose-based)
+	__m128 iwa_dx,iwa_dy,iwa_dz,iwa_ox,iwa_oy,iwa_oz, iwb_dx,iwb_dy,iwb_dz,iwb_ox,iwb_oy,iwb_oz;
+	{ __m128 r0,r1,r2,r3;
+	  int i0a=b->body_a[0],i1a=b->body_a[1],i2a=b->body_a[2],i3a=b->body_a[3];
+	  int i0b=b->body_b[0],i1b=b->body_b[1],i2b=b->body_b[2],i3b=b->body_b[3];
+	  r0=bodies[i0a].iw_diag.m;r1=bodies[i1a].iw_diag.m;r2=bodies[i2a].iw_diag.m;r3=bodies[i3a].iw_diag.m; simd_transpose4(&r0,&r1,&r2,&r3); iwa_dx=r0;iwa_dy=r1;iwa_dz=r2;
+	  r0=bodies[i0a].iw_off.m;r1=bodies[i1a].iw_off.m;r2=bodies[i2a].iw_off.m;r3=bodies[i3a].iw_off.m; simd_transpose4(&r0,&r1,&r2,&r3); iwa_ox=r0;iwa_oy=r1;iwa_oz=r2;
+	  r0=bodies[i0b].iw_diag.m;r1=bodies[i1b].iw_diag.m;r2=bodies[i2b].iw_diag.m;r3=bodies[i3b].iw_diag.m; simd_transpose4(&r0,&r1,&r2,&r3); iwb_dx=r0;iwb_dy=r1;iwb_dz=r2;
+	  r0=bodies[i0b].iw_off.m;r1=bodies[i1b].iw_off.m;r2=bodies[i2b].iw_off.m;r3=bodies[i3b].iw_off.m; simd_transpose4(&r0,&r1,&r2,&r3); iwb_ox=r0;iwb_oy=r1;iwb_oz=r2;
+	}
+
+	// Tangent 1: recompute cross(centroid_r, tangent1) inline
+	__m128 rct1_ax,rct1_ay,rct1_az, rct1_bx,rct1_by,rct1_bz;
+	SOA_CROSS3(b->centroid_r_a_x,b->centroid_r_a_y,b->centroid_r_a_z, b->tangent1_x,b->tangent1_y,b->tangent1_z, rct1_ax,rct1_ay,rct1_az);
+	SOA_CROSS3(b->centroid_r_b_x,b->centroid_r_b_y,b->centroid_r_b_z, b->tangent1_x,b->tangent1_y,b->tangent1_z, rct1_bx,rct1_by,rct1_bz);
+	__m128 vt1=_mm_add_ps(SOA_DOT3(dvx,dvy,dvz,b->tangent1_x,b->tangent1_y,b->tangent1_z),_mm_sub_ps(SOA_DOT3(wb_sx,wb_sy,wb_sz,rct1_bx,rct1_by,rct1_bz),SOA_DOT3(wa_sx,wa_sy,wa_sz,rct1_ax,rct1_ay,rct1_az)));
 	__m128 nt1=_mm_max_ps(_mm_sub_ps(zero,max_f),_mm_min_ps(_mm_add_ps(b->lambda_t1,_mm_mul_ps(b->eff_mass_t1,_mm_sub_ps(zero,vt1))),max_f));
 	__m128 dt1=_mm_sub_ps(nt1,b->lambda_t1); b->lambda_t1=nt1;
 
-	__m128 vt2=_mm_add_ps(SOA_DOT3(dvx,dvy,dvz,b->tangent2_x,b->tangent2_y,b->tangent2_z),_mm_sub_ps(SOA_DOT3(wb_sx,wb_sy,wb_sz,b->rct2_b_x,b->rct2_b_y,b->rct2_b_z),SOA_DOT3(wa_sx,wa_sy,wa_sz,b->rct2_a_x,b->rct2_a_y,b->rct2_a_z)));
+	// Tangent 2
+	__m128 rct2_ax,rct2_ay,rct2_az, rct2_bx,rct2_by,rct2_bz;
+	SOA_CROSS3(b->centroid_r_a_x,b->centroid_r_a_y,b->centroid_r_a_z, b->tangent2_x,b->tangent2_y,b->tangent2_z, rct2_ax,rct2_ay,rct2_az);
+	SOA_CROSS3(b->centroid_r_b_x,b->centroid_r_b_y,b->centroid_r_b_z, b->tangent2_x,b->tangent2_y,b->tangent2_z, rct2_bx,rct2_by,rct2_bz);
+	__m128 vt2=_mm_add_ps(SOA_DOT3(dvx,dvy,dvz,b->tangent2_x,b->tangent2_y,b->tangent2_z),_mm_sub_ps(SOA_DOT3(wb_sx,wb_sy,wb_sz,rct2_bx,rct2_by,rct2_bz),SOA_DOT3(wa_sx,wa_sy,wa_sz,rct2_ax,rct2_ay,rct2_az)));
 	__m128 nt2=_mm_max_ps(_mm_sub_ps(zero,max_f),_mm_min_ps(_mm_add_ps(b->lambda_t2,_mm_mul_ps(b->eff_mass_t2,_mm_sub_ps(zero,vt2))),max_f));
 	__m128 dt2=_mm_sub_ps(nt2,b->lambda_t2); b->lambda_t2=nt2;
 
-	__m128 max_tw=_mm_mul_ps(_mm_mul_ps(b->friction,total_lambda_n),b->patch_radius);
+	// Torsional
+	__m128 max_tw=_mm_mul_ps(max_f,b->patch_radius);
 	__m128 wrel=SOA_DOT3(_mm_sub_ps(wb_sx,wa_sx),_mm_sub_ps(wb_sy,wa_sy),_mm_sub_ps(wb_sz,wa_sz),b->normal_x,b->normal_y,b->normal_z);
 	__m128 ntw=_mm_max_ps(_mm_sub_ps(zero,max_tw),_mm_min_ps(_mm_add_ps(b->lambda_twist,_mm_mul_ps(b->eff_mass_twist,_mm_sub_ps(zero,wrel))),max_tw));
 	__m128 dtw=_mm_sub_ps(ntw,b->lambda_twist); b->lambda_twist=ntw;
 
-	// Single combined apply for all friction
+	// Combined apply: linear + angular (I_w * cross recomputed inline)
 	__m128 lin_x=_mm_add_ps(_mm_mul_ps(b->tangent1_x,dt1),_mm_mul_ps(b->tangent2_x,dt2));
 	__m128 lin_y=_mm_add_ps(_mm_mul_ps(b->tangent1_y,dt1),_mm_mul_ps(b->tangent2_y,dt2));
 	__m128 lin_z=_mm_add_ps(_mm_mul_ps(b->tangent1_z,dt1),_mm_mul_ps(b->tangent2_z,dt2));
 	va_x=_mm_sub_ps(va_x,_mm_mul_ps(lin_x,b->inv_mass_a)); va_y=_mm_sub_ps(va_y,_mm_mul_ps(lin_y,b->inv_mass_a)); va_z=_mm_sub_ps(va_z,_mm_mul_ps(lin_z,b->inv_mass_a));
 	vb_x=_mm_add_ps(vb_x,_mm_mul_ps(lin_x,b->inv_mass_b)); vb_y=_mm_add_ps(vb_y,_mm_mul_ps(lin_y,b->inv_mass_b)); vb_z=_mm_add_ps(vb_z,_mm_mul_ps(lin_z,b->inv_mass_b));
-	wa_x=_mm_sub_ps(wa_x,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_a_x,dt1),_mm_mul_ps(b->w_t2_a_x,dt2)),_mm_mul_ps(b->w_tw_a_x,dtw)));
-	wa_y=_mm_sub_ps(wa_y,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_a_y,dt1),_mm_mul_ps(b->w_t2_a_y,dt2)),_mm_mul_ps(b->w_tw_a_y,dtw)));
-	wa_z=_mm_sub_ps(wa_z,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_a_z,dt1),_mm_mul_ps(b->w_t2_a_z,dt2)),_mm_mul_ps(b->w_tw_a_z,dtw)));
-	wb_x=_mm_add_ps(wb_x,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_b_x,dt1),_mm_mul_ps(b->w_t2_b_x,dt2)),_mm_mul_ps(b->w_tw_b_x,dtw)));
-	wb_y=_mm_add_ps(wb_y,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_b_y,dt1),_mm_mul_ps(b->w_t2_b_y,dt2)),_mm_mul_ps(b->w_tw_b_y,dtw)));
-	wb_z=_mm_add_ps(wb_z,_mm_add_ps(_mm_add_ps(_mm_mul_ps(b->w_t1_b_z,dt1),_mm_mul_ps(b->w_t2_b_z,dt2)),_mm_mul_ps(b->w_tw_b_z,dtw)));
+	__m128 wt1_ax,wt1_ay,wt1_az,wt1_bx,wt1_by,wt1_bz, wt2_ax,wt2_ay,wt2_az,wt2_bx,wt2_by,wt2_bz, wtw_ax,wtw_ay,wtw_az,wtw_bx,wtw_by,wtw_bz;
+	SOA_IW_MUL(iwa_dx,iwa_dy,iwa_dz,iwa_ox,iwa_oy,iwa_oz, rct1_ax,rct1_ay,rct1_az, wt1_ax,wt1_ay,wt1_az);
+	SOA_IW_MUL(iwb_dx,iwb_dy,iwb_dz,iwb_ox,iwb_oy,iwb_oz, rct1_bx,rct1_by,rct1_bz, wt1_bx,wt1_by,wt1_bz);
+	SOA_IW_MUL(iwa_dx,iwa_dy,iwa_dz,iwa_ox,iwa_oy,iwa_oz, rct2_ax,rct2_ay,rct2_az, wt2_ax,wt2_ay,wt2_az);
+	SOA_IW_MUL(iwb_dx,iwb_dy,iwb_dz,iwb_ox,iwb_oy,iwb_oz, rct2_bx,rct2_by,rct2_bz, wt2_bx,wt2_by,wt2_bz);
+	SOA_IW_MUL(iwa_dx,iwa_dy,iwa_dz,iwa_ox,iwa_oy,iwa_oz, b->normal_x,b->normal_y,b->normal_z, wtw_ax,wtw_ay,wtw_az);
+	SOA_IW_MUL(iwb_dx,iwb_dy,iwb_dz,iwb_ox,iwb_oy,iwb_oz, b->normal_x,b->normal_y,b->normal_z, wtw_bx,wtw_by,wtw_bz);
+	wa_x=_mm_sub_ps(wa_x,_mm_add_ps(_mm_add_ps(_mm_mul_ps(wt1_ax,dt1),_mm_mul_ps(wt2_ax,dt2)),_mm_mul_ps(wtw_ax,dtw)));
+	wa_y=_mm_sub_ps(wa_y,_mm_add_ps(_mm_add_ps(_mm_mul_ps(wt1_ay,dt1),_mm_mul_ps(wt2_ay,dt2)),_mm_mul_ps(wtw_ay,dtw)));
+	wa_z=_mm_sub_ps(wa_z,_mm_add_ps(_mm_add_ps(_mm_mul_ps(wt1_az,dt1),_mm_mul_ps(wt2_az,dt2)),_mm_mul_ps(wtw_az,dtw)));
+	wb_x=_mm_add_ps(wb_x,_mm_add_ps(_mm_add_ps(_mm_mul_ps(wt1_bx,dt1),_mm_mul_ps(wt2_bx,dt2)),_mm_mul_ps(wtw_bx,dtw)));
+	wb_y=_mm_add_ps(wb_y,_mm_add_ps(_mm_add_ps(_mm_mul_ps(wt1_by,dt1),_mm_mul_ps(wt2_by,dt2)),_mm_mul_ps(wtw_by,dtw)));
+	wb_z=_mm_add_ps(wb_z,_mm_add_ps(_mm_add_ps(_mm_mul_ps(wt1_bz,dt1),_mm_mul_ps(wt2_bz,dt2)),_mm_mul_ps(wtw_bz,dtw)));
 
 	// Scatter velocities back
 	// Scatter body velocities via reverse transpose
