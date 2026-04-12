@@ -257,6 +257,14 @@ static void pgs_work_fn(void* ctx, int start, int count)
 	}
 }
 
+// --- Batch refresh work function (parallel batch refresh for substep 2+) ---
+typedef struct RefreshCtx { PGS_Batch4* batches; SolverManifold* sm; SolverContact* sc; } RefreshCtx;
+static void refresh_work_fn(void* ctx, int start, int count)
+{
+	RefreshCtx* r = (RefreshCtx*)ctx;
+	for (int i = start; i < start + count; i++) pgs_batch4_refresh(&r->batches[i], r->sm, r->sc);
+}
+
 // --- Integrate work function (parallel body integration) ---
 typedef struct IntegrateCtx { WorldInternal* w; float dt; int* body_indices; int mode; } IntegrateCtx;
 static void integrate_vel_work_fn(void* ctx, int start, int count)
@@ -691,9 +699,15 @@ void world_step(World world, float dt)
 #if SIMD_SSE
 			// On substep 2+, only refresh changing fields (bias + lambda).
 			if (sub > 0 && simd_batch_count > 0) {
+#ifdef _WIN32
+				if (n_workers > 1 && simd_batch_count >= n_workers * 2) {
+					RefreshCtx rc = { .batches = simd_batches, .sm = sm, .sc = sc };
+					pool_dispatch(refresh_work_fn, &rc, simd_batch_count, SOLVER_BLOCK_SIZE, n_workers);
+				} else
+#endif
 				for (int bi = 0; bi < simd_batch_count; bi++) {
 					pgs_batch4_refresh(&simd_batches[bi], sm, sc);
-			}
+				}
 			}
 
 			// Iteration loop: dispatch per color within each iteration.
