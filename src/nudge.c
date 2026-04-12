@@ -477,9 +477,11 @@ void world_step(World world, float dt)
 
 	// Fast path: skip entire solver when nothing to solve (all sleeping, no contacts, no joints).
 	// Only safe when no islands are awake — free-falling bodies with 0 contacts still need integration.
-	int any_awake_island = 0;
-	for (int ii = 0; ii < asize(w->islands) && !any_awake_island; ii++)
-		if ((w->island_gen[ii] & 1) && w->islands[ii].awake) any_awake_island = 1;
+	// When sleep is disabled all islands are awake, so skip the scan.
+	int any_awake_island = !w->sleep_enabled;
+	if (!any_awake_island)
+		for (int ii = 0; ii < asize(w->islands) && !any_awake_island; ii++)
+			if ((w->island_gen[ii] & 1) && w->islands[ii].awake) any_awake_island = 1;
 	int any_active_joints = 0;
 	for (int ji = 0; ji < asize(w->joints) && !any_active_joints; ji++)
 		if (split_alive(w->joint_gen, ji)) any_active_joints = 1;
