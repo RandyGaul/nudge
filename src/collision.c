@@ -1636,8 +1636,11 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	int hint = -1;
 	uint64_t pkey = 0;
 	WarmManifold* wm = NULL;
-	int uses_sat = (s0->type >= SHAPE_BOX && s1->type >= SHAPE_BOX); // box/hull/cylinder pairs use SAT
-	if (uses_sat && w->sat_hint_enabled) { pkey = body_pair_key(i, j); wm = map_get_ptr(w->warm_cache, pkey); if (wm) hint = wm->sat_axis; hp = &hint; }
+	// SAT hint: skip for box-box (15 axes is cheap, hash lookup costs more than it saves).
+	// Only use for hull/cylinder pairs where axis count is higher.
+	int uses_sat = (s0->type >= SHAPE_BOX && s1->type >= SHAPE_BOX);
+	int uses_hint = uses_sat && !(s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull);
+	if (uses_hint && w->sat_hint_enabled) { pkey = body_pair_key(i, j); wm = map_get_ptr(w->warm_cache, pkey); if (wm) hint = wm->sat_axis; hp = &hint; }
 
 	// Upper-triangle dispatch: simple pairs first, then SAT-based pairs.
 	int hit = 0;

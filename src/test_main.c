@@ -40,6 +40,7 @@ int main(int argc, char* argv[])
 	int chaos_bodies = 500;
 	int chaos_frames = 30;
 	int chaos_churn = 10;
+	int bench_pyramid_base = 0;
 	int bench_pile_grid = 10;
 	int bench_pile_height = 5;
 	int bench_pile_frames = 300;
@@ -60,6 +61,8 @@ int main(int argc, char* argv[])
 			bench_stack = (i + 1 < argc && argv[i+1][0] != '-') ? atoi(argv[++i]) : 10;
 		else if (strcmp(argv[i], "--bench-pile") == 0)
 			bench_pile = 1;
+		else if (strcmp(argv[i], "--bench-pyramid") == 0)
+			bench_pyramid_base = (i + 1 < argc && argv[i+1][0] != '-') ? atoi(argv[++i]) : 20;
 		else if (strcmp(argv[i], "--bench-suite") == 0)
 			bench_suite_flag = 1;
 		else if (strcmp(argv[i], "--bench-chaos") == 0)
@@ -140,6 +143,10 @@ int main(int argc, char* argv[])
 	if (bench_pile) {
 		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
 		bench_box_pile(bench_pile_grid, bench_pile_height, bench_pile_frames, wp);
+		return 0;
+	}
+	if (bench_pyramid_base > 0) {
+		bench_pyramid(bench_pyramid_base, 600);
 		return 0;
 	}
 

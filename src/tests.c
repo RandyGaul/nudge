@@ -11928,6 +11928,77 @@ static void bench_box_pile(int grid_w, int height, int frames_count, WorldParams
 	destroy_world(w);
 }
 
+static void bench_pyramid(int base_size, int frames_count)
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = 2, .velocity_iters = 8 };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -0.5f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 0.5f, 50) });
+	int total = 0;
+	for (int row = 0; row < base_size; row++) {
+		int count = base_size - row;
+		float startX = -(count - 1) * 0.5f;
+		for (int i = 0; i < count; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3(startX + i, 0.5f + row, 0), .rotation = quat_identity(), .mass = 1.0f, .friction = 0.6f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+			total++;
+		}
+	}
+	printf("bench_pyramid: %d boxes (base=%d), %d frames, sub=%d vel=%d, NO SLEEP\n", total, base_size, frames_count, wi->sub_steps, wi->velocity_iters);
+
+	extern void narrowphase_reset_timers();
+	extern void narrowphase_end_frame();
+	extern void narrowphase_print_timers();
+	narrowphase_reset_timers();
+
+	PerfTimers acc = {0};
+	PGSTimers pacc = {0};
+	float dt = 1.0f / 60.0f;
+	for (int frame = 0; frame < frames_count; frame++) {
+		world_step(w, dt);
+		narrowphase_end_frame();
+		PerfTimers t = world_get_perf((World){(uint64_t)wi});
+		acc.total += t.total; acc.broadphase += t.broadphase; acc.pre_solve += t.pre_solve;
+		acc.pgs_solve += t.pgs_solve; acc.position_correct += t.position_correct;
+		acc.integrate += t.integrate; acc.islands += t.islands;
+		PGSTimers p = t.pgs;
+		pacc.pre_solve += p.pre_solve; pacc.warm_start += p.warm_start; pacc.graph_color += p.graph_color;
+		pacc.iterations += p.iterations; pacc.relax += p.relax; pacc.post_solve += p.post_solve;
+		pacc.pos_joints += p.pos_joints;
+	}
+	double n = (double)frames_count;
+	printf("  avg total:      %8.3f ms\n", acc.total / n * 1000.0);
+	printf("  broadphase:     %8.3f ms\n", acc.broadphase / n * 1000.0);
+	printf("  pre_solve:      %8.3f ms\n", acc.pre_solve / n * 1000.0);
+	printf("  pgs_solve:      %8.3f ms\n", acc.pgs_solve / n * 1000.0);
+	printf("  pos_correct:    %8.3f ms\n", acc.position_correct / n * 1000.0);
+	printf("  integrate:      %8.3f ms\n", acc.integrate / n * 1000.0);
+	printf("  islands:        %8.3f ms\n", acc.islands / n * 1000.0);
+	printf("  --- PGS breakdown ---\n");
+	printf("  pgs.pre_solve:  %8.3f ms\n", pacc.pre_solve / n * 1000.0);
+	printf("  pgs.iterations: %8.3f ms\n", pacc.iterations / n * 1000.0);
+	printf("  pgs.relax:      %8.3f ms\n", pacc.relax / n * 1000.0);
+	printf("  pgs.post_solve: %8.3f ms\n", pacc.post_solve / n * 1000.0);
+	narrowphase_print_timers();
+	extern double bp_refit_acc, bp_precomp_acc, bp_sweep_acc, bp_cross_acc;
+	extern int bp_frame_count;
+	double bn = (double)bp_frame_count;
+	if (bn > 0) {
+		printf("  --- broadphase breakdown ---\n");
+		printf("  bp.refit:       %8.3f ms\n", bp_refit_acc / bn * 1000.0);
+		printf("  bp.precomp:     %8.3f ms\n", bp_precomp_acc / bn * 1000.0);
+		printf("  bp.sweep(d-d):  %8.3f ms\n", bp_sweep_acc / bn * 1000.0);
+		printf("  bp.cross(d-s):  %8.3f ms\n", bp_cross_acc / bn * 1000.0);
+		printf("  bp.isl_update:  %8.3f ms\n", pacc.pos_joints / n * 1000.0);
+	}
+	bp_refit_acc = bp_precomp_acc = bp_sweep_acc = bp_cross_acc = 0;
+	bp_frame_count = 0;
+	destroy_world(w);
+}
+
 // Run bench_box_pile at multiple scales for scaling analysis.
 // Simple deterministic RNG for benchmark reproducibility.
 static uint32_t bench_rng_state = 12345;
