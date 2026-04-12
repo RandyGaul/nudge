@@ -533,7 +533,6 @@ void world_step(World world, float dt)
 	int count = asize(w->body_hot);
 	CK_DYNA ConstraintRef* crefs = NULL;
 	int sm_count = asize(sm);
-	afit(crefs, sm_count + asize(sol_joints));
 	for (int i = 0; i < sm_count; i++) {
 		if (sm[i].contact_count == 0) continue; // skip empty manifolds (static-static filtered out)
 		ConstraintRef r = { .type = CTYPE_CONTACT, .index = i,
