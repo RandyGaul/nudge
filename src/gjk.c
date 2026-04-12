@@ -664,14 +664,13 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	v3 sA, sB;
 	int use_simplex_cache = cache && cache->count >= 1 && cache->count <= 4;
 	if (use_simplex_cache) {
-		for (int i = 0; i < cache->count; i++) {
-			simplex.v[i].point1 = cache->point1[i];
-			simplex.v[i].point2 = cache->point2[i];
-			simplex.v[i].point = sub(cache->point2[i], cache->point1[i]);
-			simplex.v[i].feat1 = cache->feat1[i];
-			simplex.v[i].feat2 = cache->feat2[i];
-			simplex.v[i].u = 1.0f;
-		}
+		// Unrolled cache restore: avoid loop overhead for the hot path.
+		#define RESTORE_VERT(i) simplex.v[i].point1 = cache->point1[i]; simplex.v[i].point2 = cache->point2[i]; simplex.v[i].point = sub(cache->point2[i], cache->point1[i]); simplex.v[i].feat1 = cache->feat1[i]; simplex.v[i].feat2 = cache->feat2[i]; simplex.v[i].u = 1.0f;
+		RESTORE_VERT(0);
+		if (cache->count >= 2) { RESTORE_VERT(1); }
+		if (cache->count >= 3) { RESTORE_VERT(2); }
+		if (cache->count >= 4) { RESTORE_VERT(3); }
+		#undef RESTORE_VERT
 		simplex.divisor = (float)cache->count;
 		simplex.count = cache->count;
 	} else {
