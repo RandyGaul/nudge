@@ -2596,7 +2596,6 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
 	AABB scene_bounds = aabb_empty();
 	CK_DYNA SAP_Entry* sap = NULL;
-	afit(sap, body_count);
 	// Compute tight AABBs. Skip sleeping dynamic bodies (they don't move).
 	CK_DYNA int* sleeping_bodies = NULL;
 	for (int i = 0; i < body_count; i++) {
