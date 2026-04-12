@@ -464,10 +464,14 @@ void world_step(World world, float dt)
 	w->perf.pgs.pos_joints = perf_now() - t_iuc; // hijack: store islands_update_contacts time
 	w->perf.broadphase = perf_now() - t1;
 
-	aclear(w->debug_contacts);
-	for (int i = 0; i < asize(manifolds); i++)
-		for (int c = 0; c < manifolds[i].m.count; c++)
-			apush(w->debug_contacts, manifolds[i].m.contacts[c]);
+	// Only populate debug_contacts when the array was previously queried (non-NULL).
+	// Avoids 48KB of per-frame apush when debug visualization is unused.
+	if (w->debug_contacts) {
+		aclear(w->debug_contacts);
+		for (int i = 0; i < asize(manifolds); i++)
+			for (int c = 0; c < manifolds[i].m.count; c++)
+				apush(w->debug_contacts, manifolds[i].m.contacts[c]);
+	}
 
 	int manifold_count = asize(manifolds);
 
@@ -1372,6 +1376,8 @@ void world_debug_joints(World world, JointDebugFn fn, void* user)
 int world_get_contacts(World world, const Contact** out)
 {
 	WorldInternal* w = (WorldInternal*)world.id;
+	// Ensure the array exists so world_step knows to populate it next frame.
+	if (!w->debug_contacts) { afit(w->debug_contacts, 1); asetlen(w->debug_contacts, 0); }
 	*out = w->debug_contacts;
 	return asize(w->debug_contacts);
 }
