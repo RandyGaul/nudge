@@ -2593,7 +2593,8 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	// Sleeping bodies live in bvh_sleeping and are excluded from SAP.
 	double t1 = perf_now();
 	int body_count = asize(w->body_hot);
-	AABB* tight = CK_ALLOC(sizeof(AABB) * body_count);
+	AABB tight_stack[256];
+	AABB* tight = (body_count <= 256) ? tight_stack : CK_ALLOC(sizeof(AABB) * body_count);
 	AABB scene_bounds = aabb_empty();
 	CK_DYNA SAP_Entry* sap = NULL;
 	// Compute tight AABBs. Skip sleeping dynamic bodies (they don't move).
@@ -2686,7 +2687,7 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	afree(dd_pairs);
 	bp_frame_count++;
 
-	CK_FREE(tight);
+	if (tight != tight_stack) CK_FREE(tight);
 	afree(sap);
 }
 
