@@ -137,7 +137,7 @@ EXPORT void nudge_debug_sleep(uint64_t world) {
 	if (max_idx >= 0) {
 		v3 v = w->body_hot[max_idx].velocity;
 		v3 av = w->body_hot[max_idx].angular_velocity;
-		fprintf(stderr, "sleep: awake=%d jittery=%d max_v2=%.6f (body %d: v=(%.4f,%.4f,%.4f) w=(%.4f,%.4f,%.4f) sleep_t=%.2f)\n", awake, jittery, max_v2, max_idx, v.x, v.y, v.z, av.x, av.y, av.z, w->body_hot[max_idx].sleep_time);
+		fprintf(stderr, "sleep: awake=%d jittery=%d max_v2=%.6f (body %d: v=(%.4f,%.4f,%.4f) w=(%.4f,%.4f,%.4f) sleep_t=%.2f)\n", awake, jittery, max_v2, max_idx, v.x, v.y, v.z, av.x, av.y, av.z, w->body_state[max_idx].sleep_time);
 	}
 }
 
