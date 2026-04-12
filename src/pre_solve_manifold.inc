@@ -96,10 +96,13 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		smf.lambda_t1 = wm->manifold_lambda_t1; smf.lambda_t2 = wm->manifold_lambda_t2; smf.lambda_twist = wm->manifold_lambda_twist;
 	}
 
-	// Speculative contacts: zero warm-started impulse for negative-penetration contacts
-	for (int c = 0; c < smf.contact_count; c++) { SolverContact* s = &sc[contact_base+c]; if (s->penetration < 0.0f) { s->lambda_n = 0; s->lambda_t1 = 0; s->lambda_t2 = 0; } }
-	// Sync warm-started lambda_n to PatchContact
-	for (int c = 0; c < smf.contact_count; c++) pc[contact_base+c].lambda_n = sc[contact_base+c].lambda_n;
+	// Speculative contacts: zero warm-started impulse for negative-penetration contacts.
+	// Sync lambda_n to PatchContact in the same pass (eliminates separate sync loop).
+	for (int c = 0; c < smf.contact_count; c++) {
+		SolverContact* s = &sc[contact_base+c];
+		if (s->penetration < 0.0f) { s->lambda_n = 0; s->lambda_t1 = 0; s->lambda_t2 = 0; }
+		pc[contact_base+c].lambda_n = s->lambda_n;
+	}
 
 	sm[idx] = smf;
 }
