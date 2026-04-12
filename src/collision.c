@@ -1027,7 +1027,7 @@ static SIMD_FORCEINLINE int reduce_contacts(Contact* contacts, int count)
 // Generate face-face contact between two convex hulls using Sutherland-Hodgman clipping.
 // ref_face is the separating face on (ref_hull, ref_pos, ref_rot, ref_sc).
 // flip=1 means ref is actually hull B (so normal is negated for A->B convention).
-static int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot, v3 ref_sc, const Hull* inc_hull, v3 inc_pos, quat inc_rot, v3 inc_sc, int ref_face, int flip, Manifold* manifold)
+static SIMD_FORCEINLINE int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot, v3 ref_sc, const Hull* inc_hull, v3 inc_pos, quat inc_rot, v3 inc_sc, int ref_face, int flip, Manifold* manifold)
 {
 	HullPlane ref_plane = plane_transform(ref_hull->planes[ref_face], ref_pos, ref_rot, ref_sc);
 	int inc_face = find_incident_face(inc_hull, inc_pos, inc_rot, inc_sc, ref_plane.normal);
