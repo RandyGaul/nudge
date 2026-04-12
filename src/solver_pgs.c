@@ -529,6 +529,8 @@ typedef struct PGS_Batch4
 	__m128 w_tw_a_x, w_tw_a_y, w_tw_a_z, w_tw_b_x, w_tw_b_y, w_tw_b_z;
 	__m128 lambda_t1, lambda_t2, lambda_twist;
 	PGS_ContactLayer4 cp[MAX_CONTACTS]; // pre-built contact layers
+	int manifold_idx[4]; // manifold indices for substep refresh
+	int lane_count;      // active lanes (1-4)
 } PGS_Batch4;
 
 #define SOA_DOT3(ax,ay,az,bx,by,bz) _mm_add_ps(_mm_add_ps(_mm_mul_ps(ax,bx), _mm_mul_ps(ay,by)), _mm_mul_ps(az,bz))
@@ -538,7 +540,8 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 	float buf[4];
 	#define GATHER1(dst, field) for (int j = 0; j < 4; j++) buf[j] = (j < count) ? sm[indices[j]].field : 0; dst = _mm_loadu_ps(buf)
 	#define GATHER3(dx,dy,dz, field) for (int j = 0; j < 4; j++) { v3 v = (j < count) ? sm[indices[j]].field : V3(0,0,0); ((float*)&dx)[j]=v.x; ((float*)&dy)[j]=v.y; ((float*)&dz)[j]=v.z; }
-	for (int j = 0; j < 4; j++) { bt->body_a[j] = (j < count) ? sm[indices[j]].body_a : 0; bt->body_b[j] = (j < count) ? sm[indices[j]].body_b : 0; }
+	bt->lane_count = count;
+	for (int j = 0; j < 4; j++) { bt->manifold_idx[j] = (j < count) ? indices[j] : 0; bt->body_a[j] = (j < count) ? sm[indices[j]].body_a : 0; bt->body_b[j] = (j < count) ? sm[indices[j]].body_b : 0; }
 	GATHER1(bt->inv_mass_a, inv_mass_a); GATHER1(bt->inv_mass_b, inv_mass_b);
 	bt->inv_mass_sum = _mm_add_ps(bt->inv_mass_a, bt->inv_mass_b);
 	GATHER1(bt->friction, friction); GATHER1(bt->patch_radius, patch_radius);
@@ -577,6 +580,28 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 		cl->wn_a_x=_mm_loadu_ps(wnax);cl->wn_a_y=_mm_loadu_ps(wnay);cl->wn_a_z=_mm_loadu_ps(wnaz);
 		cl->wn_b_x=_mm_loadu_ps(wnbx);cl->wn_b_y=_mm_loadu_ps(wnby);cl->wn_b_z=_mm_loadu_ps(wnbz);
 		cl->eff_mass_n=_mm_loadu_ps(emn);cl->bias=_mm_loadu_ps(bias);cl->bounce=_mm_loadu_ps(bnc);cl->softness=_mm_loadu_ps(sft);cl->lambda_n=_mm_loadu_ps(lam);
+	}
+}
+
+// Lightweight refresh: only update bias and lambda from PatchContact/SolverManifold.
+// Called on substep 2+ when structural data (normals, eff_mass, etc.) hasn't changed.
+static void pgs_batch4_refresh(PGS_Batch4* bt, SolverManifold* sm, PatchContact* pc)
+{
+	int count = bt->lane_count;
+	float buf[4];
+	for (int j = 0; j < 4; j++) buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_t1 : 0; bt->lambda_t1 = _mm_loadu_ps(buf);
+	for (int j = 0; j < 4; j++) buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_t2 : 0; bt->lambda_t2 = _mm_loadu_ps(buf);
+	for (int j = 0; j < 4; j++) buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_twist : 0; bt->lambda_twist = _mm_loadu_ps(buf);
+	for (int cp_idx = 0; cp_idx < bt->max_contacts; cp_idx++) {
+		float bias[4]={0}, lam[4]={0};
+		for (int j = 0; j < count; j++) {
+			int mi = bt->manifold_idx[j];
+			if (cp_idx >= sm[mi].contact_count) continue;
+			PatchContact* s = &pc[sm[mi].contact_start + cp_idx];
+			bias[j] = s->bias; lam[j] = s->lambda_n;
+		}
+		bt->cp[cp_idx].bias = _mm_loadu_ps(bias);
+		bt->cp[cp_idx].lambda_n = _mm_loadu_ps(lam);
 	}
 }
 

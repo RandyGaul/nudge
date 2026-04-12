@@ -566,6 +566,12 @@ void world_step(World world, float dt)
 	// K^-1 residual correction is applied at the configured iteration.
 	double t_pgs = 0, t_pos = 0, t_int_sub = 0;
 	double t_jlim = 0, t_ldl = 0, t_relax = 0, t_posJ = 0;
+	int use_body_vel = (asize(sol_joints) == 0);
+#if SIMD_SSE
+	CK_DYNA PGS_Batch4* simd_batches = NULL;
+	CK_DYNA int* simd_color_batch_starts = NULL;
+	int simd_batch_count = 0;
+#endif
 	for (int sub = 0; sub < n_sub; sub++) {
 		if (sub > 0) {
 			double ti = perf_now();
@@ -606,29 +612,23 @@ void world_step(World world, float dt)
 		// PGS: iterate all constraints (contacts, and joints when LDL is off).
 		// Fast path: contacts with no joints use compact SolverBodyVel
 		// (32 bytes/body instead of 120 bytes — fits more bodies in cache).
-		int use_body_vel = (asize(sol_joints) == 0);
 		if (use_body_vel) solver_sync_vel_in(w);
 
-		double tp = perf_now();
-		if (use_body_vel) {
+		// Build SIMD batches on first substep; refresh only bias/lambda on substep 2+.
 #if SIMD_SSE
-			// Build persistent SoA batch array ONCE — reused across all iterations.
-			// Eliminates per-iteration manifold→SoA conversion (was 40x redundant).
+		if (sub == 0 && use_body_vel && cref_count > 0) {
 			int total_batches = 0;
 			for (int c = 0; c < color_count; c++) total_batches += (batch_starts[c+1] - batch_starts[c] + 3) / 4;
-			CK_DYNA PGS_Batch4* batches = NULL;
-			afit(batches, total_batches);
-			CK_DYNA int* color_batch_starts = NULL;
-			apush(color_batch_starts, 0);
+			afit(simd_batches, total_batches);
+			apush(simd_color_batch_starts, 0);
 			for (int c = 0; c < color_count; c++) {
 				int start = batch_starts[c], end = batch_starts[c + 1];
 				for (int i = start; i + 3 < end; i += 4) {
 					int idx[4] = { crefs[i].index, crefs[i+1].index, crefs[i+2].index, crefs[i+3].index };
 					PGS_Batch4 bt;
 					pgs_batch4_prepare(&bt, sm, idx, 4, pc);
-					apush(batches, bt);
+					apush(simd_batches, bt);
 				}
-				// Remainder manifolds: build partial batch
 				int rem_start = start + ((end - start) / 4) * 4;
 				if (rem_start < end) {
 					int idx[4] = {0};
@@ -636,29 +636,38 @@ void world_step(World world, float dt)
 					for (int j = 0; j < rem_count; j++) idx[j] = crefs[rem_start + j].index;
 					PGS_Batch4 bt;
 					pgs_batch4_prepare(&bt, sm, idx, rem_count, pc);
-					apush(batches, bt);
+					apush(simd_batches, bt);
 				}
-				apush(color_batch_starts, asize(batches));
+				apush(simd_color_batch_starts, asize(simd_batches));
 			}
-			int batch_count = asize(batches);
+			simd_batch_count = asize(simd_batches);
+		}
+#endif
+
+		double tp = perf_now();
+		if (use_body_vel) {
+#if SIMD_SSE
+			// On substep 2+, only refresh changing fields (bias + lambda).
+			if (sub > 0 && simd_batch_count > 0) {
+				for (int bi = 0; bi < simd_batch_count; bi++)
+					pgs_batch4_refresh(&simd_batches[bi], sm, pc);
+			}
 
 			// Iteration loop: dispatch per color within each iteration.
-			// Colors must be sequential (graph coloring guarantee), but within each color
-			// all blocks are parallel.
 			// n_workers already computed at top of world_step
 			for (int iter = 0; iter < w->velocity_iters; iter++) {
 				for (int c = 0; c < color_count; c++) {
-					int bs = color_batch_starts[c], be = color_batch_starts[c + 1];
+					int bs = simd_color_batch_starts[c], be = simd_color_batch_starts[c + 1];
 					int n_color_batches = be - bs;
 #ifdef _WIN32
 					if (n_workers > 1 && n_color_batches >= n_workers * 2) {
-						PGS_WorkCtx pgs_ctx = { .bodies = w->body_vel, .batches = batches + bs };
+						PGS_WorkCtx pgs_ctx = { .bodies = w->body_vel, .batches = simd_batches + bs };
 						pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
 					} else
 #endif
 					{
 						for (int bi = bs; bi < be; bi++)
-							solve_contact_batch4_sv(w->body_vel, &batches[bi]);
+							solve_contact_batch4_sv(w->body_vel, &simd_batches[bi]);
 					}
 				}
 				double tjl = perf_now();
@@ -667,11 +676,10 @@ void world_step(World world, float dt)
 			}
 
 			// Scatter lambdas back from persistent batches to SolverManifold/PatchContact.
-			// Iterate by color to avoid per-batch color search.
 			for (int c2 = 0; c2 < color_count; c2++) {
-				for (int bi = color_batch_starts[c2]; bi < color_batch_starts[c2+1]; bi++) {
-					PGS_Batch4* bt = &batches[bi];
-					int base = batch_starts[c2] + (bi - color_batch_starts[c2]) * 4;
+				for (int bi = simd_color_batch_starts[c2]; bi < simd_color_batch_starts[c2+1]; bi++) {
+					PGS_Batch4* bt = &simd_batches[bi];
+					int base = batch_starts[c2] + (bi - simd_color_batch_starts[c2]) * 4;
 					for (int j = 0; j < 4 && base + j < batch_starts[c2+1]; j++) {
 						int mi = crefs[base + j].index;
 						sm[mi].lambda_t1 = ((float*)&bt->lambda_t1)[j];
@@ -682,8 +690,6 @@ void world_step(World world, float dt)
 					}
 				}
 			}
-			afree(batches);
-			afree(color_batch_starts);
 #else
 			for (int iter = 0; iter < w->velocity_iters; iter++) {
 				for (int c = 0; c < color_count; c++)
@@ -742,6 +748,11 @@ void world_step(World world, float dt)
 
 		t_pos += (perf_now() - tr);
 	}
+
+#if SIMD_SSE
+	afree(simd_batches);
+	afree(simd_color_batch_starts);
+#endif
 
 	w->perf.pgs_solve = t_pgs;
 	w->perf.integrate += t_int_sub;
