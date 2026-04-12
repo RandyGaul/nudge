@@ -7,7 +7,7 @@
 
 // body_pair_key defined in collision.c (included before this file)
 
-static SIMD_FORCEINLINE void contact_tangent_basis(v3 n, v3* t1, v3* t2)
+static void contact_tangent_basis(v3 n, v3* t1, v3* t2)
 {
 	if (fabsf(n.x) >= 0.57735f)
 		*t1 = norm(V3(n.y, -n.x, 0.0f));
