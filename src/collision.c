@@ -922,7 +922,7 @@ static int find_incident_face(const Hull* hull, v3 pos, quat rot, v3 sc, v3 ref_
 // Sutherland-Hodgman: clip polygon against a single plane.
 // Keeps points on the negative side: dot(plane_n, p) - plane_d <= 0.
 // Tracks feature IDs: clip_edge is the side plane index that clips new verts.
-static int clip_to_plane(v3* in, uint8_t* in_fid, int in_count, v3 plane_n, float plane_d, uint8_t clip_edge, v3* out, uint8_t* out_fid)
+static SIMD_FORCEINLINE int clip_to_plane(v3* in, uint8_t* in_fid, int in_count, v3 plane_n, float plane_d, uint8_t clip_edge, v3* out, uint8_t* out_fid)
 {
 	if (in_count == 0) return 0;
 	int out_count = 0;
