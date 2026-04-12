@@ -534,7 +534,7 @@ static v3 gjk_center(const GJK_Shape* s)
 // -----------------------------------------------------------------------------
 // Simplex solvers: find closest point on simplex to origin.
 
-static int gjk_solve2(GJK_Simplex* s)
+static SIMD_NOINLINE int gjk_solve2(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point;
 	v3 ba = sub(b, a);
@@ -553,7 +553,7 @@ static int gjk_solve2(GJK_Simplex* s)
 	return 1;
 }
 
-static int gjk_solve3(GJK_Simplex* s)
+static SIMD_NOINLINE int gjk_solve3(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point;
 	v3 ba = sub(b, a), cb = sub(c, b), ac = sub(a, c);
@@ -579,7 +579,7 @@ static int gjk_solve3(GJK_Simplex* s)
 	return 1;
 }
 
-static int gjk_solve4(GJK_Simplex* s)
+static SIMD_NOINLINE int gjk_solve4(GJK_Simplex* s)
 {
 	v3 a = s->v[0].point, b = s->v[1].point, c = s->v[2].point, d = s->v[3].point;
 	float uAB = dot(b, sub(b, a)), vAB = dot(a, sub(a, b));
@@ -777,7 +777,7 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	// Extract witness points and distance.
 	gjk_witness_points(&simplex, result.point1, result.point2, &result.feat1, &result.feat2);
 	v3 sep = sub(result.point2, result.point1);
-	result.distance = len(sep);
+	result.distance = simd_get_x(simd_sqrt_ss(v3_dot_m(sep, sep)));
 	result.iterations = iter;
 
 	// Save cache for next frame.
