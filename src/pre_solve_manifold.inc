@@ -38,7 +38,7 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		v3 rn_b = cross(r_b, ct->normal);
 		v3 w_n_a = inv_inertia_world_mul(a, rn_a);
 		v3 w_n_b = inv_inertia_world_mul(b, rn_b);
-		float K_n = inv_mass_sum + dot(cross(w_n_a, r_a), ct->normal) + dot(cross(w_n_b, r_b), ct->normal);
+		float K_n = inv_mass_sum + dot(w_n_a, rn_a) + dot(w_n_b, rn_b);
 		float eff_mass_n = K_n > 1e-12f ? 1.0f / K_n : 0.0f;
 		float softness = 0.0f, bias = 0.0f;
 		if (soft_val > 0.0f) {
@@ -80,9 +80,9 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	smf.w_t1_a = inv_inertia_world_mul(a, smf.rct1_a); smf.w_t1_b = inv_inertia_world_mul(b, smf.rct1_b);
 	smf.w_t2_a = inv_inertia_world_mul(a, smf.rct2_a); smf.w_t2_b = inv_inertia_world_mul(b, smf.rct2_b);
 	smf.w_tw_a = inv_inertia_world_mul(a, n); smf.w_tw_b = inv_inertia_world_mul(b, n);
-	float k_t1 = inv_mass_sum + dot(cross(smf.w_t1_a, smf.centroid_r_a), smf.tangent1) + dot(cross(smf.w_t1_b, smf.centroid_r_b), smf.tangent1);
+	float k_t1 = inv_mass_sum + dot(smf.w_t1_a, smf.rct1_a) + dot(smf.w_t1_b, smf.rct1_b);
 	smf.eff_mass_t1 = k_t1 > 1e-12f ? 1.0f / k_t1 : 0.0f;
-	float k_t2 = inv_mass_sum + dot(cross(smf.w_t2_a, smf.centroid_r_a), smf.tangent2) + dot(cross(smf.w_t2_b, smf.centroid_r_b), smf.tangent2);
+	float k_t2 = inv_mass_sum + dot(smf.w_t2_a, smf.rct2_a) + dot(smf.w_t2_b, smf.rct2_b);
 	smf.eff_mass_t2 = k_t2 > 1e-12f ? 1.0f / k_t2 : 0.0f;
 	float k_twist = dot(smf.w_tw_a, n) + dot(smf.w_tw_b, n);
 	smf.eff_mass_twist = k_twist > 1e-12f ? 1.0f / k_twist : 0.0f;
