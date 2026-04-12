@@ -377,19 +377,6 @@ typedef struct SolverContact
 	uint32_t feature_id; // geometric feature key for warm starting
 } SolverContact;
 
-// Compact contact data for PGS iteration (68 bytes, ~1 cache line).
-// Built from SolverContact in pre_solve; lambda_n copied back after iteration.
-typedef struct PatchContact
-{
-	v3 rn_a, rn_b;       // precomputed cross(r, normal)
-	v3 w_n_a, w_n_b;     // precomputed I_w * cross(r, normal)
-	float eff_mass_n;
-	float bias;
-	float bounce;
-	float softness;
-	float lambda_n;      // read/write during iteration
-	float _pad[3];       // pad to 80 bytes (align to 16)
-} PatchContact;
 
 typedef struct SolverManifold
 {

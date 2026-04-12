@@ -1,8 +1,8 @@
 // pre_solve_manifold.inc -- extracted per-manifold pre_solve for parallel dispatch.
-// Included from solver_pgs.c. Each call writes to fixed-stride slots in sm/sc/pc arrays.
+// Included from solver_pgs.c. Each call writes to fixed-stride slots in sm/sc arrays.
 // Thread-safe: warm_cache is read-only, each manifold writes to its own index range.
 
-static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, SolverManifold* sm, SolverContact* sc, PatchContact* pc, float dt, float soft_dd, float bias_dd, float soft_ds, float bias_ds)
+static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, SolverManifold* sm, SolverContact* sc, float dt, float soft_dd, float bias_dd, float soft_ds, float bias_ds)
 {
 	BodyHot* a = &w->body_hot[im->body_a];
 	BodyHot* b = &w->body_hot[im->body_b];
@@ -61,7 +61,6 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		s->w_n_a = w_n_a; s->w_n_b = w_n_b; s->eff_mass_n = eff_mass_n;
 		s->softness = softness; s->bias = bias; s->bounce = bounce;
 		s->lambda_n = 0;
-		pc[contact_base + c] = (PatchContact){ .rn_a = rn_a, .rn_b = rn_b, .w_n_a = w_n_a, .w_n_b = w_n_b, .eff_mass_n = eff_mass_n, .bias = bias, .bounce = bounce, .softness = softness };
 	}
 
 	// Patch friction: centroid, tangent basis, effective mass
@@ -100,11 +99,9 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	}
 
 	// Speculative contacts: zero warm-started impulse for negative-penetration contacts.
-	// Sync lambda_n to PatchContact in the same pass (eliminates separate sync loop).
 	for (int c = 0; c < smf.contact_count; c++) {
 		SolverContact* s = &sc[contact_base+c];
 		if (s->penetration < 0.0f) s->lambda_n = 0;
-		pc[contact_base+c].lambda_n = s->lambda_n;
 	}
 
 	sm[idx] = smf;

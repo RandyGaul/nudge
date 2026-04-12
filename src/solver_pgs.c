@@ -64,17 +64,15 @@ static int warm_match(WarmManifold* wm, uint32_t feature_id)
 
 #include "pre_solve_manifold.inc"
 
-static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, CK_DYNA PatchContact** out_pc, float dt)
+static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, float dt)
 {
 	CK_DYNA SolverManifold* sm = NULL;
 	CK_DYNA SolverContact*  sc = NULL;
-	CK_DYNA PatchContact*   pc = NULL;
 	// Fixed-stride: each manifold gets MAX_CONTACTS slots. Enables parallel dispatch.
-	if (manifold_count == 0) { *out_sm = sm; *out_sc = sc; if (out_pc) *out_pc = pc; else afree(pc); return; }
+	if (manifold_count == 0) { *out_sm = sm; *out_sc = sc; return; }
 	afit(sm, manifold_count); asetlen(sm, manifold_count);
 	int total_contacts = manifold_count * MAX_CONTACTS;
 	afit(sc, total_contacts); asetlen(sc, total_contacts);
-	afit(pc, total_contacts); asetlen(pc, total_contacts);
 	// Only contact_count must be zero for early-return manifolds; the full struct
 	// is written by pre_solve_manifold for all active manifolds.
 	for (int i = 0; i < manifold_count; i++) sm[i].contact_count = 0;
@@ -92,7 +90,7 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 	}
 
 	for (int i = 0; i < manifold_count; i++) {
-		pre_solve_manifold(w, &manifolds[i], i, sm, sc, pc, dt, soft_dd, bias_dd, soft_ds, bias_ds);
+		pre_solve_manifold(w, &manifolds[i], i, sm, sc, dt, soft_dd, bias_dd, soft_ds, bias_ds);
 	}
 
 	// Apply warm start impulses
@@ -122,7 +120,6 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 
 	*out_sm = sm;
 	*out_sc = sc;
-	if (out_pc) *out_pc = pc; else afree(pc);
 }
 
 // NGS position correction: directly fix remaining penetration after velocity solve
@@ -392,7 +389,7 @@ static SIMD_FORCEINLINE void apply_impulse_row_sv(BodyHot* a, BodyHot* b, float 
 // BEPU-style: recompute cross+inertia inline instead of reading precomputed data.
 // Trades ALU (cheap in Release) for bandwidth (expensive at 10K+ bodies).
 // SolverContact only needs: r_a, r_b, eff_mass_n, bias, bounce, softness, lambda_n.
-static SIMD_FORCEINLINE void solve_contact_patch_sv(BodyHot* bodies, SolverManifold* m, PatchContact* pc)
+static SIMD_FORCEINLINE void solve_contact_patch_sv(BodyHot* bodies, SolverManifold* m, SolverContact* sc)
 {
 	BodyHot* a = &bodies[m->body_a];
 	BodyHot* b = &bodies[m->body_b];
@@ -403,7 +400,7 @@ static SIMD_FORCEINLINE void solve_contact_patch_sv(BodyHot* bodies, SolverManif
 	float linear_vn = dot(sub(b->velocity, a->velocity), normal);
 	float total_lambda_n = 0.0f;
 	for (int ci = 0; ci < m->contact_count; ci++) {
-		PatchContact* s = &pc[m->contact_start + ci];
+		SolverContact* s = &sc[m->contact_start + ci];
 		v3 rn_a = s->rn_a;
 		v3 rn_b = s->rn_b;
 		float vn = linear_vn + dot(b->angular_velocity, rn_b) - dot(a->angular_velocity, rn_a);
@@ -584,7 +581,7 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 	GATHER_V3(bt->centroid_r_a, sm, mi0, mi1, mi2, mi3, centroid_r_a);
 	GATHER_V3(bt->centroid_r_b, sm, mi0, mi1, mi2, mi3, centroid_r_b);
 
-	// Pack contact layers: raw r_a/r_b from SolverContact + scalar prestep from PatchContact.
+	// Pack contact layers: raw r_a/r_b + scalar prestep from SolverContact.
 	bt->max_contacts = 0;
 	for (int j = 0; j < count; j++) { if (sm[indices[j]].contact_count > bt->max_contacts) { bt->max_contacts = sm[indices[j]].contact_count; } }
 	for (int cp_idx = 0; cp_idx < bt->max_contacts; cp_idx++) {
@@ -606,9 +603,9 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 	}
 }
 
-// Lightweight refresh: only update bias, bounce, and lambda from PatchContact/SolverManifold.
+// Lightweight refresh: only update bias, bounce, and lambda from SolverContact/SolverManifold.
 // Called on substep 2+ when structural data (normals, offsets, etc.) hasn't changed.
-static void pgs_batch4_refresh(PGS_Batch4* bt, SolverManifold* sm, PatchContact* pc)
+static void pgs_batch4_refresh(PGS_Batch4* bt, SolverManifold* sm, SolverContact* sc)
 {
 	int count = bt->lane_count;
 	float buf[4];
@@ -620,7 +617,7 @@ static void pgs_batch4_refresh(PGS_Batch4* bt, SolverManifold* sm, PatchContact*
 		for (int j = 0; j < count; j++) {
 			int mi = bt->manifold_idx[j];
 			if (cp_idx >= sm[mi].contact_count) { continue; }
-			PatchContact* s = &pc[sm[mi].contact_start + cp_idx];
+			SolverContact* s = &sc[sm[mi].contact_start + cp_idx];
 			bi[j] = s->bias; lam[j] = s->lambda_n;
 		}
 		bt->cp[cp_idx].bias = simd_load(bi);

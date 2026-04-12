@@ -236,7 +236,7 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 }
 
 // --- PGS solver work function (per-color) ---
-typedef struct PGS_WorkCtx { BodyHot* bodies; PGS_Batch4* batches; SolverManifold* sm; SolverContact* sc; PatchContact* pc; int scatter; } PGS_WorkCtx;
+typedef struct PGS_WorkCtx { BodyHot* bodies; PGS_Batch4* batches; SolverManifold* sm; SolverContact* sc; int scatter; } PGS_WorkCtx;
 static void pgs_work_fn(void* ctx, int start, int count)
 {
 	PGS_WorkCtx* p = (PGS_WorkCtx*)ctx;
@@ -250,9 +250,7 @@ static void pgs_work_fn(void* ctx, int start, int count)
 				p->sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
 				p->sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
 				for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < p->sm[mi].contact_count; cp2++) {
-					float lam = SIMD_LANE(bt->cp[cp2].lambda_n, j);
-					p->pc[p->sm[mi].contact_start + cp2].lambda_n = lam;
-					p->sc[p->sm[mi].contact_start + cp2].lambda_n = lam;
+					p->sc[p->sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
 				}
 			}
 		}
@@ -305,28 +303,25 @@ static void integrate_pos_work_fn(void* ctx, int start, int count)
 }
 
 // --- Pre-solve work function (parallel manifold setup) ---
-typedef struct PreSolveCtx { WorldInternal* w; InternalManifold* manifolds; SolverManifold* sm; SolverContact* sc; PatchContact* pc; float dt; float soft_dd, bias_dd, soft_ds, bias_ds; } PreSolveCtx;
+typedef struct PreSolveCtx { WorldInternal* w; InternalManifold* manifolds; SolverManifold* sm; SolverContact* sc; float dt; float soft_dd, bias_dd, soft_ds, bias_ds; } PreSolveCtx;
 static void pre_solve_work_fn(void* ctx, int start, int count)
 {
 	PreSolveCtx* ps = (PreSolveCtx*)ctx;
 	for (int i = start; i < start + count; i++) {
-		pre_solve_manifold(ps->w, &ps->manifolds[i], i, ps->sm, ps->sc, ps->pc, ps->dt, ps->soft_dd, ps->bias_dd, ps->soft_ds, ps->bias_ds);
+		pre_solve_manifold(ps->w, &ps->manifolds[i], i, ps->sm, ps->sc, ps->dt, ps->soft_dd, ps->bias_dd, ps->soft_ds, ps->bias_ds);
 	}
 }
 
 // Parallel pre_solve: alloc fixed-stride → dispatch → sequential warm start.
-static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, CK_DYNA PatchContact** out_pc, float dt, WorkFn work_fn)
+static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, float dt, WorkFn work_fn)
 {
 	CK_DYNA SolverManifold* sm = NULL;
 	CK_DYNA SolverContact*  sc = NULL;
-	CK_DYNA PatchContact*   pc = NULL;
 	afit(sm, manifold_count); asetlen(sm, manifold_count);
 	int total_contacts = manifold_count * MAX_CONTACTS;
 	afit(sc, total_contacts); asetlen(sc, total_contacts);
-	afit(pc, total_contacts); asetlen(pc, total_contacts);
 	memset(sm, 0, manifold_count * sizeof(SolverManifold));
 	memset(sc, 0, total_contacts * sizeof(SolverContact));
-	memset(pc, 0, total_contacts * sizeof(PatchContact));
 	float soft_dd = 0, bias_dd = 0, soft_ds = 0, bias_ds = 0;
 	if (w->solver_type != SOLVER_SI) {
 		float h1 = w->contact_hertz, h2 = h1 * 2.0f, dr = w->contact_damping_ratio;
@@ -335,7 +330,7 @@ static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifo
 		if (den1 > 1e-12f) { soft_dd = 1.0f / den1; bias_dd = dt * o1*o1 * soft_dd; }
 		if (den2 > 1e-12f) { soft_ds = 1.0f / den2; bias_ds = dt * o2*o2 * soft_ds; }
 	}
-	PreSolveCtx ps_ctx = { .w = w, .manifolds = manifolds, .sm = sm, .sc = sc, .pc = pc, .dt = dt, .soft_dd = soft_dd, .bias_dd = bias_dd, .soft_ds = soft_ds, .bias_ds = bias_ds };
+	PreSolveCtx ps_ctx = { .w = w, .manifolds = manifolds, .sm = sm, .sc = sc, .dt = dt, .soft_dd = soft_dd, .bias_dd = bias_dd, .soft_ds = soft_ds, .bias_ds = bias_ds };
 	pool_dispatch(work_fn, &ps_ctx, manifold_count, 32, w->thread_count);
 	// Warm start (sequential — modifies shared body velocities)
 	for (int i = 0; i < manifold_count; i++) {
@@ -347,7 +342,6 @@ static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifo
 		if (m->lambda_twist != 0.0f) { v3 tw = scale(m->normal, m->lambda_twist); BodyState* sa = &w->body_state[m->body_a]; BodyState* sb = &w->body_state[m->body_b]; a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, tw)); b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, tw)); }
 	}
 	*out_sm = sm; *out_sc = sc;
-	if (out_pc) *out_pc = pc; else afree(pc);
 }
 
 // --- Narrowphase work function ---
@@ -545,14 +539,13 @@ void world_step(World world, float dt)
 	double t2 = perf_now();
 	SolverManifold* sm = NULL;
 	SolverContact*  sc = NULL;
-	CK_DYNA PatchContact* pc = NULL;
 	// Pre-solve: parallel when threading enabled (each manifold writes to fixed-stride slots).
 #ifdef _WIN32
 	if (n_workers > 1 && manifold_count >= 64)
-		solver_pre_solve_dispatch(w, manifolds, manifold_count, &sm, &sc, &pc, sub_dt, pre_solve_work_fn);
+		solver_pre_solve_dispatch(w, manifolds, manifold_count, &sm, &sc, sub_dt, pre_solve_work_fn);
 	else
 #endif
-		solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, &pc, sub_dt);
+		solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, sub_dt);
 
 	SolverJoint* sol_joints = NULL;
 	joints_pre_solve(w, sub_dt, &sol_joints);
@@ -699,12 +692,12 @@ void world_step(World world, float dt)
 			// On substep 2+, only refresh changing fields (bias + lambda).
 			if (sub > 0 && simd_batch_count > 0) {
 				for (int bi = 0; bi < simd_batch_count; bi++) {
-					pgs_batch4_refresh(&simd_batches[bi], sm, pc);
+					pgs_batch4_refresh(&simd_batches[bi], sm, sc);
 			}
 			}
 
 			// Iteration loop: dispatch per color within each iteration.
-			// Last iteration fuses lambda scatter (batch -> sm/sc/pc) into solve
+			// Last iteration fuses lambda scatter (batch -> sm/sc) into solve
 			// to avoid a separate sequential pass. Safe: batches within a color
 			// write to disjoint manifold/contact slots.
 			int last_iter = w->velocity_iters - 1;
@@ -715,7 +708,7 @@ void world_step(World world, float dt)
 					int n_color_batches = be - bs;
 #ifdef _WIN32
 					if (n_workers > 1 && n_color_batches >= n_workers * 2) {
-						PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs, .sm = sm, .sc = sc, .pc = pc, .scatter = do_scatter };
+						PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs, .sm = sm, .sc = sc, .scatter = do_scatter };
 						pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
 					} else
 #endif
@@ -730,9 +723,7 @@ void world_step(World world, float dt)
 									sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
 									sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
 									for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
-										float lam = SIMD_LANE(bt->cp[cp2].lambda_n, j);
-										pc[sm[mi].contact_start + cp2].lambda_n = lam;
-										sc[sm[mi].contact_start + cp2].lambda_n = lam;
+										sc[sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
 									}
 								}
 							}
@@ -748,7 +739,7 @@ void world_step(World world, float dt)
 				for (int c = 0; c < color_count; c++) {
 					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++) {
 						if (crefs[i].type == CTYPE_CONTACT)
-							solve_contact_patch_sv(w->body_hot, &sm[crefs[i].index], pc);
+							solve_contact_patch_sv(w->body_hot, &sm[crefs[i].index], sc);
 					}
 				}
 				double tjl = perf_now();
@@ -769,15 +760,6 @@ void world_step(World world, float dt)
 			}
 		}
 		t_pgs += perf_now() - tp;
-
-		// Sync lambda_n from PatchContact back to SolverContact.
-		// SIMD path: scatter already writes both pc[] and sc[] (lines 724-726), skip.
-		// Non-SSE scalar path: solve_contact_patch_sv writes pc[] only, needs sync.
-#if !SIMD_SSE
-		if (use_simd_path) {
-			for (int ci2 = 0; ci2 < asize(pc); ci2++) sc[ci2].lambda_n = pc[ci2].lambda_n;
-		}
-#endif
 
 		double ti2 = perf_now();
 #ifdef _WIN32
@@ -853,7 +835,7 @@ void world_step(World world, float dt)
 	w->perf.islands = perf_now() - t4;
 
 	afree(manifolds);
-	afree(pc);
+
 	w->perf.total = perf_now() - t_total;
 }
 
