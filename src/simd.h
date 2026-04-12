@@ -521,4 +521,7 @@ static inline void simd_transpose4(simd4f* r0, simd4f* r1, simd4f* r2, simd4f* r
 // Sign mask constant.
 static inline simd4f simd_sign_mask() { return simd_cast_itof(simd_set1_i((int)0x80000000)); }
 
+// Extract a single lane from a simd4f by index (0-3).
+#define SIMD_LANE(v, lane) (((float*)&(v))[lane])
+
 #endif // SIMD_H

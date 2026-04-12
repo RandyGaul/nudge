@@ -717,11 +717,11 @@ void world_step(World world, float dt)
 					int base = batch_starts[c2] + (bi - simd_color_batch_starts[c2]) * 4;
 					for (int j = 0; j < 4 && base + j < batch_starts[c2+1]; j++) {
 						int mi = crefs[base + j].index;
-						sm[mi].lambda_t1 = ((float*)&bt->lambda_t1)[j];
-						sm[mi].lambda_t2 = ((float*)&bt->lambda_t2)[j];
-						sm[mi].lambda_twist = ((float*)&bt->lambda_twist)[j];
+						sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
+						sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
+						sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
 						for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
-							pc[sm[mi].contact_start + cp2].lambda_n = ((float*)&bt->cp[cp2].lambda_n)[j];
+							pc[sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
 					}
 					}
 				}
