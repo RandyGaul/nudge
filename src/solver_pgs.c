@@ -555,7 +555,7 @@ static inline v3w iw_mul(v3w iw_d, v3w iw_o, v3w v)
 	};
 }
 
-static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices, int count, SolverContact* sc, PatchContact* pc)
+static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices, int count, SolverContact* sc)
 {
 	float buf[4];
 	#define GATHER1(dst, field) for (int j = 0; j < 4; j++) { buf[j] = (j < count) ? sm[indices[j]].field : 0; } dst = simd_load(buf)
@@ -584,8 +584,8 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 		for (int j = 0; j < count; j++) {
 			if (cp_idx >= sm[indices[j]].contact_count) { continue; }
 			int ci = sm[indices[j]].contact_start + cp_idx;
-			ra[j] = sc[ci].r_a; rb[j] = sc[ci].r_b;
-			PatchContact* s = &pc[ci];
+			SolverContact* s = &sc[ci];
+			ra[j] = s->r_a; rb[j] = s->r_b;
 			emn[j]=s->eff_mass_n; bi[j]=s->bias; bnc[j]=s->bounce; sft[j]=s->softness; lam[j]=s->lambda_n;
 		}
 		cl->r_a = v3w_load4(ra[3], ra[2], ra[1], ra[0]);

@@ -661,7 +661,7 @@ void world_step(World world, float dt)
 				for (int i = start; i + 3 < end; i += 4) {
 					int idx[4] = { crefs[i].index, crefs[i+1].index, crefs[i+2].index, crefs[i+3].index };
 					PGS_Batch4 bt;
-					pgs_batch4_prepare(&bt, sm, idx, 4, sc, pc);
+					pgs_batch4_prepare(&bt, sm, idx, 4, sc);
 					apush(simd_batches, bt);
 				}
 				int rem_start = start + ((end - start) / 4) * 4;
@@ -670,7 +670,7 @@ void world_step(World world, float dt)
 					int rem_count = end - rem_start;
 					for (int j = 0; j < rem_count; j++) idx[j] = crefs[rem_start + j].index;
 					PGS_Batch4 bt;
-					pgs_batch4_prepare(&bt, sm, idx, rem_count, sc, pc);
+					pgs_batch4_prepare(&bt, sm, idx, rem_count, sc);
 					apush(simd_batches, bt);
 				}
 				apush(simd_color_batch_starts, asize(simd_batches));
