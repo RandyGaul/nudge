@@ -822,13 +822,13 @@ static void bvh_refit(BVH_Tree* t, WorldInternal* w)
 	int changed = 0;
 	bvh_fused_recurse(&r, t->root, 0, -1, 0, &changed);
 
-	// Swap new arrays into the tree.
-	aclear(t->nodes); aclear(t->meta);
-	int total = t->nodes[t->root].a.leaf_count + t->nodes[t->root].b.leaf_count;
-	// Compute live count from the root's leaf_count (internal nodes = leaves - 1, plus root = leaves - 1).
+	// Swap new arrays into the tree (bulk memcpy instead of per-element apush).
 	int live_count = new_nodes[0].a.leaf_count + new_nodes[0].b.leaf_count - 1;
 	if (live_count < 1) live_count = 1;
-	for (int i = 0; i < live_count; i++) { apush(t->nodes, new_nodes[i]); apush(t->meta, new_meta[i]); }
+	afit(t->nodes, live_count); asetlen(t->nodes, live_count);
+	memcpy(t->nodes, new_nodes, live_count * sizeof(BVHNode));
+	afit(t->meta, live_count); asetlen(t->meta, live_count);
+	memcpy(t->meta, new_meta, live_count * sizeof(BVHMeta));
 	aclear(t->node_free);
 	t->root = 0;
 
