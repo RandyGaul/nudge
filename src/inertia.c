@@ -12,8 +12,10 @@ static v3 inv_inertia_mul(quat rot, v3 inv_i, v3 v)
 // Stored as diagonal (xx,yy,zz) + off-diagonal (xy,xz,yz) in BodyHot.
 static void body_compute_inv_inertia_world(BodyHot* h)
 {
-	quat q = h->rotation;
 	float a = h->inv_inertia_local.x, b = h->inv_inertia_local.y, c = h->inv_inertia_local.z;
+	// Uniform inertia (cubes, spheres): I_w = a*I, rotation cancels out.
+	if (a == b && b == c) { h->iw_diag = V3(a, a, a); h->iw_off = V3(0, 0, 0); return; }
+	quat q = h->rotation;
 	float xx = q.x*q.x, yy = q.y*q.y, zz = q.z*q.z;
 	float xy = q.x*q.y, xz = q.x*q.z, yz = q.y*q.z;
 	float wx = q.w*q.x, wy = q.w*q.y, wz = q.w*q.z;
