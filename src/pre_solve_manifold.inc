@@ -72,7 +72,7 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	smf.normal = n;
 	contact_tangent_basis(n, &smf.tangent1, &smf.tangent2);
 	smf.patch_area = estimate_patch_area(im->m.contacts, im->m.count);
-	{ float v = smf.patch_area * (1.0f / 3.14159265f); __m128 xv = _mm_set_ss(v); smf.patch_radius = 0.6667f * _mm_cvtss_f32(_mm_mul_ss(xv, _mm_rsqrt_ss(xv))); }
+	smf.patch_radius = 0.6667f * sqrtf(smf.patch_area * (1.0f / 3.14159265f));
 	// Compute cross(r, dir) and I_w * cross(r, dir) once, reuse for effective mass.
 	smf.rct1_a = cross(smf.centroid_r_a, smf.tangent1); smf.rct1_b = cross(smf.centroid_r_b, smf.tangent1);
 	smf.rct2_a = cross(smf.centroid_r_a, smf.tangent2); smf.rct2_b = cross(smf.centroid_r_b, smf.tangent2);
