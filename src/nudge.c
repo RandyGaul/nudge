@@ -284,12 +284,12 @@ static void integrate_pos_work_fn(void* ctx, int start, int count)
 }
 
 // --- Pre-solve work function (parallel manifold setup) ---
-typedef struct PreSolveCtx { WorldInternal* w; InternalManifold* manifolds; SolverManifold* sm; SolverContact* sc; PatchContact* pc; float dt; } PreSolveCtx;
+typedef struct PreSolveCtx { WorldInternal* w; InternalManifold* manifolds; SolverManifold* sm; SolverContact* sc; PatchContact* pc; float dt; float soft_dd, bias_dd, soft_ds, bias_ds; } PreSolveCtx;
 static void pre_solve_work_fn(void* ctx, int start, int count)
 {
 	PreSolveCtx* ps = (PreSolveCtx*)ctx;
 	for (int i = start; i < start + count; i++)
-		pre_solve_manifold(ps->w, &ps->manifolds[i], i, ps->sm, ps->sc, ps->pc, ps->dt);
+		pre_solve_manifold(ps->w, &ps->manifolds[i], i, ps->sm, ps->sc, ps->pc, ps->dt, ps->soft_dd, ps->bias_dd, ps->soft_ds, ps->bias_ds);
 }
 
 // Parallel pre_solve: alloc fixed-stride → dispatch → sequential warm start.
@@ -305,7 +305,15 @@ static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifo
 	memset(sm, 0, manifold_count * sizeof(SolverManifold));
 	memset(sc, 0, total_contacts * sizeof(SolverContact));
 	memset(pc, 0, total_contacts * sizeof(PatchContact));
-	PreSolveCtx ps_ctx = { .w = w, .manifolds = manifolds, .sm = sm, .sc = sc, .pc = pc, .dt = dt };
+	float soft_dd = 0, bias_dd = 0, soft_ds = 0, bias_ds = 0;
+	if (w->solver_type != SOLVER_SI) {
+		float h1 = w->contact_hertz, h2 = h1 * 2.0f, dr = w->contact_damping_ratio;
+		float o1 = 6.28318530718f * h1, o2 = 6.28318530718f * h2;
+		float den1 = dt*2*dr*o1 + dt*dt*o1*o1, den2 = dt*2*dr*o2 + dt*dt*o2*o2;
+		if (den1 > 1e-12f) { soft_dd = 1.0f / den1; bias_dd = dt * o1*o1 * soft_dd; }
+		if (den2 > 1e-12f) { soft_ds = 1.0f / den2; bias_ds = dt * o2*o2 * soft_ds; }
+	}
+	PreSolveCtx ps_ctx = { .w = w, .manifolds = manifolds, .sm = sm, .sc = sc, .pc = pc, .dt = dt, .soft_dd = soft_dd, .bias_dd = bias_dd, .soft_ds = soft_ds, .bias_ds = bias_ds };
 	pool_dispatch(work_fn, &ps_ctx, manifold_count, 32, w->thread_count);
 	// Warm start (sequential — modifies shared body velocities)
 	int patch_warm = 1;

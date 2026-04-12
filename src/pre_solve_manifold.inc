@@ -2,7 +2,7 @@
 // Included from solver_pgs.c. Each call writes to fixed-stride slots in sm/sc/pc arrays.
 // Thread-safe: warm_cache is read-only, each manifold writes to its own index range.
 
-static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, SolverManifold* sm, SolverContact* sc, PatchContact* pc, float dt)
+static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, SolverManifold* sm, SolverContact* sc, PatchContact* pc, float dt, float soft_dd, float bias_dd, float soft_ds, float bias_ds)
 {
 	BodyHot* a = &w->body_hot[im->body_a];
 	BodyHot* b = &w->body_hot[im->body_b];
@@ -16,18 +16,10 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 
 	SolverManifold smf = { .body_a = im->body_a, .body_b = im->body_b, .contact_start = contact_base, .contact_count = im->m.count, .friction = mu, .inv_mass_a = a->inv_mass, .inv_mass_b = b->inv_mass };
 
-	// Softness (same for all contacts in this manifold)
-	float soft_val = 0.0f, bias_rate_val = 0.0f;
-	if (w->solver_type != SOLVER_SI) {
-		float hertz = w->contact_hertz;
-		if (a->inv_mass == 0.0f || b->inv_mass == 0.0f) hertz *= 2.0f;
-		float omega = 2.0f * 3.14159265f * hertz;
-		float d = 2.0f * w->contact_damping_ratio * omega;
-		float kk = omega * omega;
-		float hd = dt * d, hhk = dt * dt * kk;
-		float denom = hd + hhk;
-		if (denom > 1e-12f) { soft_val = 1.0f / denom; bias_rate_val = dt * kk * soft_val; }
-	}
+	// Select precomputed softness parameters based on static/dynamic pair type.
+	int has_static = (a->inv_mass == 0.0f || b->inv_mass == 0.0f);
+	float soft_val = has_static ? soft_ds : soft_dd;
+	float bias_rate_val = has_static ? bias_ds : bias_dd;
 
 	// Per-contact setup. Only initialize fields used by patch-mode PGS and post-solve.
 	for (int c = 0; c < im->m.count; c++) {

@@ -77,8 +77,20 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 	// is written by pre_solve_manifold for all active manifolds.
 	for (int i = 0; i < manifold_count; i++) sm[i].contact_count = 0;
 
+	// Precompute softness for dynamic-dynamic and dynamic-static pairs.
+	float soft_dd = 0, bias_dd = 0, soft_ds = 0, bias_ds = 0;
+	if (w->solver_type != SOLVER_SI) {
+		float h1 = w->contact_hertz, h2 = h1 * 2.0f;
+		float dr = w->contact_damping_ratio;
+		float o1 = 6.28318530718f * h1, o2 = 6.28318530718f * h2;
+		float d1 = 2*dr*o1, k1 = o1*o1, den1 = dt*d1 + dt*dt*k1;
+		float d2 = 2*dr*o2, k2 = o2*o2, den2 = dt*d2 + dt*dt*k2;
+		if (den1 > 1e-12f) { soft_dd = 1.0f / den1; bias_dd = dt * k1 * soft_dd; }
+		if (den2 > 1e-12f) { soft_ds = 1.0f / den2; bias_ds = dt * k2 * soft_ds; }
+	}
+
 	for (int i = 0; i < manifold_count; i++)
-		pre_solve_manifold(w, &manifolds[i], i, sm, sc, pc, dt);
+		pre_solve_manifold(w, &manifolds[i], i, sm, sc, pc, dt, soft_dd, bias_dd, soft_ds, bias_ds);
 
 	// Apply warm start impulses
 	for (int i = 0; i < asize(sm); i++) {
