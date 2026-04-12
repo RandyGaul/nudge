@@ -177,11 +177,10 @@ static void solver_position_correct(WorldInternal* w, SolverManifold* sm, int sm
 			for (int ci = 0; ci < m->contact_count; ci++) {
 				SolverContact* s = &sc[m->contact_start + ci];
 
-				// Recompute separation from current positions
-				v3 r_a = sub(add(a->position, rotate(a->rotation, rotate(inv(a->rotation), s->r_a))), a->position);
-				v3 r_b = sub(add(b->position, rotate(b->rotation, rotate(inv(b->rotation), s->r_b))), b->position);
-				v3 p_a = add(a->position, r_a);
-				v3 p_b = add(b->position, r_b);
+				// Recompute separation from current positions (r_a/r_b are close enough
+				// after small position corrections — matches solver_relax_contacts approach).
+				v3 p_a = add(a->position, s->r_a);
+				v3 p_b = add(b->position, s->r_b);
 				float separation = dot(sub(p_b, p_a), s->normal) - s->penetration;
 
 				float C = fminf(0.0f, separation + SOLVER_SLOP);
