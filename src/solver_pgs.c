@@ -196,21 +196,29 @@ static void solver_position_correct(WorldInternal* w, SolverManifold* sm, int sm
 // Keeps normals, tangent basis, effective mass unchanged — only refreshes the RHS.
 static void solver_relax_contacts(WorldInternal* w, SolverManifold* sm, int sm_count, SolverContact* sc, float dt)
 {
-	for (int i = 0; i < sm_count; i++) {
-		SolverManifold* m = &sm[i];
-		if (m->contact_count == 0) continue;
-		BodyHot* a = &w->body_hot[m->body_a];
-		BodyHot* b = &w->body_hot[m->body_b];
-
+	// Precompute bias rates: dynamic-dynamic and dynamic-static variants.
+	float bias_rate_dd = 0.0f, bias_rate_ds = 0.0f;
+	{
 		float hertz = w->contact_hertz;
-		if (a->inv_mass == 0.0f || b->inv_mass == 0.0f) hertz *= 2.0f;
 		float omega = 2.0f * 3.14159265f * hertz;
 		float d = 2.0f * w->contact_damping_ratio * omega;
 		float k = omega * omega;
 		float hd = dt * d, hhk = dt * dt * k;
 		float denom = hd + hhk;
-		float bias_rate = (denom > 1e-12f) ? dt * k / denom : 0.0f;
-
+		bias_rate_dd = (denom > 1e-12f) ? dt * k / denom : 0.0f;
+		float omega2 = 2.0f * 3.14159265f * hertz * 2.0f;
+		float d2 = 2.0f * w->contact_damping_ratio * omega2;
+		float k2 = omega2 * omega2;
+		float hd2 = dt * d2, hhk2 = dt * dt * k2;
+		float denom2 = hd2 + hhk2;
+		bias_rate_ds = (denom2 > 1e-12f) ? dt * k2 / denom2 : 0.0f;
+	}
+	for (int i = 0; i < sm_count; i++) {
+		SolverManifold* m = &sm[i];
+		if (m->contact_count == 0) continue;
+		BodyHot* a = &w->body_hot[m->body_a];
+		BodyHot* b = &w->body_hot[m->body_b];
+		float bias_rate = (m->inv_mass_a == 0.0f || m->inv_mass_b == 0.0f) ? bias_rate_ds : bias_rate_dd;
 		for (int ci = 0; ci < m->contact_count; ci++) {
 			SolverContact* s = &sc[m->contact_start + ci];
 
