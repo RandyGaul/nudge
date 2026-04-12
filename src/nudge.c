@@ -357,7 +357,8 @@ typedef struct NP_WorkCtx
 {
 	WorldInternal* w;
 	BroadPair* pairs;
-	CK_DYNA InternalManifold** per_thread_manifolds; // array of per-thread dyn arrays
+	InternalManifold* output;       // pre-allocated output array (n_pairs slots)
+	volatile long next_slot;        // atomic write cursor
 } NP_WorkCtx;
 
 // Thread-local narrowphase: each block writes to its own manifold array.
@@ -396,13 +397,10 @@ static void np_work_fn(void* ctx, int start, int count)
 		else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) hit = collide_cylinder_cylinder(make_cylinder(bs0, s0), make_cylinder(bs1, s1), &im.m);
 		if (hit) apush(local, im);
 	}
-	// Merge local manifolds into per-thread output (we just push to the global array with a lock).
-	// Simple: use a global lock for the merge since blocks are large and merges are infrequent.
-	if (asize(local) > 0) {
-		static volatile long np_merge_lock;
-		while (_InterlockedCompareExchange(&np_merge_lock, 1, 0) != 0) _mm_pause();
-		for (int k = 0; k < asize(local); k++) apush(*np->per_thread_manifolds, local[k]);
-		_InterlockedExchange(&np_merge_lock, 0);
+	// Lock-free merge: each hit claims a slot via atomic increment.
+	for (int k = 0; k < asize(local); k++) {
+		long slot = _InterlockedExchangeAdd(&np->next_slot, 1);
+		np->output[slot] = local[k];
 	}
 	afree(local);
 }
@@ -472,12 +470,15 @@ void world_step(World world, float dt)
 	w->np_pairs_out = NULL;
 
 #ifdef _WIN32
-	// Parallel narrowphase on collected pairs.
+	// Parallel narrowphase on collected pairs. Lock-free: pre-allocate output,
+	// each hit claims a slot via atomic counter. No merge lock needed.
 	if (n_workers > 1 && asize(np_pairs) >= 32) {
-		CK_DYNA InternalManifold* merged = manifolds;
-		NP_WorkCtx np_ctx = { .w = w, .pairs = np_pairs, .per_thread_manifolds = &merged };
+		int existing = asize(manifolds);
+		int total_cap = existing + asize(np_pairs);
+		afit(manifolds, total_cap); asetlen(manifolds, total_cap);
+		NP_WorkCtx np_ctx = { .w = w, .pairs = np_pairs, .output = manifolds + existing, .next_slot = 0 };
 		pool_dispatch(np_work_fn, &np_ctx, asize(np_pairs), 32, n_workers);
-		manifolds = merged;
+		asetlen(manifolds, existing + np_ctx.next_slot);
 	} else if (asize(np_pairs) > 0) {
 		for (int i = 0; i < asize(np_pairs); i++) {
 			narrowphase_pair(w, np_pairs[i].a, np_pairs[i].b, &manifolds);
