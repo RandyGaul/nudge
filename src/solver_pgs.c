@@ -86,7 +86,7 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 	for (int i = 0; i < manifold_count; i++)
 		pre_solve_manifold(w, &manifolds[i], i, sm, sc, pc, dt);
 
-	// Apply warm start impulses
+	// Apply warm start impulses (using precomputed angular directions from pre_solve_manifold)
 	for (int i = 0; i < asize(sm); i++) {
 		SolverManifold* m = &sm[i];
 		if (m->contact_count == 0) continue; // skip empty (static-static filtered)
@@ -95,7 +95,11 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 		for (int ci = 0; ci < m->contact_count; ci++) {
 			SolverContact* s = &sc[m->contact_start + ci];
 			if (s->lambda_n == 0.0f) continue;
-			apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n));
+			v3 P = scale(s->normal, s->lambda_n);
+			a->velocity = sub(a->velocity, scale(P, a->inv_mass));
+			b->velocity = add(b->velocity, scale(P, b->inv_mass));
+			a->angular_velocity = sub(a->angular_velocity, scale(s->w_n_a, s->lambda_n));
+			b->angular_velocity = add(b->angular_velocity, scale(s->w_n_b, s->lambda_n));
 		}
 		// Warm start manifold-level friction
 		if ((m->lambda_t1 != 0.0f || m->lambda_t2 != 0.0f)) {
