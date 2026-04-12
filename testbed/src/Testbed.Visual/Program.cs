@@ -8,11 +8,17 @@ using Testbed.Jolt;
 
 var scenes = new (string name, SceneSetup setup)[]
 {
-	("1: Box Stack",   VisualScenes.BoxStack50),
-	("2: Pyramid",     VisualScenes.Pyramid15),
-	("3: Sphere Drop", VisualScenes.SphereDrop),
-	("4: Dominos",     VisualScenes.Dominos),
-	("5: Box Wall",    VisualScenes.BoxWall),
+	("1: Box Stack",      VisualScenes.BoxStack50),
+	("2: Pyramid",        VisualScenes.Pyramid15),
+	("3: Sphere Drop",    VisualScenes.SphereDrop),
+	("4: Dominos",        VisualScenes.Dominos),
+	("5: Box Wall",       VisualScenes.BoxWall),
+	("6: Friction Ramp",  VisualScenes.FrictionRamp),
+	("7: Pendulum Chain", VisualScenes.PendulumChain),
+	("8: Avalanche",      VisualScenes.ShapeAvalanche),
+	("9: Bowling",        VisualScenes.Bowling),
+	("A: Bouncy Pit",     VisualScenes.BouncyPit),
+	("B: Funnel",         VisualScenes.Funnel),
 };
 
 const float ENGINE_SPACING = 30.0f;
@@ -67,12 +73,20 @@ LoadScene(0);
 
 while (!Raylib.WindowShouldClose())
 {
-	// Scene switching
-	for (int i = 0; i < scenes.Length; i++)
+	// Scene switching: 1-9 for first 9, A/B for 10-11, arrows to cycle
+	for (int i = 0; i < Math.Min(scenes.Length, 9); i++)
 	{
 		if (Raylib.IsKeyPressed(KeyboardKey.One + i))
 			LoadScene(i);
 	}
+	if (scenes.Length > 9 && Raylib.IsKeyPressed(KeyboardKey.A))
+		LoadScene(9);
+	if (scenes.Length > 10 && Raylib.IsKeyPressed(KeyboardKey.B))
+		LoadScene(10);
+	if (Raylib.IsKeyPressed(KeyboardKey.Right))
+		LoadScene((currentScene + 1) % scenes.Length);
+	if (Raylib.IsKeyPressed(KeyboardKey.Left))
+		LoadScene((currentScene - 1 + scenes.Length) % scenes.Length);
 	if (Raylib.IsKeyPressed(KeyboardKey.Space))
 		paused = !paused;
 
@@ -163,7 +177,7 @@ while (!Raylib.WindowShouldClose())
 	int y = 10;
 	Raylib.DrawText($"Scene: {scenes[currentScene].name}", 10, y, 20, Color.White);
 	y += 25;
-	Raylib.DrawText("Keys: 1-5 switch scene, SPACE pause, mouse orbit", 10, y, 16, Color.Gray);
+	Raylib.DrawText("Keys: 1-9/A/B switch scene, LEFT/RIGHT cycle, SPACE pause, mouse orbit", 10, y, 16, Color.Gray);
 	y += 25;
 
 	for (int i = 0; i < slots.Length; i++)

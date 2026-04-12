@@ -6,6 +6,7 @@ public struct BodyDesc
 {
 	public ShapeType Shape;
 	public float PosX, PosY, PosZ;
+	public float RotX, RotY, RotZ, RotW; // quaternion; all-zero = identity
 	public float HalfExtentX, HalfExtentY, HalfExtentZ; // box
 	public float Radius;     // sphere/capsule
 	public float HalfHeight; // capsule
@@ -27,4 +28,5 @@ public interface IPhysicsAdapter : IDisposable
 	bool IsBodyActive(int bodyIndex);
 	void SetVelocity(int bodyIndex, float vx, float vy, float vz);
 	string GetPerfBreakdown() => ""; // optional, override for details
+	void AddDistanceJoint(int bodyA, int bodyB, float localAx, float localAy, float localAz, float localBx, float localBy, float localBz, float restLength) { } // optional
 }

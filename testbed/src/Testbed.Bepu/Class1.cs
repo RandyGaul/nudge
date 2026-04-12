@@ -11,9 +11,29 @@ using Testbed;
 
 namespace Testbed.Bepu;
 
+class MaterialLookup
+{
+	public readonly Dictionary<BodyHandle, float> DynamicFriction = new();
+	public readonly Dictionary<StaticHandle, float> StaticFriction = new();
+
+	public float GetFriction(CollidableReference r)
+	{
+		if (r.Mobility == CollidableMobility.Static)
+		{
+			if (StaticFriction.TryGetValue(r.StaticHandle, out float f)) return f;
+		}
+		else
+		{
+			if (DynamicFriction.TryGetValue(r.BodyHandle, out float f)) return f;
+		}
+		return 0.5f;
+	}
+}
+
 struct NarrowPhaseCallbacks : INarrowPhaseCallbacks
 {
 	public SpringSettings ContactSpringiness;
+	public MaterialLookup Materials;
 
 	public void Initialize(Simulation simulation)
 	{
@@ -26,7 +46,9 @@ struct NarrowPhaseCallbacks : INarrowPhaseCallbacks
 
 	public bool ConfigureContactManifold<TManifold>(int workerIndex, CollidablePair pair, ref TManifold manifold, out PairMaterialProperties pairMaterial) where TManifold : unmanaged, IContactManifold<TManifold>
 	{
-		pairMaterial.FrictionCoefficient = 0.5f;
+		float f1 = Materials?.GetFriction(pair.A) ?? 0.5f;
+		float f2 = Materials?.GetFriction(pair.B) ?? 0.5f;
+		pairMaterial.FrictionCoefficient = MathF.Sqrt(f1 * f2);
 		pairMaterial.MaximumRecoveryVelocity = 2f;
 		pairMaterial.SpringSettings = ContactSpringiness;
 		return true;
@@ -67,14 +89,18 @@ public class BepuAdapter : IPhysicsAdapter
 	readonly List<BodyHandle> _dynamicHandles = new();
 	readonly List<StaticHandle> _staticHandles = new();
 	readonly List<bool> _isStatic = new();
+	readonly MaterialLookup _materials = new();
 	double _lastStepMs;
+
+	static Quaternion NormalizeRot(BodyDesc d) =>
+		(d.RotX == 0 && d.RotY == 0 && d.RotZ == 0 && d.RotW == 0) ? Quaternion.Identity : new Quaternion(d.RotX, d.RotY, d.RotZ, d.RotW);
 
 	public void CreateWorld(float gravityX, float gravityY, float gravityZ)
 	{
 		_pool = new BufferPool();
 		_sim = Simulation.Create(
 			_pool,
-			new NarrowPhaseCallbacks(),
+			new NarrowPhaseCallbacks { Materials = _materials },
 			new PoseIntegratorCallbacks { Gravity = new Vector3(gravityX, gravityY, gravityZ) },
 			new SolveDescription(8, 1));
 	}
@@ -82,17 +108,19 @@ public class BepuAdapter : IPhysicsAdapter
 	public int AddBody(BodyDesc desc)
 	{
 		int index = _isStatic.Count;
+		var rot = NormalizeRot(desc);
+		var pose = new RigidPose(new Vector3(desc.PosX, desc.PosY, desc.PosZ), rot);
+		float friction = desc.Friction > 0 ? desc.Friction : 0.5f;
 
 		if (desc.Mass <= 0)
 		{
 			// Static body
 			TypedIndex shapeIndex = AddShape(desc);
-			var staticDesc = new StaticDescription(
-				new Vector3(desc.PosX, desc.PosY, desc.PosZ),
-				shapeIndex);
-			_staticHandles.Add(_sim!.Statics.Add(staticDesc));
+			var handle = _sim!.Statics.Add(new StaticDescription(pose, shapeIndex));
+			_staticHandles.Add(handle);
 			_dynamicHandles.Add(default);
 			_isStatic.Add(true);
+			_materials.StaticFriction[handle] = friction;
 		}
 		else
 		{
@@ -102,28 +130,28 @@ public class BepuAdapter : IPhysicsAdapter
 				case ShapeType.Box:
 				{
 					var shape = new Box(desc.HalfExtentX * 2, desc.HalfExtentY * 2, desc.HalfExtentZ * 2);
-					var bodyDesc = BodyDescription.CreateConvexDynamic(
-						new RigidPose(new Vector3(desc.PosX, desc.PosY, desc.PosZ)),
-						desc.Mass, _sim!.Shapes, shape);
-					_dynamicHandles.Add(_sim!.Bodies.Add(bodyDesc));
+					var bodyDesc = BodyDescription.CreateConvexDynamic(pose, desc.Mass, _sim!.Shapes, shape);
+					var handle = _sim!.Bodies.Add(bodyDesc);
+					_dynamicHandles.Add(handle);
+					_materials.DynamicFriction[handle] = friction;
 					break;
 				}
 				case ShapeType.Sphere:
 				{
 					var shape = new BepuPhysics.Collidables.Sphere(desc.Radius);
-					var bodyDesc = BodyDescription.CreateConvexDynamic(
-						new RigidPose(new Vector3(desc.PosX, desc.PosY, desc.PosZ)),
-						desc.Mass, _sim!.Shapes, shape);
-					_dynamicHandles.Add(_sim!.Bodies.Add(bodyDesc));
+					var bodyDesc = BodyDescription.CreateConvexDynamic(pose, desc.Mass, _sim!.Shapes, shape);
+					var handle = _sim!.Bodies.Add(bodyDesc);
+					_dynamicHandles.Add(handle);
+					_materials.DynamicFriction[handle] = friction;
 					break;
 				}
 				case ShapeType.Capsule:
 				{
 					var shape = new Capsule(desc.Radius, desc.HalfHeight * 2);
-					var bodyDesc = BodyDescription.CreateConvexDynamic(
-						new RigidPose(new Vector3(desc.PosX, desc.PosY, desc.PosZ)),
-						desc.Mass, _sim!.Shapes, shape);
-					_dynamicHandles.Add(_sim!.Bodies.Add(bodyDesc));
+					var bodyDesc = BodyDescription.CreateConvexDynamic(pose, desc.Mass, _sim!.Shapes, shape);
+					var handle = _sim!.Bodies.Add(bodyDesc);
+					_dynamicHandles.Add(handle);
+					_materials.DynamicFriction[handle] = friction;
 					break;
 				}
 			}
@@ -143,6 +171,43 @@ public class BepuAdapter : IPhysicsAdapter
 			ShapeType.Capsule => _sim!.Shapes.Add(new Capsule(desc.Radius, desc.HalfHeight * 2)),
 			_ => throw new ArgumentException("Unknown shape type"),
 		};
+	}
+
+	BodyHandle EnsureDynamic(int bodyIndex)
+	{
+		if (!_isStatic[bodyIndex])
+			return _dynamicHandles[bodyIndex];
+
+		// Convert static to kinematic so it can participate in constraints
+		var staticRef = _sim!.Statics[_staticHandles[bodyIndex]];
+		var pose = staticRef.Pose;
+		var shape = staticRef.Shape;
+		var oldHandle = _staticHandles[bodyIndex];
+		_sim.Statics.Remove(oldHandle);
+
+		var desc = BodyDescription.CreateKinematic(pose, new CollidableDescription(shape), new BodyActivityDescription(-1));
+		var handle = _sim.Bodies.Add(desc);
+		_dynamicHandles[bodyIndex] = handle;
+		_isStatic[bodyIndex] = false;
+
+		// Migrate friction data
+		if (_materials.StaticFriction.Remove(oldHandle, out float f))
+			_materials.DynamicFriction[handle] = f;
+
+		return handle;
+	}
+
+	public void AddDistanceJoint(int bodyA, int bodyB, float localAx, float localAy, float localAz, float localBx, float localBy, float localBz, float restLength)
+	{
+		var hA = EnsureDynamic(bodyA);
+		var hB = EnsureDynamic(bodyB);
+		_sim!.Solver.Add(hA, hB, new DistanceServo
+		{
+			LocalOffsetA = new Vector3(localAx, localAy, localAz),
+			LocalOffsetB = new Vector3(localBx, localBy, localBz),
+			TargetDistance = restLength,
+			SpringSettings = new SpringSettings(120, 1),
+		});
 	}
 
 	public void Step(float dt)

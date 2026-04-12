@@ -23,6 +23,9 @@ internal static partial class Native
 	[LibraryImport(Lib, EntryPoint = "nudge_create_body")]
 	public static partial ulong CreateBody(ulong world, float px, float py, float pz, float mass, float friction, float restitution);
 
+	[LibraryImport(Lib, EntryPoint = "nudge_create_body_rotated")]
+	public static partial ulong CreateBodyRotated(ulong world, float px, float py, float pz, float qx, float qy, float qz, float qw, float mass, float friction, float restitution);
+
 	[LibraryImport(Lib, EntryPoint = "nudge_body_add_box")]
 	public static partial void BodyAddBox(ulong world, ulong body, float hx, float hy, float hz);
 
@@ -49,6 +52,9 @@ internal static partial class Native
 
 	[LibraryImport(Lib, EntryPoint = "nudge_body_set_velocity")]
 	public static partial void SetVelocity(ulong world, ulong body, float vx, float vy, float vz);
+
+	[LibraryImport(Lib, EntryPoint = "nudge_create_distance_joint")]
+	public static partial ulong CreateDistanceJoint(ulong world, ulong bodyA, ulong bodyB, float ax, float ay, float az, float bx, float by, float bz, float restLength);
 }
 
 public struct NudgePerfTimers
@@ -69,6 +75,9 @@ public class NudgeAdapter : IPhysicsAdapter
 	readonly List<ulong> _bodies = new();
 	double _lastStepMs;
 
+	static (float x, float y, float z, float w) NormalizeRot(BodyDesc d) =>
+		(d.RotX == 0 && d.RotY == 0 && d.RotZ == 0 && d.RotW == 0) ? (0, 0, 0, 1f) : (d.RotX, d.RotY, d.RotZ, d.RotW);
+
 	public void CreateWorld(float gravityX, float gravityY, float gravityZ)
 	{
 		_world = Native.CreateWorld(gravityX, gravityY, gravityZ, 0, 0, 0);
@@ -76,7 +85,8 @@ public class NudgeAdapter : IPhysicsAdapter
 
 	public int AddBody(BodyDesc desc)
 	{
-		ulong body = Native.CreateBody(_world, desc.PosX, desc.PosY, desc.PosZ, desc.Mass, desc.Friction, desc.Restitution);
+		var (qx, qy, qz, qw) = NormalizeRot(desc);
+		ulong body = Native.CreateBodyRotated(_world, desc.PosX, desc.PosY, desc.PosZ, qx, qy, qz, qw, desc.Mass, desc.Friction, desc.Restitution);
 
 		switch (desc.Shape)
 		{
@@ -131,6 +141,11 @@ public class NudgeAdapter : IPhysicsAdapter
 	public void DebugSleep() => Native.DebugSleep(_world);
 
 	public void SetVelocity(int bodyIndex, float vx, float vy, float vz) => Native.SetVelocity(_world, _bodies[bodyIndex], vx, vy, vz);
+
+	public void AddDistanceJoint(int bodyA, int bodyB, float localAx, float localAy, float localAz, float localBx, float localBy, float localBz, float restLength)
+	{
+		Native.CreateDistanceJoint(_world, _bodies[bodyA], _bodies[bodyB], localAx, localAy, localAz, localBx, localBy, localBz, restLength);
+	}
 
 	public unsafe NudgePerfTimers GetPerfTimers()
 	{

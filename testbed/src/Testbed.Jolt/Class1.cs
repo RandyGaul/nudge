@@ -18,6 +18,9 @@ internal static partial class Native
 	[LibraryImport(Lib, EntryPoint = "jolt_create_body")]
 	public static partial int CreateBody(nint world, int shapeType, float s0, float s1, float s2, float px, float py, float pz, float mass, float friction, float restitution);
 
+	[LibraryImport(Lib, EntryPoint = "jolt_create_body_rotated")]
+	public static partial int CreateBodyRotated(nint world, int shapeType, float s0, float s1, float s2, float px, float py, float pz, float qx, float qy, float qz, float qw, float mass, float friction, float restitution);
+
 	[LibraryImport(Lib, EntryPoint = "jolt_step")]
 	public static partial void Step(nint world, float dt);
 
@@ -41,6 +44,9 @@ internal static partial class Native
 
 	[LibraryImport(Lib, EntryPoint = "jolt_optimize_broadphase")]
 	public static partial void OptimizeBroadphase(nint world);
+
+	[LibraryImport(Lib, EntryPoint = "jolt_create_distance_joint")]
+	public static partial void CreateDistanceJoint(nint world, int bodyA, int bodyB, float ax, float ay, float az, float bx, float by, float bz, float restLength);
 }
 
 public class JoltAdapter : IPhysicsAdapter
@@ -50,6 +56,9 @@ public class JoltAdapter : IPhysicsAdapter
 	nint _world;
 	int _bodyCount;
 	bool _broadphaseOptimized;
+
+	static (float x, float y, float z, float w) NormalizeRot(BodyDesc d) =>
+		(d.RotX == 0 && d.RotY == 0 && d.RotZ == 0 && d.RotW == 0) ? (0, 0, 0, 1f) : (d.RotX, d.RotY, d.RotZ, d.RotW);
 
 	public void CreateWorld(float gravityX, float gravityY, float gravityZ)
 	{
@@ -80,7 +89,8 @@ public class JoltAdapter : IPhysicsAdapter
 				throw new ArgumentException("Unknown shape type");
 		}
 
-		int index = Native.CreateBody(_world, shapeType, s0, s1, s2, desc.PosX, desc.PosY, desc.PosZ, desc.Mass, desc.Friction, desc.Restitution);
+		var (qx, qy, qz, qw) = NormalizeRot(desc);
+		int index = Native.CreateBodyRotated(_world, shapeType, s0, s1, s2, desc.PosX, desc.PosY, desc.PosZ, qx, qy, qz, qw, desc.Mass, desc.Friction, desc.Restitution);
 		_bodyCount++;
 		return index;
 	}
@@ -116,6 +126,11 @@ public class JoltAdapter : IPhysicsAdapter
 	public void SetVelocity(int bodyIndex, float vx, float vy, float vz) => Native.SetVelocity(_world, bodyIndex, vx, vy, vz);
 
 	public bool IsBodyActive(int bodyIndex) => Native.IsBodyActive(_world, bodyIndex) != 0;
+
+	public void AddDistanceJoint(int bodyA, int bodyB, float localAx, float localAy, float localAz, float localBx, float localBy, float localBz, float restLength)
+	{
+		Native.CreateDistanceJoint(_world, bodyA, bodyB, localAx, localAy, localAz, localBx, localBy, localBz, restLength);
+	}
 
 	public void Dispose()
 	{

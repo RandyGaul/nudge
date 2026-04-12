@@ -144,3 +144,23 @@ EXPORT void nudge_debug_sleep(uint64_t world) {
 EXPORT void nudge_body_set_velocity(uint64_t world, uint64_t body, float vx, float vy, float vz) {
 	body_set_velocity((World){world}, (Body){body}, V3(vx, vy, vz));
 }
+
+EXPORT uint64_t nudge_create_body_rotated(uint64_t world, float px, float py, float pz, float qx, float qy, float qz, float qw, float mass, float friction, float restitution) {
+	BodyParams p = {0};
+	p.position = V3(px, py, pz);
+	p.rotation = (quat){qx, qy, qz, qw};
+	p.mass = mass;
+	p.friction = friction > 0 ? friction : 0.5f;
+	p.restitution = restitution;
+	return create_body((World){world}, p).id;
+}
+
+EXPORT uint64_t nudge_create_distance_joint(uint64_t world, uint64_t body_a, uint64_t body_b, float ax, float ay, float az, float bx, float by, float bz, float rest_length) {
+	DistanceParams p = {0};
+	p.body_a = (Body){body_a};
+	p.body_b = (Body){body_b};
+	p.local_offset_a = V3(ax, ay, az);
+	p.local_offset_b = V3(bx, by, bz);
+	p.rest_length = rest_length;
+	return create_distance((World){world}, p).id;
+}

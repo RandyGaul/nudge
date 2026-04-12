@@ -11,6 +11,7 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <chrono>
 #include <vector>
 #include <cstdio>
@@ -73,6 +74,7 @@ struct JoltWorld {
 	TempAllocatorImpl* temp_allocator;
 	JobSystemThreadPool* job_system;
 	std::vector<BodyID> bodies;
+	std::vector<Body*> body_ptrs;
 	double last_step_time;
 };
 
@@ -145,9 +147,7 @@ EXPORT void jolt_destroy_world(void* world) {
 	delete w;
 }
 
-// Combined create body + shape. Returns body index.
-EXPORT int jolt_create_body(void* world, int shape_type, float s0, float s1, float s2, float px, float py, float pz, float mass, float friction, float restitution) {
-	auto* w = (JoltWorld*)world;
+static int jolt_create_body_impl(JoltWorld* w, int shape_type, float s0, float s1, float s2, float px, float py, float pz, Quat rot, float mass, float friction, float restitution) {
 	auto& bi = w->system.GetBodyInterface();
 
 	const Shape* shape;
@@ -162,7 +162,7 @@ EXPORT int jolt_create_body(void* world, int shape_type, float s0, float s1, flo
 	ObjectLayer layer = (mass <= 0) ? Layers::NON_MOVING : Layers::MOVING;
 	EActivation activation = (mass <= 0) ? EActivation::DontActivate : EActivation::Activate;
 
-	BodyCreationSettings settings(shape, RVec3(px, py, pz), Quat::sIdentity(), motion, layer);
+	BodyCreationSettings settings(shape, RVec3(px, py, pz), rot, motion, layer);
 	if (mass > 0) {
 		settings.mOverrideMassProperties = EOverrideMassProperties::CalculateInertia;
 		settings.mMassPropertiesOverride.mMass = mass;
@@ -170,10 +170,21 @@ EXPORT int jolt_create_body(void* world, int shape_type, float s0, float s1, flo
 	settings.mFriction = (friction > 0) ? friction : 0.5f;
 	settings.mRestitution = restitution;
 
-	BodyID id = bi.CreateAndAddBody(settings, activation);
+	Body* body = bi.CreateBody(settings);
+	bi.AddBody(body->GetID(), activation);
 	int index = (int)w->bodies.size();
-	w->bodies.push_back(id);
+	w->bodies.push_back(body->GetID());
+	w->body_ptrs.push_back(body);
 	return index;
+}
+
+// Combined create body + shape. Returns body index.
+EXPORT int jolt_create_body(void* world, int shape_type, float s0, float s1, float s2, float px, float py, float pz, float mass, float friction, float restitution) {
+	return jolt_create_body_impl((JoltWorld*)world, shape_type, s0, s1, s2, px, py, pz, Quat::sIdentity(), mass, friction, restitution);
+}
+
+EXPORT int jolt_create_body_rotated(void* world, int shape_type, float s0, float s1, float s2, float px, float py, float pz, float qx, float qy, float qz, float qw, float mass, float friction, float restitution) {
+	return jolt_create_body_impl((JoltWorld*)world, shape_type, s0, s1, s2, px, py, pz, Quat(qx, qy, qz, qw), mass, friction, restitution);
 }
 
 EXPORT void jolt_step(void* world, float dt) {
@@ -229,4 +240,17 @@ EXPORT void jolt_set_velocity(void* world, int body_index, float vx, float vy, f
 
 EXPORT void jolt_optimize_broadphase(void* world) {
 	((JoltWorld*)world)->system.OptimizeBroadPhase();
+}
+
+EXPORT void jolt_create_distance_joint(void* world, int body_a, int body_b, float ax, float ay, float az, float bx, float by, float bz, float rest_length) {
+	auto* w = (JoltWorld*)world;
+
+	DistanceConstraintSettings settings;
+	settings.mSpace = EConstraintSpace::LocalToBodyCOM;
+	settings.mPoint1 = Vec3(ax, ay, az);
+	settings.mPoint2 = Vec3(bx, by, bz);
+	settings.mMinDistance = rest_length;
+	settings.mMaxDistance = rest_length;
+
+	w->system.AddConstraint(settings.Create(*w->body_ptrs[body_a], *w->body_ptrs[body_b]));
 }
