@@ -16,6 +16,10 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 
 	SolverManifold smf = { .body_a = im->body_a, .body_b = im->body_b, .contact_start = contact_base, .contact_count = im->m.count, .friction = mu, .inv_mass_a = a->inv_mass, .inv_mass_b = b->inv_mass };
 
+	// Skip per-contact restitution velocity when both bodies are slow (settled stacks).
+	float rest_thresh2 = SOLVER_RESTITUTION_THRESH * SOLVER_RESTITUTION_THRESH;
+	int check_bounce = rest > 0.0f && (len2(a->velocity) + len2(a->angular_velocity) + len2(b->velocity) + len2(b->angular_velocity)) > rest_thresh2;
+
 	// Select precomputed softness parameters based on static/dynamic pair type.
 	int has_static = (a->inv_mass == 0.0f || b->inv_mass == 0.0f);
 	float soft_val = has_static ? soft_ds : soft_dd;
@@ -41,11 +45,14 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 			bias = pen > 0.0f ? -bias_rate_val * pen : 0.0f;
 			if (bias < -w->max_push_velocity) bias = -w->max_push_velocity;
 		}
-		v3 vel_a = add(a->velocity, cross(a->angular_velocity, r_a));
-		v3 vel_b = add(b->velocity, cross(b->angular_velocity, r_b));
-		float vn_rel = dot(sub(vel_b, vel_a), ct->normal);
-		float bounce = (-vn_rel > SOLVER_RESTITUTION_THRESH) ? rest * vn_rel : 0.0f;
-		if (bounce != 0.0f) bias = 0.0f;
+		float bounce = 0.0f;
+		if (check_bounce) {
+			v3 vel_a = add(a->velocity, cross(a->angular_velocity, r_a));
+			v3 vel_b = add(b->velocity, cross(b->angular_velocity, r_b));
+			float vn_rel = dot(sub(vel_b, vel_a), ct->normal);
+			bounce = (-vn_rel > SOLVER_RESTITUTION_THRESH) ? rest * vn_rel : 0.0f;
+			if (bounce != 0.0f) bias = 0.0f;
+		}
 		SolverContact* s = &sc[contact_base + c];
 		s->r_a = r_a; s->r_b = r_b; s->normal = ct->normal; s->penetration = ct->penetration;
 		s->feature_id = ct->feature_id; s->rn_a = rn_a; s->rn_b = rn_b;
