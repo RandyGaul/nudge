@@ -105,6 +105,7 @@ static int g_mesh_cylinder;
 static bool g_show_contacts = true;
 static bool g_show_joints = true;
 static bool g_show_bvh = true;
+static bool g_show_proxies = false;
 static bool g_show_sleep = true;
 static bool g_show_shadows = true;
 static bool g_sleep_enabled = true;
@@ -137,7 +138,7 @@ typedef struct Scene {
 	void (*setup)();
 } Scene;
 
-static int g_scene_index = 1; // Box Pyramid
+static int g_scene_index = 14; // Cylinder Playground
 
 // Mouse constraint state (right-click drag to interact with bodies)
 static Body g_mouse_body;         // body being dragged ({0} if none)
@@ -186,6 +187,7 @@ static Scene g_scenes[] = {
 	{ "Weld Bridge",     scene_weld_bridge_setup },
 	{ "Slider Crane",    scene_slider_crane_setup },
 	{ "Hinge Limits",    scene_hinge_limits_setup },
+	{ "Cylinder Playground", scene_cylinder_playground_setup },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 
@@ -652,6 +654,7 @@ void update()
 	ImGui_Checkbox("Contacts", &g_show_contacts);
 	ImGui_Checkbox("Joints", &g_show_joints);
 	ImGui_Checkbox("BVH", &g_show_bvh);
+	ImGui_SameLine(); ImGui_Checkbox("Proxies", &g_show_proxies);
 	ImGui_Checkbox("Sleeping bodies", &g_show_sleep);
 	ImGui_Checkbox("Shadows", &g_show_shadows);
 
@@ -819,6 +822,25 @@ void draw()
 		WorldInternal* vw = (WorldInternal*)g_world.id;
 		int stale = bvh_validate_leaves(vw->bvh_dynamic, vw);
 		if (stale > 0) printf("[BVH] %d stale dynamic leaves at draw time (frame %d)\n", stale, vw->frame);
+	}
+
+	if (g_show_proxies) {
+		// Draw per-body fat AABB (green) and tight AABB (yellow) for dynamic bodies.
+		// Stale proxies (tight outside fat) show as red tight AABB.
+		WorldInternal* pw = (WorldInternal*)g_world.id;
+		for (int i = 0; i < asize(pw->body_hot); i++) {
+			if (!split_alive(pw->body_gen, i)) continue;
+			if (asize(pw->body_cold[i].shapes) == 0) continue;
+			if (pw->body_hot[i].inv_mass == 0.0f) continue;
+			int leaf = pw->body_cold[i].bvh_leaf;
+			if (leaf < 0) continue;
+			AABB tight_bb = body_aabb(&pw->body_hot[i], &pw->body_cold[i]);
+			v3 fmin = pw->bvh_dynamic->leaves[leaf].fat_min;
+			v3 fmax = pw->bvh_dynamic->leaves[leaf].fat_max;
+			int stale = tight_bb.min.x < fmin.x || tight_bb.min.y < fmin.y || tight_bb.min.z < fmin.z || tight_bb.max.x > fmax.x || tight_bb.max.y > fmax.y || tight_bb.max.z > fmax.z;
+			draw_aabb_wireframe(fmin, fmax, V3(0.2f, 0.8f, 0.2f)); // fat = green
+			draw_aabb_wireframe(tight_bb.min, tight_bb.max, stale ? V3(1, 0.2f, 0.2f) : V3(0.9f, 0.9f, 0.3f)); // tight = yellow (red if stale)
+		}
 	}
 
 	render_end();

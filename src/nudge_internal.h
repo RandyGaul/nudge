@@ -307,6 +307,13 @@ typedef struct WorldInternal
 	int box_use_hull;          // 1 = route box-box through hull-hull path (debug)
 	int incremental_np_enabled; // 1 = incremental narrowphase (cached feature pair refresh)
 	int warm_start_enabled;    // 1 = warm-start contact impulses from cache
+	// Native cylinder narrowphase toggles (0 = route through hull-backed fallback).
+	// Flipped on per-pair as native routines land; default 0 until Phase 6 cleanup.
+	int cyl_native_sphere;
+	int cyl_native_capsule;
+	int cyl_native_box;
+	int cyl_native_hull;
+	int cyl_native_cyl;
 	int thread_count;        // 0 or 1 = single-threaded, >1 = parallel PGS solver
 	void* np_pairs_out; // CK_DYNA BroadPair** — when set, broadphase outputs pairs here instead of running narrowphase
 	int ldl_enabled;         // 1 = LDL direct correction for joints (dual solvers only)

@@ -358,11 +358,11 @@ static void np_work_fn(void* ctx, int start, int count)
 		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL) hit = collide_sphere_hull(make_sphere(h0, s0), make_convex_hull(h1, s1), &im.m);
 		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL) hit = collide_capsule_hull(make_capsule(h0, s0), make_convex_hull(h1, s1), &im.m);
 		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL) hit = collide_hull_hull(make_convex_hull(h0, s0), make_convex_hull(h1, s1), &im.m);
-		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER) hit = collide_sphere_hull(make_sphere(h0, s0), make_cylinder_hull(h1, s1), &im.m);
-		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER) hit = collide_capsule_hull(make_capsule(h0, s0), make_cylinder_hull(h1, s1), &im.m);
-		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER) hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, h0->position, h0->rotation, s0->box.half_extents }, make_cylinder_hull(h1, s1), &im.m);
-		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER) hit = collide_hull_hull(make_convex_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m);
-		else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) hit = collide_hull_hull(make_cylinder_hull(h0, s0), make_cylinder_hull(h1, s1), &im.m);
+		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_sphere(make_cylinder(h1, s1), make_sphere(h0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
+		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_capsule(make_cylinder(h1, s1), make_capsule(h0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
+		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_box(make_cylinder(h1, s1), make_box(h0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
+		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_hull(make_cylinder(h1, s1), make_convex_hull(h0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
+		else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) hit = collide_cylinder_cylinder(make_cylinder(h0, s0), make_cylinder(h1, s1), &im.m);
 		if (hit) apush(local, im);
 	}
 	// Merge local manifolds into per-thread output (we just push to the global array with a lock).

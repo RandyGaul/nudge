@@ -70,6 +70,14 @@ typedef struct Box
 	v3 half_extents;
 } Box;
 
+typedef struct Cylinder
+{
+	v3 center;
+	quat rotation;
+	float half_height; // along local Y
+	float radius;
+} Cylinder;
+
 // Half-edge mesh for convex polyhedra.
 // Edges stored in twin pairs: edge 2k and twin 2k+1.
 typedef struct HalfEdge
@@ -165,6 +173,14 @@ int collide_capsule_box(Capsule a, Box b, Manifold* manifold);
 int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold);
 int collide_box_box(Box a, Box b, Manifold* manifold);
 int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold);
+
+// Native cylinder collision. Cylinder is always shape A; for cyl-as-B callers
+// swap arguments and flip manifold normals after calling.
+int collide_cylinder_sphere(Cylinder a, Sphere b, Manifold* manifold);
+int collide_cylinder_capsule(Cylinder a, Capsule b, Manifold* manifold);
+int collide_cylinder_box(Cylinder a, Box b, Manifold* manifold);
+int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold);
+int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold);
 
 // Built-in unit box hull (half-extents 1,1,1). Use with ConvexHull + scale for boxes.
 const Hull* hull_unit_box();
