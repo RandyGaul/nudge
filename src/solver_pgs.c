@@ -30,13 +30,6 @@ static float estimate_patch_area(Contact* contacts, int count)
 	return area > PATCH_MIN_AREA ? area : PATCH_MIN_AREA;
 }
 
-static float compute_effective_mass(BodyHot* a, BodyHot* b, float inv_mass_sum, v3 r_a, v3 r_b, v3 dir)
-{
-	v3 ra_x_d = cross(r_a, dir);
-	v3 rb_x_d = cross(r_b, dir);
-	float k = inv_mass_sum + dot(cross(inv_inertia_world_mul(a, ra_x_d), r_a), dir) + dot(cross(inv_inertia_world_mul(b, rb_x_d), r_b), dir);
-	return k > 1e-12f ? 1.0f / k : 0.0f;
-}
 
 // Apply an impulse (linear + angular) to a body pair.
 // Uses precomputed world-space inverse inertia (iw_diag/iw_off) for speed.
