@@ -42,3 +42,9 @@ if(MSVC)
 	target_compile_options(nudge_tests PRIVATE /experimental:c11atomics /Ob3)
 	target_link_options(nudge_tests PRIVATE /STACK:8388608)
 endif()
+
+# Copy SDL3.dll next to executables so F5 works in MSVC
+add_custom_command(TARGET nudge POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3-shared> $<TARGET_FILE_DIR:nudge>)
+add_custom_command(TARGET nudge_tests POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3-shared> $<TARGET_FILE_DIR:nudge_tests>)

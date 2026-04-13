@@ -46,6 +46,7 @@ typedef ptrdiff_t GLintptr;
 	X(void,    BufferData,             GLenum target, GLsizeiptr size, const void* data, GLenum usage) \
 	X(void,    BufferSubData,          GLenum target, GLintptr offset, GLsizeiptr size, const void* data) \
 	X(void,    DeleteBuffers,          GLsizei n, const GLuint* buffers) \
+	X(void,    DeleteVertexArrays,    GLsizei n, const GLuint* arrays) \
 	X(void,    VertexAttribPointer,    GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void* pointer) \
 	X(void,    EnableVertexAttribArray, GLuint index) \
 	X(void,    VertexAttribDivisor,    GLuint index, GLuint divisor) \
@@ -253,6 +254,15 @@ static void mesh_upload(Mesh* mesh, MeshVertex* verts, int vert_count, uint16_t*
 	gl_VertexAttribDivisor(6, 1);
 
 	gl_BindVertexArray(0);
+}
+
+static void mesh_destroy(Mesh* mesh)
+{
+	if (mesh->instance_vbo) gl_DeleteBuffers(1, &mesh->instance_vbo);
+	if (mesh->ebo) gl_DeleteBuffers(1, &mesh->ebo);
+	if (mesh->vbo) gl_DeleteBuffers(1, &mesh->vbo);
+	if (mesh->vao) gl_DeleteVertexArrays(1, &mesh->vao);
+	*mesh = (Mesh){0};
 }
 
 // -----------------------------------------------------------------------------

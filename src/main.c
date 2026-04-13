@@ -451,6 +451,9 @@ static void draw_aabb_wireframe(v3 lo, v3 hi, v3 color);
 
 #include "debug_ui.c"
 
+static bool g_npv_mode = false;
+#include "np_viz.c"
+
 void update()
 {
 	// Camera input (skip when imgui wants the mouse)
@@ -590,6 +593,7 @@ void update()
 	if (ImGui_Button(">>")) { g_scene_index = (g_scene_index + 1) % SCENE_COUNT; setup_scene(); }
 	if (ImGui_Button("Restart")) setup_scene();
 	ImGui_SameLine();
+	if (ImGui_Button("NP Viz")) g_npv_mode = true;
 	ImGui_Checkbox("Pause", &g_paused);
 	if (g_paused) { ImGui_SameLine(); if (ImGui_Button("Step")) g_step_once = true; }
 	if (g_recording) { ImGui_SameLine(); ImGui_TextColored((ImVec4){1,0.2f,0.2f,1}, "REC %d", asize(g_recorded_frames)); }
