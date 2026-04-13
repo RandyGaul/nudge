@@ -1024,29 +1024,38 @@ static void scene_capsule_test_setup()
 
 	// Override to isolate narrowphase
 	WorldInternal *wi = (WorldInternal *)g_world.id;
-	wi->broadphase_type = BROADPHASE_N2;
-	wi->sleep_enabled = 0;
-	wi->warm_start_enabled = 0;
-	wi->incremental_np_enabled = 0;
+	// wi->broadphase_type = BROADPHASE_N2; // BVH default
+	// All systems default (BVH, sleep, warm start, incremental NP)
 
-	// Spawn capsules at 7 tilt angles, each 0.01m above ground.
-	// If narrowphase is correct, ALL should generate a contact on step 1.
-	float angles[] = { 0, 15, 30, 45, 60, 75, 90 };
-	for (int i = 0; i < 7; i++) {
-		float rad = angles[i] * 3.14159265f / 180.0f;
-		float qz = sinf(rad * 0.5f), qw = cosf(rad * 0.5f);
-		float cy = 0.5f * fabsf(cosf(rad)) + CAP_RADIUS + 0.001f;
-		Body c = create_body(g_world, (BodyParams){
-			.position = V3(-4.5f + i * 1.5f, cy, 0),
-			.rotation = (quat){ 0, 0, qz, qw },
-			.mass = 1.0f,
-			.friction = 0.5f,
-			.restitution = 0.0f, // zero restitution to isolate contact detection
-		});
-		body_add_shape(g_world, c, (ShapeParams){
-			.type = SHAPE_CAPSULE,
-			.capsule = { .half_height = CAP_HALF_H, .radius = CAP_RADIUS },
-		});
-		apush(g_draw_list, ((DrawEntry){ c, g_mesh_capsule, V3(1, 1, 1), V3(0.2f, 0.8f, 0.3f) }));
+	// Triangle of capsule pins + sphere ball
+	float spacing = 0.8f;
+	for (int row = 0; row < 3; row++) {
+		for (int col = 0; col <= row; col++) {
+			float x = (col - row * 0.5f) * spacing;
+			float z = row * spacing * 0.866f;
+			Body c = create_body(g_world, (BodyParams){
+				.position = V3(x, CAP_HALF_H + CAP_RADIUS, z),
+				.rotation = quat_identity(),
+				.mass = 1.0f,
+				.friction = 0.5f,
+				.restitution = 0.3f,
+			});
+			body_add_shape(g_world, c, (ShapeParams){
+				.type = SHAPE_CAPSULE,
+				.capsule = { .half_height = CAP_HALF_H, .radius = CAP_RADIUS },
+			});
+			apush(g_draw_list, ((DrawEntry){ c, g_mesh_capsule, V3(1, 1, 1), V3(0.9f, 0.9f, 0.9f) }));
+		}
 	}
+	// Ball
+	Body ball = create_body(g_world, (BodyParams){
+		.position = V3(0, 0.5f, -3),
+		.rotation = quat_identity(),
+		.mass = 3.0f,
+		.friction = 0.3f,
+	});
+	body_add_shape(g_world, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+	apush(g_draw_list, ((DrawEntry){ ball, MESH_SPHERE, V3(0.5f, 0.5f, 0.5f), V3(0.8f, 0.2f, 0.2f) }));
+	// Push ball toward pins
+	body_vel(wi, handle_index(ball)) = V3(0, 0, 5);
 }

@@ -137,6 +137,7 @@ static int g_ldl_inspect_step = 0;      // factorization step slider
 static int g_ldl_hover_body = -1;       // body highlighted by matrix hover (-1 = none)
 static bool g_paused = false;
 static bool g_step_once = false;
+static int g_playback_frame = 0;
 static float g_time_scale = 1.0f; // slow-mo: 0.1 = 10x slow, 1 = normal
 static int g_run_frames = 0;      // >0: run this many frames then auto-pause
 
@@ -584,11 +585,11 @@ void update()
 	}
 
 	// Playback mode: drive mouse events from recording
-	static int playback_frame = 0;
+	// g_playback_frame is now global g_playback_frame
 	if (g_recording == 2) {
 		int n = asize(g_recorded_frames);
-		if (playback_frame < n) {
-			RecordedFrame* rf = &g_recorded_frames[playback_frame];
+		if (g_playback_frame < n) {
+			RecordedFrame* rf = &g_recorded_frames[g_playback_frame];
 			WorldInternal* pw = (WorldInternal*)g_world.id;
 			if (rf->type == 1 && rf->body_draw_idx >= 0 && rf->body_draw_idx < asize(g_draw_list)) {
 				Body target = g_draw_list[rf->body_draw_idx].body;
@@ -600,10 +601,10 @@ void update()
 			} else if (rf->type == 3 && g_mouse_anchor.id) {
 				mouse_end_drag();
 			}
-			playback_frame++;
+			g_playback_frame++;
 		} else {
 			g_recording = 0;
-			playback_frame = 0;
+			g_playback_frame = 0;
 			printf("[PLAY] done\n");
 		}
 	}
@@ -653,7 +654,7 @@ void update()
 			for (int i = pw->frame; i < rec_start; i++) world_step(g_world, 1.0f / 60.0f);
 			g_recording = 2; // 2 = playback mode
 			g_rec_body_draw_idx = -1;
-			playback_frame = 0;
+			g_playback_frame = 0;
 			printf("[PLAY] loaded %d frames, scene=%d start=%d\n", rec_n, rec_scene, rec_start);
 		} else {
 			printf("[PLAY] no mouse_recording.bin found\n");

@@ -597,6 +597,31 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		g_drag_anchor = (Body){0};
 		g_drag_joint = (Joint){0};
 		dbg_send_str(c, "OK released\n");
+	} else if (strcmp(cmd, "playrecording") == 0) {
+		FILE *rf = fopen("mouse_recording.bin", "rb");
+		if (!rf) { dbg_send_str(c, "ERR no mouse_recording.bin\n"); return; }
+		int rec_scene, rec_start, rec_n;
+		fread(&rec_scene, sizeof(int), 1, rf);
+		fread(&rec_start, sizeof(int), 1, rf);
+		fread(&rec_n, sizeof(int), 1, rf);
+		afree(g_recorded_frames);
+		g_recorded_frames = NULL;
+		afit(g_recorded_frames, rec_n);
+		asetlen(g_recorded_frames, rec_n);
+		fread(g_recorded_frames, sizeof(RecordedFrame), rec_n, rf);
+		fclose(rf);
+		g_rec_start_frame = rec_start;
+		g_scene_index = rec_scene;
+		setup_scene();
+		WorldInternal *pw = (WorldInternal *)g_world.id;
+		for (int i = pw->frame; i < rec_start; i++) world_step(g_world, 1.0f / 60.0f);
+		g_recording = 2;
+		g_rec_body_draw_idx = -1;
+		g_playback_frame = 0;
+		g_paused = false;
+		CK_SDYNA char *s = NULL;
+		sfmt(s, "OK playing %d frames (scene=%d start=%d) world=0x%llX\n", rec_n, rec_scene, rec_start, (unsigned long long)g_world.id);
+		dbg_reply(c, s);
 	} else if (strcmp(cmd, "run") == 0) {
 		int n = (*rest) ? atoi(rest) : 60;
 		if (n < 1) n = 1;
