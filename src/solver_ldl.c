@@ -1411,6 +1411,8 @@ static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_jo
 	// Synthetic weld deltas are skipped -- they couple shards only.
 	// Apply to REAL bodies (con->body_a/b may be virtual from shattering).
 	// s->lambda accumulates PGS + LDL for next frame's warm-start.
+	(void)comp_bodies; // currently unused -- reserved for future compressed-space velocity solve
+
 	double t_apply_start = perf_now();
 	for (int i = 0; i < jc; i++) {
 		LDL_Constraint* con = &c->constraints[i];
