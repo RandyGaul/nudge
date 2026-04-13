@@ -11990,6 +11990,7 @@ static void run_tests()
 	test_fail = 0;
 
 	printf("--- nudge narrowphase tests ---\n");
+	void test_capsule_box_tilted_direct();
 
 	test_sphere_sphere();
 	test_sphere_capsule();
@@ -11999,6 +12000,7 @@ static void run_tests()
 	test_floor_contacts();
 	test_capsule_settles_on_floor();
 	test_capsule_rolls_no_lurch();
+	test_capsule_box_tilted_direct();
 	test_sphere_settles_on_floor();
 	test_gjk_dispatch();
 	test_gjk_distance();
