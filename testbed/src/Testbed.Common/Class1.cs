@@ -29,4 +29,10 @@ public interface IPhysicsAdapter : IDisposable
 	void SetVelocity(int bodyIndex, float vx, float vy, float vz);
 	string GetPerfBreakdown() => ""; // optional, override for details
 	void AddDistanceJoint(int bodyA, int bodyB, float localAx, float localAy, float localAz, float localBx, float localBy, float localBz, float restLength) { } // optional
+
+	// Mouse picking: create spring constraint to drag bodies.
+	// Returns a drag handle (opaque int). -1 = failed.
+	int BeginDrag(int bodyIndex, float hitX, float hitY, float hitZ) => -1;
+	void UpdateDrag(int dragHandle, float targetX, float targetY, float targetZ) { }
+	void EndDrag(int dragHandle) { }
 }

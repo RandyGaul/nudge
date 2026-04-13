@@ -47,6 +47,21 @@ internal static partial class Native
 
 	[LibraryImport(Lib, EntryPoint = "jolt_create_distance_joint")]
 	public static partial void CreateDistanceJoint(nint world, int bodyA, int bodyB, float ax, float ay, float az, float bx, float by, float bz, float restLength);
+
+	[LibraryImport(Lib, EntryPoint = "jolt_create_kinematic_body")]
+	public static partial int CreateKinematicBody(nint world, float px, float py, float pz);
+
+	[LibraryImport(Lib, EntryPoint = "jolt_set_position")]
+	public static partial void SetPosition(nint world, int bodyIndex, float px, float py, float pz);
+
+	[LibraryImport(Lib, EntryPoint = "jolt_remove_body")]
+	public static partial void RemoveBody(nint world, int bodyIndex);
+
+	[LibraryImport(Lib, EntryPoint = "jolt_create_spring_constraint")]
+	public static partial int CreateSpringConstraint(nint world, int bodyA, int bodyB, float ax, float ay, float az, float bx, float by, float bz, float freq, float damping);
+
+	[LibraryImport(Lib, EntryPoint = "jolt_remove_constraint")]
+	public static partial void RemoveConstraint(nint world, int constraintId);
 }
 
 public class JoltAdapter : IPhysicsAdapter
@@ -126,6 +141,47 @@ public class JoltAdapter : IPhysicsAdapter
 	public void SetVelocity(int bodyIndex, float vx, float vy, float vz) => Native.SetVelocity(_world, bodyIndex, vx, vy, vz);
 
 	public bool IsBodyActive(int bodyIndex) => Native.IsBodyActive(_world, bodyIndex) != 0;
+
+	struct DragState { public int AnchorBody, ConstraintId; }
+	readonly Dictionary<int, DragState> _drags = new();
+	int _nextDragId = 1;
+
+	public unsafe int BeginDrag(int bodyIndex, float hitX, float hitY, float hitZ)
+	{
+		int anchor = Native.CreateKinematicBody(_world, hitX, hitY, hitZ);
+
+		// Compute body-local offset: inverse-rotate (hit - bodyPos)
+		float* pos = stackalloc float[3];
+		Native.GetPosition(_world, bodyIndex, pos);
+		float* rot = stackalloc float[4];
+		Native.GetRotation(_world, bodyIndex, rot);
+		float qx = rot[0], qy = rot[1], qz = rot[2], qw = rot[3];
+		float dx = hitX - pos[0], dy = hitY - pos[1], dz = hitZ - pos[2];
+		// q^-1 * d: conjugate quaternion rotation
+		float tx = 2 * (qy * dz - qz * dy), ty = 2 * (qz * dx - qx * dz), tz = 2 * (qx * dy - qy * dx);
+		float lx = dx - qw * tx - (qy * tz - qz * ty);
+		float ly = dy - qw * ty - (qz * tx - qx * tz);
+		float lz = dz - qw * tz - (qx * ty - qy * tx);
+
+		int constraint = Native.CreateSpringConstraint(_world, anchor, bodyIndex, 0, 0, 0, lx, ly, lz, 5.0f, 0.7f);
+
+		int id = _nextDragId++;
+		_drags[id] = new DragState { AnchorBody = anchor, ConstraintId = constraint };
+		return id;
+	}
+
+	public void UpdateDrag(int dragHandle, float targetX, float targetY, float targetZ)
+	{
+		if (!_drags.TryGetValue(dragHandle, out var state)) return;
+		Native.SetPosition(_world, state.AnchorBody, targetX, targetY, targetZ);
+	}
+
+	public void EndDrag(int dragHandle)
+	{
+		if (!_drags.Remove(dragHandle, out var state)) return;
+		Native.RemoveConstraint(_world, state.ConstraintId);
+		Native.RemoveBody(_world, state.AnchorBody);
+	}
 
 	public void AddDistanceJoint(int bodyA, int bodyB, float localAx, float localAy, float localAz, float localBx, float localBy, float localBz, float restLength)
 	{

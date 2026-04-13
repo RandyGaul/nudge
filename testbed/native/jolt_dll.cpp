@@ -75,6 +75,7 @@ struct JoltWorld {
 	JobSystemThreadPool* job_system;
 	std::vector<BodyID> bodies;
 	std::vector<Body*> body_ptrs;
+	std::vector<Constraint*> constraints;
 	double last_step_time;
 };
 
@@ -253,4 +254,62 @@ EXPORT void jolt_create_distance_joint(void* world, int body_a, int body_b, floa
 	settings.mMaxDistance = rest_length;
 
 	w->system.AddConstraint(settings.Create(*w->body_ptrs[body_a], *w->body_ptrs[body_b]));
+}
+
+// --- Mouse picking support ---
+
+EXPORT int jolt_create_kinematic_body(void* world, float px, float py, float pz) {
+	auto* w = (JoltWorld*)world;
+	auto& bi = w->system.GetBodyInterface();
+
+	// Tiny sphere, kinematic (mass=0 + kinematic motion type)
+	BodyCreationSettings settings(new SphereShape(0.01f), RVec3(px, py, pz), Quat::sIdentity(), EMotionType::Kinematic, Layers::MOVING);
+	Body* body = bi.CreateBody(settings);
+	bi.AddBody(body->GetID(), EActivation::Activate);
+	int index = (int)w->bodies.size();
+	w->bodies.push_back(body->GetID());
+	w->body_ptrs.push_back(body);
+	return index;
+}
+
+EXPORT void jolt_set_position(void* world, int body_index, float px, float py, float pz) {
+	auto* w = (JoltWorld*)world;
+	w->system.GetBodyInterface().SetPosition(w->bodies[body_index], RVec3(px, py, pz), EActivation::Activate);
+}
+
+EXPORT void jolt_remove_body(void* world, int body_index) {
+	auto* w = (JoltWorld*)world;
+	auto& bi = w->system.GetBodyInterface();
+	bi.RemoveBody(w->bodies[body_index]);
+	bi.DestroyBody(w->bodies[body_index]);
+	// Mark slot as invalid (don't compact -- indices are handles)
+	w->bodies[body_index] = BodyID();
+	w->body_ptrs[body_index] = nullptr;
+}
+
+EXPORT int jolt_create_spring_constraint(void* world, int body_a, int body_b, float ax, float ay, float az, float bx, float by, float bz, float freq, float damping) {
+	auto* w = (JoltWorld*)world;
+
+	DistanceConstraintSettings settings;
+	settings.mSpace = EConstraintSpace::LocalToBodyCOM;
+	settings.mPoint1 = Vec3(ax, ay, az);
+	settings.mPoint2 = Vec3(bx, by, bz);
+	settings.mMinDistance = 0;
+	settings.mMaxDistance = 0;
+	settings.mLimitsSpringSettings.mFrequency = freq;
+	settings.mLimitsSpringSettings.mDamping = damping;
+
+	Constraint* c = settings.Create(*w->body_ptrs[body_a], *w->body_ptrs[body_b]);
+	w->system.AddConstraint(c);
+	int index = (int)w->constraints.size();
+	w->constraints.push_back(c);
+	return index;
+}
+
+EXPORT void jolt_remove_constraint(void* world, int constraint_id) {
+	auto* w = (JoltWorld*)world;
+	if (constraint_id >= 0 && constraint_id < (int)w->constraints.size() && w->constraints[constraint_id]) {
+		w->system.RemoveConstraint(w->constraints[constraint_id]);
+		w->constraints[constraint_id] = nullptr;
+	}
 }

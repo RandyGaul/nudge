@@ -53,6 +53,18 @@ internal static partial class Native
 	[LibraryImport(Lib, EntryPoint = "nudge_body_set_velocity")]
 	public static partial void SetVelocity(ulong world, ulong body, float vx, float vy, float vz);
 
+	[LibraryImport(Lib, EntryPoint = "nudge_create_ball_socket")]
+	public static partial ulong CreateBallSocket(ulong world, ulong bodyA, ulong bodyB, float ax, float ay, float az, float bx, float by, float bz, float freq, float dampingRatio);
+
+	[LibraryImport(Lib, EntryPoint = "nudge_body_set_position")]
+	public static partial void SetPosition(ulong world, ulong body, float px, float py, float pz);
+
+	[LibraryImport(Lib, EntryPoint = "nudge_destroy_body")]
+	public static partial void DestroyBody(ulong world, ulong body);
+
+	[LibraryImport(Lib, EntryPoint = "nudge_destroy_joint")]
+	public static partial void DestroyJoint(ulong world, ulong joint);
+
 	[LibraryImport(Lib, EntryPoint = "nudge_create_distance_joint")]
 	public static partial ulong CreateDistanceJoint(ulong world, ulong bodyA, ulong bodyB, float ax, float ay, float az, float bx, float by, float bz, float restLength);
 }
@@ -141,6 +153,46 @@ public class NudgeAdapter : IPhysicsAdapter
 	public void DebugSleep() => Native.DebugSleep(_world);
 
 	public void SetVelocity(int bodyIndex, float vx, float vy, float vz) => Native.SetVelocity(_world, _bodies[bodyIndex], vx, vy, vz);
+
+	struct DragState { public ulong AnchorBody, Joint; }
+	readonly Dictionary<int, DragState> _drags = new();
+	int _nextDragId = 1;
+
+	public int BeginDrag(int bodyIndex, float hitX, float hitY, float hitZ)
+	{
+		// Create static anchor body at hit point
+		ulong anchor = Native.CreateBody(_world, hitX, hitY, hitZ, 0, 0.5f, 0);
+		Native.BodyAddSphere(_world, anchor, 0.01f);
+
+		// Compute body-local offset: inverse-rotate (hit - bodyPos)
+		var (bx, by, bz) = GetPosition(bodyIndex);
+		var (qx, qy, qz, qw) = GetRotation(bodyIndex);
+		float dx = hitX - bx, dy = hitY - by, dz = hitZ - bz;
+		// q^-1 * d: conjugate quaternion rotation
+		float tx = 2 * (qy * dz - qz * dy), ty = 2 * (qz * dx - qx * dz), tz = 2 * (qx * dy - qy * dx);
+		float lx = dx - qw * tx - (qy * tz - qz * ty);
+		float ly = dy - qw * ty - (qz * tx - qx * tz);
+		float lz = dz - qw * tz - (qx * ty - qy * tx);
+
+		ulong joint = Native.CreateBallSocket(_world, anchor, _bodies[bodyIndex], 0, 0, 0, lx, ly, lz, 5.0f, 0.7f);
+
+		int id = _nextDragId++;
+		_drags[id] = new DragState { AnchorBody = anchor, Joint = joint };
+		return id;
+	}
+
+	public void UpdateDrag(int dragHandle, float targetX, float targetY, float targetZ)
+	{
+		if (!_drags.TryGetValue(dragHandle, out var state)) return;
+		Native.SetPosition(_world, state.AnchorBody, targetX, targetY, targetZ);
+	}
+
+	public void EndDrag(int dragHandle)
+	{
+		if (!_drags.Remove(dragHandle, out var state)) return;
+		Native.DestroyJoint(_world, state.Joint);
+		Native.DestroyBody(_world, state.AnchorBody);
+	}
 
 	public void AddDistanceJoint(int bodyA, int bodyB, float localAx, float localAy, float localAz, float localBx, float localBy, float localBz, float restLength)
 	{

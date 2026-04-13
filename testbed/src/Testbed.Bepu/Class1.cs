@@ -197,6 +197,53 @@ public class BepuAdapter : IPhysicsAdapter
 		return handle;
 	}
 
+	struct DragState { public BodyHandle Anchor; public ConstraintHandle Constraint; }
+	readonly Dictionary<int, DragState> _drags = new();
+	int _nextDragId = 1;
+
+	public int BeginDrag(int bodyIndex, float hitX, float hitY, float hitZ)
+	{
+		var anchorDesc = BodyDescription.CreateKinematic(
+			new RigidPose(new Vector3(hitX, hitY, hitZ)),
+			new CollidableDescription(_sim!.Shapes.Add(new BepuPhysics.Collidables.Sphere(0.01f))),
+			new BodyActivityDescription(-1));
+		var anchor = _sim!.Bodies.Add(anchorDesc);
+
+		var dynHandle = EnsureDynamic(bodyIndex);
+
+		// Compute body-local offset
+		var bodyPose = _sim.Bodies[dynHandle].Pose;
+		var worldOffset = new Vector3(hitX, hitY, hitZ) - bodyPose.Position;
+		var invRot = Quaternion.Conjugate(bodyPose.Orientation);
+		var localOffset = Vector3.Transform(worldOffset, invRot);
+
+		var constraint = _sim.Solver.Add(anchor, dynHandle, new BallSocket
+		{
+			LocalOffsetA = Vector3.Zero,
+			LocalOffsetB = localOffset,
+			SpringSettings = new SpringSettings(5, 0.7f),
+		});
+
+		int id = _nextDragId++;
+		_drags[id] = new DragState { Anchor = anchor, Constraint = constraint };
+		return id;
+	}
+
+	public void UpdateDrag(int dragHandle, float targetX, float targetY, float targetZ)
+	{
+		if (!_drags.TryGetValue(dragHandle, out var state)) return;
+		var bodyRef = _sim!.Bodies.GetBodyReference(state.Anchor);
+		bodyRef.Pose.Position = new Vector3(targetX, targetY, targetZ);
+		bodyRef.Awake = true;
+	}
+
+	public void EndDrag(int dragHandle)
+	{
+		if (!_drags.Remove(dragHandle, out var state)) return;
+		_sim!.Solver.Remove(state.Constraint);
+		_sim.Bodies.Remove(state.Anchor);
+	}
+
 	public void AddDistanceJoint(int bodyA, int bodyB, float localAx, float localAy, float localAz, float localBx, float localBy, float localBz, float restLength)
 	{
 		var hA = EnsureDynamic(bodyA);

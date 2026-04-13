@@ -49,6 +49,11 @@ EngineSlot[] slots = [];
 int currentScene = -1;
 bool paused = false;
 
+// Mouse picking state
+int[] dragHandles = new int[3] { -1, -1, -1 };
+float dragDist = 0;
+Vector3 dragTarget = Vector3.Zero;
+
 void LoadScene(int index)
 {
 	foreach (var s in slots) s.Dispose();
@@ -67,6 +72,7 @@ void LoadScene(int index)
 	}
 
 	currentScene = index;
+	dragHandles = new int[3] { -1, -1, -1 };
 }
 
 LoadScene(0);
@@ -100,6 +106,84 @@ while (!Raylib.WindowShouldClose())
 	// Render
 	Raylib.BeginDrawing();
 	Raylib.ClearBackground(new Color(30, 30, 35, 255));
+
+	// --- Mouse picking: right-click drag to interact with bodies ---
+	if (Raylib.IsMouseButtonPressed(MouseButton.Right))
+	{
+		var mousePos = Raylib.GetMousePosition();
+		var ray = Raylib.GetScreenToWorldRay(mousePos, camera);
+
+		for (int si = 0; si < slots.Length; si++)
+		{
+			var slot = slots[si];
+			float bestT = float.MaxValue;
+			int bestBody = -1;
+
+			foreach (var body in slot.Bodies)
+			{
+				if (body.IsStatic) continue;
+				var (px, py, pz) = slot.Adapter.GetPosition(body.Index);
+				var bodyPos = new Vector3(px + slot.OffsetX, py, pz);
+
+				float radius = body.Shape switch
+				{
+					ShapeType.Box => MathF.Sqrt(body.HX * body.HX + body.HY * body.HY + body.HZ * body.HZ),
+					ShapeType.Sphere => body.Radius,
+					ShapeType.Capsule => body.HalfHeight + body.Radius,
+					_ => 1.0f,
+				};
+
+				var oc = ray.Position - bodyPos;
+				float b = Vector3.Dot(oc, ray.Direction);
+				float c = Vector3.Dot(oc, oc) - radius * radius;
+				float disc = b * b - c;
+				if (disc < 0) continue;
+				float t = -b - MathF.Sqrt(disc);
+				if (t < 0) t = -b + MathF.Sqrt(disc);
+				if (t >= 0 && t < bestT)
+				{
+					bestT = t;
+					bestBody = body.Index;
+				}
+			}
+
+			if (bestBody >= 0)
+			{
+				var hitPoint = ray.Position + ray.Direction * bestT;
+				float hitX = hitPoint.X - slot.OffsetX;
+				float hitY = hitPoint.Y;
+				float hitZ = hitPoint.Z;
+				dragHandles[si] = slot.Adapter.BeginDrag(bestBody, hitX, hitY, hitZ);
+				dragDist = bestT;
+			}
+		}
+	}
+
+	if (Raylib.IsMouseButtonDown(MouseButton.Right))
+	{
+		var mousePos = Raylib.GetMousePosition();
+		var ray = Raylib.GetScreenToWorldRay(mousePos, camera);
+		dragTarget = ray.Position + ray.Direction * dragDist;
+
+		for (int si = 0; si < slots.Length; si++)
+		{
+			if (dragHandles[si] < 0) continue;
+			float tx = dragTarget.X - slots[si].OffsetX;
+			float ty = dragTarget.Y;
+			float tz = dragTarget.Z;
+			slots[si].Adapter.UpdateDrag(dragHandles[si], tx, ty, tz);
+		}
+	}
+
+	if (Raylib.IsMouseButtonReleased(MouseButton.Right))
+	{
+		for (int si = 0; si < slots.Length; si++)
+		{
+			if (dragHandles[si] < 0) continue;
+			slots[si].Adapter.EndDrag(dragHandles[si]);
+			dragHandles[si] = -1;
+		}
+	}
 
 	// Maya-style orbit camera
 	if (Raylib.IsMouseButtonDown(MouseButton.Left) && !Raylib.IsKeyDown(KeyboardKey.LeftControl))
@@ -171,13 +255,23 @@ while (!Raylib.WindowShouldClose())
 		}
 	}
 
+	// Draw drag indicator
+	if (Raylib.IsMouseButtonDown(MouseButton.Right))
+	{
+		bool anyDrag = false;
+		for (int si = 0; si < slots.Length; si++)
+			if (dragHandles[si] >= 0) { anyDrag = true; break; }
+		if (anyDrag)
+			Raylib.DrawSphere(dragTarget, 0.15f, Color.Yellow);
+	}
+
 	Raylib.EndMode3D();
 
 	// HUD
 	int y = 10;
 	Raylib.DrawText($"Scene: {scenes[currentScene].name}", 10, y, 20, Color.White);
 	y += 25;
-	Raylib.DrawText("Keys: 1-9/A/B switch scene, LEFT/RIGHT cycle, SPACE pause, mouse orbit", 10, y, 16, Color.Gray);
+	Raylib.DrawText("Keys: 1-9/A/B switch scene, LEFT/RIGHT cycle, SPACE pause | LMB orbit, RMB drag body", 10, y, 16, Color.Gray);
 	y += 25;
 
 	for (int i = 0; i < slots.Length; i++)

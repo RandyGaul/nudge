@@ -145,6 +145,10 @@ EXPORT void nudge_body_set_velocity(uint64_t world, uint64_t body, float vx, flo
 	body_set_velocity((World){world}, (Body){body}, V3(vx, vy, vz));
 }
 
+EXPORT void nudge_body_set_position(uint64_t world, uint64_t body, float px, float py, float pz) {
+	body_set_position((World){world}, (Body){body}, V3(px, py, pz));
+}
+
 EXPORT uint64_t nudge_create_body_rotated(uint64_t world, float px, float py, float pz, float qx, float qy, float qz, float qw, float mass, float friction, float restitution) {
 	BodyParams p = {0};
 	p.position = V3(px, py, pz);
@@ -163,4 +167,22 @@ EXPORT uint64_t nudge_create_distance_joint(uint64_t world, uint64_t body_a, uin
 	p.local_offset_b = V3(bx, by, bz);
 	p.rest_length = rest_length;
 	return create_distance((World){world}, p).id;
+}
+
+EXPORT uint64_t nudge_create_ball_socket(uint64_t world, uint64_t body_a, uint64_t body_b, float ax, float ay, float az, float bx, float by, float bz, float freq, float damping_ratio) {
+	BallSocketParams p = {0};
+	p.body_a = (Body){body_a};
+	p.body_b = (Body){body_b};
+	p.local_offset_a = V3(ax, ay, az);
+	p.local_offset_b = V3(bx, by, bz);
+	p.spring = (SpringParams){freq, damping_ratio};
+	return create_ball_socket((World){world}, p).id;
+}
+
+EXPORT void nudge_destroy_body(uint64_t world, uint64_t body) {
+	destroy_body((World){world}, (Body){body});
+}
+
+EXPORT void nudge_destroy_joint(uint64_t world, uint64_t joint) {
+	destroy_joint((World){world}, (Joint){joint});
 }
