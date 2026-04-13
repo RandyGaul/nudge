@@ -330,6 +330,7 @@ static void ldl_K_body_off(LDL_JacobianRow* jac_i, int di, int side_i, LDL_Jacob
 // Apply impulse generically: v += M^{-1} * J^T * lambda for one body.
 // jac has dof rows, lambda has dof scalars. side: 0 = J_a, 1 = J_b.
 // sign: +1 or -1 (convention: body_a gets -, body_b gets +... but sign is baked into J).
+// Apply impulse with real body masses (used by position correction, tests).
 static void ldl_apply_jacobian_impulse(LDL_JacobianRow* jac, int dof, double* lambda, BodyHot* body, int side)
 {
 	for (int d = 0; d < dof; d++) {
@@ -342,6 +343,29 @@ static void ldl_apply_jacobian_impulse(LDL_JacobianRow* jac, int dof, double* la
 		body->velocity.z += (float)dv.z;
 		dv3 j_ang_d = DV3(J[3] * lam, J[4] * lam, J[5] * lam);
 		dv3 dw = dinv_inertia_world_mul(body, j_ang_d);
+		body->angular_velocity.x += (float)dw.x;
+		body->angular_velocity.y += (float)dw.y;
+		body->angular_velocity.z += (float)dw.z;
+	}
+}
+
+// Apply impulse with compressed masses (consistent with sqrt-compressed K factoring).
+// Lambda was computed from K_compressed = J * M_c^-1 * J^T, so apply must use M_c^-1.
+static void ldl_apply_jacobian_impulse_comp(LDL_JacobianRow* jac, int dof, double* lambda, BodyHot* body, LDL_CompBody* comp, int side)
+{
+	for (int d = 0; d < dof; d++) {
+		double* J = side ? jac[d].J_b : jac[d].J_a;
+		double lam = lambda[d];
+		double inv_m = (double)comp->inv_mass;
+		dv3 dv = DV3(inv_m * J[0] * lam, inv_m * J[1] * lam, inv_m * J[2] * lam);
+		body->velocity.x += (float)dv.x;
+		body->velocity.y += (float)dv.y;
+		body->velocity.z += (float)dv.z;
+		dv3 j_ang_d = DV3(J[3] * lam, J[4] * lam, J[5] * lam);
+		// Compressed inertia: same sqrt ratio as K factoring
+		double xx = comp->iw_diag.x, yy = comp->iw_diag.y, zz = comp->iw_diag.z;
+		double xy = comp->iw_off.x, xz = comp->iw_off.y, yz = comp->iw_off.z;
+		dv3 dw = DV3(xx*j_ang_d.x + xy*j_ang_d.y + xz*j_ang_d.z, xy*j_ang_d.x + yy*j_ang_d.y + yz*j_ang_d.z, xz*j_ang_d.x + yz*j_ang_d.y + zz*j_ang_d.z);
 		body->angular_velocity.x += (float)dw.x;
 		body->angular_velocity.y += (float)dw.y;
 		body->angular_velocity.z += (float)dw.z;
@@ -1317,7 +1341,7 @@ static int ldl_validate_lambda(double* lambda, int n)
 }
 
 // Solve: build RHS, forward/back-sub via topology, apply velocity + position lambdas.
-static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt)
+static void ldl_island_solve(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt, LDL_CompBody* comp_bodies)
 {
 	int jc = c->joint_count;
 	int n = c->n;
@@ -1592,10 +1616,8 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 	for (int i = 0; i < body_count; i++) {
 		float inv_m = body_inv_mass(w, i);
 		if (inv_m > 0.0f) {
-			// Use real masses for velocity K (no compression).
-			// Compression was causing oscillation at extreme mass ratios (500:1)
-			// because K is factored with compressed masses but impulses are
-			// applied with real masses, creating an inconsistency.
+			// No compression for velocity K -- apply uses real masses, so K must match.
+			// Sqrt compression is used for position correction only (separate comp_bodies).
 			comp_bodies[i].inv_mass = inv_m;
 			comp_bodies[i].iw_diag = body_iw_diag(w, i);
 			comp_bodies[i].iw_off = body_iw_off(w, i);
@@ -1656,6 +1678,21 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 {
 	if (joint_count == 0) return;
 
+	// Build compressed masses for consistent impulse application (must match K factoring).
+	int body_count = asize(w->body_hot);
+	LDL_CompBody* comp_bodies = CK_ALLOC(body_count * sizeof(LDL_CompBody));
+	for (int i = 0; i < body_count; i++) {
+		float inv_m = body_inv_mass(w, i);
+		if (inv_m > 0.0f) {
+			float comp_ratio = sqrtf(inv_m) / inv_m;
+			comp_bodies[i].inv_mass = sqrtf(inv_m);
+			comp_bodies[i].iw_diag = scale(body_iw_diag(w, i), comp_ratio);
+			comp_bodies[i].iw_off = scale(body_iw_off(w, i), comp_ratio);
+		} else {
+			comp_bodies[i] = (LDL_CompBody){0};
+		}
+	}
+
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {
 		if (!(w->island_gen[ii] & 1)) continue;
@@ -1665,8 +1702,9 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 		LDL_Cache* c = &isl->ldl;
 		if (c->n == 0 || !c->topo) continue;
 
-		ldl_island_solve(c, w, sol_joints, joint_count, sub_dt);
+		ldl_island_solve(c, w, sol_joints, joint_count, sub_dt, comp_bodies);
 	}
+	CK_FREE(comp_bodies);
 }
 
 // Mass ratio compression exponent for position correction.

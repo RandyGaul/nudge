@@ -99,7 +99,7 @@ static void test_pgs_vs_ldl_single_rigid()
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
 	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
-	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	v3 ldl_lambda = V3(sw.sol_joints[0].lambda[0], sw.sol_joints[0].lambda[1], sw.sol_joints[0].lambda[2]);
 
@@ -202,7 +202,7 @@ static void test_pgs_vs_ldl_chain_gravity()
 	ldl_build_bundles(&cc);
 	ldl_build_topology(&cc, w);
 	ldl_numeric_factor(&cc, w, sw.sol_joints, NULL);
-	ldl_island_solve(&cc, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&cc, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	// Compare final body velocities
 	printf("    PGS vel B: (%.6f, %.6f, %.6f)\n", bodies_pgs[1].velocity.x, bodies_pgs[1].velocity.y, bodies_pgs[1].velocity.z);
@@ -328,7 +328,7 @@ static void test_pgs_vs_ldl_star_gravity()
 	ldl_build_bundles(&cc);
 	ldl_build_topology(&cc, w);
 	ldl_numeric_factor(&cc, w, sw.sol_joints, NULL);
-	ldl_island_solve(&cc, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&cc, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	printf("    Star hub PGS vel: (%.6f, %.6f, %.6f)\n", bodies_pgs[1].velocity.x, bodies_pgs[1].velocity.y, bodies_pgs[1].velocity.z);
 	printf("    Star hub LDL vel: (%.6f, %.6f, %.6f)\n", body_vel(w, 1).x, body_vel(w, 1).y, body_vel(w, 1).z);
@@ -442,7 +442,7 @@ static void test_pgs_vs_ldl_star_shattering()
 	ldl_build_bundles(&cc);
 	ldl_build_topology(&cc, w);
 	ldl_numeric_factor(&cc, w, sw.sol_joints, NULL);
-	ldl_island_solve(&cc, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&cc, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	printf("    [shattering] Hub PGS vel.y: %.6f  LDL vel.y: %.6f\n", bodies_pgs[1].velocity.y, body_vel(w, 1).y);
 	for (int i = 2; i < nb; i++)

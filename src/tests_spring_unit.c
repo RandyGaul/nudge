@@ -198,7 +198,7 @@ static void test_soft_spring_pulls_together()
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
 	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
-	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	// After solve: body A should have gained +X velocity, body B should have gained -X velocity.
 	// Both moving toward each other = spring pulling.
@@ -258,7 +258,7 @@ static void test_soft_spring_no_overshoot()
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
 	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
-	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	// Velocity should be moderate -- not shooting off. At sub_dt = 1/240,
 	// even aggressive correction shouldn't exceed a few m/s for 1m separation.
@@ -318,7 +318,7 @@ static void test_soft_spring_heavy_light()
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
 	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
-	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	// Both should move toward each other
 	TEST_ASSERT(body_vel(w, 0).x > 0.0f);
@@ -375,7 +375,7 @@ static void test_rigid_constraint_zeroes_velocity()
 	ldl_build_bundles(&c);
 	ldl_build_topology(&c, w);
 	ldl_numeric_factor(&c, w, sw.sol_joints, NULL);
-	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	// After solve: constraint velocity should be near zero.
 	// Bodies were separating at 2 m/s relative; the rigid constraint should cancel that.
@@ -436,7 +436,7 @@ static void test_rigid_constraint_with_lever()
 	double cv_before[3];
 	for (int d = 0; d < 3; d++) cv_before[d] = ldl_constraint_velocity(&jac[d], &w->body_hot[0], &w->body_hot[1]);
 
-	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	// Recompute constraint velocity after solve
 	double cv_after[3];

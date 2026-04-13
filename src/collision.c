@@ -521,6 +521,8 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 			float fd = matched_plane.offset;
 
 			// Clip segment to face polygon (Sutherland-Hodgman on a segment).
+			// Side plane normals point OUTWARD from the face polygon, so
+			// dp > 0 = outside, dp < 0 = inside.
 			v3 cp_p = a.p, cp_q = a.q;
 			int clipped_out = 0;
 			{
@@ -533,10 +535,10 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 					float side_d = dot(side_n, tail);
 					float dp_s = dot(side_n, cp_p) - side_d;
 					float dq_s = dot(side_n, cp_q) - side_d;
-					if (dp_s < 0 && dq_s < 0) { clipped_out = 1; break; }
+					if (dp_s > 0 && dq_s > 0) { clipped_out = 1; break; }
 					if (dp_s * dq_s < 0) {
 						float t = dp_s / (dp_s - dq_s);
-						if (dp_s < 0) cp_p = add(cp_p, scale(sub(cp_q, cp_p), t));
+						if (dp_s > 0) cp_p = add(cp_p, scale(sub(cp_q, cp_p), t));
 						else          cp_q = add(cp_p, scale(sub(cp_q, cp_p), t));
 					}
 					ei = hull->edge_next[ei];

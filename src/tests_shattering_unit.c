@@ -158,7 +158,7 @@ static void test_shatter_hub_star_pipeline()
 
 	// If we get here without assert, try solving
 	float sub_dt = 1.0f / 240.0f;
-	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	// Verify no NaN in body velocities
 	for (int i = 0; i < sw.body_count; i++) {
@@ -215,7 +215,7 @@ static void test_shatter_hub_star_extreme_mass()
 			TEST_ASSERT(c.diag_D[i][d] > 0);
 
 	float sub_dt = 1.0f / 240.0f;
-	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	for (int i = 0; i < sw.body_count; i++) {
 		TEST_ASSERT(body_vel(w, i).x == body_vel(w, i).x);
@@ -281,7 +281,7 @@ static void test_shatter_hub_with_soft_springs()
 		for (int d = 0; d < t->dof[i]; d++)
 			TEST_ASSERT(c.diag_D[i][d] > 0);
 
-	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt);
+	ldl_island_solve(&c, w, sw.sol_joints, sw.sol_joint_count, sub_dt, NULL);
 
 	// Velocities should be finite and bounded
 	for (int i = 0; i < sw.body_count; i++) {
