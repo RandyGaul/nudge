@@ -561,10 +561,12 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		g_drag_body = target_body;
 		g_drag_local_hit = V3(lx, ly, lz);
 		g_drag_anchor = create_body(g_world, (BodyParams){ .position = V3(tx, ty, tz), .rotation = quat_identity(), .mass = 0 });
+		// Softer spring than mouse constraint (2Hz vs 5Hz) because TCP
+		// commands move the target in discrete jumps, not smooth mouse motion.
 		g_drag_joint = create_ball_socket(g_world, (BallSocketParams){
 			.body_a = g_drag_anchor, .body_b = g_drag_body,
 			.local_offset_a = V3(0, 0, 0), .local_offset_b = g_drag_local_hit,
-			.spring = { .frequency = 5.0f, .damping_ratio = 0.7f },
+			.spring = { .frequency = 2.0f, .damping_ratio = 1.0f },
 		});
 		int isl = w->body_cold[idx].island_id;
 		if (isl >= 0 && !w->islands[isl].awake) island_wake(w, isl);
