@@ -486,12 +486,8 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 {
 	GJK_Result r = gjk_query_segment_hull(a.p, a.q, b);
 
-	// Contact generation margin: generate speculative contacts slightly beyond
-	// the capsule surface so fast-rotating capsules maintain contact chains.
-	// Contacts with negative penetration get lambda=0 in the solver (speculative).
-	float contact_margin = LINEAR_SLOP * 10;
-	if (r.distance > a.radius + contact_margin) return 0;
-	if (!manifold) return r.distance <= a.radius;
+	if (r.distance > a.radius) return 0;
+	if (!manifold) return 1;
 
 	if (r.distance > LINEAR_SLOP) {
 		// --- Shallow path ---

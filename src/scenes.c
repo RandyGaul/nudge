@@ -1022,19 +1022,24 @@ static void scene_capsule_test_setup()
 {
 	add_big_floor();
 
-	v3 color = V3(0.2f, 0.8f, 0.3f);
-	for (int i = 0; i < 5; i++) {
-		Body c = create_body(g_world, (BodyParams){
-			.position = V3(-3.0f + i * 1.5f, 1.0f, 0),
-			.rotation = quat_identity(),
-			.mass = 1.0f,
-			.friction = 0.5f,
-			.restitution = 0.5f,
-		});
-		body_add_shape(g_world, c, (ShapeParams){
-			.type = SHAPE_CAPSULE,
-			.capsule = { .half_height = CAP_HALF_H, .radius = CAP_RADIUS },
-		});
-		apush(g_draw_list, ((DrawEntry){ c, g_mesh_capsule, V3(1, 1, 1), color }));
-	}
+	// Override to isolate narrowphase: N^2 broadphase, no sleep, no incremental NP, no warm start
+	WorldInternal *wi = (WorldInternal *)g_world.id;
+	wi->broadphase_type = BROADPHASE_N2;
+	wi->sleep_enabled = 0;
+	wi->warm_start_enabled = 0;
+	wi->incremental_np_enabled = 0;
+
+	// Single capsule for minimal repro
+	Body c = create_body(g_world, (BodyParams){
+		.position = V3(0, 1.0f, 0),
+		.rotation = quat_identity(),
+		.mass = 1.0f,
+		.friction = 0.5f,
+		.restitution = 0.5f,
+	});
+	body_add_shape(g_world, c, (ShapeParams){
+		.type = SHAPE_CAPSULE,
+		.capsule = { .half_height = CAP_HALF_H, .radius = CAP_RADIUS },
+	});
+	apush(g_draw_list, ((DrawEntry){ c, g_mesh_capsule, V3(1, 1, 1), V3(0.2f, 0.8f, 0.3f) }));
 }
