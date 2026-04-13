@@ -1716,7 +1716,7 @@ static void test_cyl_hull_native()
 		{ "cyl-hull CAP/FACE deep",
 		  V3(0, 0.9f, 0), I, hh, r, CYL_OTHER_HULL,
 		  .hull = { bh, V3(0, 0, 0), I, V3(5, 0.5f, 5) },
-		  .is_deep = 1, .expected_normal = V3(0,-1,0), .expected_contact_count = 1 },
+		  .is_deep = 1, .expected_normal = V3(0,-1,0), .expected_contact_count = 4 },
 
 		// --- cyl RIM x hull FACE (cylinder tipped against a floor) ---
 		{ "cyl-hull RIM/FACE deep",
@@ -1769,7 +1769,7 @@ static void test_cyl_box_native()
 		{ "cyl-box CAP/FACE deep",
 		  V3(0, 0.9f, 0), I, hh, r, CYL_OTHER_BOX,
 		  .box = { V3(0, 0, 0), I, V3(5, 0.5f, 5) },
-		  .is_deep = 1, .expected_normal = V3(0,-1,0), .expected_contact_count = 1 },
+		  .is_deep = 1, .expected_normal = V3(0,-1,0), .expected_contact_count = 4 },
 
 		// --- cyl SIDE x box EDGE ---
 		{ "cyl-box SIDE/EDGE deep",

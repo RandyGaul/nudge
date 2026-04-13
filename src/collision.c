@@ -2025,20 +2025,34 @@ int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold)
 				if (len2(radial) > a.radius * a.radius) continue;
 				points[cp] = wv; depths[cp] = -d; cp++;
 			}
-			// Fallback for large hulls (no verts inside cap disk): project cap
-			// center onto the hull face and use that as the contact point.
+			// Fallback for large hulls (no verts inside cap disk): generate
+			// 4 rim points around the cap edge for rotational stability.
+			// A single center point gives zero torsional friction, allowing
+			// the cylinder to tip freely from any small perturbation.
 			if (cp == 0) {
-				float face_d = dot(cap_center, best_n) - best_face_plane.offset;
-				if (face_d < 0.0f) {
-					// Cap center is behind the face — contact at cap center projected onto face.
-					points[0] = sub(cap_center, scale(best_n, face_d));
-					depths[0] = -face_d;
-				} else {
-					// Cap center is above the face — use cap center directly.
+				// Build a tangent frame on the cap plane.
+				v3 t1, t2;
+				if (fabsf(cap_n.y) < 0.9f) t1 = v3_norm(v3_cross(cap_n, V3(0, 1, 0)));
+				else t1 = v3_norm(v3_cross(cap_n, V3(1, 0, 0)));
+				t2 = v3_cross(cap_n, t1);
+				// 4 rim points at 0/90/180/270 degrees.
+				v3 offsets[4] = { scale(t1, a.radius), scale(t2, a.radius), scale(t1, -a.radius), scale(t2, -a.radius) };
+				for (int ri = 0; ri < 4; ri++) {
+					v3 rim_pt = add(cap_center, offsets[ri]);
+					float face_d = dot(rim_pt, best_n) - best_face_plane.offset;
+					float pen = -face_d;
+					if (pen < -LINEAR_SLOP) continue;
+					if (pen < 0) pen = 0;
+					points[cp] = sub(rim_pt, scale(best_n, face_d));
+					depths[cp] = pen;
+					cp++;
+				}
+				// Fallback if no rim points penetrate (cap barely touching).
+				if (cp == 0) {
 					points[0] = cap_center;
 					depths[0] = -best_sep;
+					cp = 1;
 				}
-				cp = 1;
 			}
 			manifold->count = cp;
 			for (int i = 0; i < cp; i++)
