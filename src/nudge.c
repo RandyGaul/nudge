@@ -977,6 +977,8 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	                     s.cylinder.radius = params.cylinder.radius; break;
 	}
 	apush(w->body_cold[idx].shapes, s);
+	if (params.type == SHAPE_CYLINDER && w->body_state[idx].angular_damping < 0.15f)
+		w->body_state[idx].angular_damping = 0.15f;
 	recompute_body_inertia(w, idx);
 
 	// Insert into BVH on first shape add.

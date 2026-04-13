@@ -1,0 +1,7 @@
+# Capsule isolation repro: push body 4 (45 deg) sideways, check if it settles
+# Body 4 is at position (0, 0.655, 0) tilted 45 degrees
+# Expected: capsule tips over, rolls, settles within 5 seconds
+scene Capsule Test
+step 60
+push 4 1 0 0 0 0.5 0
+step 300

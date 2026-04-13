@@ -740,21 +740,24 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		gjk_support(shapeB, neg(closest), &fB, sB);
 		v3 w = sub(sB, sA);
 
-		// Duplicate vertex termination (non-cylinder shapes only).
 		if (use_index_term) {
+			// Duplicate vertex termination (non-cylinder shapes only).
 			int dup = 0;
 			for (int i = 0; i < simplex.count; i++) {
 				if (simplex.v[i].feat1 == fA && simplex.v[i].feat2 == fB) { dup = 1; break; }
 			}
 			if (dup) break;
+		} else {
+			// Relative progress termination (cylinder only).
+			float max_vert2 = 0.0f;
+			for (int i = 0; i < simplex.count; i++) {
+				float v2 = len2(simplex.v[i].point);
+				if (v2 > max_vert2) max_vert2 = v2;
+			}
+			float progress = dsq - dot(w, closest);
+			if (progress <= max_vert2 * GJK_PROGRESS_EPS) break;
 		}
 
-		// Relative progress termination.
-		// Use dsq (closest distance squared) instead of max_vert2 (largest simplex vertex).
-		// max_vert2 scales with hull size, causing premature termination for small shapes
-		// near large hulls (e.g., capsule near center of a 20x20 floor box).
-		float progress = dsq - dot(w, closest);
-		if (progress <= dsq * GJK_PROGRESS_EPS) break;
 
 		iter++;
 		GJK_Vertex* vert = &simplex.v[simplex.count];

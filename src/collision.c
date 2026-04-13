@@ -2025,40 +2025,47 @@ int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold)
 				if (len2(radial) > a.radius * a.radius) continue;
 				points[cp] = wv; depths[cp] = -d; cp++;
 			}
-			// Fallback for large hulls (no verts inside cap disk).
+			// Fallback for large hulls (no verts inside cap disk): rim contacts.
+			// Near-parallel: 4 quadrant rim points for full rotational stability.
+			// Tilted: 2 splayed rim points for torsional friction.
 			if (cp == 0) {
+				v3 toward_face = sub(neg_n, scale(cap_n, dot(neg_n, cap_n)));
+				float toward_len = v3_len(toward_face);
+				v3 toward_dir;
+				if (toward_len > 1e-6f)
+					toward_dir = scale(toward_face, 1.0f / toward_len);
+				else
+					toward_dir = v3_norm(v3_cross(cap_n, fabsf(cap_n.y) < 0.9f ? V3(0,1,0) : V3(1,0,0)));
+				v3 perp_dir = v3_cross(cap_n, toward_dir);
+
 				if (axis_alignment > 0.95f) {
-					// Nearly parallel: 4 rim points for rotational stability.
-					v3 t1, t2;
-					if (fabsf(cap_n.y) < 0.9f) t1 = v3_norm(v3_cross(cap_n, V3(0, 1, 0)));
-					else t1 = v3_norm(v3_cross(cap_n, V3(1, 0, 0)));
-					t2 = v3_cross(cap_n, t1);
-					v3 offsets[4] = { scale(t1, a.radius), scale(t2, a.radius), scale(t1, -a.radius), scale(t2, -a.radius) };
-					for (int ri = 0; ri < 4; ri++) {
-						v3 rim_pt = add(cap_center, offsets[ri]);
-						float face_d = dot(rim_pt, best_n) - best_face_plane.offset;
-						float pen = -face_d;
-						if (pen <= 0.0f) continue;
-						points[cp] = sub(rim_pt, scale(best_n, face_d));
-						depths[cp] = pen;
+					v3 rim_dirs[4];
+					rim_dirs[0] = toward_dir;
+					rim_dirs[1] = perp_dir;
+					rim_dirs[2] = neg(toward_dir);
+					rim_dirs[3] = neg(perp_dir);
+					for (int i = 0; i < 4; i++) {
+						v3 rim = add(cap_center, scale(rim_dirs[i], a.radius));
+						float fd = dot(rim, best_n) - best_face_plane.offset;
+						if (-fd <= 0.0f) continue;
+						points[cp] = sub(rim, scale(best_n, fd));
+						depths[cp] = -fd;
 						cp++;
 					}
 				}
-				// Tilted or fallback: single deepest rim point.
+				if (cp == 1) cp = 0; // single rim point = no patch area, fall back to 2-point splay
 				if (cp == 0) {
-					v3 toward_face = sub(neg_n, scale(cap_n, dot(neg_n, cap_n)));
-					float toward_len = v3_len(toward_face);
-					v3 rim_pt;
-					if (toward_len > 1e-6f)
-						rim_pt = add(cap_center, scale(toward_face, a.radius / toward_len));
-					else
-						rim_pt = add(cap_center, scale(v3_norm(v3_cross(cap_n, fabsf(cap_n.y) < 0.9f ? V3(0,1,0) : V3(1,0,0))), a.radius));
-					float face_d = dot(rim_pt, best_n) - best_face_plane.offset;
-					float pen = -face_d;
-					if (pen < 0) pen = 0;
-					points[0] = sub(rim_pt, scale(best_n, face_d));
-					depths[0] = pen > 0 ? pen : -best_sep;
-					cp = 1;
+					v3 d0 = add(scale(toward_dir, 0.999f), scale(perp_dir, 0.0436f));
+					v3 d1 = add(scale(toward_dir, 0.999f), scale(perp_dir, -0.0436f));
+					v3 r0 = add(cap_center, scale(d0, a.radius));
+					v3 r1 = add(cap_center, scale(d1, a.radius));
+					float f0 = dot(r0, best_n) - best_face_plane.offset;
+					float f1 = dot(r1, best_n) - best_face_plane.offset;
+					points[0] = sub(r0, scale(best_n, f0));
+					points[1] = sub(r1, scale(best_n, f1));
+					depths[0] = -f0 > 0.0f ? -f0 : -best_sep;
+					depths[1] = -f1 > 0.0f ? -f1 : -best_sep;
+					cp = 2;
 				}
 			}
 			manifold->count = cp;

@@ -1724,7 +1724,7 @@ static void test_cyl_hull_native()
 		  { sinf(0.3f), 0, 0, cosf(0.3f) }, // tilt ~34 deg around X
 		  hh, r, CYL_OTHER_HULL,
 		  .hull = { bh, V3(0, -1.5f, 0), I, V3(5, 0.5f, 5) }, // floor
-		  .is_deep = 1, .expected_normal = V3(0,-1,0), .expected_contact_count = 1 },
+		  .is_deep = 1, .expected_normal = V3(0,-1,0), .expected_contact_count = 2 },
 
 		// --- Separated (miss) ---
 		{ "cyl-hull separated (miss)",
