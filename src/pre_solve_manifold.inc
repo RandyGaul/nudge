@@ -41,8 +41,13 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		float softness = 0.0f, bias = 0.0f;
 		if (soft_val > 0.0f) {
 			float K = eff_mass_n > 0.0f ? 1.0f / eff_mass_n : 0.0f;
-			softness = soft_val;
-			eff_mass_n = (K + soft_val) > 1e-12f ? 1.0f / (K + soft_val) : 0.0f;
+			// Bepu-style softened effective mass: 1 / (K * (1 + softness)).
+			// The softness term is extra = 1/(w^2*dt^2 + w*dr*dt).
+			// effectiveMassCFMScale = 1/(1+extra), so eff_mass = (1/(1+extra)) / K.
+			// softnessImpulseScale = extra/(1+extra) = extra * effectiveMassCFMScale.
+			float denom = 1.0f + soft_val;
+			softness = soft_val / denom;           // softnessImpulseScale
+			eff_mass_n = (K * denom) > 1e-12f ? 1.0f / (K * denom) : 0.0f;
 			float pen = ct->penetration - SOLVER_SLOP;
 			bias = pen > 0.0f ? -bias_rate_val * pen : 0.0f;
 			if (bias < -w->max_push_velocity) bias = -w->max_push_velocity;

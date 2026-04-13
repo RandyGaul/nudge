@@ -12730,6 +12730,7 @@ static void test_box_wall_explosion()
 	World w = create_world(wp);
 	WorldInternal* wi = (WorldInternal*)w.id;
 	wi->sleep_enabled = 0;
+	// wi->warm_start_enabled = 0; // warm start causes energy injection during fast impacts
 
 	// Floor
 	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -0.5f, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
@@ -12761,6 +12762,11 @@ static void test_box_wall_explosion()
 	float max_pos = 0;
 	for (int frame = 0; frame < 300 && !exploded; frame++) {
 		world_step(w, dt);
+		// Log sphere trajectory at key frames
+		v3 sp = body_get_position(w, wrecker);
+		v3 sv = body_get_velocity(w, wrecker);
+		if (frame < 50 || frame % 30 == 0)
+			printf("  f=%3d sphere pos=(%.2f, %.2f, %.2f) vel=(%.2f, %.2f, %.2f)\n", frame, sp.x, sp.y, sp.z, sv.x, sv.y, sv.z);
 		// Check all wall bodies for explosion (position magnitude > 100 = definitely wrong)
 		for (int i = 0; i < asize(wall_bodies); i++) {
 			v3 pos = body_get_position(w, wall_bodies[i]);

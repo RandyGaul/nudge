@@ -984,12 +984,36 @@ v3 body_get_position(World world, Body body)
 	return body_pos(w, idx);
 }
 
+void body_set_position(World world, Body body, v3 pos)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	assert(split_valid(w->body_gen, body));
+	body_pos(w, idx) = pos;
+}
+
 quat body_get_rotation(World world, Body body)
 {
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(body);
 	assert(split_valid(w->body_gen, body));
 	return body_rot(w, idx);
+}
+
+v3 body_get_velocity(World world, Body body)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	assert(split_valid(w->body_gen, body));
+	return body_vel(w, idx);
+}
+
+v3 body_get_angular_velocity(World world, Body body)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	assert(split_valid(w->body_gen, body));
+	return body_angvel(w, idx);
 }
 
 void body_wake(World world, Body body)

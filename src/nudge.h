@@ -349,7 +349,10 @@ void destroy_body(World world, Body body);
 void body_add_shape(World world, Body body, ShapeParams params);
 
 v3 body_get_position(World world, Body body);
+void body_set_position(World world, Body body, v3 pos);
 quat body_get_rotation(World world, Body body);
+v3 body_get_velocity(World world, Body body);
+v3 body_get_angular_velocity(World world, Body body);
 
 void body_wake(World world, Body body);
 void body_set_velocity(World world, Body body, v3 vel);
