@@ -2026,13 +2026,9 @@ int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold)
 				points[cp] = wv; depths[cp] = -d; cp++;
 			}
 			// Fallback for large hulls (no verts inside cap disk).
-			// Nearly parallel (axis_alignment > 0.95): generate 4 rim points
-			// clipped to the hull face for rotational stability.
-			// Tilted: single center point to avoid jitter from rim points
-			// that oscillate in/out of the face.
 			if (cp == 0) {
 				if (axis_alignment > 0.95f) {
-					// Build tangent frame on the cap plane.
+					// Nearly parallel: 4 rim points for rotational stability.
 					v3 t1, t2;
 					if (fabsf(cap_n.y) < 0.9f) t1 = v3_norm(v3_cross(cap_n, V3(0, 1, 0)));
 					else t1 = v3_norm(v3_cross(cap_n, V3(1, 0, 0)));
@@ -2042,18 +2038,26 @@ int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold)
 						v3 rim_pt = add(cap_center, offsets[ri]);
 						float face_d = dot(rim_pt, best_n) - best_face_plane.offset;
 						float pen = -face_d;
-						if (pen < -LINEAR_SLOP) continue;
-						if (pen < 0) pen = 0;
+						if (pen <= 0.0f) continue;
 						points[cp] = sub(rim_pt, scale(best_n, face_d));
 						depths[cp] = pen;
 						cp++;
 					}
 				}
-				// Single center point for tilted caps, or fallback if no rim points penetrate.
+				// Tilted or fallback: single deepest rim point.
 				if (cp == 0) {
-					float face_d = dot(cap_center, best_n) - best_face_plane.offset;
-					points[0] = sub(cap_center, scale(best_n, fminf(face_d, 0.0f)));
-					depths[0] = -best_sep;
+					v3 toward_face = sub(neg_n, scale(cap_n, dot(neg_n, cap_n)));
+					float toward_len = v3_len(toward_face);
+					v3 rim_pt;
+					if (toward_len > 1e-6f)
+						rim_pt = add(cap_center, scale(toward_face, a.radius / toward_len));
+					else
+						rim_pt = add(cap_center, scale(v3_norm(v3_cross(cap_n, fabsf(cap_n.y) < 0.9f ? V3(0,1,0) : V3(1,0,0))), a.radius));
+					float face_d = dot(rim_pt, best_n) - best_face_plane.offset;
+					float pen = -face_d;
+					if (pen < 0) pen = 0;
+					points[0] = sub(rim_pt, scale(best_n, face_d));
+					depths[0] = pen > 0 ? pen : -best_sep;
 					cp = 1;
 				}
 			}
