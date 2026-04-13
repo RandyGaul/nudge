@@ -13883,5 +13883,23 @@ static void test_capsule_box_tilted_direct()
 
 	// Also test GJK distance directly
 	GJK_Result r = gjk_query_segment_hull(cap.p, cap.q, bh);
-	printf("  GJK seg-hull: distance=%.5f pt1=(%.3f,%.3f,%.3f) pt2=(%.3f,%.3f,%.3f)\n", r.distance, r.point1.x, r.point1.y, r.point1.z, r.point2.x, r.point2.y, r.point2.z);
+	printf("  GJK seg-hull: distance=%.5f pt1=(%.3f,%.3f,%.3f) pt2=(%.3f,%.3f,%.3f) iters=%d\n", r.distance, r.point1.x, r.point1.y, r.point1.z, r.point2.x, r.point2.y, r.point2.z, r.iterations);
+
+	// Test 2: exact geometry from bowling pin GJK bug
+	// Capsule near-horizontal, Q endpoint below ground level, GJK returns midpoint distance
+	TEST_BEGIN("capsule-box GJK near-horizontal segment");
+	{
+		// From trace: p.y=0.343 q.y=0.294, GJK returned 0.322 instead of ~0.294
+		Capsule cap2 = { V3(0.972f, 0.343f, 0.759f), V3(1.919f, 0.294f, 0.473f), 0.3f };
+		Box floor2 = { V3(0, -1, 0), quat_identity(), V3(10, 1, 10) };
+		ConvexHull bh2 = { hull_unit_box(), floor2.center, floor2.rotation, floor2.half_extents };
+		GJK_Result r2 = gjk_query_segment_hull(cap2.p, cap2.q, bh2);
+		printf("  GJK: dist=%.5f expected<=%.5f pt1=(%.3f,%.3f,%.3f) pt2=(%.3f,%.3f,%.3f) iters=%d\n",
+			r2.distance, cap2.radius + LINEAR_SLOP,
+			r2.point1.x, r2.point1.y, r2.point1.z, r2.point2.x, r2.point2.y, r2.point2.z, r2.iterations);
+		// Q.y=0.294, distance from Q to ground plane = 0.294
+		// GJK should return ~0.294, NOT 0.322 (midpoint distance)
+		printf("  Q.y=%.3f, expected GJK dist ~ Q.y = %.3f\n", cap2.q.y, cap2.q.y);
+		TEST_ASSERT(r2.distance < cap2.q.y + 0.01f); // GJK should find Q, not midpoint
+	}
 }
