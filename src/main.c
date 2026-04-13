@@ -484,6 +484,7 @@ static bool g_npv_mode = false;
 
 void update()
 {
+	debug_server_poll();
 	if (g_npv_mode) { npv_update(); return; }
 
 	// Camera input (skip when imgui wants the mouse)
