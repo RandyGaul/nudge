@@ -126,6 +126,8 @@ static void integrate_positions(WorldInternal* w, float dt)
 		float inv_ql = 1.0f / ql;
 		s->rotation.x *= inv_ql; s->rotation.y *= inv_ql;
 		s->rotation.z *= inv_ql; s->rotation.w *= inv_ql;
+		// Recompute world-space inertia from updated rotation so substep 2+ has fresh values.
+		body_compute_inv_inertia_world(h, s);
 	}
 }
 
@@ -307,6 +309,7 @@ static void integrate_pos_work_fn(void* ctx, int start, int count)
 		if (ql < 1e-15f) ql = 1.0f;
 		float inv_ql = 1.0f / ql;
 		s->rotation.x *= inv_ql; s->rotation.y *= inv_ql; s->rotation.z *= inv_ql; s->rotation.w *= inv_ql;
+		body_compute_inv_inertia_world(h, s);
 	}
 }
 

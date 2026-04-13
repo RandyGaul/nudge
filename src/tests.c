@@ -9915,6 +9915,93 @@ static void test_hinge_limit_gravity_both_sides()
 	}
 }
 
+// Chain with mouse constraint pulling down: LDL should not oscillate.
+// Reproduces the bug where stale cached iw_diag/iw_off caused violent shaking.
+static void test_chain_mouse_drag_stability()
+{
+	for (int use_ldl = 0; use_ldl <= 1; use_ldl++) {
+		const char* mode = use_ldl ? "LDL" : "PGS";
+		World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+		WorldInternal* wi = (WorldInternal*)w.id;
+		wi->sleep_enabled = 0;
+		wi->ldl_enabled = use_ldl;
+
+		// Static anchor at origin
+		Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+
+		// Chain of 6 links extending horizontally
+		int n_links = 6;
+		float spacing = 1.0f;
+		Body links[6];
+		for (int i = 0; i < n_links; i++) {
+			links[i] = create_body(w, (BodyParams){ .position = V3((i + 1) * spacing, 10, 0), .rotation = quat_identity(), .mass = 0.5f, .friction = 0.3f });
+			body_add_shape(w, links[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		}
+
+		// Heavy ball at the end
+		Body ball = create_body(w, (BodyParams){ .position = V3((n_links + 1) * spacing, 10, 0), .rotation = quat_identity(), .mass = 10.0f, .friction = 0.3f });
+		body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+		// Distance joints: anchor -> link0 -> ... -> ball
+		create_distance(w, (DistanceParams){ .body_a = anchor, .body_b = links[0], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .rest_length = spacing });
+		for (int i = 0; i < n_links - 1; i++) {
+			create_distance(w, (DistanceParams){ .body_a = links[i], .body_b = links[i+1], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .rest_length = spacing });
+		}
+		create_distance(w, (DistanceParams){ .body_a = links[n_links - 1], .body_b = ball, .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .rest_length = spacing });
+
+		// Let chain settle for 60 frames
+		for (int i = 0; i < 60; i++) { world_step(w, 1.0f / 60.0f); }
+
+		// Mouse constraint: static anchor below chain, soft ball-socket to heavy ball
+		Body mouse_anchor = create_body(w, (BodyParams){ .position = V3(0, -5, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, mouse_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.01f });
+		Joint mouse_joint = create_ball_socket(w, (BallSocketParams){ .body_a = mouse_anchor, .body_b = ball, .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+
+		// Step 120 frames with mouse pulling down. Sample velocity sum at intervals.
+		float max_vel_sum = 0;
+		float vel_sums[4] = {0};
+		for (int frame = 0; frame < 120; frame++) {
+			world_step(w, 1.0f / 60.0f);
+			// Sum Y velocity magnitudes across all chain links + ball
+			float vel_sum = 0;
+			for (int i = 0; i < n_links; i++) {
+				int idx = handle_index(links[i]);
+				vel_sum += fabsf(body_vel(wi, idx).y);
+			}
+			vel_sum += fabsf(body_vel(wi, handle_index(ball)).y);
+			if (vel_sum > max_vel_sum) { max_vel_sum = vel_sum; }
+			// Sample at 30-frame intervals
+			if (frame == 29) { vel_sums[0] = vel_sum; }
+			if (frame == 59) { vel_sums[1] = vel_sum; }
+			if (frame == 89) { vel_sums[2] = vel_sum; }
+			if (frame == 119) { vel_sums[3] = vel_sum; }
+		}
+
+		printf("  [chain drag %s] vel_sums: %.2f %.2f %.2f %.2f  max=%.2f\n", mode, vel_sums[0], vel_sums[1], vel_sums[2], vel_sums[3], max_vel_sum);
+
+		// The chain should settle: later velocity sums should decrease, not oscillate.
+		// PGS: initial spike from impulse is expected but must converge (10→5→2.6→2).
+		// LDL bug: oscillates (92→30→80→50) instead of converging.
+		{
+			char name[64]; snprintf(name, sizeof(name), "chain drag %s: velocity settling", mode);
+			TEST_BEGIN(name);
+			// Last sample should be less than first (converging, not oscillating)
+			TEST_ASSERT(vel_sums[3] < vel_sums[0]);
+		}
+		{
+			char name[64]; snprintf(name, sizeof(name), "chain drag %s: no late-stage growth", mode);
+			TEST_BEGIN(name);
+			// Third sample should not be higher than second (no energy injection)
+			TEST_ASSERT(vel_sums[2] < vel_sums[1] * 1.5f + 2.0f);
+		}
+
+		destroy_joint(w, mouse_joint);
+		destroy_body(w, mouse_anchor);
+		destroy_world(w);
+	}
+}
+
 static void run_motor_comprehensive_tests()
 {
 	printf("--- motor/limit/joint comprehensive tests ---\n");
@@ -9938,6 +10025,7 @@ static void run_motor_comprehensive_tests()
 	test_slider_crane_scene();
 	test_fixed_joint_bridge_stability();
 	test_all_joints_ldl_vs_pgs();
+	test_chain_mouse_drag_stability();
 }
 
 static void run_solver_tests()

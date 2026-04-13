@@ -61,6 +61,50 @@ static const v3 npv_axis_colors[3] = { {0.9f,0.2f,0.2f,0}, {0.2f,0.9f,0.2f,0}, {
 static const v3 npv_axis_colors_bright[3] = { {1,0.5f,0.5f,0}, {0.5f,1,0.5f,0}, {0.5f,0.5f,1,0} };
 
 // ----------------------------------------------------------------------------
+// SAT cache debug: step-through trace of the validation loop.
+
+typedef enum
+{
+	NPV_STEP_COLD_START,       // no cache exists, full SAT required
+	NPV_STEP_CACHE_INFO,       // show what's cached (face pair, ref body)
+	NPV_STEP_SEP_DIR,          // separation direction computation
+	NPV_STEP_CACHED_FACE,      // evaluate cached face: its normal + dot with sep
+	NPV_STEP_CHECK_NEIGHBOR,   // check one neighbor face: dot comparison
+	NPV_STEP_VALID,            // all neighbors passed, cache is valid
+	NPV_STEP_INVALID,          // a neighbor was better, cache invalidated
+	NPV_STEP_REFRESH_OK,       // refresh succeeded, contacts from cached face
+	NPV_STEP_REFRESH_FAIL,     // refresh failed (clipping produced 0 contacts)
+	NPV_STEP_FULL_SAT,         // fell through to full SAT, new pair stored
+} NPV_StepKind;
+
+typedef struct NPV_Step
+{
+	NPV_StepKind kind;
+	char desc[160];
+	// Face to highlight on the reference hull (-1 = none).
+	int face;
+	v3 face_normal;      // world-space normal of this face
+	float dot_sep;       // dot with separation direction
+	int pass;            // 1=green(ok), 0=red(fail), -1=neutral
+} NPV_Step;
+
+#define NPV_MAX_STEPS 64
+
+static NPV_Step npv_steps[NPV_MAX_STEPS];
+static int npv_step_count;
+static int npv_step_cur;           // current step the user is viewing
+static int npv_show_sat;           // UI toggle for SAT debug
+static CachedFeaturePair npv_cached_pair; // persisted across frames
+static int npv_has_cache;          // 1 if cached_pair is populated
+static int npv_sat_axis;           // cached SAT axis hint
+
+// Reference hull info for SAT debug drawing (set during collide).
+static const Hull* npv_ref_hull;
+static v3 npv_ref_pos, npv_ref_sc;
+static quat npv_ref_rot;
+static v3 npv_sat_sep_dir;        // separation direction used in validation
+
+// ----------------------------------------------------------------------------
 // Hull preset builders.
 
 static Hull* npv_build_tetrahedron()
