@@ -1592,10 +1592,13 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 	for (int i = 0; i < body_count; i++) {
 		float inv_m = body_inv_mass(w, i);
 		if (inv_m > 0.0f) {
-			float comp_ratio = sqrtf(inv_m) / inv_m;
-			comp_bodies[i].inv_mass = sqrtf(inv_m);
-			comp_bodies[i].iw_diag = scale(body_iw_diag(w, i), comp_ratio);
-			comp_bodies[i].iw_off = scale(body_iw_off(w, i), comp_ratio);
+			// Use real masses for velocity K (no compression).
+			// Compression was causing oscillation at extreme mass ratios (500:1)
+			// because K is factored with compressed masses but impulses are
+			// applied with real masses, creating an inconsistency.
+			comp_bodies[i].inv_mass = inv_m;
+			comp_bodies[i].iw_diag = body_iw_diag(w, i);
+			comp_bodies[i].iw_off = body_iw_off(w, i);
 		} else {
 			comp_bodies[i].inv_mass = 0.0f;
 			comp_bodies[i].iw_diag = V3(0, 0, 0);

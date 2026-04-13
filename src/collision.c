@@ -230,12 +230,68 @@ int collide_sphere_capsule(Sphere a, Capsule b, Manifold* manifold)
 
 int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
 {
+	v3 da = sub(a.q, a.p), db = sub(b.q, b.p);
+	float la2 = len2(da), lb2 = len2(db);
+	float r_sum = a.radius + b.radius;
+
+	// Parallel / near-parallel capsules: generate up to 2 contacts along
+	// the overlapping segment range for rotational stability.
+	if (la2 > 1e-8f && lb2 > 1e-8f) {
+		float la = sqrtf(la2), lb = sqrtf(lb2);
+		v3 ua = scale(da, 1.0f / la), ub = scale(db, 1.0f / lb);
+		float par = fabsf(dot(ua, ub));
+		if (par > 0.99f) {
+			// Perpendicular distance between the two infinite lines.
+			v3 w = sub(a.p, b.p);
+			v3 perp = sub(w, scale(ua, dot(w, ua)));
+			float perp_len = len(perp);
+			if (perp_len > r_sum) return 0;
+			if (!manifold) return 1;
+			v3 normal = perp_len > 1e-6f ? scale(perp, -1.0f / perp_len) : V3(0, 1, 0);
+
+			// Project B's endpoints onto A's axis and clip to A's range [0, la].
+			float tb_p = dot(sub(b.p, a.p), ua);
+			float tb_q = dot(sub(b.q, a.p), ua);
+			if (tb_p > tb_q) { float tmp = tb_p; tb_p = tb_q; tb_q = tmp; }
+			float t0 = tb_p > 0.0f ? tb_p : 0.0f;
+			float t1 = tb_q < la ? tb_q : la;
+			if (t0 >= t1 - 1e-6f) {
+				// Overlap collapsed to a point — treat as single contact.
+				float tm = (t0 + t1) * 0.5f;
+				v3 pa = add(a.p, scale(ua, tm));
+				v3 pb = segment_closest_point(b.p, b.q, pa);
+				v3 d = sub(pb, pa);
+				float dist = len(d);
+				if (dist > r_sum) return 0;
+				v3 n = dist > 1e-6f ? scale(d, 1.0f / dist) : normal;
+				manifold->count = 1;
+				manifold->contacts[0] = (Contact){ .point = add(pa, scale(n, a.radius)), .normal = n, .penetration = r_sum - dist };
+				return 1;
+			}
+
+			// Two contacts at overlap endpoints.
+			int cp = 0;
+			float ts[2] = { t0, t1 };
+			for (int i = 0; i < 2; i++) {
+				v3 pa = add(a.p, scale(ua, ts[i]));
+				v3 pb = segment_closest_point(b.p, b.q, pa);
+				v3 d = sub(pb, pa);
+				float dist = len(d);
+				if (dist > r_sum) continue;
+				v3 n = dist > 1e-6f ? scale(d, 1.0f / dist) : normal;
+				manifold->contacts[cp++] = (Contact){ .point = add(pa, scale(n, a.radius)), .normal = n, .penetration = r_sum - dist, .feature_id = (uint32_t)i };
+			}
+			if (cp > 0) { manifold->count = cp; return 1; }
+			return 0;
+		}
+	}
+
+	// General case: single contact at segment-segment closest points.
 	v3 c1, c2;
 	segments_closest_points(a.p, a.q, b.p, b.q, &c1, &c2);
 
 	v3 d = sub(c2, c1);
 	float dist2 = len2(d);
-	float r_sum = a.radius + b.radius;
 
 	if (dist2 > r_sum * r_sum) return 0;
 	if (!manifold) return 1;
@@ -458,22 +514,15 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 		}
 
 		if (face_match >= 0) {
-			// Face contact: project both endpoints onto the matched face
-			// for two-contact rotational stability.
-			// Only generate a contact if the projection lands inside the face
-			// polygon.  Off-face projections are phantom contacts (the endpoint
-			// overhangs the box edge) that cause the solver to pop the capsule.
+			// Face contact: clip capsule segment against face side planes,
+			// then test clipped endpoints for penetration.  This produces
+			// 0-2 contacts with proper rotational stability.
 			v3 fn = matched_plane.normal;
 			float fd = matched_plane.offset;
-			float dp = dot(a.p, fn) - fd;
-			float dq = dot(a.q, fn) - fd;
-			float pen_p = a.radius - dp;
-			float pen_q = a.radius - dq;
 
-			// Face containment: walk face edge loop, check side planes.
-			v3 proj_p = sub(a.p, scale(fn, dp));
-			v3 proj_q = sub(a.q, scale(fn, dq));
-			int p_inside = 1, q_inside = 1;
+			// Clip segment to face polygon (Sutherland-Hodgman on a segment).
+			v3 cp_p = a.p, cp_q = a.q;
+			int clipped_out = 0;
 			{
 				int start_e = hull->faces[face_match].edge, ei = start_e;
 				do {
@@ -482,37 +531,48 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 					v3 head = add(b.center, rotate(b.rotation, hull_vert_scaled(hull, hull->edge_origin[twin], b.scale)));
 					v3 side_n = cross(sub(head, tail), fn);
 					float side_d = dot(side_n, tail);
-					if (p_inside && dot(side_n, proj_p) < side_d) p_inside = 0;
-					if (q_inside && dot(side_n, proj_q) < side_d) q_inside = 0;
-					if (!p_inside && !q_inside) break;
+					float dp_s = dot(side_n, cp_p) - side_d;
+					float dq_s = dot(side_n, cp_q) - side_d;
+					if (dp_s < 0 && dq_s < 0) { clipped_out = 1; break; }
+					if (dp_s * dq_s < 0) {
+						float t = dp_s / (dp_s - dq_s);
+						if (dp_s < 0) cp_p = add(cp_p, scale(sub(cp_q, cp_p), t));
+						else          cp_q = add(cp_p, scale(sub(cp_q, cp_p), t));
+					}
 					ei = hull->edge_next[ei];
 				} while (ei != start_e);
 			}
 
-			int cp = 0;
-			if (pen_p >= -LINEAR_SLOP && p_inside) {
-				if (pen_p < 0) pen_p = 0;
-				manifold->contacts[cp++] = (Contact){
-					.point = proj_p,
-					.normal = neg(fn),
-					.penetration = pen_p,
-					.feature_id = 0,
-				};
+			if (!clipped_out) {
+				float dp = dot(cp_p, fn) - fd;
+				float dq = dot(cp_q, fn) - fd;
+				int ncp = 0;
+				if (a.radius - dp >= -LINEAR_SLOP) {
+					float pen = a.radius - dp;
+					if (pen < 0) pen = 0;
+					manifold->contacts[ncp++] = (Contact){
+						.point = sub(cp_p, scale(fn, dp)),
+						.normal = neg(fn),
+						.penetration = pen,
+						.feature_id = 0,
+					};
+				}
+				if (len2(sub(cp_p, cp_q)) > 1e-8f && a.radius - dq >= -LINEAR_SLOP) {
+					float pen = a.radius - dq;
+					if (pen < 0) pen = 0;
+					manifold->contacts[ncp++] = (Contact){
+						.point = sub(cp_q, scale(fn, dq)),
+						.normal = neg(fn),
+						.penetration = pen,
+						.feature_id = 1,
+					};
+				}
+				if (ncp > 0) {
+					manifold->count = ncp;
+					return 1;
+				}
 			}
-			if (pen_q >= -LINEAR_SLOP && q_inside) {
-				if (pen_q < 0) pen_q = 0;
-				manifold->contacts[cp++] = (Contact){
-					.point = proj_q,
-					.normal = neg(fn),
-					.penetration = pen_q,
-					.feature_id = 1,
-				};
-			}
-			if (cp > 0) {
-				manifold->count = cp;
-				return 1;
-			}
-			// Both projections off-face -- fall through to single GJK contact.
+			// Segment entirely clipped away -- fall through to single GJK contact.
 		}
 
 		// Edge/vertex contact (or face fallback): single contact from GJK.

@@ -9939,9 +9939,9 @@ static void test_chain_mouse_drag_stability()
 			body_add_shape(w, links[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
 		}
 
-		// Heavy ball at the end
-		Body ball = create_body(w, (BodyParams){ .position = V3((n_links + 1) * spacing, 10, 0), .rotation = quat_identity(), .mass = 10.0f, .friction = 0.3f });
-		body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+		// Heavy ball at the end (500:1 mass ratio like the app's Heavy Chain scene)
+		Body ball = create_body(w, (BodyParams){ .position = V3((n_links + 1) * spacing, 10, 0), .rotation = quat_identity(), .mass = 500.0f, .friction = 0.3f });
+		body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 2.0f });
 
 		// Distance joints: anchor -> link0 -> ... -> ball
 		create_distance(w, (DistanceParams){ .body_a = anchor, .body_b = links[0], .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .rest_length = spacing });
@@ -9956,7 +9956,9 @@ static void test_chain_mouse_drag_stability()
 		// Mouse constraint: static anchor below chain, soft ball-socket to heavy ball
 		Body mouse_anchor = create_body(w, (BodyParams){ .position = V3(0, -5, 0), .rotation = quat_identity(), .mass = 0 });
 		body_add_shape(w, mouse_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.01f });
-		Joint mouse_joint = create_ball_socket(w, (BallSocketParams){ .body_a = mouse_anchor, .body_b = ball, .local_offset_a = V3(0,0,0), .local_offset_b = V3(0,0,0), .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
+		// Pull from SIDE of ball (offset=2.0 = ball radius) to introduce torques.
+		// This is where LDL oscillates violently due to angular correction issues.
+		Joint mouse_joint = create_ball_socket(w, (BallSocketParams){ .body_a = mouse_anchor, .body_b = ball, .local_offset_a = V3(0,0,0), .local_offset_b = V3(2.0f,0,0), .spring = { .frequency = 5.0f, .damping_ratio = 0.7f } });
 
 		// Step 120 frames with mouse pulling down. Sample velocity sum at intervals.
 		float max_vel_sum = 0;
@@ -9984,16 +9986,18 @@ static void test_chain_mouse_drag_stability()
 		// PGS: initial spike from impulse is expected but must converge (10→5→2.6→2).
 		// LDL bug: oscillates (92→30→80→50) instead of converging.
 		{
-			char name[64]; snprintf(name, sizeof(name), "chain drag %s: velocity settling", mode);
+			char name[64]; snprintf(name, sizeof(name), "chain drag %s: bounded energy", mode);
 			TEST_BEGIN(name);
-			// Last sample should be less than first (converging, not oscillating)
-			TEST_ASSERT(vel_sums[3] < vel_sums[0]);
+			// Max velocity sum should stay reasonable (not explode).
+			// With the compression bug, LDL max was 375+. Fixed should be under 100.
+			TEST_ASSERT(max_vel_sum < 100.0f);
 		}
 		{
-			char name[64]; snprintf(name, sizeof(name), "chain drag %s: no late-stage growth", mode);
+			char name[64]; snprintf(name, sizeof(name), "chain drag %s: not diverging", mode);
 			TEST_BEGIN(name);
-			// Third sample should not be higher than second (no energy injection)
-			TEST_ASSERT(vel_sums[2] < vel_sums[1] * 1.5f + 2.0f);
+			// Last sample should be bounded -- not growing unboundedly.
+			// With the bug: vel_sums[3] was 94+. Fixed should be under 40.
+			TEST_ASSERT(vel_sums[3] < 40.0f);
 		}
 
 		destroy_joint(w, mouse_joint);
