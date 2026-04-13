@@ -367,7 +367,7 @@ int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold)
 	// GJK on the sphere CENTER (point) vs hull core.
 	GJK_Result r = gjk_query_point_hull(a.center, b);
 
-	if (r.distance > a.radius) return 0; // separated
+	if (r.distance > a.radius + LINEAR_SLOP) return 0; // separated (with slop margin)
 
 	if (r.distance > LINEAR_SLOP) {
 		// Shallow: center is outside hull but within radius.
@@ -486,8 +486,8 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 {
 	GJK_Result r = gjk_query_segment_hull(a.p, a.q, b);
 
-	if (r.distance > a.radius) return 0;
-	if (!manifold) return 1;
+	if (r.distance > a.radius + LINEAR_SLOP) return 0;
+	if (!manifold) return r.distance <= a.radius;
 
 	if (r.distance > LINEAR_SLOP) {
 		// --- Shallow path ---
