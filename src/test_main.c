@@ -219,7 +219,8 @@ int main(int argc, char* argv[])
 		for (int i = 2; i < argc; i++) {
 			if (strcmp(argv[i], "--bail") == 0) { test_bail = 1; continue; }
 			// Call test by name (add entries as needed)
-			if (strcmp(argv[i], "pull-down") == 0) test_ldl_pull_down_heavy_chain();
+			if (strcmp(argv[i], "box-wall") == 0) test_box_wall_explosion();
+			else if (strcmp(argv[i], "pull-down") == 0) test_ldl_pull_down_heavy_chain();
 			else if (strcmp(argv[i], "trace") == 0) test_stretched_joint_trace();
 			else if (strcmp(argv[i], "showcase-stretch") == 0) test_ldl_showcase_chain_stretch();
 			else if (strcmp(argv[i], "lift-drop") == 0) test_ldl_lift_and_drop();

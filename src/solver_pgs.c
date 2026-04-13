@@ -582,23 +582,22 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 	GATHER_V3(bt->centroid_r_b, sm, mi0, mi1, mi2, mi3, centroid_r_b);
 
 	// Pack contact layers: raw r_a/r_b + scalar prestep from SolverContact.
+	// Inactive lanes (manifold has fewer contacts than this layer) get zeroed scalars
+	// so the solver generates zero impulse. r_a/r_b padding doesn't matter when eff_mass_n=0.
 	bt->max_contacts = 0;
 	for (int j = 0; j < count; j++) { if (sm[indices[j]].contact_count > bt->max_contacts) { bt->max_contacts = sm[indices[j]].contact_count; } }
 	for (int cp_idx = 0; cp_idx < bt->max_contacts; cp_idx++) {
 		PGS_ContactLayer4* cl = &bt->cp[cp_idx];
-		// Compute contact indices for this layer (pad inactive lanes to sc[0]).
-		int ci0 = (0 < count && cp_idx < sm[indices[0]].contact_count) ? sm[indices[0]].contact_start + cp_idx : 0;
-		int ci1 = (1 < count && cp_idx < sm[indices[1]].contact_count) ? sm[indices[1]].contact_start + cp_idx : 0;
-		int ci2 = (2 < count && cp_idx < sm[indices[2]].contact_count) ? sm[indices[2]].contact_start + cp_idx : 0;
-		int ci3 = (3 < count && cp_idx < sm[indices[3]].contact_count) ? sm[indices[3]].contact_start + cp_idx : 0;
-		GATHER_V3(cl->r_a, sc, ci0, ci1, ci2, ci3, r_a);
-		GATHER_V3(cl->r_b, sc, ci0, ci1, ci2, ci3, r_b);
-		float emn[4], bi[4], bnc[4], sft[4], lam[4];
-		emn[0]=sc[ci0].eff_mass_n; emn[1]=sc[ci1].eff_mass_n; emn[2]=sc[ci2].eff_mass_n; emn[3]=sc[ci3].eff_mass_n;
-		bi[0]=sc[ci0].bias; bi[1]=sc[ci1].bias; bi[2]=sc[ci2].bias; bi[3]=sc[ci3].bias;
-		bnc[0]=sc[ci0].bounce; bnc[1]=sc[ci1].bounce; bnc[2]=sc[ci2].bounce; bnc[3]=sc[ci3].bounce;
-		sft[0]=sc[ci0].softness; sft[1]=sc[ci1].softness; sft[2]=sc[ci2].softness; sft[3]=sc[ci3].softness;
-		lam[0]=sc[ci0].lambda_n; lam[1]=sc[ci1].lambda_n; lam[2]=sc[ci2].lambda_n; lam[3]=sc[ci3].lambda_n;
+		int ci[4] = {0, 0, 0, 0};
+		float emn[4]={0}, bi[4]={0}, bnc[4]={0}, sft[4]={0}, lam[4]={0};
+		for (int j = 0; j < count; j++) {
+			if (cp_idx >= sm[indices[j]].contact_count) continue;
+			ci[j] = sm[indices[j]].contact_start + cp_idx;
+			SolverContact* s = &sc[ci[j]];
+			emn[j]=s->eff_mass_n; bi[j]=s->bias; bnc[j]=s->bounce; sft[j]=s->softness; lam[j]=s->lambda_n;
+		}
+		GATHER_V3(cl->r_a, sc, ci[0], ci[1], ci[2], ci[3], r_a);
+		GATHER_V3(cl->r_b, sc, ci[0], ci[1], ci[2], ci[3], r_b);
 		cl->eff_mass_n = simd_load(emn); cl->bias = simd_load(bi); cl->bounce = simd_load(bnc); cl->softness = simd_load(sft); cl->lambda_n = simd_load(lam);
 	}
 }

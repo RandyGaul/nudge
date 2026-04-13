@@ -12720,6 +12720,70 @@ static void run_tests()
 }
 
 // ============================================================================
+// Box-wall wrecking ball regression test.
+// Reproduces the visual testbed BoxWall scene: 10x10 staggered wall + 50kg
+// sphere launched at 15 m/s. Detects explosion (any body position > threshold).
+
+static void test_box_wall_explosion()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	// Floor
+	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -0.5f, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 0.5f, 20) });
+
+	// 10x10 staggered wall of unit boxes
+	int cols = 10, rows = 10;
+	CK_DYNA Body* wall_bodies = NULL;
+	for (int r = 0; r < rows; r++) {
+		for (int c = 0; c < cols; c++) {
+			float offset = (r % 2 == 0) ? 0 : 0.5f;
+			float x = (float)(c - cols / 2) + offset;
+			float y = 0.5f + (float)r;
+			Body b = create_body(w, (BodyParams){ .position = V3(x, y, 0), .rotation = quat_identity(), .mass = 1.0f, .friction = 0.5f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+			apush(wall_bodies, b);
+		}
+	}
+
+	// Wrecking sphere
+	Body wrecker = create_body(w, (BodyParams){ .position = V3(-10, 5, 0), .rotation = quat_identity(), .mass = 50.0f, .friction = 0.3f });
+	body_add_shape(w, wrecker, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 1.5f });
+	body_set_velocity(w, wrecker, V3(15, 0, 0));
+
+	// Simulate 300 frames at 60Hz (5 seconds -- sphere hits wall around frame 40)
+	float dt = 1.0f / 60.0f;
+	int exploded = 0;
+	int explode_frame = -1;
+	float max_pos = 0;
+	for (int frame = 0; frame < 300 && !exploded; frame++) {
+		world_step(w, dt);
+		// Check all wall bodies for explosion (position magnitude > 100 = definitely wrong)
+		for (int i = 0; i < asize(wall_bodies); i++) {
+			v3 pos = body_get_position(w, wall_bodies[i]);
+			float mag = sqrtf(pos.x*pos.x + pos.y*pos.y + pos.z*pos.z);
+			if (mag > max_pos) max_pos = mag;
+			if (mag > 100.0f) {
+				printf("  EXPLOSION at frame %d: body %d at (%.1f, %.1f, %.1f) mag=%.1f\n", frame, i, pos.x, pos.y, pos.z, mag);
+				exploded = 1;
+				explode_frame = frame;
+				break;
+			}
+		}
+	}
+	if (exploded) {
+		printf("  box_wall: EXPLOSION detected at frame %d (max_pos=%.1f)\n", explode_frame, max_pos);
+	} else {
+		printf("  box_wall: OK (max_pos=%.1f after 300 frames)\n", max_pos);
+	}
+	afree(wall_bodies);
+	destroy_world(w);
+}
+
+// ============================================================================
 // Box stack stability benchmark.
 // Creates a floor + N unit boxes stacked vertically, simulates 1000 frames at
 // 60Hz, and reports cumulative motion and max drift from ideal rest positions.
