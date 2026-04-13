@@ -859,63 +859,6 @@ static void npv_draw_sat_debug()
 }
 
 // ----------------------------------------------------------------------------
-// Repro cases: load exact shape configurations from bug investigations.
-// Add new cases here. The UI shows a combo to select one.
-
-typedef struct NPV_Repro
-{
-	const char *name;
-	int kind_a, kind_b;
-	v3 pos_a, pos_b;
-	quat rot_a, rot_b;
-	float radius_a, radius_b;
-	float half_height_a, half_height_b;
-	v3 half_extents_a, half_extents_b;
-} NPV_Repro;
-
-static void npv_load_repro(const NPV_Repro *r);
-
-static const NPV_Repro s_npv_repros[] = {
-	{
-		"GJK capsule near-horizontal vs floor",
-		NPV_CAPSULE, NPV_BOX,
-		{ .x=0.972f, .y=0.629f, .z=0.759f }, { .x=0, .y=-1, .z=0 },
-		{ .x=0, .y=0, .z=-0.383f, .w=0.924f }, { .x=0, .y=0, .z=0, .w=1 },
-		0.3f, 0,
-		0.5f, 0,
-		{ .x=0.3f, .y=0.3f, .z=0.3f }, { .x=10, .y=1, .z=10 },
-	},
-	{
-		"GJK capsule Q below ground (bowling pin)",
-		NPV_CAPSULE, NPV_BOX,
-		// From trace: p=(0.972,0.343,0.759) q=(1.919,0.294,0.473)
-		// Center = midpoint, rotation from endpoints
-		{ .x=1.446f, .y=0.319f, .z=0.616f }, { .x=0, .y=-1, .z=0 },
-		{ .x=0.224f, .y=0.029f, .z=-0.287f, .w=0.931f }, { .x=0, .y=0, .z=0, .w=1 },
-		0.3f, 0,
-		0.5f, 0,
-		{ .x=0.3f, .y=0.3f, .z=0.3f }, { .x=10, .y=1, .z=10 },
-	},
-};
-#define NPV_REPRO_COUNT (int)(sizeof(s_npv_repros)/sizeof(s_npv_repros[0]))
-
-static void npv_load_repro(const NPV_Repro *r)
-{
-	NPV_Shape *a = &npv_shapes[0], *b = &npv_shapes[1];
-	npv_free_hull(a); npv_free_hull(b);
-
-	a->kind = r->kind_a; a->pos = r->pos_a; a->rot = r->rot_a;
-	a->radius = r->radius_a; a->half_height = r->half_height_a; a->half_extents = r->half_extents_a;
-	b->kind = r->kind_b; b->pos = r->pos_b; b->rot = r->rot_b;
-	b->radius = r->radius_b; b->half_height = r->half_height_b; b->half_extents = r->half_extents_b;
-
-	if (a->kind >= NPV_HULL_TETRA) npv_rebuild_hull(a);
-	if (b->kind >= NPV_HULL_TETRA) npv_rebuild_hull(b);
-	npv_rebuild_mesh(a);
-	npv_rebuild_mesh(b);
-}
-
-// ----------------------------------------------------------------------------
 // Initialization.
 
 static void npv_init_shape(NPV_Shape* s, int idx)
@@ -1097,18 +1040,6 @@ static void npv_update()
 	ImGui_Begin("NP Viz", NULL, 0);
 
 	if (ImGui_Button("Back to Simulation")) g_npv_mode = 0;
-
-	// Repro case loader.
-	ImGui_SeparatorText("Repro Cases");
-	{
-		static int repro_idx = -1;
-		if (ImGui_Combo("Load Repro", &repro_idx, "-- select --\0GJK capsule near-horizontal vs floor\0GJK capsule Q below ground (bowling pin)\0")) {
-			if (repro_idx >= 0 && repro_idx < NPV_REPRO_COUNT) {
-				npv_load_repro(&s_npv_repros[repro_idx]);
-				repro_idx = -1;
-			}
-		}
-	}
 
 	// Gizmo mode.
 	ImGui_SeparatorText("Gizmo");

@@ -599,14 +599,32 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		dbg_send_str(c, "OK released\n");
 	} else if (strcmp(cmd, "npviz") == 0) {
 		g_npv_mode = 1;
-		int repro = (*rest) ? atoi(rest) : -1;
-		if (repro >= 0 && repro < NPV_REPRO_COUNT) {
-			if (!npv_initialized) npv_init();
-			npv_load_repro(&s_npv_repros[repro]);
+		if (!npv_initialized) npv_init();
+		dbg_send_str(c, "OK npviz mode\n");
+	} else if (strcmp(cmd, "npvset") == 0) {
+		// npvset <A|B> <kind> <px> <py> <pz> <qx> <qy> <qz> <qw> <radius> <hh> <hex> <hey> <hez>
+		if (!npv_initialized) { g_npv_mode = 1; npv_init(); }
+		char which; int kind;
+		float px, py, pz, qx, qy, qz, qw, radius, hh, hex, hey, hez;
+		if (sscanf(rest, "%c %d %f %f %f %f %f %f %f %f %f %f %f %f",
+				&which, &kind, &px, &py, &pz, &qx, &qy, &qz, &qw, &radius, &hh, &hex, &hey, &hez) != 14) {
+			dbg_send_str(c, "ERR usage: npvset <A|B> <kind> <px py pz> <qx qy qz qw> <radius> <hh> <hex hey hez>\n");
+			return;
 		}
-		CK_SDYNA char *s = NULL;
-		sfmt(s, "OK npviz mode%s\n", repro >= 0 ? " (repro loaded)" : "");
-		dbg_reply(c, s);
+		int idx = (which == 'B' || which == 'b') ? 1 : 0;
+		NPV_Shape *s = &npv_shapes[idx];
+		npv_free_hull(s);
+		s->kind = kind;
+		s->pos = V3(px, py, pz);
+		s->rot = (quat){ qx, qy, qz, qw };
+		s->radius = radius;
+		s->half_height = hh;
+		s->half_extents = V3(hex, hey, hez);
+		if (s->kind >= NPV_HULL_TETRA) npv_rebuild_hull(s);
+		npv_rebuild_mesh(s);
+		CK_SDYNA char *r = NULL;
+		sfmt(r, "OK shape %c set to kind=%d pos=(%.3f,%.3f,%.3f)\n", which, kind, px, py, pz);
+		dbg_reply(c, r);
 	} else if (strcmp(cmd, "playrecording") == 0) {
 		FILE *rf = fopen("mouse_recording.bin", "rb");
 		if (!rf) { dbg_send_str(c, "ERR no mouse_recording.bin\n"); return; }
