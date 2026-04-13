@@ -848,6 +848,87 @@ static void cmd_replay(const char *filename)
 	printf("Replay complete.\n");
 }
 
+// Check whether all dynamic bodies have settled (speed below threshold).
+// Steps the engine N frames, checking each frame. Reports pass/fail + offenders.
+static void cmd_stable(const char *args)
+{
+	float threshold = 0.05f;
+	int frames = 60;
+	sscanf(args, "%f %d", &threshold, &frames);
+
+	TypeDesc *root = find_type("WorldInternal");
+	TypeDesc *hot_type = find_type("BodyHot");
+	TypeDesc *gen_type = find_type("WorldInternal"); // for body_gen
+	if (!root || !hot_type) { printf("ERR missing types\n"); return; }
+
+	FieldDesc *f_hot = find_field(root, "body_hot");
+	FieldDesc *f_gen = find_field(root, "body_gen");
+	if (!f_hot || !f_gen) { printf("ERR missing fields\n"); return; }
+
+	int consecutive_stable = 0;
+	int worst_body = -1;
+	float worst_speed = 0;
+
+	for (int frame = 0; frame < frames; frame++) {
+		// Step one frame
+		driver_cmd("step");
+
+		// Read world to get array pointers
+		void *world = malloc(root->size);
+		if (!rpm_read(g_world_ptr, world, root->size)) { printf("ERR read\n"); free(world); return; }
+		uint64_t hot_ptr = *(uint64_t *)((char *)world + f_hot->offset);
+		uint64_t gen_ptr = *(uint64_t *)((char *)world + f_gen->offset);
+		free(world);
+
+		if (!hot_ptr || !gen_ptr) { printf("ERR null arrays\n"); return; }
+		int count = rpm_array_count(hot_ptr);
+		if (count <= 0) { printf("ERR no bodies\n"); return; }
+
+		void *hots = malloc(count * hot_type->size);
+		uint32_t *gens = malloc(count * 4);
+		rpm_read(hot_ptr, hots, count * hot_type->size);
+		rpm_read(gen_ptr, gens, count * 4);
+
+		FieldDesc *f_vel = find_field(hot_type, "velocity");
+		FieldDesc *f_angvel = find_field(hot_type, "angular_velocity");
+		FieldDesc *f_inv = find_field(hot_type, "inv_mass");
+
+		int all_stable = 1;
+		worst_body = -1;
+		worst_speed = 0;
+		for (int i = 0; i < count; i++) {
+			if (!(gens[i] & 1)) continue;
+			char *h = (char *)hots + i * hot_type->size;
+			float im = *(float *)(h + f_inv->offset);
+			if (im == 0) continue; // skip static
+			float *v = (float *)(h + f_vel->offset);
+			float *av = (float *)(h + f_angvel->offset);
+			float speed = sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+			float aspeed = sqrtf(av[0]*av[0] + av[1]*av[1] + av[2]*av[2]);
+			// Use linear speed for stability check (angular can be large during smooth rolling)
+			float vy = fabsf(v[1]);
+			if (vy > threshold) {
+				all_stable = 0;
+				if (vy > worst_speed) { worst_speed = vy; worst_body = i; }
+			}
+		}
+		free(hots);
+		free(gens);
+
+		if (all_stable) {
+			consecutive_stable++;
+			if (consecutive_stable >= 10) {
+				printf("STABLE: all bodies settled after %d frames (%d consecutive stable)\n", frame + 1, consecutive_stable);
+				return;
+			}
+		} else {
+			consecutive_stable = 0;
+		}
+	}
+
+	printf("UNSTABLE: after %d frames, body %d still has |vy|=%.4f (threshold=%.4f)\n", frames, worst_body, worst_speed, threshold);
+}
+
 static void cmd_help()
 {
 	printf(
@@ -861,12 +942,16 @@ static void cmd_help()
 		"  snap [path]                         save snapshot for diff\n"
 		"  diff                                compare current state with snapshot\n"
 		"  replay <file>                       play back a repro script\n"
+		"  stable [threshold] [frames]         check if all bodies settled\n"
 		"  raw <addr> [len]                    hex dump\n"
 		"\n"
 		"Driver commands (sent to engine):\n"
 		"  pause / step [n]                    pause, step frames\n"
 		"  scene <name> / scenes / restart     scene control\n"
 		"  push <idx> <f> [r]                  impulse at point\n"
+		"  drag <idx> <local> <target>         begin mouse-like drag\n"
+		"  dragto <target>                     update drag position\n"
+		"  release                             end drag\n"
 		"  highlight <idx> <color|r g b>       tint a body\n"
 		"  unhighlight <idx|all>               remove tint\n"
 		"  label <text>                        show overlay text\n"
@@ -980,10 +1065,13 @@ int main(int argc, char *argv[])
 		else if (strcmp(cmd, "raw") == 0) cmd_raw(rest);
 		else if (strcmp(cmd, "help") == 0) cmd_help();
 		else if (strcmp(cmd, "replay") == 0) cmd_replay(rest);
+		else if (strcmp(cmd, "stable") == 0) cmd_stable(rest);
 		else if (strcmp(cmd, "pause") == 0 || strcmp(cmd, "step") == 0 || strcmp(cmd, "run") == 0 ||
 		         strcmp(cmd, "scene") == 0 || strcmp(cmd, "scenes") == 0 ||
 		         strcmp(cmd, "restart") == 0 || strcmp(cmd, "info") == 0 ||
-		         strcmp(cmd, "push") == 0 || strcmp(cmd, "highlight") == 0 ||
+		         strcmp(cmd, "push") == 0 || strcmp(cmd, "drag") == 0 ||
+		         strcmp(cmd, "dragto") == 0 || strcmp(cmd, "release") == 0 ||
+		         strcmp(cmd, "highlight") == 0 ||
 		         strcmp(cmd, "unhighlight") == 0 || strcmp(cmd, "label") == 0 ||
 		         strcmp(cmd, "slow") == 0) {
 			driver_cmd(line);

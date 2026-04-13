@@ -9,6 +9,12 @@
 #define DBG_MAX_CLIENTS 4
 #define DBG_RECV_BUF 4096
 
+// Remote drag state (mirrors the mouse constraint but driven via TCP).
+static Body g_drag_body;
+static Body g_drag_anchor;
+static Joint g_drag_joint;
+static v3 g_drag_local_hit;
+
 // ============================================================================
 // Reflection: type descriptors built from real engine structs via offsetof.
 // ============================================================================
@@ -528,6 +534,67 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		CK_SDYNA char *s = NULL;
 		sfmt(s, "OK pushed body %d: J=(%.1f,%.1f,%.1f) at r=(%.2f,%.2f,%.2f)\n", idx, fx, fy, fz, r_world.x, r_world.y, r_world.z);
 		dbg_reply(c, s);
+	} else if (strcmp(cmd, "drag") == 0) {
+		// drag <body_idx> <local_x> <local_y> <local_z> <target_x> <target_y> <target_z>
+		// Begin dragging: creates soft ball-socket from body to a hidden anchor.
+		int idx; float lx, ly, lz, tx, ty, tz;
+		if (sscanf(rest, "%d %f %f %f %f %f %f", &idx, &lx, &ly, &lz, &tx, &ty, &tz) != 7) {
+			dbg_send_str(c, "ERR usage: drag <body_idx> <local_xyz> <target_xyz>\n");
+			return;
+		}
+		WorldInternal *w = (WorldInternal *)g_world.id;
+		if (idx < 0 || idx >= asize(w->body_hot) || !(w->body_gen[idx] & 1)) {
+			dbg_send_str(c, "ERR invalid body index\n");
+			return;
+		}
+		if (g_drag_body.id) {
+			destroy_joint(g_world, g_drag_joint);
+			destroy_body(g_world, g_drag_anchor);
+			g_drag_body = (Body){0};
+		}
+		// Find the Body handle from index
+		Body target_body = {0};
+		for (int i = 0; i < asize(g_draw_list); i++) {
+			if (handle_index(g_draw_list[i].body) == idx) { target_body = g_draw_list[i].body; break; }
+		}
+		if (!target_body.id) { dbg_send_str(c, "ERR body not in draw list\n"); return; }
+		g_drag_body = target_body;
+		g_drag_local_hit = V3(lx, ly, lz);
+		g_drag_anchor = create_body(g_world, (BodyParams){ .position = V3(tx, ty, tz), .rotation = quat_identity(), .mass = 0 });
+		g_drag_joint = create_ball_socket(g_world, (BallSocketParams){
+			.body_a = g_drag_anchor, .body_b = g_drag_body,
+			.local_offset_a = V3(0, 0, 0), .local_offset_b = g_drag_local_hit,
+			.spring = { .frequency = 5.0f, .damping_ratio = 0.7f },
+		});
+		int isl = w->body_cold[idx].island_id;
+		if (isl >= 0 && !w->islands[isl].awake) island_wake(w, isl);
+		CK_SDYNA char *s = NULL;
+		sfmt(s, "OK dragging body %d from local (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f)\n", idx, lx, ly, lz, tx, ty, tz);
+		dbg_reply(c, s);
+	} else if (strcmp(cmd, "dragto") == 0) {
+		// dragto <target_x> <target_y> <target_z>
+		// Update drag target position.
+		float tx, ty, tz;
+		if (sscanf(rest, "%f %f %f", &tx, &ty, &tz) != 3) {
+			dbg_send_str(c, "ERR usage: dragto <target_xyz>\n");
+			return;
+		}
+		if (!g_drag_body.id) { dbg_send_str(c, "ERR not dragging\n"); return; }
+		WorldInternal *w = (WorldInternal *)g_world.id;
+		int anchor_idx = handle_index(g_drag_anchor);
+		body_pos(w, anchor_idx) = V3(tx, ty, tz);
+		int joint_idx = handle_index(g_drag_joint);
+		int isl = w->joints[joint_idx].island_id;
+		if (isl >= 0 && !w->islands[isl].awake) island_wake(w, isl);
+		dbg_send_str(c, "OK\n");
+	} else if (strcmp(cmd, "release") == 0) {
+		if (!g_drag_body.id) { dbg_send_str(c, "ERR not dragging\n"); return; }
+		destroy_joint(g_world, g_drag_joint);
+		destroy_body(g_world, g_drag_anchor);
+		g_drag_body = (Body){0};
+		g_drag_anchor = (Body){0};
+		g_drag_joint = (Joint){0};
+		dbg_send_str(c, "OK released\n");
 	} else if (strcmp(cmd, "run") == 0) {
 		int n = (*rest) ? atoi(rest) : 60;
 		if (n < 1) n = 1;
