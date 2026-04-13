@@ -597,6 +597,16 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		g_drag_anchor = (Body){0};
 		g_drag_joint = (Joint){0};
 		dbg_send_str(c, "OK released\n");
+	} else if (strcmp(cmd, "npviz") == 0) {
+		g_npv_mode = 1;
+		int repro = (*rest) ? atoi(rest) : -1;
+		if (repro >= 0 && repro < NPV_REPRO_COUNT) {
+			if (!npv_initialized) npv_init();
+			npv_load_repro(&s_npv_repros[repro]);
+		}
+		CK_SDYNA char *s = NULL;
+		sfmt(s, "OK npviz mode%s\n", repro >= 0 ? " (repro loaded)" : "");
+		dbg_reply(c, s);
 	} else if (strcmp(cmd, "playrecording") == 0) {
 		FILE *rf = fopen("mouse_recording.bin", "rb");
 		if (!rf) { dbg_send_str(c, "ERR no mouse_recording.bin\n"); return; }

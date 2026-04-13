@@ -1069,7 +1069,7 @@ int main(int argc, char *argv[])
 		else if (strcmp(cmd, "pause") == 0 || strcmp(cmd, "step") == 0 || strcmp(cmd, "run") == 0 ||
 		         strcmp(cmd, "scene") == 0 || strcmp(cmd, "scenes") == 0 ||
 		         strcmp(cmd, "restart") == 0 || strcmp(cmd, "info") == 0 ||
-		         strcmp(cmd, "push") == 0 || strcmp(cmd, "playrecording") == 0 ||
+		         strcmp(cmd, "push") == 0 || strcmp(cmd, "playrecording") == 0 || strcmp(cmd, "npviz") == 0 ||
 		         strcmp(cmd, "drag") == 0 ||
 		         strcmp(cmd, "dragto") == 0 || strcmp(cmd, "release") == 0 ||
 		         strcmp(cmd, "highlight") == 0 ||
