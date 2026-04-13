@@ -750,13 +750,11 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		}
 
 		// Relative progress termination.
-		float max_vert2 = 0.0f;
-		for (int i = 0; i < simplex.count; i++) {
-			float v2 = len2(simplex.v[i].point);
-			if (v2 > max_vert2) max_vert2 = v2;
-		}
+		// Use dsq (closest distance squared) instead of max_vert2 (largest simplex vertex).
+		// max_vert2 scales with hull size, causing premature termination for small shapes
+		// near large hulls (e.g., capsule near center of a 20x20 floor box).
 		float progress = dsq - dot(w, closest);
-		if (progress <= max_vert2 * GJK_PROGRESS_EPS) break;
+		if (progress <= dsq * GJK_PROGRESS_EPS) break;
 
 		iter++;
 		GJK_Vertex* vert = &simplex.v[simplex.count];
@@ -787,19 +785,10 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 	float rA = shapeA->radius;
 	float rB = shapeB->radius;
 	if (rA != 0.0f || rB != 0.0f) {
-		if (result.distance > FLT_EPSILON) {
-			v3 normal = scale(sep, 1.0f / result.distance);
-			result.point1 = add(result.point1, scale(normal, rA));
-			result.point2 = sub(result.point2, scale(normal, rB));
-			result.distance = fmaxf(0.0f, result.distance - rA - rB);
-		} else {
-			v3 diff = sub(result.point2, result.point1);
-			float d2 = len2(diff);
-			v3 normal = d2 > FLT_EPSILON * FLT_EPSILON ? scale(diff, 1.0f / sqrtf(d2)) : V3(1, 0, 0);
-			result.point1 = add(result.point1, scale(normal, rA));
-			result.point2 = sub(result.point2, scale(normal, rB));
-			result.distance = 0.0f;
-		}
+		v3 normal = scale(sep, 1.0f / result.distance);
+		result.point1 = add(result.point1, scale(normal, rA));
+		result.point2 = sub(result.point2, scale(normal, rB));
+		result.distance = fmaxf(0.0f, result.distance - rA - rB);
 	}
 	return result;
 }
