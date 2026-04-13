@@ -1,6 +1,10 @@
 @echo off
 cd /d "%~dp0"
 
+echo Configuring native DLLs...
+cmake -S testbed\native -B testbed\native\build -DCMAKE_BUILD_TYPE=Release
+if errorlevel 1 goto :fail
+
 echo Building native DLLs...
 cmake --build testbed\native\build --config Release
 if errorlevel 1 goto :fail
