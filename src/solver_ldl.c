@@ -1436,6 +1436,9 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 		if (con->is_synthetic) continue;
 		int oi = t->row_offset[con->bundle_idx] + con->bundle_offset;
 		SolverJoint* sj = &sol_joints[con->solver_idx];
+		// Soft (spring) joints: no position correction -- they're velocity-level only.
+		// Position-correcting a spring constraint fights the spring and injects energy.
+		if (sj->softness > 0.0f) continue;
 		for (int d = 0; d < con->dof; d++) {
 			pos_rhs[oi + d] = -ptv * sj->pos_error[d];
 		}

@@ -93,7 +93,7 @@ typedef struct NPV_Step
 static NPV_Step npv_steps[NPV_MAX_STEPS];
 static int npv_step_count;
 static int npv_step_cur;           // current step the user is viewing
-static int npv_show_sat;           // UI toggle for SAT debug
+static bool npv_show_sat;          // UI toggle for SAT debug
 static CachedFeaturePair npv_cached_pair; // persisted across frames
 static int npv_has_cache;          // 1 if cached_pair is populated
 static int npv_sat_axis;           // cached SAT axis hint
@@ -283,6 +283,198 @@ static void npv_flip_manifold(Manifold* m)
 		m->contacts[i].normal = v3_neg(m->contacts[i].normal);
 }
 
+// ----------------------------------------------------------------------------
+// Hull face drawing helpers (for SAT debug visualization).
+
+static void npv_draw_hull_face(const Hull* hull, int face, v3 pos, quat rot, v3 sc, v3 color)
+{
+	int e = hull->faces[face].edge;
+	int start = e;
+	v3 verts[64];
+	int count = 0;
+	do {
+		v3 v = hull->verts[hull->edge_origin[e]];
+		verts[count++] = v3_add(pos, quat_rotate(rot, V3(v.x*sc.x, v.y*sc.y, v.z*sc.z)));
+		e = hull->edge_next[e];
+	} while (e != start && count < 64);
+	for (int i = 0; i < count; i++)
+		render_debug_line(verts[i], verts[(i + 1) % count], color);
+}
+
+static v3 npv_hull_face_center(const Hull* hull, int face, v3 pos, quat rot, v3 sc)
+{
+	int e = hull->faces[face].edge;
+	int start = e;
+	v3 sum = V3(0, 0, 0);
+	int count = 0;
+	do {
+		v3 v = hull->verts[hull->edge_origin[e]];
+		sum = v3_add(sum, V3(v.x*sc.x, v.y*sc.y, v.z*sc.z));
+		count++;
+		e = hull->edge_next[e];
+	} while (e != start);
+	return v3_add(pos, quat_rotate(rot, v3_scale(sum, 1.0f / (float)count)));
+}
+
+// Add one step to the trace (returns pointer for further edits).
+static NPV_Step* npv_add_step(NPV_StepKind kind, const char* desc)
+{
+	if (npv_step_count >= NPV_MAX_STEPS) return &npv_steps[NPV_MAX_STEPS - 1];
+	NPV_Step* s = &npv_steps[npv_step_count++];
+	*s = (NPV_Step){0};
+	s->kind = kind;
+	s->face = -1;
+	s->pass = -1;
+	snprintf(s->desc, sizeof(s->desc), "%s", desc);
+	return s;
+}
+
+// Is the shape pair SAT-compatible? (both are box or hull)
+static int npv_is_sat_pair()
+{
+	ShapeType ta = npv_engine_type(npv_shapes[0].kind);
+	ShapeType tb = npv_engine_type(npv_shapes[1].kind);
+	return (ta == SHAPE_BOX || ta == SHAPE_HULL) && (tb == SHAPE_BOX || tb == SHAPE_HULL);
+}
+
+// Get hull + transform for a shape (boxes use unit box hull with half_extents as scale).
+static void npv_get_hull_info(NPV_Shape* s, const Hull** out_hull, v3* out_pos, quat* out_rot, v3* out_sc)
+{
+	if (npv_engine_type(s->kind) == SHAPE_BOX) {
+		*out_hull = hull_unit_box();
+		*out_pos = s->pos;
+		*out_rot = s->rot;
+		*out_sc = s->half_extents;
+	} else {
+		*out_hull = s->hull;
+		*out_pos = s->pos;
+		*out_rot = s->rot;
+		*out_sc = V3(1, 1, 1);
+	}
+}
+
+// Build the step-through trace of the validation loop.
+static void npv_build_sat_trace()
+{
+	npv_step_count = 0;
+	npv_ref_hull = NULL;
+
+	if (!npv_is_sat_pair()) return;
+
+	const Hull* hull_a; v3 pos_a, sc_a; quat rot_a;
+	const Hull* hull_b; v3 pos_b, sc_b; quat rot_b;
+	npv_get_hull_info(&npv_shapes[0], &hull_a, &pos_a, &rot_a, &sc_a);
+	npv_get_hull_info(&npv_shapes[1], &hull_b, &pos_b, &rot_b, &sc_b);
+	if (!hull_a || !hull_b) return;
+
+	if (!npv_has_cache || npv_cached_pair.type == 0) {
+		npv_add_step(NPV_STEP_COLD_START, "Cold start: no cached feature pair. Running full SAT.");
+		return;
+	}
+
+	if (npv_cached_pair.type == 2) {
+		npv_add_step(NPV_STEP_CACHE_INFO, "Cached pair: edge-edge (always invalidated in V1).");
+		npv_add_step(NPV_STEP_INVALID, "Edge-edge cache invalidated. Running full SAT.");
+		return;
+	}
+
+	// Face-face cache: build validation trace.
+	int ref_body = npv_cached_pair.ref_body;
+	int ref_face = (ref_body == 0) ? npv_cached_pair.face_a : npv_cached_pair.face_b;
+	const Hull* ref_hull = (ref_body == 0) ? hull_a : hull_b;
+	v3 ref_pos = (ref_body == 0) ? pos_a : pos_b;
+	quat ref_rot = (ref_body == 0) ? rot_a : rot_b;
+	v3 ref_sc = (ref_body == 0) ? sc_a : sc_b;
+	v3 inc_pos = (ref_body == 0) ? pos_b : pos_a;
+
+	// Store for drawing.
+	npv_ref_hull = ref_hull;
+	npv_ref_pos = ref_pos;
+	npv_ref_rot = ref_rot;
+	npv_ref_sc = ref_sc;
+
+	{
+		char buf[160];
+		snprintf(buf, sizeof(buf), "Cached pair: face-face, ref=Shape %c, face_a=%d, face_b=%d", ref_body ? 'B' : 'A', npv_cached_pair.face_a, npv_cached_pair.face_b);
+		npv_add_step(NPV_STEP_CACHE_INFO, buf);
+	}
+
+	// Separation direction.
+	v3 sep_dir = v3_norm(v3_sub(inc_pos, ref_pos));
+	npv_sat_sep_dir = sep_dir;
+	{
+		char buf[160];
+		snprintf(buf, sizeof(buf), "Sep direction: ref(%c) -> inc(%c) = (%.2f, %.2f, %.2f)", ref_body ? 'B' : 'A', ref_body ? 'A' : 'B', sep_dir.x, sep_dir.y, sep_dir.z);
+		NPV_Step* s = npv_add_step(NPV_STEP_SEP_DIR, buf);
+		s->pass = -1;
+	}
+
+	// Cached face evaluation.
+	if (ref_face < 0 || ref_face >= ref_hull->face_count) {
+		npv_add_step(NPV_STEP_INVALID, "Cached face index out of range! Invalidated.");
+		return;
+	}
+	HullPlane cached_plane = plane_transform(ref_hull->planes[ref_face], ref_pos, ref_rot, ref_sc);
+	float cached_dot = v3_dot(cached_plane.normal, sep_dir);
+	{
+		char buf[160];
+		snprintf(buf, sizeof(buf), "Cached face %d: normal=(%.2f,%.2f,%.2f), dot(n,sep)=%.4f", ref_face, cached_plane.normal.x, cached_plane.normal.y, cached_plane.normal.z, cached_dot);
+		NPV_Step* s = npv_add_step(NPV_STEP_CACHED_FACE, buf);
+		s->face = ref_face;
+		s->face_normal = cached_plane.normal;
+		s->dot_sep = cached_dot;
+		s->pass = 1;
+	}
+
+	// Walk neighbors.
+	int valid = 1;
+	int ei = ref_hull->faces[ref_face].edge;
+	int start_ei = ei;
+	int neighbor_idx = 0;
+	do {
+		int adj = ref_hull->edge_face[ref_hull->edge_twin[ei]];
+		HullPlane adj_plane = plane_transform(ref_hull->planes[adj], ref_pos, ref_rot, ref_sc);
+		float adj_dot = v3_dot(adj_plane.normal, sep_dir);
+		int better = adj_dot > cached_dot + 1e-4f;
+
+		char buf[160];
+		snprintf(buf, sizeof(buf), "  Neighbor %d (face %d): dot=%.4f %s %.4f %s", neighbor_idx, adj, adj_dot, better ? ">" : "<=", cached_dot + 1e-4f, better ? "-- INVALIDATES" : "-- ok");
+		NPV_Step* s = npv_add_step(NPV_STEP_CHECK_NEIGHBOR, buf);
+		s->face = adj;
+		s->face_normal = adj_plane.normal;
+		s->dot_sep = adj_dot;
+		s->pass = better ? 0 : 1;
+
+		if (better && valid) valid = 0;
+
+		neighbor_idx++;
+		ei = ref_hull->edge_next[ei];
+	} while (ei != start_ei);
+
+	if (valid) {
+		npv_add_step(NPV_STEP_VALID, "All neighbors OK. Cached face is still valid.");
+
+		// Try refresh.
+		Manifold refresh_m = {0};
+		CachedFeaturePair cp_copy = npv_cached_pair;
+		ConvexHull cha = { hull_a, pos_a, rot_a, sc_a };
+		ConvexHull chb = { hull_b, pos_b, rot_b, sc_b };
+		int refreshed = refresh_hull_hull_face(cha, chb, &refresh_m, &cp_copy);
+		if (refreshed) {
+			char buf[160];
+			snprintf(buf, sizeof(buf), "Refresh succeeded: %d contact%s from cached face.", refresh_m.count, refresh_m.count != 1 ? "s" : "");
+			npv_add_step(NPV_STEP_REFRESH_OK, buf);
+		} else {
+			npv_add_step(NPV_STEP_REFRESH_FAIL, "Refresh failed (clipping produced 0 contacts). Falling back to full SAT.");
+		}
+	} else {
+		npv_add_step(NPV_STEP_INVALID, "Cache invalidated: a neighbor face is better aligned. Running full SAT.");
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Collision dispatch.
+
 static void npv_run_collide()
 {
 	npv_manifold = (Manifold){0};
@@ -296,66 +488,77 @@ static void npv_run_collide()
 	if (tb == SHAPE_HULL && !sb->hull) { npv_colliding = 0; return; }
 
 	int hit = 0;
+	int is_sat = npv_is_sat_pair();
 
-	if (ta == SHAPE_SPHERE && tb == SHAPE_SPHERE) {
-		hit = collide_sphere_sphere(npv_make_sphere(sa), npv_make_sphere(sb), &npv_manifold);
-	} else if (ta == SHAPE_SPHERE && tb == SHAPE_CAPSULE) {
-		hit = collide_sphere_capsule(npv_make_sphere(sa), npv_make_capsule(sb), &npv_manifold);
-	} else if (ta == SHAPE_SPHERE && tb == SHAPE_BOX) {
-		hit = collide_sphere_box(npv_make_sphere(sa), npv_make_box(sb), &npv_manifold);
-	} else if (ta == SHAPE_SPHERE && tb == SHAPE_HULL) {
-		hit = collide_sphere_hull(npv_make_sphere(sa), npv_make_hull(sb), &npv_manifold);
-	} else if (ta == SHAPE_SPHERE && tb == SHAPE_CYLINDER) {
-		hit = collide_cylinder_sphere(npv_make_cylinder(sb), npv_make_sphere(sa), &npv_manifold);
-		npv_flip_manifold(&npv_manifold);
-	} else if (ta == SHAPE_CAPSULE && tb == SHAPE_SPHERE) {
-		hit = collide_sphere_capsule(npv_make_sphere(sb), npv_make_capsule(sa), &npv_manifold);
-		npv_flip_manifold(&npv_manifold);
-	} else if (ta == SHAPE_CAPSULE && tb == SHAPE_CAPSULE) {
-		hit = collide_capsule_capsule(npv_make_capsule(sa), npv_make_capsule(sb), &npv_manifold);
-	} else if (ta == SHAPE_CAPSULE && tb == SHAPE_BOX) {
-		hit = collide_capsule_box(npv_make_capsule(sa), npv_make_box(sb), &npv_manifold);
-	} else if (ta == SHAPE_CAPSULE && tb == SHAPE_HULL) {
-		hit = collide_capsule_hull(npv_make_capsule(sa), npv_make_hull(sb), &npv_manifold);
-	} else if (ta == SHAPE_CAPSULE && tb == SHAPE_CYLINDER) {
-		hit = collide_cylinder_capsule(npv_make_cylinder(sb), npv_make_capsule(sa), &npv_manifold);
-		npv_flip_manifold(&npv_manifold);
-	} else if (ta == SHAPE_BOX && tb == SHAPE_SPHERE) {
-		hit = collide_sphere_box(npv_make_sphere(sb), npv_make_box(sa), &npv_manifold);
-		npv_flip_manifold(&npv_manifold);
-	} else if (ta == SHAPE_BOX && tb == SHAPE_CAPSULE) {
-		hit = collide_capsule_box(npv_make_capsule(sb), npv_make_box(sa), &npv_manifold);
-		npv_flip_manifold(&npv_manifold);
-	} else if (ta == SHAPE_BOX && tb == SHAPE_BOX) {
-		hit = collide_box_box(npv_make_box(sa), npv_make_box(sb), &npv_manifold);
-	} else if (ta == SHAPE_BOX && tb == SHAPE_HULL) {
-		hit = collide_hull_hull(npv_box_as_hull(sa), npv_make_hull(sb), &npv_manifold);
-	} else if (ta == SHAPE_BOX && tb == SHAPE_CYLINDER) {
-		hit = collide_cylinder_box(npv_make_cylinder(sb), npv_make_box(sa), &npv_manifold);
-		npv_flip_manifold(&npv_manifold);
-	} else if (ta == SHAPE_HULL && tb == SHAPE_SPHERE) {
-		hit = collide_sphere_hull(npv_make_sphere(sb), npv_make_hull(sa), &npv_manifold);
-		npv_flip_manifold(&npv_manifold);
-	} else if (ta == SHAPE_HULL && tb == SHAPE_CAPSULE) {
-		hit = collide_capsule_hull(npv_make_capsule(sb), npv_make_hull(sa), &npv_manifold);
-		npv_flip_manifold(&npv_manifold);
-	} else if (ta == SHAPE_HULL && tb == SHAPE_BOX) {
-		hit = collide_hull_hull(npv_make_hull(sa), npv_box_as_hull(sb), &npv_manifold);
-	} else if (ta == SHAPE_HULL && tb == SHAPE_HULL) {
-		hit = collide_hull_hull(npv_make_hull(sa), npv_make_hull(sb), &npv_manifold);
-	} else if (ta == SHAPE_HULL && tb == SHAPE_CYLINDER) {
-		hit = collide_cylinder_hull(npv_make_cylinder(sb), npv_make_hull(sa), &npv_manifold);
-		npv_flip_manifold(&npv_manifold);
-	} else if (ta == SHAPE_CYLINDER && tb == SHAPE_SPHERE) {
-		hit = collide_cylinder_sphere(npv_make_cylinder(sa), npv_make_sphere(sb), &npv_manifold);
-	} else if (ta == SHAPE_CYLINDER && tb == SHAPE_CAPSULE) {
-		hit = collide_cylinder_capsule(npv_make_cylinder(sa), npv_make_capsule(sb), &npv_manifold);
-	} else if (ta == SHAPE_CYLINDER && tb == SHAPE_BOX) {
-		hit = collide_cylinder_box(npv_make_cylinder(sa), npv_make_box(sb), &npv_manifold);
-	} else if (ta == SHAPE_CYLINDER && tb == SHAPE_HULL) {
-		hit = collide_cylinder_hull(npv_make_cylinder(sa), npv_make_hull(sb), &npv_manifold);
-	} else if (ta == SHAPE_CYLINDER && tb == SHAPE_CYLINDER) {
-		hit = collide_cylinder_cylinder(npv_make_cylinder(sa), npv_make_cylinder(sb), &npv_manifold);
+	// Build SAT debug trace BEFORE collision (uses old cached pair).
+	if (npv_show_sat) npv_build_sat_trace();
+
+	// For SAT pairs, use _ex variant to capture the feature pair.
+	if (is_sat) {
+		const Hull* ha; v3 pa, sca; quat ra;
+		const Hull* hb; v3 pb, scb; quat rb;
+		npv_get_hull_info(sa, &ha, &pa, &ra, &sca);
+		npv_get_hull_info(sb, &hb, &pb, &rb, &scb);
+		if (ha && hb) {
+			ConvexHull cha = { ha, pa, ra, sca };
+			ConvexHull chb = { hb, pb, rb, scb };
+			CachedFeaturePair out_pair = {0};
+			int hint = npv_has_cache ? npv_sat_axis : -1;
+			hit = collide_hull_hull_ex(cha, chb, &npv_manifold, &hint, &out_pair);
+			npv_sat_axis = hint;
+			if (out_pair.type) { npv_cached_pair = out_pair; npv_has_cache = 1; }
+		}
+	} else {
+		// Non-SAT pairs: full dispatch, clear cache.
+		npv_has_cache = 0;
+		npv_cached_pair = (CachedFeaturePair){0};
+
+		if (ta == SHAPE_SPHERE && tb == SHAPE_SPHERE) {
+			hit = collide_sphere_sphere(npv_make_sphere(sa), npv_make_sphere(sb), &npv_manifold);
+		} else if (ta == SHAPE_SPHERE && tb == SHAPE_CAPSULE) {
+			hit = collide_sphere_capsule(npv_make_sphere(sa), npv_make_capsule(sb), &npv_manifold);
+		} else if (ta == SHAPE_SPHERE && tb == SHAPE_BOX) {
+			hit = collide_sphere_box(npv_make_sphere(sa), npv_make_box(sb), &npv_manifold);
+		} else if (ta == SHAPE_SPHERE && tb == SHAPE_HULL) {
+			hit = collide_sphere_hull(npv_make_sphere(sa), npv_make_hull(sb), &npv_manifold);
+		} else if (ta == SHAPE_SPHERE && tb == SHAPE_CYLINDER) {
+			hit = collide_cylinder_sphere(npv_make_cylinder(sb), npv_make_sphere(sa), &npv_manifold);
+			npv_flip_manifold(&npv_manifold);
+		} else if (ta == SHAPE_CAPSULE && tb == SHAPE_SPHERE) {
+			hit = collide_sphere_capsule(npv_make_sphere(sb), npv_make_capsule(sa), &npv_manifold);
+			npv_flip_manifold(&npv_manifold);
+		} else if (ta == SHAPE_CAPSULE && tb == SHAPE_CAPSULE) {
+			hit = collide_capsule_capsule(npv_make_capsule(sa), npv_make_capsule(sb), &npv_manifold);
+		} else if (ta == SHAPE_CAPSULE && tb == SHAPE_BOX) {
+			hit = collide_capsule_box(npv_make_capsule(sa), npv_make_box(sb), &npv_manifold);
+		} else if (ta == SHAPE_CAPSULE && tb == SHAPE_HULL) {
+			hit = collide_capsule_hull(npv_make_capsule(sa), npv_make_hull(sb), &npv_manifold);
+		} else if (ta == SHAPE_CAPSULE && tb == SHAPE_CYLINDER) {
+			hit = collide_cylinder_capsule(npv_make_cylinder(sb), npv_make_capsule(sa), &npv_manifold);
+			npv_flip_manifold(&npv_manifold);
+		} else if (ta == SHAPE_BOX && tb == SHAPE_SPHERE) {
+			hit = collide_sphere_box(npv_make_sphere(sb), npv_make_box(sa), &npv_manifold);
+			npv_flip_manifold(&npv_manifold);
+		} else if (ta == SHAPE_BOX && tb == SHAPE_CAPSULE) {
+			hit = collide_capsule_box(npv_make_capsule(sb), npv_make_box(sa), &npv_manifold);
+			npv_flip_manifold(&npv_manifold);
+		} else if (ta == SHAPE_HULL && tb == SHAPE_SPHERE) {
+			hit = collide_sphere_hull(npv_make_sphere(sb), npv_make_hull(sa), &npv_manifold);
+			npv_flip_manifold(&npv_manifold);
+		} else if (ta == SHAPE_HULL && tb == SHAPE_CAPSULE) {
+			hit = collide_capsule_hull(npv_make_capsule(sb), npv_make_hull(sa), &npv_manifold);
+			npv_flip_manifold(&npv_manifold);
+		} else if (ta == SHAPE_CYLINDER && tb == SHAPE_SPHERE) {
+			hit = collide_cylinder_sphere(npv_make_cylinder(sa), npv_make_sphere(sb), &npv_manifold);
+		} else if (ta == SHAPE_CYLINDER && tb == SHAPE_CAPSULE) {
+			hit = collide_cylinder_capsule(npv_make_cylinder(sa), npv_make_capsule(sb), &npv_manifold);
+		} else if (ta == SHAPE_CYLINDER && tb == SHAPE_BOX) {
+			hit = collide_cylinder_box(npv_make_cylinder(sa), npv_make_box(sb), &npv_manifold);
+		} else if (ta == SHAPE_CYLINDER && tb == SHAPE_HULL) {
+			hit = collide_cylinder_hull(npv_make_cylinder(sa), npv_make_hull(sb), &npv_manifold);
+		} else if (ta == SHAPE_CYLINDER && tb == SHAPE_CYLINDER) {
+			hit = collide_cylinder_cylinder(npv_make_cylinder(sa), npv_make_cylinder(sb), &npv_manifold);
+		}
 	}
 
 	npv_colliding = hit;
@@ -617,6 +820,45 @@ static void npv_draw_manifold()
 }
 
 // ----------------------------------------------------------------------------
+// SAT debug drawing: render face highlights for steps up to npv_step_cur.
+
+static void npv_draw_sat_debug()
+{
+	if (!npv_show_sat || npv_step_count == 0 || !npv_ref_hull) return;
+
+	int limit = npv_step_cur + 1;
+	if (limit > npv_step_count) limit = npv_step_count;
+
+	for (int i = 0; i < limit; i++) {
+		NPV_Step* s = &npv_steps[i];
+		int is_current = (i == npv_step_cur);
+		float alpha = is_current ? 1.0f : 0.4f;
+
+		if (s->kind == NPV_STEP_SEP_DIR) {
+			// Draw separation direction arrow between shapes.
+			v3 col = V3(0.7f * alpha, 0.7f * alpha, 0.7f * alpha);
+			render_debug_line(npv_shapes[0].pos, npv_shapes[1].pos, col);
+		}
+
+		if (s->face < 0 || s->face >= npv_ref_hull->face_count) continue;
+
+		v3 color;
+		if (s->pass == 1) color = V3(0.2f * alpha, 0.9f * alpha, 0.3f * alpha);       // green = ok
+		else if (s->pass == 0) color = V3(1.0f * alpha, 0.25f * alpha, 0.2f * alpha);  // red = invalidates
+		else color = V3(0.0f, 0.9f * alpha, 1.0f * alpha);                              // cyan = cached face
+
+		// Draw face wireframe.
+		npv_draw_hull_face(npv_ref_hull, s->face, npv_ref_pos, npv_ref_rot, npv_ref_sc, color);
+
+		// Draw face normal arrow from face center.
+		v3 fc = npv_hull_face_center(npv_ref_hull, s->face, npv_ref_pos, npv_ref_rot, npv_ref_sc);
+		float nlen = is_current ? 0.5f : 0.3f;
+		v3 tip = v3_add(fc, v3_scale(s->face_normal, nlen));
+		render_debug_line(fc, tip, color);
+	}
+}
+
+// ----------------------------------------------------------------------------
 // Initialization.
 
 static void npv_init_shape(NPV_Shape* s, int idx)
@@ -668,6 +910,8 @@ static int npv_shape_ui(NPV_Shape* s, const char* label, int shape_idx)
 			npv_free_hull(s);
 			if (s->kind >= NPV_HULL_TETRA) npv_rebuild_hull(s);
 			npv_rebuild_mesh(s);
+			npv_has_cache = 0; npv_cached_pair = (CachedFeaturePair){0};
+			npv_step_count = 0; npv_step_cur = 0;
 			changed = 1;
 		}
 	}
@@ -847,6 +1091,48 @@ static void npv_update()
 		ImGui_TextColored((ImVec4){1.0f, 0.4f, 0.4f, 1.0f}, "Not colliding");
 	}
 
+	// SAT cache debug.
+	ImGui_SeparatorText("SAT Cache");
+	ImGui_Checkbox("Show SAT Debug", &npv_show_sat);
+	if (npv_show_sat) {
+		if (!npv_is_sat_pair()) {
+			ImGui_TextDisabled("(not a SAT pair -- need box/hull vs box/hull)");
+		} else if (npv_step_count > 0) {
+			// Step navigation.
+			if (ImGui_Button("|<")) npv_step_cur = 0;
+			ImGui_SameLine();
+			if (ImGui_Button("<Prev")) { if (npv_step_cur > 0) npv_step_cur--; }
+			ImGui_SameLine();
+			if (ImGui_Button("Next>")) { if (npv_step_cur < npv_step_count - 1) npv_step_cur++; }
+			ImGui_SameLine();
+			if (ImGui_Button(">|")) npv_step_cur = npv_step_count - 1;
+			ImGui_SameLine();
+			ImGui_Text("Step %d/%d", npv_step_cur + 1, npv_step_count);
+
+			// Clamp step if trace was rebuilt with fewer steps.
+			if (npv_step_cur >= npv_step_count) npv_step_cur = npv_step_count - 1;
+
+			// Show all steps, highlight current.
+			for (int i = 0; i < npv_step_count; i++) {
+				NPV_Step* st = &npv_steps[i];
+				bool is_cur = (i == npv_step_cur);
+				if (is_cur) {
+					ImVec4 col;
+					if (st->pass == 1) col = (ImVec4){0.3f, 1.0f, 0.4f, 1.0f};
+					else if (st->pass == 0) col = (ImVec4){1.0f, 0.4f, 0.3f, 1.0f};
+					else col = (ImVec4){0.4f, 0.9f, 1.0f, 1.0f};
+					ImGui_TextColored(col, ">> %s", st->desc);
+				} else {
+					ImGui_TextDisabled("   %s", st->desc);
+				}
+			}
+
+			if (ImGui_Button("Clear Cache")) { npv_has_cache = 0; npv_cached_pair = (CachedFeaturePair){0}; npv_step_count = 0; npv_step_cur = 0; }
+		} else {
+			ImGui_TextDisabled("No trace yet. Move shapes to collide.");
+		}
+	}
+
 	ImGui_End();
 }
 
@@ -915,6 +1201,9 @@ static void npv_draw()
 
 	// Draw manifold.
 	npv_draw_manifold();
+
+	// Draw SAT cache debug visualization.
+	npv_draw_sat_debug();
 
 	render_end();
 }
