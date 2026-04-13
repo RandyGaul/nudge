@@ -640,18 +640,18 @@ static int npv_shape_ui(NPV_Shape* s, const char* label, int shape_idx)
 	// Shape-specific params.
 	switch (s->kind) {
 	case NPV_SPHERE:
-		if (ImGui_DragFloat3Ex("Radius", &s->radius, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
+		if (ImGui_DragFloatEx("Radius", &s->radius, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
 		break;
 	case NPV_CAPSULE:
-		if (ImGui_DragFloat3Ex("Radius##cap", &s->radius, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
-		if (ImGui_DragFloat3Ex("Half Height", &s->half_height, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
+		if (ImGui_DragFloatEx("Radius##cap", &s->radius, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
+		if (ImGui_DragFloatEx("Half Height", &s->half_height, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
 		break;
 	case NPV_BOX:
 		if (ImGui_DragFloat3Ex("Half Extents", &s->half_extents.x, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
 		break;
 	case NPV_CYLINDER:
-		if (ImGui_DragFloat3Ex("Radius##cyl", &s->radius, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
-		if (ImGui_DragFloat3Ex("Half Height##cyl", &s->half_height, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
+		if (ImGui_DragFloatEx("Radius##cyl", &s->radius, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
+		if (ImGui_DragFloatEx("Half Height##cyl", &s->half_height, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
 		break;
 	default: // hull types
 		if (s->kind == NPV_HULL_RANDOM) {
@@ -766,14 +766,24 @@ static void npv_update()
 	if (ImGui_RadioButton("Shape B", npv_selected == 1)) npv_selected = 1;
 	ImGui_SameLine();
 	if (ImGui_Button("Reset")) {
-		npv_free_hull(&npv_shapes[npv_selected]);
-		npv_init_shape(&npv_shapes[npv_selected], npv_selected);
-		// Reclaim the mesh slot (init_shape allocates a new one, but we want to reuse).
-		// Undo the allocation: decrement mesh count and use old slot.
-		r_mesh_count--;
-		npv_shapes[npv_selected].mesh_slot = (npv_selected == 0) ? npv_shapes[0].mesh_slot : npv_shapes[1].mesh_slot;
-		if (npv_shapes[npv_selected].kind >= NPV_HULL_TETRA) npv_rebuild_hull(&npv_shapes[npv_selected]);
-		npv_rebuild_mesh(&npv_shapes[npv_selected]);
+		NPV_Shape* rs = &npv_shapes[npv_selected];
+		int saved_slot = rs->mesh_slot;
+		int saved_valid = rs->mesh_valid;
+		npv_free_hull(rs);
+		if (saved_valid) { mesh_destroy(&r_meshes[saved_slot]); }
+		*rs = (NPV_Shape){0};
+		rs->kind = (npv_selected == 0) ? NPV_SPHERE : NPV_BOX;
+		rs->pos = (npv_selected == 0) ? V3(-1.0f, 1.0f, 0.0f) : V3(1.0f, 1.0f, 0.0f);
+		rs->rot = quat_identity();
+		rs->radius = 0.5f;
+		rs->half_height = 0.5f;
+		rs->half_extents = V3(0.5f, 0.5f, 0.5f);
+		rs->rand_verts = 12;
+		rs->rand_seed = 12345 + (uint32_t)npv_selected * 99991;
+		rs->color = (npv_selected == 0) ? V3(0.85f, 0.35f, 0.3f) : V3(0.3f, 0.45f, 0.85f);
+		rs->mesh_slot = saved_slot;
+		rs->mesh_valid = 0;
+		npv_rebuild_mesh(rs);
 	}
 
 	ImGui_Spacing();

@@ -456,6 +456,8 @@ static bool g_npv_mode = false;
 
 void update()
 {
+	if (g_npv_mode) { npv_update(); return; }
+
 	// Camera input (skip when imgui wants the mouse)
 	ImGuiIO* io = ImGui_GetIO();
 	if (!io->WantCaptureMouse) {
@@ -726,6 +728,8 @@ static void draw_aabb_wireframe(v3 lo, v3 hi, v3 color)
 
 void draw()
 {
+	if (g_npv_mode) { npv_draw(); return; }
+
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	render_draw_bg(V3(0.35f, 0.38f, 0.42f), V3(0.14f, 0.14f, 0.16f));
 

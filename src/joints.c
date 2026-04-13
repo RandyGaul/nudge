@@ -131,29 +131,29 @@ static float jac_velocity_f(JacobianRow* row, BodyHot* a, BodyHot* b)
 }
 
 // Apply impulse for one DOF row: v += M^-1 * J^T * lambda.
-static void jac_apply(JacobianRow* row, float lambda, BodyHot* a, BodyHot* b)
+static void jac_apply(JacobianRow* row, float lambda, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
 {
 	float ima = a->inv_mass, imb = b->inv_mass;
 	a->velocity.x += ima * row->J_a[0] * lambda;
 	a->velocity.y += ima * row->J_a[1] * lambda;
 	a->velocity.z += ima * row->J_a[2] * lambda;
-	v3 ang_a = inv_inertia_world_mul(a, V3(row->J_a[3]*lambda, row->J_a[4]*lambda, row->J_a[5]*lambda));
+	v3 ang_a = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, V3(row->J_a[3]*lambda, row->J_a[4]*lambda, row->J_a[5]*lambda));
 	a->angular_velocity = add(a->angular_velocity, ang_a);
 	b->velocity.x += imb * row->J_b[0] * lambda;
 	b->velocity.y += imb * row->J_b[1] * lambda;
 	b->velocity.z += imb * row->J_b[2] * lambda;
-	v3 ang_b = inv_inertia_world_mul(b, V3(row->J_b[3]*lambda, row->J_b[4]*lambda, row->J_b[5]*lambda));
+	v3 ang_b = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, V3(row->J_b[3]*lambda, row->J_b[4]*lambda, row->J_b[5]*lambda));
 	b->angular_velocity = add(b->angular_velocity, ang_b);
 }
 
 // Compute scalar effective mass for one DOF row: 1 / (J * M^-1 * J^T + softness).
-static float jac_eff_mass(JacobianRow* row, BodyHot* a, BodyHot* b, float softness)
+static float jac_eff_mass(JacobianRow* row, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb, float softness)
 {
 	float ima = a->inv_mass, imb = b->inv_mass;
 	float k = ima * (row->J_a[0]*row->J_a[0] + row->J_a[1]*row->J_a[1] + row->J_a[2]*row->J_a[2]) + imb * (row->J_b[0]*row->J_b[0] + row->J_b[1]*row->J_b[1] + row->J_b[2]*row->J_b[2]);
-	v3 wa = inv_inertia_world_mul(a, V3(row->J_a[3], row->J_a[4], row->J_a[5]));
+	v3 wa = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, V3(row->J_a[3], row->J_a[4], row->J_a[5]));
 	k += row->J_a[3]*wa.x + row->J_a[4]*wa.y + row->J_a[5]*wa.z;
-	v3 wb = inv_inertia_world_mul(b, V3(row->J_b[3], row->J_b[4], row->J_b[5]));
+	v3 wb = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, V3(row->J_b[3], row->J_b[4], row->J_b[5]));
 	k += row->J_b[3]*wb.x + row->J_b[4]*wb.y + row->J_b[5]*wb.z;
 	k += softness;
 	return k > 1e-12f ? 1.0f / k : 0.0f;
@@ -391,7 +391,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 
 	// Generic: compute eff_mass and bias from pos_error for all DOFs
 	for (int d = 0; d < s->dof; d++) {
-		s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, soft);
+		s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, sa, sb, soft);
 		s->bias[d] = ptv * s->pos_error[d];
 	}
 
@@ -534,7 +534,7 @@ static void joints_solve_limits(WorldInternal* w, SolverJoint* joints, int count
 			s->lambda[d] += dl;
 			if (s->lambda[d] < s->lo[d]) s->lambda[d] = s->lo[d];
 			if (s->lambda[d] > s->hi[d]) s->lambda[d] = s->hi[d];
-			jac_apply(&s->rows[d], s->lambda[d] - old, a, b);
+			jac_apply(&s->rows[d], s->lambda[d] - old, a, b, sa, sb);
 		}
 	}
 }
@@ -550,7 +550,7 @@ static void joints_warm_start(WorldInternal* w, SolverJoint* joints, int count)
 		BodyState* sb = &w->body_state[s->body_b];
 		for (int d = 0; d < s->dof; d++) {
 			if (s->lambda[d] == 0) continue;
-			jac_apply(&s->rows[d], s->lambda[d], a, b);
+			jac_apply(&s->rows[d], s->lambda[d], a, b, sa, sb);
 		}
 	}
 }
@@ -582,7 +582,7 @@ static void solve_joint(WorldInternal* w, SolverJoint* s)
 		s->lambda[0] += delta;
 		if (s->lambda[0] < s->lo[0]) s->lambda[0] = s->lo[0];
 		if (s->lambda[0] > s->hi[0]) s->lambda[0] = s->hi[0];
-		jac_apply(&s->rows[0], s->lambda[0] - old, a, b);
+		jac_apply(&s->rows[0], s->lambda[0] - old, a, b, sa, sb);
 		return;
 	}
 
@@ -609,7 +609,7 @@ static void solve_joint(WorldInternal* w, SolverJoint* s)
 			block_solve_f(K, D, rhs, delta, base_dof);
 			for (int d = 0; d < base_dof; d++) {
 				s->lambda[d] += delta[d];
-				jac_apply(&s->rows[d], delta[d], a, b);
+				jac_apply(&s->rows[d], delta[d], a, b, sa, sb);
 			}
 		} else {
 			for (int d = 0; d < base_dof; d++) {
@@ -617,7 +617,7 @@ static void solve_joint(WorldInternal* w, SolverJoint* s)
 				float r = -vel_err - s->bias[d] - s->softness * s->lambda[d];
 				float dl = s->rows[d].eff_mass * r;
 				s->lambda[d] += dl;
-				jac_apply(&s->rows[d], dl, a, b);
+				jac_apply(&s->rows[d], dl, a, b, sa, sb);
 			}
 		}
 	} else if (base_dof == 1) {
@@ -625,7 +625,7 @@ static void solve_joint(WorldInternal* w, SolverJoint* s)
 		float r = -vel_err - s->bias[0] - s->softness * s->lambda[0];
 		float dl = s->rows[0].eff_mass * r;
 		s->lambda[0] += dl;
-		jac_apply(&s->rows[0], dl, a, b);
+		jac_apply(&s->rows[0], dl, a, b, sa, sb);
 	}
 
 	// Scalar clamped PGS for bounded (limit) DOFs
@@ -637,7 +637,7 @@ static void solve_joint(WorldInternal* w, SolverJoint* s)
 		s->lambda[d] += dl;
 		if (s->lambda[d] < s->lo[d]) s->lambda[d] = s->lo[d];
 		if (s->lambda[d] > s->hi[d]) s->lambda[d] = s->hi[d];
-		jac_apply(&s->rows[d], s->lambda[d] - old, a, b);
+		jac_apply(&s->rows[d], s->lambda[d] - old, a, b, sa, sb);
 	}
 }
 
