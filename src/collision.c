@@ -447,13 +447,12 @@ int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 
 	if (dist2 > 1e-12f) {
 		// Sphere center outside box — contact on box surface.
-		// diff points from box toward sphere (B->A). Negate for A->B convention.
 		float dist = sqrtf(dist2);
 		v3 local_n = scale(diff, -1.0f / dist);
 		v3 world_n = rotate(b.rotation, local_n);
 		v3 world_pt = add(b.center, rotate(b.rotation, clamped));
 		manifold->count = 1;
-		manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius - dist, .feature_id = 0 };
+		manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius - dist, .feature_id = 1 };
 		return 1;
 	}
 
@@ -465,7 +464,6 @@ int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 	float dz = he.z - fabsf(local_center.z);
 	if (dz < best_depth) { best_depth = dz; best_face = local_center.z > 0 ? 1 : 0; }
 
-	// face_sign gives outward box normal. Negate for A->B (sphere->box) convention.
 	v3 local_n = V3(0, 0, 0);
 	static const int face_axis[6] = {2, 2, 0, 0, 1, 1};
 	static const float face_sign[6] = {-1, 1, -1, 1, -1, 1};
@@ -473,7 +471,7 @@ int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 	v3 world_n = rotate(b.rotation, local_n);
 	v3 world_pt = sub(a.center, scale(world_n, a.radius));
 	manifold->count = 1;
-	manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius + best_depth, .feature_id = 0 };
+	manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius + best_depth, .feature_id = 1 };
 	return 1;
 }
 
@@ -488,8 +486,12 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 {
 	GJK_Result r = gjk_query_segment_hull(a.p, a.q, b);
 
-	if (r.distance > a.radius) return 0;
-	if (!manifold) return 1;
+	// Contact generation margin: generate speculative contacts slightly beyond
+	// the capsule surface so fast-rotating capsules maintain contact chains.
+	// Contacts with negative penetration get lambda=0 in the solver (speculative).
+	float contact_margin = LINEAR_SLOP * 4;
+	if (r.distance > a.radius + contact_margin) return 0;
+	if (!manifold) return r.distance <= a.radius;
 
 	if (r.distance > LINEAR_SLOP) {
 		// --- Shallow path ---
@@ -515,8 +517,8 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 
 		if (face_match >= 0) {
 			// Face contact: clip capsule segment against face side planes,
-			// then test clipped endpoints for penetration.  This produces
-			// 0-2 contacts with proper rotational stability.
+			// then test clipped endpoints for penetration.  Produces 0-2
+			// contacts with proper rotational stability.
 			v3 fn = matched_plane.normal;
 			float fd = matched_plane.offset;
 
@@ -549,24 +551,29 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 				float dp = dot(cp_p, fn) - fd;
 				float dq = dot(cp_q, fn) - fd;
 				int ncp = 0;
+				// Feature ID = which capsule endpoint (1=P, 2=Q).
+				// Determined by proximity to the original unclipped endpoints.
+				// Stable across frames regardless of which hull face is contacted.
 				if (a.radius - dp >= -LINEAR_SLOP) {
 					float pen = a.radius - dp;
 					if (pen < 0) pen = 0;
+					int ep = (len2(sub(cp_p, a.p)) < len2(sub(cp_p, a.q))) ? 1 : 2;
 					manifold->contacts[ncp++] = (Contact){
 						.point = sub(cp_p, scale(fn, dp)),
 						.normal = neg(fn),
 						.penetration = pen,
-						.feature_id = 0,
+						.feature_id = (uint32_t)ep,
 					};
 				}
 				if (len2(sub(cp_p, cp_q)) > 1e-8f && a.radius - dq >= -LINEAR_SLOP) {
 					float pen = a.radius - dq;
 					if (pen < 0) pen = 0;
+					int ep = (len2(sub(cp_q, a.p)) < len2(sub(cp_q, a.q))) ? 1 : 2;
 					manifold->contacts[ncp++] = (Contact){
 						.point = sub(cp_q, scale(fn, dq)),
 						.normal = neg(fn),
 						.penetration = pen,
-						.feature_id = 1,
+						.feature_id = (uint32_t)ep,
 					};
 				}
 				if (ncp > 0) {
@@ -578,12 +585,15 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 		}
 
 		// Edge/vertex contact (or face fallback): single contact from GJK.
+		// Feature ID = closest capsule endpoint (1=P, 2=Q).
 		manifold->count = 1;
+		v3 contact_pt = add(r.point1, scale(gjk_n, a.radius));
+		int ep = (len2(sub(contact_pt, a.p)) < len2(sub(contact_pt, a.q))) ? 1 : 2;
 		manifold->contacts[0] = (Contact){
-			.point = add(r.point1, scale(gjk_n, a.radius)),
+			.point = contact_pt,
 			.normal = gjk_n,
 			.penetration = a.radius - r.distance,
-			.feature_id = 2,
+			.feature_id = (uint32_t)ep,
 		};
 		return 1;
 	}
@@ -603,7 +613,7 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 		for (int fi = 0; fi < hull->face_count; fi++) {
 			HullPlane wp = plane_transform(hull->planes[fi], b.center, b.rotation, b.scale);
 			float s = dot(pt, wp.normal) - wp.offset;
-			if (s > a.radius) goto next_ep;  // this endpoint is separated on this face
+			if (s > a.radius) goto next_ep;
 			if (s > best_sep) { best_sep = s; best_n = wp.normal; best_d = wp.offset; }
 		}
 		{
@@ -611,10 +621,10 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 			if (pen >= -LINEAR_SLOP) {
 				if (pen < 0) pen = 0;
 				manifold->contacts[cp++] = (Contact){
-					.point = sub(pt, scale(best_n, best_sep)),  // project onto face
+					.point = sub(pt, scale(best_n, best_sep)),
 					.normal = neg(best_n),
 					.penetration = pen,
-					.feature_id = (uint32_t)ei,
+					.feature_id = (uint32_t)(ei + 1), // 1=P, 2=Q
 				};
 			}
 		}
@@ -624,12 +634,13 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 	// Fallback: cylindrical portion contacts hull but neither hemisphere does.
 	if (cp == 0) {
 		v3 gjk_n = r.distance > 1e-6f ? scale(sub(r.point2, r.point1), 1.0f / r.distance) : V3(0, 1, 0);
+		int ep = (len2(sub(r.point2, a.p)) < len2(sub(r.point2, a.q))) ? 1 : 2;
 		manifold->count = 1;
 		manifold->contacts[0] = (Contact){
 			.point = r.point2,
 			.normal = gjk_n,
 			.penetration = a.radius - r.distance,
-			.feature_id = 2,
+			.feature_id = (uint32_t)ep,
 		};
 		return 1;
 	}

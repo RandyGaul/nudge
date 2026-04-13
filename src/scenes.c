@@ -1006,3 +1006,27 @@ static void scene_cylinder_playground_setup()
 		apush(g_draw_list, ((DrawEntry){ h, hm, V3(1, 1, 1), V3(0.9f, 0.7f, 0.2f) }));
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Scene: Capsule Test (isolated capsule behavior on flat ground)
+
+static void scene_capsule_test_setup()
+{
+	add_floor();
+
+	v3 color = V3(0.2f, 0.8f, 0.3f);
+	for (int i = 0; i < 5; i++) {
+		Body c = create_body(g_world, (BodyParams){
+			.position = V3(-3.0f + i * 1.5f, 1.0f, 0),
+			.rotation = quat_identity(),
+			.mass = 1.0f,
+			.friction = 0.5f,
+			.restitution = 0.5f,
+		});
+		body_add_shape(g_world, c, (ShapeParams){
+			.type = SHAPE_CAPSULE,
+			.capsule = { .half_height = CAP_HALF_H, .radius = CAP_RADIUS },
+		});
+		apush(g_draw_list, ((DrawEntry){ c, g_mesh_capsule, V3(1, 1, 1), color }));
+	}
+}

@@ -103,10 +103,20 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		smf.lambda_t1 = wm->manifold_lambda_t1; smf.lambda_t2 = wm->manifold_lambda_t2; smf.lambda_twist = wm->manifold_lambda_twist;
 	}
 
-	// Speculative contacts: zero warm-started impulse for negative-penetration contacts.
+	// Speculative/shallow contact lambda clamp: zero for negative penetration,
+	// and cap warm-started lambda for near-zero penetration to prevent overshoot.
+	// Without this, a stale warm lambda from a deep-pen frame gets applied to
+	// a shallow contact, injecting energy and causing erratic bouncing.
 	for (int c = 0; c < smf.contact_count; c++) {
 		SolverContact* s = &sc[contact_base+c];
-		if (s->penetration < 0.0f) s->lambda_n = 0;
+		if (s->penetration <= 0.0f) { s->lambda_n = 0; continue; }
+		// Cap warm lambda: a shallow contact (pen near slop) shouldn't carry
+		// more impulse than what a steady resting contact would produce.
+		// Steady-state lambda ~= mass * gravity * dt / n_contacts ~= 0.08.
+		// Scale: allow full lambda when pen >= 2*slop, taper to 0 at pen=0.
+		float pen_scale = s->penetration / (2.0f * SOLVER_SLOP);
+		if (pen_scale > 1.0f) pen_scale = 1.0f;
+		s->lambda_n *= pen_scale;
 	}
 
 	sm[idx] = smf;

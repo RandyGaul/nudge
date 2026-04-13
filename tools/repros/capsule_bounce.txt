@@ -1,0 +1,43 @@
+# Capsule bounce bug repro
+# Usage: replay tools/repros/capsule_bounce.txt
+
+scene Capsule Test
+label Settling...
+run 150
+wait 2800
+
+highlight 3 red
+label Pushing RED capsule
+wait 1000
+
+push 3 1.5 1 0.8 0.1 0.4 0.1
+label Tumbling...
+run 40
+wait 900
+
+slow 0.2
+label SLOW-MO: watch the erratic ground bounce
+run 200
+wait 3600
+
+slow 1
+label Normal speed: bounce-fly-bounce repeats
+run 180
+wait 3300
+
+push 3 0 5 0 0.2 0.3 0
+label Launched! Watch the chaotic landing
+run 90
+wait 1700
+
+slow 0.15
+label SLOW-MO: single-frame cold-start impacts
+run 400
+wait 7000
+
+slow 1
+label Root cause: feature_id=0 -> no warm start on capsule contacts
+wait 3000
+
+unhighlight all
+label

@@ -420,6 +420,10 @@ void world_step(World world, float dt)
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
 
+	afree(w->dbg_solver_manifolds); w->dbg_solver_manifolds = NULL;
+	afree(w->dbg_solver_contacts);  w->dbg_solver_contacts = NULL;
+	afree(w->dbg_solver_joints);    w->dbg_solver_joints = NULL;
+
 	double t0 = perf_now();
 	warm_cache_age_and_evict(w);
 	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
@@ -854,6 +858,10 @@ void world_step(World world, float dt)
 	w->perf.islands = perf_now() - t4;
 
 	afree(manifolds);
+
+	w->dbg_solver_manifolds = (void *)sm;
+	w->dbg_solver_contacts = (void *)sc;
+	w->dbg_solver_joints = (void *)sol_joints;
 
 	w->perf.total = perf_now() - t_total;
 }
@@ -1388,7 +1396,7 @@ static void bvh_debug_walk(BVH_Tree* t, int ni, int depth, BVHDebugFn fn, void* 
 {
 	BVHNode* n = &t->nodes[ni];
 	for (int s = 0; s < 2; s++) {
-		BVHChild* c = bvh_child(n, s);
+		BVH_Child* c = bvh_child(n, s);
 		if (bvh_child_is_empty(c)) continue;
 		fn(c->min, c->max, depth, bvh_child_is_leaf(c), user);
 		if (bvh_child_is_internal(c)) bvh_debug_walk(t, c->index, depth + 1, fn, user);

@@ -236,18 +236,27 @@ static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count
 		wm->manifold_lambda_twist = m->lambda_twist;
 	}
 
-	afree(sm);
-	afree(sc);
+	// sm/sc NOT freed -- kept in WorldInternal.dbg_solver_* for remote viewer.
 }
 
 // Age and evict stale warm cache entries. Called once per frame (not per sub-step).
-// Single pass: increment stale and evict in one traversal.
+// Age and evict stale warm cache entries. Called once per frame (not per sub-step).
+// Extended lifetime for awake bodies: bouncing capsules go airborne for 5-20 frames
+// and need warm data to survive until re-contact. Sleeping bodies evict quickly.
 static void warm_cache_age_and_evict(WorldInternal* w)
 {
 	int i = 0;
 	while (i < map_size(w->warm_cache)) {
-		if (++w->warm_cache[i].stale > 1)
-			map_del(w->warm_cache, map_key(w->warm_cache, i));
+		WarmManifold* wm = &w->warm_cache[i];
+		wm->stale++;
+		uint64_t key = map_key(w->warm_cache, i);
+		int ba = (int)(key & 0xFFFFFFFF);
+		int bb = (int)(key >> 32);
+		int ia = w->body_cold[ba].island_id;
+		int ib = w->body_cold[bb].island_id;
+		int awake = (ia >= 0 && (w->island_gen[ia] & 1) && w->islands[ia].awake) || (ib >= 0 && (w->island_gen[ib] & 1) && w->islands[ib].awake);
+		if (wm->stale > (awake ? 30 : 1))
+			map_del(w->warm_cache, key);
 		else
 			i++;
 	}

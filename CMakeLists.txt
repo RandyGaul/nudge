@@ -43,6 +43,10 @@ if(MSVC)
 	target_link_options(nudge_tests PRIVATE /STACK:8388608)
 endif()
 
+# Remote debug viewer (standalone, reads engine memory via ReadProcessMemory)
+add_executable(nudge_viewer tools/viewer.c)
+target_link_libraries(nudge_viewer ws2_32)
+
 # Copy SDL3.dll next to executables so F5 works in MSVC
 add_custom_command(TARGET nudge POST_BUILD
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3-shared> $<TARGET_FILE_DIR:nudge>)

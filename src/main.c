@@ -1,4 +1,12 @@
 // See LICENSE for licensing info.
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#undef small
+#undef near
+#undef far
+
 #define CKIT_IMPLEMENTATION
 #include "ckit.h"
 
@@ -53,6 +61,11 @@ void init();
 void update();
 void draw();
 
+// Forward declarations for debug server (defined in debug_server.c, included later).
+static void debug_server_init();
+static void debug_server_poll();
+static void debug_server_shutdown();
+
 static void platform_shutdown()
 {
 	SDL_GL_DestroyContext(g_glctx);
@@ -87,6 +100,7 @@ int main(int argc, char* argv[])
 		SDL_GL_SwapWindow(g_window);
 	}
 
+	debug_server_shutdown();
 	cImGui_ImplOpenGL3_Shutdown();
 	cImGui_ImplSDL3_Shutdown();
 	ImGui_DestroyContext(NULL);
@@ -123,6 +137,15 @@ static int g_ldl_inspect_step = 0;      // factorization step slider
 static int g_ldl_hover_body = -1;       // body highlighted by matrix hover (-1 = none)
 static bool g_paused = false;
 static bool g_step_once = false;
+static float g_time_scale = 1.0f; // slow-mo: 0.1 = 10x slow, 1 = normal
+static int g_run_frames = 0;      // >0: run this many frames then auto-pause
+
+// Debug replay: highlights, label overlay
+#define MAX_HIGHLIGHTS 64
+static struct { int body_idx; v3 color; int active; } g_highlights[MAX_HIGHLIGHTS];
+static int g_highlight_count;
+static char g_label_text[256];
+static float g_label_timer; // seconds remaining to show label
 
 // Capsule rendering params (baked into mesh)
 static const float CAP_RADIUS = 0.3f;
@@ -189,6 +212,7 @@ static Scene g_scenes[] = {
 	{ "Slider Crane",    scene_slider_crane_setup },
 	{ "Hinge Limits",    scene_hinge_limits_setup },
 	{ "Cylinder Playground", scene_cylinder_playground_setup },
+	{ "Capsule Test", scene_capsule_test_setup },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 
@@ -414,6 +438,8 @@ void init()
 	g_mesh_cylinder = render_create_cylinder_mesh(CYL_RADIUS, CYL_HALF_H);
 
 	setup_scene();
+
+	debug_server_init();
 }
 
 static void setup_scene()
@@ -453,6 +479,7 @@ static void draw_aabb_wireframe(v3 lo, v3 hi, v3 color);
 
 static bool g_npv_mode = false;
 #include "np_viz.c"
+#include "debug_server.c"
 
 void update()
 {
@@ -581,7 +608,13 @@ void update()
 		}
 	}
 
-	if (!g_paused || g_step_once) { world_step(g_world, 1.0f / 60.0f); g_step_once = false; }
+	if (!g_paused || g_step_once) {
+		world_step(g_world, (1.0f / 60.0f) * g_time_scale);
+		g_step_once = false;
+		if (g_run_frames > 0 && --g_run_frames == 0) g_paused = true;
+	}
+
+	debug_server_poll();
 
 	// Debug panel
 	ImGui_Begin("Debug", NULL, 0);
@@ -695,6 +728,16 @@ void update()
 		g_ldl_debug_island = (g_ldl_enabled && g_ldl_inspect_island >= 0) ? g_ldl_inspect_island : -1;
 		draw_ldl_inspector();
 	}
+
+	// Debug replay label overlay
+	if (g_label_timer > 0) {
+		g_label_timer -= 1.0f / 60.0f;
+		ImGui_SetNextWindowPosEx((ImVec2){g_width * 0.5f, 40}, ImGuiCond_Always, (ImVec2){0.5f, 0});
+		ImGui_SetNextWindowBgAlpha(0.7f);
+		ImGui_Begin("##label", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNav);
+		ImGui_TextColored((ImVec4){1, 1, 0.3f, 1}, "%s", g_label_text);
+		ImGui_End();
+	}
 }
 
 static void draw_body_mesh(int mesh, Body body, v3 sc, v3 color)
@@ -703,8 +746,17 @@ static void draw_body_mesh(int mesh, Body body, v3 sc, v3 color)
 	quat rot = body_get_rotation(g_world, body);
 	float opacity = g_translucent_shapes ? 0.3f : 1.0f;
 	if (g_show_sleep && body_is_asleep(g_world, body)) {
-		color = V3(0.3f, 0.35f, 0.5f); // desaturated blue tint
+		color = V3(0.3f, 0.35f, 0.5f);
 		opacity = g_translucent_shapes ? 0.15f : 0.6f;
+	}
+	// Debug highlight override
+	int idx = handle_index(body);
+	for (int h = 0; h < g_highlight_count; h++) {
+		if (g_highlights[h].active && g_highlights[h].body_idx == idx) {
+			color = g_highlights[h].color;
+			opacity = 1.0f;
+			break;
+		}
 	}
 	render_push(mesh, mat4_trs(pos, rot, sc), color, opacity);
 }

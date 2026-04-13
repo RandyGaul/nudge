@@ -344,6 +344,13 @@ typedef struct WorldInternal
 	float max_push_velocity;
 	int sub_steps;
 	PerfTimers perf;
+
+	// Debug: solver arrays from last world_step, kept alive for remote viewer.
+	// Freed at the start of the next world_step. Typed void* because SolverManifold
+	// and SolverContact are defined later in the unity build.
+	void *dbg_solver_manifolds; // CK_DYNA SolverManifold*
+	void *dbg_solver_contacts;  // CK_DYNA SolverContact*
+	void *dbg_solver_joints;    // CK_DYNA SolverJoint*
 } WorldInternal;
 
 // -----------------------------------------------------------------------------

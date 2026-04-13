@@ -10434,7 +10434,7 @@ static void test_bvh_cache_reorder()
 	int bp_ok = 1;
 	for (int i = 0; i < asize(t.leaves); i++) {
 		BVHLeaf* lf = &t.leaves[i];
-		BVHChild* c = bvh_child(&t.nodes[lf->node_idx], lf->child_slot);
+		BVH_Child* c = bvh_child(&t.nodes[lf->node_idx], lf->child_slot);
 		if (!bvh_child_is_leaf(c) || bvh_child_leaf_idx(c) != i) bp_ok = 0;
 	}
 	TEST_ASSERT(bp_ok);
@@ -10460,7 +10460,7 @@ static int bvh_validate_backpointers(BVH_Tree* t)
 		// Skip freed leaves (check if on freelist -- simple: just verify node_idx is in range)
 		BVHLeaf* lf = &t->leaves[i];
 		if (lf->node_idx < 0 || lf->node_idx >= asize(t->nodes)) continue;
-		BVHChild* c = bvh_child(&t->nodes[lf->node_idx], lf->child_slot);
+		BVH_Child* c = bvh_child(&t->nodes[lf->node_idx], lf->child_slot);
 		if (!bvh_child_is_leaf(c) || bvh_child_leaf_idx(c) != i) return 0;
 	}
 	return 1;
@@ -10588,7 +10588,7 @@ static void test_bvh_refine_subtree()
 	// Build LUT from current tree state.
 	AABB* lut = CK_ALLOC(sizeof(AABB) * asize(t.leaves));
 	for (int i = 0; i < asize(t.leaves); i++) {
-		BVHChild* c = bvh_child(&t.nodes[t.leaves[i].node_idx], t.leaves[i].child_slot);
+		BVH_Child* c = bvh_child(&t.nodes[t.leaves[i].node_idx], t.leaves[i].child_slot);
 		lut[i] = bvh_child_aabb(c);
 	}
 

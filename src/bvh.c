@@ -81,18 +81,18 @@ static AABB body_aabb(BodyState* s, BodyCold* c)
 // BVH node layout: 64 bytes = one cache line.
 // Two children inline. Metadata (parent pointers) stored separately.
 
-typedef struct BVHChild
+typedef struct BVH_Child
 {
 	v3 min;          // 12
 	int32_t index;   // 4 -- negative: encoded leaf (~idx), non-negative: child node
 	v3 max;          // 12
 	int32_t leaf_count; // 4 -- 0=empty, 1=leaf, >1=internal subtree
-} BVHChild;          // 32 bytes
+} BVH_Child;          // 32 bytes
 
 typedef struct BVHNode
 {
-	BVHChild a; // 32
-	BVHChild b; // 32
+	BVH_Child a; // 32
+	BVH_Child b; // 32
 } BVHNode;      // 64 bytes
 
 typedef struct BVHMeta
@@ -156,13 +156,13 @@ static int bvh_alloc_leaf(BVH_Tree* t)
 // -----------------------------------------------------------------------------
 // Child helpers.
 
-static BVHChild* bvh_child(BVHNode* n, int slot) { return slot == 0 ? &n->a : &n->b; }
+static BVH_Child* bvh_child(BVHNode* n, int slot) { return slot == 0 ? &n->a : &n->b; }
 
-static AABB bvh_child_aabb(BVHChild* c) { return (AABB){ c->min, c->max }; }
+static AABB bvh_child_aabb(BVH_Child* c) { return (AABB){ c->min, c->max }; }
 
-static void bvh_child_set_aabb(BVHChild* c, AABB box) { c->min = box.min; c->max = box.max; }
+static void bvh_child_set_aabb(BVH_Child* c, AABB box) { c->min = box.min; c->max = box.max; }
 
-static void bvh_child_set_leaf(BVHChild* c, AABB box, int leaf_idx) { bvh_child_set_aabb(c, box); c->index = ~leaf_idx; c->leaf_count = 1; }
+static void bvh_child_set_leaf(BVH_Child* c, AABB box, int leaf_idx) { bvh_child_set_aabb(c, box); c->index = ~leaf_idx; c->leaf_count = 1; }
 
 // Place a leaf with fat AABB. The node child stores the fat AABB for conservative overlap.
 static void bvh_place_leaf(BVH_Tree* t, int ni, int slot, AABB tight, int leaf_idx)
@@ -175,14 +175,14 @@ static void bvh_place_leaf(BVH_Tree* t, int ni, int slot, AABB tight, int leaf_i
 	t->leaves[leaf_idx].fat_max = fat.max;
 }
 
-static void bvh_child_set_node(BVHChild* c, AABB box, int node_idx, int lcount) { bvh_child_set_aabb(c, box); c->index = node_idx; c->leaf_count = lcount; }
+static void bvh_child_set_node(BVH_Child* c, AABB box, int node_idx, int lcount) { bvh_child_set_aabb(c, box); c->index = node_idx; c->leaf_count = lcount; }
 
-static void bvh_child_set_empty(BVHChild* c) { *c = (BVHChild){0}; }
+static void bvh_child_set_empty(BVH_Child* c) { *c = (BVH_Child){0}; }
 
-static int bvh_child_is_leaf(BVHChild* c) { return c->leaf_count == 1; }
-static int bvh_child_is_internal(BVHChild* c) { return c->leaf_count > 1; }
-static int bvh_child_is_empty(BVHChild* c) { return c->leaf_count == 0; }
-static int bvh_child_leaf_idx(BVHChild* c) { return ~c->index; }
+static int bvh_child_is_leaf(BVH_Child* c) { return c->leaf_count == 1; }
+static int bvh_child_is_internal(BVH_Child* c) { return c->leaf_count > 1; }
+static int bvh_child_is_empty(BVH_Child* c) { return c->leaf_count == 0; }
+static int bvh_child_leaf_idx(BVH_Child* c) { return ~c->index; }
 
 static AABB bvh_node_aabb(BVHNode* n)
 {
@@ -197,7 +197,7 @@ static int bvh_count_leaves(BVH_Tree* t, int ni)
 	BVHNode* n = &t->nodes[ni];
 	int count = 0;
 	for (int s = 0; s < 2; s++) {
-		BVHChild* c = bvh_child(n, s);
+		BVH_Child* c = bvh_child(n, s);
 		if (bvh_child_is_empty(c)) continue;
 		if (bvh_child_is_leaf(c)) count++;
 		else count += bvh_count_leaves(t, c->index);
@@ -220,14 +220,14 @@ static void bvh_try_rotate(BVH_Tree* t, int ni)
 
 	// For each internal child, try swapping each of its grandchildren with the other child.
 	for (int side = 0; side < 2; side++) {
-		BVHChild* parent_child = bvh_child(n, side);
-		BVHChild* uncle = bvh_child(n, 1 - side);
+		BVH_Child* parent_child = bvh_child(n, side);
+		BVH_Child* uncle = bvh_child(n, 1 - side);
 		if (!bvh_child_is_internal(parent_child)) continue;
 
 		BVHNode* pn = &t->nodes[parent_child->index];
 		for (int gc = 0; gc < 2; gc++) {
-			BVHChild* grandchild = bvh_child(pn, gc);
-			BVHChild* sibling = bvh_child(pn, 1 - gc);
+			BVH_Child* grandchild = bvh_child(pn, gc);
+			BVH_Child* sibling = bvh_child(pn, 1 - gc);
 			if (bvh_child_is_empty(grandchild) || bvh_child_is_empty(sibling)) continue;
 
 			// After rotation: parent_child would contain (sibling, uncle_old), uncle slot gets grandchild.
@@ -248,14 +248,14 @@ static void bvh_try_rotate(BVH_Tree* t, int ni)
 	// Apply the rotation.
 	int side = best_rot / 2;
 	int gc = best_rot % 2;
-	BVHChild* parent_child = bvh_child(n, side);
-	BVHChild* uncle_slot = bvh_child(n, 1 - side);
+	BVH_Child* parent_child = bvh_child(n, side);
+	BVH_Child* uncle_slot = bvh_child(n, 1 - side);
 	int pn_idx = parent_child->index;
 	BVHNode* pn = &t->nodes[pn_idx];
 
 	// Save grandchild and uncle.
-	BVHChild gc_saved = *bvh_child(pn, gc);
-	BVHChild uncle_saved = *uncle_slot;
+	BVH_Child gc_saved = *bvh_child(pn, gc);
+	BVH_Child uncle_saved = *uncle_slot;
 
 	// Grandchild moves to uncle's slot in N.
 	*uncle_slot = gc_saved;
@@ -276,7 +276,7 @@ static void bvh_try_rotate(BVH_Tree* t, int ni)
 		t->meta[uncle_slot->index].child_slot = 1 - side;
 	}
 	// The uncle (now in pn at slot gc):
-	BVHChild* new_gc = bvh_child(pn, gc);
+	BVH_Child* new_gc = bvh_child(pn, gc);
 	if (bvh_child_is_leaf(new_gc)) {
 		t->leaves[bvh_child_leaf_idx(new_gc)].node_idx = pn_idx;
 		t->leaves[bvh_child_leaf_idx(new_gc)].child_slot = gc;
@@ -325,7 +325,7 @@ static int bvh_insert(BVH_Tree* t, int body_idx, AABB bounds)
 		float cost_b = aabb_surface_area(mb) * (node->b.leaf_count + 1) - aabb_surface_area(bvh_child_aabb(&node->b)) * node->b.leaf_count;
 
 		int slot = cost_a == cost_b ? (node->a.leaf_count <= node->b.leaf_count ? 0 : 1) : (cost_a < cost_b ? 0 : 1);
-		BVHChild* child = bvh_child(node, slot);
+		BVH_Child* child = bvh_child(node, slot);
 
 		if (bvh_child_is_leaf(child)) {
 			// Split: create new node containing existing leaf + new leaf.
@@ -388,7 +388,7 @@ static int bvh_remove(BVH_Tree* t, int leaf_idx)
 
 	// Get the sibling.
 	int sib_slot = 1 - slot;
-	BVHChild sib = *bvh_child(&t->nodes[ni], sib_slot);
+	BVH_Child sib = *bvh_child(&t->nodes[ni], sib_slot);
 
 	int parent = t->meta[ni].parent;
 	if (parent == -1) {
@@ -398,7 +398,7 @@ static int bvh_remove(BVH_Tree* t, int leaf_idx)
 	} else {
 		// Replace ni in parent with sibling.
 		int parent_slot = t->meta[ni].child_slot;
-		BVHChild* pc = bvh_child(&t->nodes[parent], parent_slot);
+		BVH_Child* pc = bvh_child(&t->nodes[parent], parent_slot);
 		*pc = sib;
 
 		// Update sibling's back-pointers.
@@ -428,7 +428,7 @@ static int bvh_remove(BVH_Tree* t, int leaf_idx)
 	int last = asize(t->leaves) - 1;
 	if (leaf_idx != last) {
 		t->leaves[leaf_idx] = t->leaves[last];
-		BVHChild* lc = bvh_child(&t->nodes[t->leaves[leaf_idx].node_idx], t->leaves[leaf_idx].child_slot);
+		BVH_Child* lc = bvh_child(&t->nodes[t->leaves[leaf_idx].node_idx], t->leaves[leaf_idx].child_slot);
 		lc->index = ~leaf_idx;
 		apop(t->leaves);
 		return t->leaves[leaf_idx].body_idx;
@@ -551,7 +551,7 @@ static void bvh_collect_and_free(BVH_Tree* t, int ni, CK_DYNA int** lis)
 {
 	BVHNode* n = &t->nodes[ni];
 	for (int s = 0; s < 2; s++) {
-		BVHChild* c = bvh_child(n, s);
+		BVH_Child* c = bvh_child(n, s);
 		if (bvh_child_is_empty(c)) continue;
 		if (bvh_child_is_leaf(c)) apush(*lis, bvh_child_leaf_idx(c));
 		else bvh_collect_and_free(t, c->index, lis);
@@ -715,7 +715,7 @@ typedef struct BVHRefit
 
 // Refit+reorder a single child. Returns updated child for parent to store.
 // target_idx is where the child node should go in the new array.
-static BVHChild bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int parent_target, int parent_slot, int* changed)
+static BVH_Child bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int parent_target, int parent_slot, int* changed)
 {
 	BVHNode* src = &r->src_nodes[src_ni];
 	BVHMeta* smeta = &r->src_meta[src_ni];
@@ -742,7 +742,7 @@ static BVHChild bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int p
 	int target_b = target_idx + 1 + a_nodes;
 
 	// Process child A.
-	BVHChild sa = src->a;
+	BVH_Child sa = src->a;
 	if (bvh_child_is_leaf(&sa)) {
 		int li = bvh_child_leaf_idx(&sa);
 		int bi = r->tree->leaves[li].body_idx;
@@ -771,7 +771,7 @@ static BVHChild bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int p
 	}
 
 	// Process child B.
-	BVHChild sb = src->b;
+	BVH_Child sb = src->b;
 	if (bvh_child_is_leaf(&sb)) {
 		int li = bvh_child_leaf_idx(&sb);
 		int bi = r->tree->leaves[li].body_idx;
@@ -802,8 +802,8 @@ static BVHChild bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int p
 	dmeta->dirty = !all_sleeping;
 	*changed |= any_changed;
 
-	// Return this node as a BVHChild for the parent.
-	BVHChild result;
+	// Return this node as a BVH_Child for the parent.
+	BVH_Child result;
 	bvh_child_set_aabb(&result, bvh_node_aabb(dst));
 	result.index = target_idx;
 	result.leaf_count = dst->a.leaf_count + dst->b.leaf_count;
@@ -858,9 +858,9 @@ static int bvh_validate_leaves(BVH_Tree* t, WorldInternal* w)
 // Self-test: find all overlapping leaf pairs within a single tree.
 // Split dispatch: leaf-vs-node, node-vs-node with 4-pair batching.
 
-static void bvh_dispatch_pair(BVH_Tree* t, BVHChild* a, BVHChild* b, CK_DYNA BroadPair** pairs);
+static void bvh_dispatch_pair(BVH_Tree* t, BVH_Child* a, BVH_Child* b, CK_DYNA BroadPair** pairs);
 
-static void bvh_leaf_vs_node(BVH_Tree* t, BVHChild* leaf, int ni, CK_DYNA BroadPair** pairs)
+static void bvh_leaf_vs_node(BVH_Tree* t, BVH_Child* leaf, int ni, CK_DYNA BroadPair** pairs)
 {
 	BVHNode* n = &t->nodes[ni];
 	int oa = aabb_overlaps(bvh_child_aabb(leaf), bvh_child_aabb(&n->a));
@@ -896,7 +896,7 @@ static void bvh_nodes_vs_nodes(BVH_Tree* t, BVHNode* na, BVHNode* nb, CK_DYNA Br
 	if (oo_bb) bvh_dispatch_pair(t, &na->b, &nb->b, pairs);
 }
 
-static void bvh_dispatch_pair(BVH_Tree* t, BVHChild* a, BVHChild* b, CK_DYNA BroadPair** pairs)
+static void bvh_dispatch_pair(BVH_Tree* t, BVH_Child* a, BVH_Child* b, CK_DYNA BroadPair** pairs)
 {
 	if (bvh_child_is_internal(a) && bvh_child_is_internal(b)) {
 		bvh_nodes_vs_nodes(t, &t->nodes[a->index], &t->nodes[b->index], pairs);
@@ -926,9 +926,9 @@ static void bvh_self_test(BVH_Tree* t, CK_DYNA BroadPair** pairs)
 // Cross-test: find all overlapping leaf pairs between two trees.
 // Split dispatch with 4-pair batching for node-vs-node.
 
-static void bvh_cross_dispatch(BVH_Tree* ta, BVHChild* a, BVH_Tree* tb, BVHChild* b, CK_DYNA BroadPair** pairs);
+static void bvh_cross_dispatch(BVH_Tree* ta, BVH_Child* a, BVH_Tree* tb, BVH_Child* b, CK_DYNA BroadPair** pairs);
 
-static void bvh_cross_leaf_vs_node(BVH_Tree* tl, BVHChild* leaf, BVH_Tree* tn, int ni, CK_DYNA BroadPair** pairs)
+static void bvh_cross_leaf_vs_node(BVH_Tree* tl, BVH_Child* leaf, BVH_Tree* tn, int ni, CK_DYNA BroadPair** pairs)
 {
 	BVHNode* n = &tn->nodes[ni];
 	int oa = aabb_overlaps(bvh_child_aabb(leaf), bvh_child_aabb(&n->a));
@@ -963,7 +963,7 @@ static void bvh_cross_nodes(BVH_Tree* ta, BVHNode* na, BVH_Tree* tb, BVHNode* nb
 	if (oo_bb) bvh_cross_dispatch(ta, &na->b, tb, &nb->b, pairs);
 }
 
-static void bvh_cross_dispatch(BVH_Tree* ta, BVHChild* a, BVH_Tree* tb, BVHChild* b, CK_DYNA BroadPair** pairs)
+static void bvh_cross_dispatch(BVH_Tree* ta, BVH_Child* a, BVH_Tree* tb, BVH_Child* b, CK_DYNA BroadPair** pairs)
 {
 	if (bvh_child_is_internal(a) && bvh_child_is_internal(b)) {
 		bvh_cross_nodes(ta, &ta->nodes[a->index], tb, &tb->nodes[b->index], pairs);
@@ -992,7 +992,7 @@ static void bvh_query_aabb_node(BVH_Tree* t, int ni, AABB query, CK_DYNA int** r
 {
 	BVHNode* n = &t->nodes[ni];
 	for (int s = 0; s < 2; s++) {
-		BVHChild* c = bvh_child(n, s);
+		BVH_Child* c = bvh_child(n, s);
 		if (bvh_child_is_empty(c)) continue;
 		if (!aabb_overlaps(query, bvh_child_aabb(c))) continue;
 		if (bvh_child_is_leaf(c))
@@ -1035,7 +1035,7 @@ static void bvh_query_ray_node(BVH_Tree* t, int ni, v3 origin, v3 inv_dir, float
 {
 	BVHNode* n = &t->nodes[ni];
 	for (int s = 0; s < 2; s++) {
-		BVHChild* c = bvh_child(n, s);
+		BVH_Child* c = bvh_child(n, s);
 		if (bvh_child_is_empty(c)) continue;
 		float t_hit;
 		if (!ray_aabb(origin, inv_dir, bvh_child_aabb(c), max_t, &t_hit)) continue;
@@ -1060,7 +1060,7 @@ static AABB* bvh_build_lut(BVH_Tree* t)
 	AABB* lut = CK_ALLOC(sizeof(AABB) * lcount);
 	for (int i = 0; i < lcount; i++) {
 		BVHLeaf* lf = &t->leaves[i];
-		BVHChild* c = bvh_child(&t->nodes[lf->node_idx], lf->child_slot);
+		BVH_Child* c = bvh_child(&t->nodes[lf->node_idx], lf->child_slot);
 		lut[i] = bvh_child_aabb(c);
 	}
 	return lut;

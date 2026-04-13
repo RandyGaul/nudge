@@ -70,10 +70,13 @@
 - `src/vmath.h` -- v3, quat, mat4 math
 - `src/render.c` -- GL 3.3 instanced renderer
 - `src/ckit.h` -- vendored data structures (dynamic arrays, strings, maps)
+- `src/debug_server.c` -- minimal TCP driver (pause/step/scene) for remote viewer
+- `tools/viewer.c` -- remote debug viewer (ReadProcessMemory + reflected type tables)
 
 ## Debugging
+- **Remote viewer** (`/remote-debug` skill): Use for inspecting live physics state -- body positions, solver manifolds, contacts, islands, BVH, warm cache. The viewer (`tools/viewer.c`) reads engine memory via ReadProcessMemory using reflected type tables. Engine has a tiny TCP driver for pause/step/scene control. The viewer is the smart part -- all type layout knowledge lives there. To add types: add a REFLECT() block in the viewer, no engine changes needed.
 - Use the `win-debugger` MCP for debugging crashes and inspecting runtime state. Launch the Debug build under cdb, set breakpoints on nudge functions (module name is `nudge` for the app, `nudge_tests` for tests), inspect locals/structs, and walk the call stack.
-- Prefer the debugger over printf debugging -- it gives full struct inspection, call stacks, conditional breakpoints, and catches access violations at the exact instruction.
+- Prefer the debugger and remote viewer over printf debugging -- they give full struct inspection without code changes.
 - Symbol path: `C:/git/nudge/build/Debug`. Force-load symbols with `.reload /f <module>.exe`.
 
 ## Reference code

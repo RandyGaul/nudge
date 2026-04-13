@@ -14,6 +14,7 @@ CLAUDE.md
 *.tsv
 *.txt
 !CMakeLists.txt
+!tools/repros/*.txt
 *.bat
 *.xml
 *.log

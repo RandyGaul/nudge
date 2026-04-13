@@ -797,5 +797,5 @@ static void joints_post_solve(WorldInternal* w, SolverJoint* joints, int count)
 		SolverJoint* s = &joints[i];
 		for (int d = 0; d < s->dof; d++) w->joints[s->joint_idx].warm_lambda[d] = s->lambda[d];
 	}
-	afree(joints);
+	// joints NOT freed -- kept in WorldInternal.dbg_solver_joints for remote viewer.
 }
