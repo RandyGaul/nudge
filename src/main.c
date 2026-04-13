@@ -139,7 +139,7 @@ typedef struct Scene {
 	void (*setup)();
 } Scene;
 
-static int g_scene_index = 6; // Heavy Chain (LDL oscillation debug)
+static int g_scene_index = 0; // Shape Showcase
 
 // Mouse constraint state (right-click drag to interact with bodies)
 static Body g_mouse_body;         // body being dragged ({0} if none)
