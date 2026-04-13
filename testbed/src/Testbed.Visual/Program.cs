@@ -56,6 +56,11 @@ Vector3 dragTarget = Vector3.Zero;
 
 void LoadScene(int index)
 {
+	// End any active drags before destroying engines
+	for (int si = 0; si < slots.Length && si < dragHandles.Length; si++)
+	{
+		if (dragHandles[si] >= 0) { slots[si].Adapter.EndDrag(dragHandles[si]); dragHandles[si] = -1; }
+	}
 	foreach (var s in slots) s.Dispose();
 
 	slots =
