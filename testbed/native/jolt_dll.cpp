@@ -138,10 +138,13 @@ EXPORT void* jolt_create_world(float gx, float gy, float gz, int max_bodies) {
 
 EXPORT void jolt_destroy_world(void* world) {
 	auto* w = (JoltWorld*)world;
+	// Remove constraints before bodies
+	for (auto& c : w->constraints) {
+		if (c) { w->system.RemoveConstraint(c); c = nullptr; }
+	}
 	auto& bi = w->system.GetBodyInterface();
 	for (auto& id : w->bodies) {
-		bi.RemoveBody(id);
-		bi.DestroyBody(id);
+		if (!id.IsInvalid()) { bi.RemoveBody(id); bi.DestroyBody(id); }
 	}
 	delete w->job_system;
 	delete w->temp_allocator;

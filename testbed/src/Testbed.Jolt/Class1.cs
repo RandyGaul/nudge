@@ -192,6 +192,13 @@ public class JoltAdapter : IPhysicsAdapter
 	{
 		if (_world != 0)
 		{
+			// Clean up any active drags before destroying world
+			foreach (var state in _drags.Values)
+			{
+				Native.RemoveConstraint(_world, state.ConstraintId);
+				Native.RemoveBody(_world, state.AnchorBody);
+			}
+			_drags.Clear();
 			Native.DestroyWorld(_world);
 			_world = 0;
 		}

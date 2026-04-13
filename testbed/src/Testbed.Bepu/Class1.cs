@@ -319,6 +319,12 @@ public class BepuAdapter : IPhysicsAdapter
 
 	public void Dispose()
 	{
+		foreach (var state in _drags.Values)
+		{
+			_sim?.Solver.Remove(state.Constraint);
+			_sim?.Bodies.Remove(state.Anchor);
+		}
+		_drags.Clear();
 		_sim?.Dispose();
 		_pool?.Clear();
 		_sim = null;

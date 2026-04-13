@@ -224,6 +224,12 @@ public class NudgeAdapter : IPhysicsAdapter
 	{
 		if (_world != 0)
 		{
+			foreach (var state in _drags.Values)
+			{
+				Native.DestroyJoint(_world, state.Joint);
+				Native.DestroyBody(_world, state.AnchorBody);
+			}
+			_drags.Clear();
 			Native.DestroyWorld(_world);
 			_world = 0;
 		}
