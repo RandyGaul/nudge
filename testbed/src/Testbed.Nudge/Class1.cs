@@ -53,6 +53,9 @@ internal static partial class Native
 	[LibraryImport(Lib, EntryPoint = "nudge_body_set_velocity")]
 	public static partial void SetVelocity(ulong world, ulong body, float vx, float vy, float vz);
 
+	[LibraryImport(Lib, EntryPoint = "nudge_set_ldl_enabled")]
+	public static partial void SetLdlEnabled(ulong world, int enabled);
+
 	[LibraryImport(Lib, EntryPoint = "nudge_create_ball_socket")]
 	public static partial ulong CreateBallSocket(ulong world, ulong bodyA, ulong bodyB, float ax, float ay, float az, float bx, float by, float bz, float freq, float dampingRatio);
 
@@ -93,6 +96,7 @@ public class NudgeAdapter : IPhysicsAdapter
 	public void CreateWorld(float gravityX, float gravityY, float gravityZ)
 	{
 		_world = Native.CreateWorld(gravityX, gravityY, gravityZ, 0, 0, 0);
+		Native.SetLdlEnabled(_world, 1);
 	}
 
 	public int AddBody(BodyDesc desc)

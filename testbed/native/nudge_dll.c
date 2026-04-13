@@ -186,3 +186,8 @@ EXPORT void nudge_destroy_body(uint64_t world, uint64_t body) {
 EXPORT void nudge_destroy_joint(uint64_t world, uint64_t joint) {
 	destroy_joint((World){world}, (Joint){joint});
 }
+
+EXPORT void nudge_set_ldl_enabled(uint64_t world, int enabled) {
+	WorldInternal* w = (WorldInternal*)world;
+	w->ldl_enabled = enabled;
+}
