@@ -38,6 +38,11 @@ typedef struct BodyCold
 	int island_id;    // -1 = no island (static or unconnected)
 	int island_prev;  // prev body in island body list, -1 = head
 	int island_next;  // next body in island body list, -1 = tail
+	// Collision filter (Bullet/Jolt convention). Two bodies collide iff
+	//   (a.group & b.mask) && (b.group & a.mask).
+	// Default both to 0xFFFFFFFF so new bodies collide with everything.
+	uint32_t collision_group;
+	uint32_t collision_mask;
 } BodyCold;
 
 // Hot: solver working set, iterated every PGS step, packed for cache.

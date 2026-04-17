@@ -15,6 +15,15 @@ static int jointed_pair_skip(CK_MAP(uint8_t) joint_pairs, int a, int b)
 	return map_get_ptr(joint_pairs, key) != NULL;
 }
 
+// Collision filter: two bodies collide iff (a.group & b.mask) && (b.group & a.mask).
+// Cheap bitwise check; skips the narrowphase entirely for filtered pairs.
+static int filter_pair_skip(WorldInternal* w, int a, int b)
+{
+	uint32_t ga = w->body_cold[a].collision_group, ma = w->body_cold[a].collision_mask;
+	uint32_t gb = w->body_cold[b].collision_group, mb = w->body_cold[b].collision_mask;
+	return ((ga & mb) == 0) || ((gb & ma) == 0);
+}
+
 static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
 {
 	int count = asize(w->body_hot);
@@ -30,6 +39,7 @@ static void broadphase_n2(WorldInternal* w, InternalManifold** manifolds)
 			int inactive_j = body_inv_mass(w, j) == 0.0f || (isl_j >= 0 && (w->island_gen[isl_j] & 1) && !w->islands[isl_j].awake);
 			if (inactive_i && inactive_j) continue;
 			if (jointed_pair_skip(w->joint_pairs, i, j)) continue;
+			if (filter_pair_skip(w, i, j)) continue;
 			narrowphase_pair(w, i, j, manifolds);
 		}
 	}
@@ -114,6 +124,7 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 			int b = sap[j].body_idx;
 			if (!aabb_overlaps(ta, tight[b])) continue;
 			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
+			if (filter_pair_skip(w, a, b)) continue;
 			apush(dd_pairs, ((BroadPair){ a, b }));
 		}
 	}
@@ -127,6 +138,7 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 			int b = sleeping_bodies[si];
 			if (!aabb_overlaps(ta, tight[b])) continue;
 			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
+			if (filter_pair_skip(w, a, b)) continue;
 			apush(dd_pairs, ((BroadPair){ a, b }));
 		}
 	}

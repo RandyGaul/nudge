@@ -902,6 +902,8 @@ Body create_body(World world, BodyParams params)
 		.island_id = -1,
 		.island_prev = -1,
 		.island_next = -1,
+		.collision_group = 0xFFFFFFFFu,
+		.collision_mask  = 0xFFFFFFFFu,
 	};
 	float fric = params.friction;
 	if (fric == 0.0f) fric = 0.5f; // default for all bodies
@@ -1083,6 +1085,23 @@ int world_get_sleep_enabled(World world)
 {
 	WorldInternal* w = (WorldInternal*)world.id;
 	return w->sleep_enabled;
+}
+
+// Collision filter: two bodies collide iff (a.group & b.mask) && (b.group & a.mask).
+// Default on create is group=mask=0xFFFFFFFF (collide with everything).
+// Useful for ragdoll parts, cranes, levers -- bodies that shouldn't contact
+// each other even though no joint directly pairs them.
+void body_set_collision_filter(World world, Body body, uint32_t group, uint32_t mask)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	assert(split_valid(w->body_gen, body));
+	w->body_cold[idx].collision_group = group;
+	w->body_cold[idx].collision_mask = mask;
+	// Wake bodies so the broadphase picks up the change on the next step.
+	int isl = w->body_cold[idx].island_id;
+	if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
+		island_wake(w, isl);
 }
 
 void body_set_sleep_allowed(World world, Body body, int allowed)
