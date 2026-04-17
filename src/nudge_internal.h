@@ -466,6 +466,7 @@ typedef struct SolverJoint
 	float hi[JOINT_MAX_DOF];
 
 	JacobianRow rows[JOINT_MAX_DOF];
+	float bs_inv_eff_mass[6];  // ball socket: inverse 3x3 effective mass (packed sym: xx,xy,xz,yy,yz,zz)
 } SolverJoint;
 
 // Constraint ref for graph coloring dispatch.

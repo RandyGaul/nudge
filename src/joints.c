@@ -108,6 +108,22 @@ static void ball_socket_eff_mass(BodyHot* a, BodyHot* b, BodyState* sa, BodyStat
 	sym3x3_inverse(K, out);
 }
 
+// Ball socket 3-DOF PGS step. Uses precomputed sym3x3 inverse effective mass
+// (built once per substep by ball_socket_eff_mass). Jv and impulse application
+// are inline from r_a, r_b -- no stored Jacobian reads, no per-iter K factor.
+static void solve_ball_socket(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
+{
+	v3 ra = s->r_a, rb = s->r_b;
+	v3 jv = sub(add(b->velocity, cross(b->angular_velocity, rb)), add(a->velocity, cross(a->angular_velocity, ra)));
+	v3 rhs = V3(-jv.x - s->bias[0] - s->softness * s->lambda[0], -jv.y - s->bias[1] - s->softness * s->lambda[1], -jv.z - s->bias[2] - s->softness * s->lambda[2]);
+	v3 delta = sym3x3_mul_v3(s->bs_inv_eff_mass, rhs);
+	s->lambda[0] += delta.x; s->lambda[1] += delta.y; s->lambda[2] += delta.z;
+	a->velocity = sub(a->velocity, scale(delta, a->inv_mass));
+	b->velocity = add(b->velocity, scale(delta, b->inv_mass));
+	a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, cross(ra, delta)));
+	b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, cross(rb, delta)));
+}
+
 static void hinge_tangent_basis(v3 axis, v3* t1, v3* t2)
 {
 	v3 ref = fabsf(axis.x) < 0.9f ? V3(1, 0, 0) : V3(0, 1, 0);
@@ -189,6 +205,9 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		v3 anchor_b = add(sb->position, s->r_b);
 		v3 err = sub(anchor_b, anchor_a);
 		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
+
+		// Precompute sym3x3 inverse for the inline block solve in solve_ball_socket.
+		ball_socket_eff_mass(a, b, sa, sb, ra, rb, soft, s->bs_inv_eff_mass);
 	} else if (s->type == JOINT_DISTANCE) {
 		s->r_a = rotate(sa->rotation, j->distance.local_a);
 		s->r_b = rotate(sb->rotation, j->distance.local_b);
@@ -573,6 +592,14 @@ static void solve_joint(WorldInternal* w, SolverJoint* s)
 	BodyHot* b = &w->body_hot[s->body_b];
 	BodyState* sa = &w->body_state[s->body_a];
 	BodyState* sb = &w->body_state[s->body_b];
+
+	// Ball socket: 3-DOF bilateral. Inline solve with precomputed sym3x3 inverse;
+	// skips per-iteration K factorization and stored-Jacobian reads.
+	if (s->type == JOINT_BALL_SOCKET && s->dof == 3) {
+		solve_ball_socket(s, a, b, sa, sb);
+		return;
+	}
+
 	if (s->dof == 1) {
 		// Scalar path (distance joints, possibly with limits)
 		float vel_err = jac_velocity_f(&s->rows[0], a, b);
