@@ -308,19 +308,23 @@ static void islands_update_contacts(WorldInternal* w, InternalManifold* manifold
 	w->prev_touching = curr_touching;
 }
 
-// Return the island that owns a manifold. Both bodies are dynamic and in the
-// same island after islands_update_contacts runs; one body may be static
-// (island_id == -1), in which case the other body's island owns it. Both-static
-// pairs are filtered out upstream and return -1 here as a safety net.
-static int manifold_owning_island(WorldInternal* w, InternalManifold* m)
+// Return the island that owns a body pair. Both dynamic bodies share an island
+// after islands_update_contacts / link_joint_to_island have run; one body may
+// be static (island_id == -1), in which case the other body's island owns the
+// pair. Both-static pairs return -1.
+static int pair_owning_island(WorldInternal* w, int a, int b)
 {
-	int a = m->body_a, b = m->body_b;
 	int isl_a = body_inv_mass(w, a) == 0.0f ? -1 : w->body_cold[a].island_id;
 	int isl_b = body_inv_mass(w, b) == 0.0f ? -1 : w->body_cold[b].island_id;
-	assert(isl_a < 0 || isl_b < 0 || isl_a == isl_b); // both-dynamic pairs share an island
+	assert(isl_a < 0 || isl_b < 0 || isl_a == isl_b);
 	if (isl_a >= 0) return isl_a;
 	if (isl_b >= 0) return isl_b;
 	return -1;
+}
+
+static int manifold_owning_island(WorldInternal* w, InternalManifold* m)
+{
+	return pair_owning_island(w, m->body_a, m->body_b);
 }
 
 // Partition manifolds by owning island. Arrays are arena-allocated; callers
@@ -369,6 +373,46 @@ static int islands_bucket_manifolds(WorldInternal* w, InternalManifold* manifold
 		int isl = manifold_owning_island(w, &manifolds[m]);
 		if (isl < 0) continue;
 		perm[cursor[isl]++] = m;
+	}
+
+	*out_offsets = offsets;
+	*out_perm = perm;
+	return n_islands;
+}
+
+// Same shape as islands_bucket_manifolds, but over sol_joints (the solver's
+// per-frame joint array populated by joints_pre_solve). Active joints always
+// have at least one dynamic body, which owns the joint's island.
+static int islands_bucket_sol_joints(WorldInternal* w, SolverJoint* sol_joints, int joint_count, Arena* arena, int** out_offsets, int** out_perm)
+{
+	int n_islands = asize(w->islands);
+
+	int* offsets = NULL;
+	arena_fit(arena, offsets, n_islands + 1);
+	asetlen(offsets, n_islands + 1);
+	for (int i = 0; i <= n_islands; i++) offsets[i] = 0;
+
+	for (int j = 0; j < joint_count; j++) {
+		int isl = pair_owning_island(w, sol_joints[j].body_a, sol_joints[j].body_b);
+		if (isl < 0) continue;
+		offsets[isl + 1]++;
+	}
+	for (int i = 1; i <= n_islands; i++) offsets[i] += offsets[i - 1];
+	int total = offsets[n_islands];
+
+	int* perm = NULL;
+	arena_fit(arena, perm, total);
+	asetlen(perm, total);
+
+	int* cursor = NULL;
+	arena_fit(arena, cursor, n_islands);
+	asetlen(cursor, n_islands);
+	for (int i = 0; i < n_islands; i++) cursor[i] = offsets[i];
+
+	for (int j = 0; j < joint_count; j++) {
+		int isl = pair_owning_island(w, sol_joints[j].body_a, sol_joints[j].body_b);
+		if (isl < 0) continue;
+		perm[cursor[isl]++] = j;
 	}
 
 	*out_offsets = offsets;

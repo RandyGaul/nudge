@@ -587,6 +587,14 @@ void world_step(World world, float dt)
 	SolverJoint* sol_joints = NULL;
 	joints_pre_solve(w, sub_dt, &sol_joints);
 
+	// Phase 1: bucket sol_joints by owning island. Paired with
+	// island_manifold_perm to drive a fully island-grouped crefs layout.
+	int* island_joint_offsets = NULL;
+	int* island_joint_perm = NULL;
+	if (asize(sol_joints) > 0) {
+		islands_bucket_sol_joints(w, sol_joints, asize(sol_joints), &w->worker_arenas[0], &island_joint_offsets, &island_joint_perm);
+	}
+
 	// LDL is a direct solver -- rigid joints don't need warm-start. Stale
 	// warm-start impulses inject energy when lever arms rotate between frames.
 	// Only zero bilateral DOFs that LDL handles; preserve limit/motor DOF warm-start.
@@ -613,34 +621,60 @@ void world_step(World world, float dt)
 	int count = asize(w->body_hot);
 	CK_DYNA ConstraintRef* crefs = NULL;
 	int sm_count = asize(sm);
-	// Iterate manifolds in per-island bucketed order so refs are grouped by
-	// island. Greedy coloring output is identical to the unbucketed order
-	// because islands have disjoint bodies: within each island, manifold
-	// indices are in ascending original order (stable partition). When the
-	// bucket is absent (no manifolds), fall back to linear scan.
-	if (island_manifold_perm) {
-		int bucketed = asize(island_manifold_perm);
-		for (int k = 0; k < bucketed; k++) {
-			int i = island_manifold_perm[k];
+	int sj_count = asize(sol_joints);
+	int n_islands = asize(w->islands);
+	// Walk islands, emitting manifold-refs then joint-refs per island. crefs
+	// ends up fully island-grouped: each island's refs are a contiguous slice,
+	// which sets up per-island coloring and per-island solve dispatch.
+	// Greedy coloring output remains bit-identical because islands have
+	// disjoint bodies -- processing order across islands cannot affect
+	// per-ref colors. Within an island, manifolds appear in ascending index
+	// (stable partition) and joints follow in sol_joints order, same as the
+	// prior flat ordering restricted to that island.
+	//
+	// PGS eligibility for joints: LDL is a direct solver for rigid equality
+	// constraints only, so joints with any bounded DOF (limits / motors) are
+	// shunted to PGS via joint_internal_has_limits.
+	for (int isl = 0; isl < n_islands; isl++) {
+		if (island_manifold_perm) {
+			int ms = island_manifold_offsets[isl];
+			int me = island_manifold_offsets[isl + 1];
+			for (int k = ms; k < me; k++) {
+				int i = island_manifold_perm[k];
+				if (sm[i].contact_count == 0) continue;
+				ConstraintRef r = { .type = CTYPE_CONTACT, .index = i,
+					.body_a = sm[i].body_a, .body_b = sm[i].body_b };
+				apush(crefs, r);
+			}
+		}
+		if (island_joint_perm) {
+			int js = island_joint_offsets[isl];
+			int je = island_joint_offsets[isl + 1];
+			for (int k = js; k < je; k++) {
+				int i = island_joint_perm[k];
+				if (w->ldl_enabled && !joint_internal_has_limits(&w->joints[sol_joints[i].joint_idx])) continue;
+				ConstraintRef r = { .type = CTYPE_JOINT, .index = i,
+					.body_a = sol_joints[i].body_a, .body_b = sol_joints[i].body_b };
+				apush(crefs, r);
+			}
+		}
+	}
+	// Manifolds that no island claims (no bucketing available, e.g. when
+	// manifolds is empty) -- fall back to the linear scan. This branch only
+	// hits when the early bucketing was skipped.
+	if (!island_manifold_perm) {
+		for (int i = 0; i < sm_count; i++) {
 			if (sm[i].contact_count == 0) continue;
 			ConstraintRef r = { .type = CTYPE_CONTACT, .index = i,
 				.body_a = sm[i].body_a, .body_b = sm[i].body_b };
 			apush(crefs, r);
 		}
-	} else {
-		for (int i = 0; i < sm_count; i++) {
-			if (sm[i].contact_count == 0) continue; // skip empty manifolds (static-static filtered out)
-			ConstraintRef r = { .type = CTYPE_CONTACT, .index = i,
-				.body_a = sm[i].body_a, .body_b = sm[i].body_b };
-			apush(crefs, r);
-		}
 	}
-	// Joints go through PGS when:
-	//  - LDL is disabled (all joints), OR
-	//  - LDL is enabled but the joint has any bounded DOF (inequality constraints).
-	// LDL is strictly for equality constraints; any limit/motor shunts the
-	// whole joint to PGS so its DOFs stay coupled in one iteration loop.
-	for (int i = 0; i < asize(sol_joints); i++) {
+	// Orphan joints (both bodies static, or a dynamic body without an
+	// island yet) -- emit in sol_joints order to match prior behavior.
+	for (int i = 0; i < sj_count; i++) {
+		int isl = pair_owning_island(w, sol_joints[i].body_a, sol_joints[i].body_b);
+		if (isl >= 0) continue;
 		if (w->ldl_enabled && !joint_internal_has_limits(&w->joints[sol_joints[i].joint_idx])) continue;
 		ConstraintRef r = { .type = CTYPE_JOINT, .index = i,
 			.body_a = sol_joints[i].body_a, .body_b = sol_joints[i].body_b };
