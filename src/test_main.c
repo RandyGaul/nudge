@@ -24,12 +24,15 @@
 #include "tests_pgs_vs_ldl.c"
 #include "tests_gjk_perf.c"
 #include "tests_arena_unit.c"
+#include "tests_threading_unit.c"
 #include "tests_epa_debug.c"
+#include "tests_epa_perf.c"
 
 int main(int argc, char* argv[])
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--debug-epa") == 0) { debug_epa(); return 0; }
+	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--bench-epa") == 0) { bench_epa_vs_sat(); return 0; }
 	int fuzz_iters = 0;
 	int soak = 0;
 	int bench_stack = 0;
@@ -214,6 +217,7 @@ int main(int argc, char* argv[])
 		}
 		test_aalign();
 		run_arena_unit_tests();
+		run_threading_unit_tests();
 		run_ldl_unit_tests();
 		run_inertia_unit_tests();
 		run_jacobian_unit_tests();
@@ -292,6 +296,7 @@ int main(int argc, char* argv[])
 		}
 		run_tests();
 		run_arena_unit_tests();
+		run_threading_unit_tests();
 		run_ldl_unit_tests();
 		run_inertia_unit_tests();
 		run_jacobian_unit_tests();

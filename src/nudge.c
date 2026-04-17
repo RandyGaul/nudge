@@ -420,49 +420,27 @@ typedef struct NP_WorkCtx
 	WorldInternal* w;
 	BroadPair* pairs;
 	InternalManifold* output;       // pre-allocated output array (n_pairs slots)
-	volatile long next_slot;        // atomic write cursor
 } NP_WorkCtx;
 
-// Thread-local narrowphase: each block writes to its own manifold array.
-// We use the block start as a pseudo-thread-id for output routing.
+// Narrowphase work: each pair writes to its fixed slot (output[i]) so output
+// order matches serial pair-emission order regardless of worker scheduling --
+// required for bit-identical cross-thread-count results. Non-hitting pairs
+// leave their slot zero-initialized (contact_count=0); caller compacts.
+//
+// Calls the full narrowphase_pair so warm-cache lookups, SAT hints,
+// incremental NP refresh, and EPA backend selection all match the serial
+// path. Thread-safe because narrowphase_pair only reads the warm_cache map
+// structure (no map_set / map_del) and only writes to each pair's own
+// WarmManifold entry (disjoint across workers).
 static void np_work_fn(void* ctx, int start, int count)
 {
 	NP_WorkCtx* np = (NP_WorkCtx*)ctx;
-	// Use a simple thread-local manifold list keyed by block index.
-	// Each block appends to a shared per-thread array using the current thread.
-	// Since blocks are claimed atomically, we use thread-local storage.
 	CK_DYNA InternalManifold* local = NULL;
 	for (int i = start; i < start + count; i++) {
 		BroadPair* p = &np->pairs[i];
-		ShapeInternal* s0 = &np->w->body_cold[p->a].shapes[0];
-		ShapeInternal* s1 = &np->w->body_cold[p->b].shapes[0];
-		int ia = p->a, ib = p->b;
-		if (s0->type > s1->type || (s0->type == s1->type && ia > ib)) { int tmp = ia; ia = ib; ib = tmp; s0 = &np->w->body_cold[ia].shapes[0]; s1 = &np->w->body_cold[ib].shapes[0]; }
-		BodyState* bs0 = &np->w->body_state[ia];
-		BodyState* bs1 = &np->w->body_state[ib];
-		InternalManifold im = { .body_a = ia, .body_b = ib };
-		int hit = 0;
-		if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE) hit = collide_sphere_sphere(make_sphere(bs0, s0), make_sphere(bs1, s1), &im.m);
-		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CAPSULE) hit = collide_sphere_capsule(make_sphere(bs0, s0), make_capsule(bs1, s1), &im.m);
-		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_BOX) hit = collide_sphere_box(make_sphere(bs0, s0), make_box(bs1, s1), &im.m);
-		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CAPSULE) hit = collide_capsule_capsule(make_capsule(bs0, s0), make_capsule(bs1, s1), &im.m);
-		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX) hit = collide_capsule_box(make_capsule(bs0, s0), make_box(bs1, s1), &im.m);
-		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) hit = collide_box_box_ex(make_box(bs0, s0), make_box(bs1, s1), &im.m, &(int){-1}, NULL);
-		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL) hit = collide_hull_hull((ConvexHull){ &s_unit_box_hull, bs0->position, bs0->rotation, s0->box.half_extents }, make_convex_hull(bs1, s1), &im.m);
-		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL) hit = collide_sphere_hull(make_sphere(bs0, s0), make_convex_hull(bs1, s1), &im.m);
-		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL) hit = collide_capsule_hull(make_capsule(bs0, s0), make_convex_hull(bs1, s1), &im.m);
-		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL) hit = collide_hull_hull(make_convex_hull(bs0, s0), make_convex_hull(bs1, s1), &im.m);
-		else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_sphere(make_cylinder(bs1, s1), make_sphere(bs0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
-		else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_capsule(make_cylinder(bs1, s1), make_capsule(bs0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
-		else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_box(make_cylinder(bs1, s1), make_box(bs0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
-		else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER) { hit = collide_cylinder_hull(make_cylinder(bs1, s1), make_convex_hull(bs0, s0), &im.m); for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal); }
-		else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) hit = collide_cylinder_cylinder(make_cylinder(bs0, s0), make_cylinder(bs1, s1), &im.m);
-		if (hit) apush(local, im);
-	}
-	// Lock-free merge: each hit claims a slot via atomic increment.
-	for (int k = 0; k < asize(local); k++) {
-		long slot = _InterlockedExchangeAdd(&np->next_slot, 1);
-		np->output[slot] = local[k];
+		aclear(local);
+		narrowphase_pair(np->w, p->a, p->b, &local);
+		if (asize(local) > 0) np->output[i] = local[0];
 	}
 	afree(local);
 }
@@ -545,15 +523,28 @@ void world_step(World world, float dt)
 	w->np_pairs_out = NULL;
 
 #ifdef _WIN32
-	// Parallel narrowphase on collected pairs. Lock-free: pre-allocate output,
-	// each hit claims a slot via atomic counter. No merge lock needed.
+	// Parallel narrowphase on collected pairs. Each pair writes to its fixed
+	// slot (pair index) so output order matches the serial broadphase pair
+	// order regardless of worker scheduling -- required for bit-identical
+	// cross-thread-count output. Non-hitting pairs leave zero-initialized
+	// slots which are compacted out afterwards in pair order.
 	if (n_workers > 1 && asize(np_pairs) >= 32) {
 		int existing = asize(manifolds);
-		int total_cap = existing + asize(np_pairs);
+		int np_count = asize(np_pairs);
+		int total_cap = existing + np_count;
 		afit(manifolds, total_cap); asetlen(manifolds, total_cap);
-		NP_WorkCtx np_ctx = { .w = w, .pairs = np_pairs, .output = manifolds + existing, .next_slot = 0 };
-		pool_dispatch(np_work_fn, &np_ctx, asize(np_pairs), 32, n_workers);
-		asetlen(manifolds, existing + np_ctx.next_slot);
+		memset(manifolds + existing, 0, (size_t)np_count * sizeof(InternalManifold));
+		NP_WorkCtx np_ctx = { .w = w, .pairs = np_pairs, .output = manifolds + existing };
+		pool_dispatch(np_work_fn, &np_ctx, np_count, 32, n_workers);
+		// Compact out non-hitting slots, preserving pair-index order.
+		int write = existing;
+		for (int i = existing; i < total_cap; i++) {
+			if (manifolds[i].m.count > 0) {
+				if (write != i) manifolds[write] = manifolds[i];
+				write++;
+			}
+		}
+		asetlen(manifolds, write);
 	} else if (asize(np_pairs) > 0) {
 		for (int i = 0; i < asize(np_pairs); i++) {
 			narrowphase_pair(w, np_pairs[i].a, np_pairs[i].b, &manifolds);
