@@ -245,21 +245,93 @@ static void apply_rotation_delta(quat* q, dv3 w)
 // Each constraint provides Jacobian rows J_a, J_b (dof x 6 each).
 // K = J * M^{-1} * J^T is computed generically for all constraint types.
 
+// Inline helpers: write Jacobian rows for standard joint types directly into
+// LDL's double-precision storage. Geometry is read from SolverJoint (r_a, r_b,
+// hinge_u1/u2, prism_t1/t2) which are refreshed per substep by joint_fill_rows
+// (cheap to recompute there). LDL no longer depends on SolverJoint.rows[].
+//
+// Ball socket (3-DOF linear): J_a = [-I | skew(r_a)], J_b = [I | -skew(r_b)].
+static void ldl_fill_point_rows(v3 r_a, v3 r_b, LDL_JacobianRow* jac)
+{
+	for (int d = 0; d < 3; d++) { memset(jac[d].J_a, 0, 6*sizeof(double)); memset(jac[d].J_b, 0, 6*sizeof(double)); }
+	jac[0].J_a[0] = -1.0; jac[0].J_a[4] = -r_a.z; jac[0].J_a[5] =  r_a.y;
+	jac[0].J_b[0] =  1.0; jac[0].J_b[4] =  r_b.z; jac[0].J_b[5] = -r_b.y;
+	jac[1].J_a[1] = -1.0; jac[1].J_a[3] =  r_a.z; jac[1].J_a[5] = -r_a.x;
+	jac[1].J_b[1] =  1.0; jac[1].J_b[3] = -r_b.z; jac[1].J_b[5] =  r_b.x;
+	jac[2].J_a[2] = -1.0; jac[2].J_a[3] = -r_a.y; jac[2].J_a[4] =  r_a.x;
+	jac[2].J_b[2] =  1.0; jac[2].J_b[3] =  r_b.y; jac[2].J_b[4] = -r_b.x;
+}
+
 // Fill Jacobian rows for a constraint. Writes dof rows starting at jac[0].
-// Copies from SolverJoint.rows[] for real joints; builds identity for synthetic welds.
+// Builds identity for synthetic welds; for real joints, recomputes from
+// SolverJoint's geometric fields (r_a, r_b, hinge_u1/u2, prism_t1/t2,
+// dist_axis) so LDL is independent of SolverJoint.rows[].
 static void ldl_fill_jacobian(LDL_Constraint* con, SolverJoint* sol_joints, LDL_JacobianRow* jac)
 {
 	if (con->is_synthetic) {
-		// Weld: J_a = -I_6, J_b = +I_6 (zero first, then set diagonal)
+		// Weld: J_a = -I_6, J_b = +I_6
 		int dof = con->dof;
 		for (int d = 0; d < dof; d++) { memset(jac[d].J_a, 0, 6 * sizeof(double)); memset(jac[d].J_b, 0, 6 * sizeof(double)); }
 		for (int d = 0; d < 6; d++) { jac[d].J_a[d] = -1.0; jac[d].J_b[d] = 1.0; }
-	} else {
-		// Non-synthetic: all 6 values per row are copied, no memset needed.
-		SolverJoint* sj = &sol_joints[con->solver_idx];
-		for (int d = 0; d < con->dof; d++) {
-			for (int k = 0; k < 6; k++) { jac[d].J_a[k] = (double)sj->rows[d].J_a[k]; jac[d].J_b[k] = (double)sj->rows[d].J_b[k]; }
-		}
+		return;
+	}
+
+	SolverJoint* sj = &sol_joints[con->solver_idx];
+
+	switch (sj->type) {
+	case JOINT_BALL_SOCKET:
+		ldl_fill_point_rows(sj->r_a, sj->r_b, jac);
+		break;
+	case JOINT_DISTANCE: {
+		// 1-DOF along pre-computed world-space axis.
+		v3 axis = sj->dist_axis;
+		v3 rxa = cross(sj->r_a, axis), rxb = cross(sj->r_b, axis);
+		memset(jac[0].J_a, 0, 6*sizeof(double)); memset(jac[0].J_b, 0, 6*sizeof(double));
+		jac[0].J_a[0] = -axis.x; jac[0].J_a[1] = -axis.y; jac[0].J_a[2] = -axis.z;
+		jac[0].J_a[3] = -rxa.x;  jac[0].J_a[4] = -rxa.y;  jac[0].J_a[5] = -rxa.z;
+		jac[0].J_b[0] =  axis.x; jac[0].J_b[1] =  axis.y; jac[0].J_b[2] =  axis.z;
+		jac[0].J_b[3] =  rxb.x;  jac[0].J_b[4] =  rxb.y;  jac[0].J_b[5] =  rxb.z;
+		break;
+	}
+	case JOINT_HINGE: {
+		ldl_fill_point_rows(sj->r_a, sj->r_b, jac);
+		v3 u1 = sj->hinge_u1, u2 = sj->hinge_u2;
+		memset(jac[3].J_a, 0, 6*sizeof(double)); memset(jac[3].J_b, 0, 6*sizeof(double));
+		memset(jac[4].J_a, 0, 6*sizeof(double)); memset(jac[4].J_b, 0, 6*sizeof(double));
+		jac[3].J_a[3] =  u1.x; jac[3].J_a[4] =  u1.y; jac[3].J_a[5] =  u1.z;
+		jac[3].J_b[3] = -u1.x; jac[3].J_b[4] = -u1.y; jac[3].J_b[5] = -u1.z;
+		jac[4].J_a[3] =  u2.x; jac[4].J_a[4] =  u2.y; jac[4].J_a[5] =  u2.z;
+		jac[4].J_b[3] = -u2.x; jac[4].J_b[4] = -u2.y; jac[4].J_b[5] = -u2.z;
+		break;
+	}
+	case JOINT_FIXED:
+		ldl_fill_point_rows(sj->r_a, sj->r_b, jac);
+		for (int d = 3; d <= 5; d++) { memset(jac[d].J_a, 0, 6*sizeof(double)); memset(jac[d].J_b, 0, 6*sizeof(double)); }
+		jac[3].J_a[3] = 1.0; jac[3].J_b[3] = -1.0;
+		jac[4].J_a[4] = 1.0; jac[4].J_b[4] = -1.0;
+		jac[5].J_a[5] = 1.0; jac[5].J_b[5] = -1.0;
+		break;
+	case JOINT_PRISMATIC: {
+		v3 t1 = sj->prism_t1, t2 = sj->prism_t2;
+		v3 rxa_t1 = cross(sj->r_a, t1), rxa_t2 = cross(sj->r_a, t2);
+		v3 rxb_t1 = cross(sj->r_b, t1), rxb_t2 = cross(sj->r_b, t2);
+		for (int d = 0; d <= 4; d++) { memset(jac[d].J_a, 0, 6*sizeof(double)); memset(jac[d].J_b, 0, 6*sizeof(double)); }
+		jac[0].J_a[0] = -t1.x; jac[0].J_a[1] = -t1.y; jac[0].J_a[2] = -t1.z;
+		jac[0].J_a[3] = -rxa_t1.x; jac[0].J_a[4] = -rxa_t1.y; jac[0].J_a[5] = -rxa_t1.z;
+		jac[0].J_b[0] =  t1.x; jac[0].J_b[1] =  t1.y; jac[0].J_b[2] =  t1.z;
+		jac[0].J_b[3] =  rxb_t1.x; jac[0].J_b[4] =  rxb_t1.y; jac[0].J_b[5] =  rxb_t1.z;
+		jac[1].J_a[0] = -t2.x; jac[1].J_a[1] = -t2.y; jac[1].J_a[2] = -t2.z;
+		jac[1].J_a[3] = -rxa_t2.x; jac[1].J_a[4] = -rxa_t2.y; jac[1].J_a[5] = -rxa_t2.z;
+		jac[1].J_b[0] =  t2.x; jac[1].J_b[1] =  t2.y; jac[1].J_b[2] =  t2.z;
+		jac[1].J_b[3] =  rxb_t2.x; jac[1].J_b[4] =  rxb_t2.y; jac[1].J_b[5] =  rxb_t2.z;
+		jac[2].J_a[3] = 1.0; jac[2].J_b[3] = -1.0;
+		jac[3].J_a[4] = 1.0; jac[3].J_b[4] = -1.0;
+		jac[4].J_a[5] = 1.0; jac[4].J_b[5] = -1.0;
+		break;
+	}
+	default:
+		for (int d = 0; d < con->dof; d++) { memset(jac[d].J_a, 0, 6*sizeof(double)); memset(jac[d].J_b, 0, 6*sizeof(double)); }
+		break;
 	}
 }
 
@@ -1552,20 +1624,15 @@ static void ldl_refresh_lever_arms_light(WorldInternal* w, SolverJoint* sol_join
 		JointInternal* j = &w->joints[s->joint_idx];
 
 		if (s->type == JOINT_DISTANCE) {
-			// Fast path: all 12 J values set explicitly, no memset needed.
-			// Softness unchanged from sub 0 — skip spring_compute.
+			// Fast path: only geometric data; LDL recomputes Jacobian inline
+			// from sj->r_a/r_b/dist_axis. Softness is constant across substeps.
 			s->r_a = rotate(sa->rotation, j->distance.local_a);
 			s->r_b = rotate(sb->rotation, j->distance.local_b);
 			v3 anchor_a = add(sa->position, s->r_a);
 			v3 anchor_b = add(sb->position, s->r_b);
 			v3 delta = sub(anchor_b, anchor_a);
 			float dist_val = len(delta);
-			v3 axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
-			v3 rxa = cross(s->r_a, axis), rxb = cross(s->r_b, axis);
-			s->rows[0].J_a[0] = -axis.x; s->rows[0].J_a[1] = -axis.y; s->rows[0].J_a[2] = -axis.z;
-			s->rows[0].J_a[3] = -rxa.x;  s->rows[0].J_a[4] = -rxa.y;  s->rows[0].J_a[5] = -rxa.z;
-			s->rows[0].J_b[0] =  axis.x; s->rows[0].J_b[1] =  axis.y; s->rows[0].J_b[2] =  axis.z;
-			s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
+			s->dist_axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
 			s->pos_error[0] = dist_val - j->distance.rest_length;
 			float dmin = j->distance.limit_min, dmax = j->distance.limit_max;
 			if (dmin > 0 || dmax > 0) {
@@ -1576,18 +1643,13 @@ static void ldl_refresh_lever_arms_light(WorldInternal* w, SolverJoint* sol_join
 		} else if (s->type == JOINT_BALL_SOCKET) {
 			s->r_a = rotate(sa->rotation, j->ball_socket.local_a);
 			s->r_b = rotate(sb->rotation, j->ball_socket.local_b);
-			v3 ra = s->r_a, rb = s->r_b;
-			s->rows[0].J_a[0] = -1; s->rows[0].J_a[1] = 0; s->rows[0].J_a[2] = 0; s->rows[0].J_a[3] = 0; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
-			s->rows[0].J_b[0] =  1; s->rows[0].J_b[1] = 0; s->rows[0].J_b[2] = 0; s->rows[0].J_b[3] = 0; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
-			s->rows[1].J_a[0] = 0; s->rows[1].J_a[1] = -1; s->rows[1].J_a[2] = 0; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[4] = 0; s->rows[1].J_a[5] = -ra.x;
-			s->rows[1].J_b[0] = 0; s->rows[1].J_b[1] =  1; s->rows[1].J_b[2] = 0; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[4] = 0; s->rows[1].J_b[5] =  rb.x;
-			s->rows[2].J_a[0] = 0; s->rows[2].J_a[1] = 0; s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x; s->rows[2].J_a[5] = 0;
-			s->rows[2].J_b[0] = 0; s->rows[2].J_b[1] = 0; s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x; s->rows[2].J_b[5] = 0;
-			v3 err = sub(add(sb->position, rb), add(sa->position, ra));
+			v3 err = sub(add(sb->position, s->r_b), add(sa->position, s->r_a));
 			s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
+			// Also refresh the ball-socket effective mass since lever arms changed.
+			ball_socket_eff_mass(a, b, sa, sb, s->r_a, s->r_b, s->softness, s->lin_inv_eff_mass);
 		} else {
-			// Complex joints (hinge, fixed, prismatic): fall back to full refresh.
-			float saved_softness = s->softness;
+			// Complex joints (hinge, fixed, prismatic): fall back to full refresh
+			// which updates geometry + specialized effective-mass blocks.
 			float saved_lambda[JOINT_MAX_DOF];
 			for (int d = 0; d < JOINT_MAX_DOF; d++) saved_lambda[d] = s->lambda[d];
 			joint_fill_rows(s, a, b, sa, sb, w, sub_dt);

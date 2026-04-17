@@ -18,9 +18,11 @@ static void test_fill_bs_rows(SolverJoint* s)
 	s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
 }
 
-// Helper: fill SolverJoint.rows[] for distance from (r_a, r_b, axis).
+// Helper: fill SolverJoint for distance joint (axis stored for LDL to read).
+// Also populates rows[] so other (non-LDL) readers still work.
 static void test_fill_dist_rows(SolverJoint* s, v3 axis)
 {
+	s->dist_axis = axis;
 	memset(s->rows[0].J_a, 0, 6 * sizeof(float)); memset(s->rows[0].J_b, 0, 6 * sizeof(float));
 	v3 rxa = cross(s->r_a, axis), rxb = cross(s->r_b, axis);
 	s->rows[0].J_a[0] = -axis.x; s->rows[0].J_a[1] = -axis.y; s->rows[0].J_a[2] = -axis.z;
@@ -29,9 +31,12 @@ static void test_fill_dist_rows(SolverJoint* s, v3 axis)
 	s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
 }
 
-// Helper: fill SolverJoint.rows[] for hinge from (r_a, r_b, u1, u2).
+// Helper: fill SolverJoint for hinge joint (u1, u2 stored for LDL to read).
+// Also populates rows[] so other (non-LDL) readers still work.
 static void test_fill_hinge_rows(SolverJoint* s, v3 u1, v3 u2)
 {
+	s->hinge_u1 = u1;
+	s->hinge_u2 = u2;
 	// Linear rows 0-2: same as ball socket
 	test_fill_bs_rows(s);
 	// Angular rows 3-4

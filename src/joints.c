@@ -369,6 +369,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->rows[0].J_a[3] = -rxa.x;  s->rows[0].J_a[4] = -rxa.y;  s->rows[0].J_a[5] = -rxa.z;
 		s->rows[0].J_b[0] =  axis.x; s->rows[0].J_b[1] =  axis.y; s->rows[0].J_b[2] =  axis.z;
 		s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
+		s->dist_axis = axis; // LDL reads this instead of reconstructing from positions
 
 		s->pos_error[0] = dist_val - j->distance.rest_length;
 

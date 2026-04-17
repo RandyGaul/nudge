@@ -526,6 +526,11 @@ typedef struct SolverJoint
 	// packed sym2x2 inverse of the 2-DOF lateral K matrix.
 	v3 prism_t1, prism_t2;
 	float prism_lateral_inv_eff_mass[3];
+
+	// Distance: world-space axis from anchor_a -> anchor_b, populated each
+	// substep so LDL and PGS can compute the 1-DOF Jacobian without reading
+	// body positions.
+	v3 dist_axis;
 } SolverJoint;
 
 // Constraint ref for graph coloring dispatch.
