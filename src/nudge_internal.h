@@ -485,6 +485,17 @@ typedef struct JacobianRow
 	float eff_mass;
 } JacobianRow;
 
+// Bounded 1-DOF row: axis + cross terms + scalar effective mass. Replaces
+// JacobianRow for bounded DOF solves -- the generic 12-float Jacobian is
+// overkill for a scalar constraint along a single axis. r_cross_a/b are
+// zero for pure-angular constraints (hinge DOF 5, angular motor, cone/twist).
+typedef struct BoundedAxis
+{
+	v3 axis;          // world-space constraint direction
+	v3 r_cross_a, r_cross_b;  // r x axis for linear constraints; zero for angular
+	float eff_mass;   // 1 / (J * M^-1 * J^T + softness)
+} BoundedAxis;
+
 // Unified solver joint: all joint types share one struct.
 // PGS and LDL both read/write the common fields. Per-DOF Jacobian rows
 // encode the constraint geometry; type-specific knowledge lives only in
@@ -531,6 +542,16 @@ typedef struct SolverJoint
 	// substep so LDL and PGS can compute the 1-DOF Jacobian without reading
 	// body positions.
 	v3 dist_axis;
+
+	// Bounded 1-DOF rows (limits, motors, unilateral types). At most 2 per
+	// joint (e.g. swing-twist with both cone and twist active). Per-type DOF
+	// mapping (which lambda[d]/lo[d]/hi[d]/bias[d] each row uses):
+	//   distance (with limits): bounded[0] -> DOF 0 (linear)
+	//   hinge (with limits/motor): bounded[0] -> DOF 5 (angular)
+	//   prismatic (with motor): bounded[0] -> DOF 5 (linear)
+	//   angular_motor / cone_limit / twist_limit: bounded[0] -> DOF 0 (angular)
+	//   swing_twist: bounded[0] -> DOF 3 (cone, angular), bounded[1] -> DOF 4 (twist, angular)
+	BoundedAxis bounded[2];
 } SolverJoint;
 
 // Constraint ref for graph coloring dispatch.

@@ -177,6 +177,47 @@ static inline void solve_point_block(SolverJoint* s, BodyHot* a, BodyHot* b, Bod
 	b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, cross(rb, delta)));
 }
 
+// 1-DOF bounded angular solve (hinge limit/motor, angular motor, cone, twist).
+// Jv = (w_a - w_b) . axis. Impulse direction = axis (world). Pure angular: no
+// velocity update on linear components.
+static inline void solve_bounded_angular(BoundedAxis* br, float* lambda, float bias, float lo, float hi, float softness, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
+{
+	if (br->eff_mass == 0.0f) return;
+	v3 axis = br->axis;
+	float jv = dot(axis, sub(a->angular_velocity, b->angular_velocity));
+	float r = -jv - bias - softness * (*lambda);
+	float dl = br->eff_mass * r;
+	float old = *lambda;
+	*lambda += dl;
+	if (*lambda < lo) *lambda = lo;
+	if (*lambda > hi) *lambda = hi;
+	float delta = *lambda - old;
+	if (delta == 0.0f) return;
+	a->angular_velocity = add(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, scale(axis, delta)));
+	b->angular_velocity = sub(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, scale(axis, delta)));
+}
+
+// 1-DOF bounded linear solve (distance, prismatic motor). Jv combines linear
+// axis component + angular cross terms (precomputed r_cross_a, r_cross_b).
+static inline void solve_bounded_linear(BoundedAxis* br, float* lambda, float bias, float lo, float hi, float softness, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
+{
+	if (br->eff_mass == 0.0f) return;
+	v3 axis = br->axis, rxa = br->r_cross_a, rxb = br->r_cross_b;
+	float jv = dot(axis, sub(b->velocity, a->velocity)) + dot(rxb, b->angular_velocity) - dot(rxa, a->angular_velocity);
+	float r = -jv - bias - softness * (*lambda);
+	float dl = br->eff_mass * r;
+	float old = *lambda;
+	*lambda += dl;
+	if (*lambda < lo) *lambda = lo;
+	if (*lambda > hi) *lambda = hi;
+	float delta = *lambda - old;
+	if (delta == 0.0f) return;
+	a->velocity = sub(a->velocity, scale(axis, delta * a->inv_mass));
+	b->velocity = add(b->velocity, scale(axis, delta * b->inv_mass));
+	a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, scale(rxa, delta)));
+	b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, scale(rxb, delta)));
+}
+
 static void solve_ball_socket(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
 {
 	solve_point_block(s, a, b, sa, sb, 0);
@@ -204,17 +245,9 @@ static void solve_hinge(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, B
 	a->angular_velocity = add(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, ang_impulse));
 	b->angular_velocity = sub(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, ang_impulse));
 
-	// Optional DOF 5 (limit/motor): bounded, still uses rows[5]/eff_mass.
-	if (s->dof > 5) {
-		float vel_err = jac_velocity_f(&s->rows[5], a, b);
-		float r = -vel_err - s->bias[5] - s->softness * s->lambda[5];
-		float dl = s->rows[5].eff_mass * r;
-		float old = s->lambda[5];
-		s->lambda[5] += dl;
-		if (s->lambda[5] < s->lo[5]) s->lambda[5] = s->lo[5];
-		if (s->lambda[5] > s->hi[5]) s->lambda[5] = s->hi[5];
-		jac_apply(&s->rows[5], s->lambda[5] - old, a, b, sa, sb);
-	}
+	// Optional DOF 5 (limit/motor): bounded, uses bounded[0] (axis + eff_mass).
+	if (s->dof > 5)
+		solve_bounded_angular(&s->bounded[0], &s->lambda[5], s->bias[5], s->lo[5], s->hi[5], s->softness, a, b, sa, sb);
 }
 
 // Shared 3-DOF angular block step (fixed rotation lock, prismatic rotation lock).
@@ -267,17 +300,9 @@ static void solve_prismatic(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 	// Angular 3-DOF: identical to fixed joint rotation lock.
 	solve_ang3_block(s, a, b, sa, sb, 2);
 
-	// Optional DOF 5 (motor along slide axis): bounded, uses rows[5]/eff_mass.
-	if (s->dof > 5) {
-		float vel_err = jac_velocity_f(&s->rows[5], a, b);
-		float r = -vel_err - s->bias[5] - s->softness * s->lambda[5];
-		float dl = s->rows[5].eff_mass * r;
-		float old = s->lambda[5];
-		s->lambda[5] += dl;
-		if (s->lambda[5] < s->lo[5]) s->lambda[5] = s->lo[5];
-		if (s->lambda[5] > s->hi[5]) s->lambda[5] = s->hi[5];
-		jac_apply(&s->rows[5], s->lambda[5] - old, a, b, sa, sb);
-	}
+	// Optional DOF 5 (motor along slide axis): bounded, uses bounded[0] (linear).
+	if (s->dof > 5)
+		solve_bounded_linear(&s->bounded[0], &s->lambda[5], s->bias[5], s->lo[5], s->hi[5], s->softness, a, b, sa, sb);
 }
 
 // Helper: build world-frame angular K (= I_a_world^-1 + I_b_world^-1 + soft*I)
@@ -474,8 +499,20 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 				} else if (!has_motor) {
 					memset(s->rows[5].J_a, 0, 6 * sizeof(float));
 					memset(s->rows[5].J_b, 0, 6 * sizeof(float));
+					// Limit inactive and no motor: zero eff_mass so solve_bounded_angular short-circuits.
+					s->bounded[0].eff_mass = 0.0f;
+					goto hinge_dof5_done;
 				}
 			}
+			// Populate bounded[0] for solve_hinge (1-DOF angular along axis_a).
+			s->bounded[0].axis = axis_a;
+			s->bounded[0].r_cross_a = V3(0,0,0);
+			s->bounded[0].r_cross_b = V3(0,0,0);
+			v3 ia_axis = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, axis_a);
+			v3 ib_axis = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, axis_a);
+			float k = dot(axis_a, add(ia_axis, ib_axis)) + soft;
+			s->bounded[0].eff_mass = k > 1e-12f ? 1.0f / k : 0.0f;
+			hinge_dof5_done:;
 		}
 	} else if (s->type == JOINT_FIXED) {
 		s->r_a = rotate(sa->rotation, j->fixed.local_a);
@@ -576,6 +613,15 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 			s->pos_error[5] = 0;
 			s->lo[5] = -j->prismatic.motor_max_impulse;
 			s->hi[5] = j->prismatic.motor_max_impulse;
+			// Populate bounded[0] for solve_prismatic: 1-DOF linear along slide axis.
+			s->bounded[0].axis = slide_axis;
+			s->bounded[0].r_cross_a = rxa_s;
+			s->bounded[0].r_cross_b = rxb_s;
+			float im_sum = a->inv_mass + b->inv_mass;
+			v3 ia_rxa = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, rxa_s);
+			v3 ib_rxb = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, rxb_s);
+			float k = im_sum + dot(rxa_s, ia_rxa) + dot(rxb_s, ib_rxb) + soft;
+			s->bounded[0].eff_mass = k > 1e-12f ? 1.0f / k : 0.0f;
 		}
 	} else if (s->type == JOINT_ANGULAR_MOTOR) {
 		s->softness = 0.0f; // motor is velocity-only; no spring
