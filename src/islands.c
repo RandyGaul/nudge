@@ -339,6 +339,16 @@ static int islands_bucket_manifolds(WorldInternal* w, InternalManifold* manifold
 {
 	int n_islands = asize(w->islands);
 
+	// No islands means nothing to bucket (sleep disabled, or no contacts yet).
+	// Return empty arrays; callers treat *out_perm = NULL with length 0 as a
+	// "no bucketing" signal. Without this guard, asetlen on a 0-capacity
+	// stretchy buffer below would dereference a NULL header.
+	if (n_islands == 0) {
+		*out_offsets = NULL;
+		*out_perm = NULL;
+		return 0;
+	}
+
 	int* offsets = NULL;
 	arena_fit(arena, offsets, n_islands + 1);
 	asetlen(offsets, n_islands + 1);
@@ -355,8 +365,10 @@ static int islands_bucket_manifolds(WorldInternal* w, InternalManifold* manifold
 	int total = offsets[n_islands];
 
 	int* perm = NULL;
-	arena_fit(arena, perm, total);
-	asetlen(perm, total);
+	if (total > 0) {
+		arena_fit(arena, perm, total);
+		asetlen(perm, total);
+	}
 
 	// Running cursor per island, initialized from offsets[]. A copy avoids
 	// clobbering the exclusive-prefix offsets we return to the caller.

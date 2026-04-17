@@ -27,6 +27,7 @@
 
 int main(int argc, char* argv[])
 {
+	setvbuf(stdout, NULL, _IONBF, 0); // unbuffered so crashes don't hide output
 	int fuzz_iters = 0;
 	int soak = 0;
 	int bench_stack = 0;
