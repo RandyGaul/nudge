@@ -699,44 +699,6 @@ static void joints_refresh_substep(WorldInternal* w, SolverJoint* joints, int co
 	}
 }
 
-// Solve motor/limit DOFs (DOF 5 for hinge/prismatic). Called each PGS iteration.
-// LDL handles bilateral DOFs; this handles the bounded motor/limit DOF.
-// Re-evaluates angle limits each call for real-time clamping.
-static void joints_solve_limits(WorldInternal* w, SolverJoint* joints, int count)
-{
-	for (int i = 0; i < count; i++) {
-		SolverJoint* s = &joints[i];
-		if (!solver_joint_has_limits(s)) continue;
-		BodyHot* a = &w->body_hot[s->body_a];
-		BodyHot* b = &w->body_hot[s->body_b];
-		BodyState* sa = &w->body_state[s->body_a];
-		BodyState* sb = &w->body_state[s->body_b];
-		JointInternal* j = &w->joints[s->joint_idx];
-
-		// Hinge DOF 5: motor and/or limit. Bounds are recomputed from the
-		// pre-computed angle (set by joint_fill_rows at substep start).
-		// No position recheck needed -- bounds were set correctly at refresh.
-		if (j->type == JOINT_HINGE && s->dof == 6) {
-			float motor_max = j->hinge.motor_max_impulse;
-			int has_motor = (motor_max > 0.0f);
-			if (s->rows[5].eff_mass == 0.0f && !has_motor) continue; // inactive limit, no motor
-		}
-
-		for (int d = 0; d < s->dof; d++) {
-			if (s->lo[d] <= -1e18f && s->hi[d] >= 1e18f) continue;
-			if (s->rows[d].eff_mass == 0.0f) continue;
-			float vel_err = jac_velocity_f(&s->rows[d], a, b);
-			float r = -vel_err - s->bias[d] - s->softness * s->lambda[d];
-			float dl = s->rows[d].eff_mass * r;
-			float old = s->lambda[d];
-			s->lambda[d] += dl;
-			if (s->lambda[d] < s->lo[d]) s->lambda[d] = s->lo[d];
-			if (s->lambda[d] > s->hi[d]) s->lambda[d] = s->hi[d];
-			jac_apply(&s->rows[d], s->lambda[d] - old, a, b, sa, sb);
-		}
-	}
-}
-
 // Generic warm start: iterate DOFs, apply each row's warm lambda.
 static void joints_warm_start(WorldInternal* w, SolverJoint* joints, int count)
 {

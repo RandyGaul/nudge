@@ -598,17 +598,17 @@ void world_step(World world, float dt)
 			.body_a = sm[i].body_a, .body_b = sm[i].body_b };
 		apush(crefs, r);
 	}
-	if (!w->ldl_enabled) {
-		// No LDL: all joints go into PGS (solve_joint handles all DOFs incl. bounded).
-		for (int i = 0; i < asize(sol_joints); i++) {
-			ConstraintRef r = { .type = CTYPE_JOINT, .index = i,
-				.body_a = sol_joints[i].body_a, .body_b = sol_joints[i].body_b };
-			apush(crefs, r);
-		}
+	// Joints go through PGS when:
+	//  - LDL is disabled (all joints), OR
+	//  - LDL is enabled but the joint has any bounded DOF (inequality constraints).
+	// LDL is strictly for equality constraints; any limit/motor shunts the
+	// whole joint to PGS so its DOFs stay coupled in one iteration loop.
+	for (int i = 0; i < asize(sol_joints); i++) {
+		if (w->ldl_enabled && !joint_internal_has_limits(&w->joints[sol_joints[i].joint_idx])) continue;
+		ConstraintRef r = { .type = CTYPE_JOINT, .index = i,
+			.body_a = sol_joints[i].body_a, .body_b = sol_joints[i].body_b };
+		apush(crefs, r);
 	}
-	// When LDL is enabled: LDL handles bilateral DOFs of rigid joints; bounded
-	// DOFs and pure-bounded joint types (angular motor, cone/twist limits) are
-	// handled by joints_solve_limits. Nothing to add to crefs.
 
 	int cref_count = asize(crefs);
 	int batch_starts[65] = {0};
@@ -776,13 +776,9 @@ void world_step(World world, float dt)
 					solve_joint(w, &sol_joints[crefs[i].index]);
 				}
 			}
-			// Limit DOFs only need a separate pass when LDL handles bilateral DOFs
-			// (joints not in crefs). When LDL is off, solve_joint above handles limits.
-			if (w->ldl_enabled) {
-				double tjl = perf_now();
-				joints_solve_limits(w, sol_joints, asize(sol_joints));
-				t_jlim += perf_now() - tjl;
-			}
+			// All joints are now either in crefs (solve_joint handles all DOFs
+			// incl. bounded) or in LDL (bilateral only, no bounded DOFs); no
+			// separate joint-limit pass is needed.
 		}
 #else
 #error "SIMD_SSE required: non-SSE solver path removed; add a SIMD_NEON backend if needed"

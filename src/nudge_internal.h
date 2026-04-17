@@ -134,6 +134,29 @@ typedef struct JointInternal
 	int island_next;  // -1 = tail
 } JointInternal;
 
+// True when a joint has any bounded DOF (limit, motor, or always-bounded type).
+// Such joints are solved entirely in PGS so all DOFs stay coupled; LDL skips them.
+static inline int joint_internal_has_limits(const JointInternal* j)
+{
+	switch (j->type) {
+	case JOINT_BALL_SOCKET:
+	case JOINT_FIXED:
+		return 0;
+	case JOINT_DISTANCE:
+		return j->distance.limit_min > 0.0f || j->distance.limit_max > 0.0f;
+	case JOINT_HINGE:
+		return j->hinge.limit_min != 0.0f || j->hinge.limit_max != 0.0f || j->hinge.motor_max_impulse > 0.0f;
+	case JOINT_PRISMATIC:
+		return j->prismatic.motor_max_impulse > 0.0f;
+	case JOINT_ANGULAR_MOTOR:
+	case JOINT_TWIST_LIMIT:
+	case JOINT_CONE_LIMIT:
+	case JOINT_SWING_TWIST:
+		return 1;
+	}
+	return 0;
+}
+
 typedef struct BVH_Tree BVH_Tree; // forward decl, defined in bvh.c
 
 // LDL direct solver types (used by solver_ldl.c).
