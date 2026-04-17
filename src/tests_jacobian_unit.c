@@ -4,47 +4,34 @@
 
 #define JAC_EPS 1e-6
 
-// Helper: fill SolverJoint.rows[] for ball socket from (r_a, r_b).
-// J_a = [-I, -skew(r_a)], J_b = [I, skew(r_b)] where skew(r)*w = r x w.
+// Sets the geometry fields on SolverJoint that LDL reads to compute Jacobians.
+// Optionally fills the test_rows scratch buffer with the same Jacobian for
+// callers that want to verify the Jacobian math via jac_velocity_f / jac_apply.
 static void test_fill_bs_rows(SolverJoint* s)
 {
-	v3 ra = s->r_a, rb = s->r_b;
-	for (int d = 0; d < 3; d++) { memset(s->rows[d].J_a, 0, 6 * sizeof(float)); memset(s->rows[d].J_b, 0, 6 * sizeof(float)); }
-	s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
-	s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
-	s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
-	s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
-	s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
-	s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
+	(void)s; // Only r_a/r_b matter for ldl_fill_jacobian; already on s.
 }
 
-// Helper: fill SolverJoint for distance joint (axis stored for LDL to read).
-// Also populates rows[] so other (non-LDL) readers still work.
+static void test_fill_bs_jac(JacobianRow* rows, v3 ra, v3 rb)
+{
+	for (int d = 0; d < 3; d++) { memset(rows[d].J_a, 0, 6 * sizeof(float)); memset(rows[d].J_b, 0, 6 * sizeof(float)); }
+	rows[0].J_a[0] = -1; rows[0].J_a[4] = -ra.z; rows[0].J_a[5] =  ra.y;
+	rows[0].J_b[0] =  1; rows[0].J_b[4] =  rb.z; rows[0].J_b[5] = -rb.y;
+	rows[1].J_a[1] = -1; rows[1].J_a[3] =  ra.z; rows[1].J_a[5] = -ra.x;
+	rows[1].J_b[1] =  1; rows[1].J_b[3] = -rb.z; rows[1].J_b[5] =  rb.x;
+	rows[2].J_a[2] = -1; rows[2].J_a[3] = -ra.y; rows[2].J_a[4] =  ra.x;
+	rows[2].J_b[2] =  1; rows[2].J_b[3] =  rb.y; rows[2].J_b[4] = -rb.x;
+}
+
 static void test_fill_dist_rows(SolverJoint* s, v3 axis)
 {
 	s->dist_axis = axis;
-	memset(s->rows[0].J_a, 0, 6 * sizeof(float)); memset(s->rows[0].J_b, 0, 6 * sizeof(float));
-	v3 rxa = cross(s->r_a, axis), rxb = cross(s->r_b, axis);
-	s->rows[0].J_a[0] = -axis.x; s->rows[0].J_a[1] = -axis.y; s->rows[0].J_a[2] = -axis.z;
-	s->rows[0].J_a[3] = -rxa.x;  s->rows[0].J_a[4] = -rxa.y;  s->rows[0].J_a[5] = -rxa.z;
-	s->rows[0].J_b[0] =  axis.x; s->rows[0].J_b[1] =  axis.y; s->rows[0].J_b[2] =  axis.z;
-	s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
 }
 
-// Helper: fill SolverJoint for hinge joint (u1, u2 stored for LDL to read).
-// Also populates rows[] so other (non-LDL) readers still work.
 static void test_fill_hinge_rows(SolverJoint* s, v3 u1, v3 u2)
 {
 	s->hinge_u1 = u1;
 	s->hinge_u2 = u2;
-	// Linear rows 0-2: same as ball socket
-	test_fill_bs_rows(s);
-	// Angular rows 3-4
-	for (int d = 3; d < 5; d++) { memset(s->rows[d].J_a, 0, 6 * sizeof(float)); memset(s->rows[d].J_b, 0, 6 * sizeof(float)); }
-	s->rows[3].J_a[3] =  u1.x; s->rows[3].J_a[4] =  u1.y; s->rows[3].J_a[5] =  u1.z;
-	s->rows[3].J_b[3] = -u1.x; s->rows[3].J_b[4] = -u1.y; s->rows[3].J_b[5] = -u1.z;
-	s->rows[4].J_a[3] =  u2.x; s->rows[4].J_a[4] =  u2.y; s->rows[4].J_a[5] =  u2.z;
-	s->rows[4].J_b[3] = -u2.x; s->rows[4].J_b[4] = -u2.y; s->rows[4].J_b[5] = -u2.z;
 }
 
 // Helper: verify a Jacobian row satisfies J*v = constraint_velocity for given body velocities.

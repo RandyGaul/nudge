@@ -346,14 +346,12 @@ static void prism_build_lateral_inv_eff_mass(BodyHot* a, BodyHot* b, BodyState* 
 
 // -----------------------------------------------------------------------------
 // Centralized Jacobian fill: the ONE function that knows about joint types.
-// Fills s->r_a, s->r_b, s->rows[], s->bias[], s->rows[].eff_mass from current body state.
 
 static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb, WorldInternal* w, float dt)
 {
 	float ptv, soft;
 	JointInternal* j = &w->joints[s->joint_idx];
 
-	for (int d = 0; d < s->dof; d++) { memset(s->rows[d].J_a, 0, 6 * sizeof(float)); memset(s->rows[d].J_b, 0, 6 * sizeof(float)); }
 
 	if (s->type == JOINT_BALL_SOCKET) {
 		s->r_a = rotate(sa->rotation, j->ball_socket.local_a);
@@ -363,12 +361,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 
 		v3 ra = s->r_a, rb = s->r_b;
 		// J_a = [-I, skew(r_a)], J_b = [I, -skew(r_b)]
-		s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
-		s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
-		s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
-		s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
-		s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
-		s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
 
 		v3 anchor_a = add(sa->position, s->r_a);
 		v3 anchor_b = add(sb->position, s->r_b);
@@ -390,10 +382,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		v3 axis = dist_val > 1e-6f ? scale(delta, 1.0f / dist_val) : V3(1, 0, 0);
 
 		v3 rxa = cross(s->r_a, axis), rxb = cross(s->r_b, axis);
-		s->rows[0].J_a[0] = -axis.x; s->rows[0].J_a[1] = -axis.y; s->rows[0].J_a[2] = -axis.z;
-		s->rows[0].J_a[3] = -rxa.x;  s->rows[0].J_a[4] = -rxa.y;  s->rows[0].J_a[5] = -rxa.z;
-		s->rows[0].J_b[0] =  axis.x; s->rows[0].J_b[1] =  axis.y; s->rows[0].J_b[2] =  axis.z;
-		s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
 		s->dist_axis = axis; // LDL reads this instead of reconstructing from positions
 		// bounded[0]: 1-DOF linear along axis (works for both rigid and limit cases).
 		s->bounded[0].axis = axis;
@@ -429,12 +417,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 
 		v3 ra = s->r_a, rb = s->r_b;
 		// Linear rows 0-2: same as ball socket (J_a = [-I, -skew(r_a)], J_b = [I, skew(r_b)])
-		s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
-		s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
-		s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
-		s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
-		s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
-		s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
 
 		// Angular rows 3-4
 		v3 axis_a = norm(rotate(sa->rotation, j->hinge.local_axis_a));
@@ -444,10 +426,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		v3 u1 = cross(t1, axis_b);
 		v3 u2 = cross(t2, axis_b);
 
-		s->rows[3].J_a[3] =  u1.x; s->rows[3].J_a[4] =  u1.y; s->rows[3].J_a[5] =  u1.z;
-		s->rows[3].J_b[3] = -u1.x; s->rows[3].J_b[4] = -u1.y; s->rows[3].J_b[5] = -u1.z;
-		s->rows[4].J_a[3] =  u2.x; s->rows[4].J_a[4] =  u2.y; s->rows[4].J_a[5] =  u2.z;
-		s->rows[4].J_b[3] = -u2.x; s->rows[4].J_b[4] = -u2.y; s->rows[4].J_b[5] = -u2.z;
 
 		v3 anchor_a = add(sa->position, s->r_a);
 		v3 anchor_b = add(sb->position, s->r_b);
@@ -481,8 +459,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		if (has_limit || has_motor) {
 			s->dof = 6;
 			// Jacobian: relative angular velocity along hinge axis
-			s->rows[5].J_a[3] = axis_a.x; s->rows[5].J_a[4] = axis_a.y; s->rows[5].J_a[5] = axis_a.z;
-			s->rows[5].J_b[3] = -axis_a.x; s->rows[5].J_b[4] = -axis_a.y; s->rows[5].J_b[5] = -axis_a.z;
 			s->pos_error[5] = 0;
 			// Default bounds: bilateral (motor or limit will narrow)
 			s->lo[5] = -FLT_MAX;
@@ -506,8 +482,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 					s->pos_error[5] = hmax - angle;
 					if (s->lo[5] < 0.0f) s->lo[5] = 0.0f;
 				} else if (!has_motor) {
-					memset(s->rows[5].J_a, 0, 6 * sizeof(float));
-					memset(s->rows[5].J_b, 0, 6 * sizeof(float));
 					// Limit inactive and no motor: zero eff_mass so solve_bounded_angular short-circuits.
 					s->bounded[0].eff_mass = 0.0f;
 					goto hinge_dof5_done;
@@ -531,17 +505,8 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 
 		v3 ra = s->r_a, rb = s->r_b;
 		// Linear rows 0-2: identical to ball socket
-		s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
-		s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
-		s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
-		s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
-		s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
-		s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
 
 		// Angular rows 3-5: lock all relative rotation
-		s->rows[3].J_a[3] = 1; s->rows[3].J_b[3] = -1;
-		s->rows[4].J_a[4] = 1; s->rows[4].J_b[4] = -1;
-		s->rows[5].J_a[5] = 1; s->rows[5].J_b[5] = -1;
 
 		// Linear position error
 		v3 anchor_a = add(sa->position, s->r_a);
@@ -577,20 +542,9 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		v3 rxa_t2 = cross(ra, t2), rxb_t2 = cross(rb, t2);
 
 		// Linear rows 0-1: lateral constraints (perpendicular to slide axis)
-		s->rows[0].J_a[0] = -t1.x; s->rows[0].J_a[1] = -t1.y; s->rows[0].J_a[2] = -t1.z;
-		s->rows[0].J_a[3] = -rxa_t1.x; s->rows[0].J_a[4] = -rxa_t1.y; s->rows[0].J_a[5] = -rxa_t1.z;
-		s->rows[0].J_b[0] =  t1.x; s->rows[0].J_b[1] =  t1.y; s->rows[0].J_b[2] =  t1.z;
-		s->rows[0].J_b[3] =  rxb_t1.x; s->rows[0].J_b[4] =  rxb_t1.y; s->rows[0].J_b[5] =  rxb_t1.z;
 
-		s->rows[1].J_a[0] = -t2.x; s->rows[1].J_a[1] = -t2.y; s->rows[1].J_a[2] = -t2.z;
-		s->rows[1].J_a[3] = -rxa_t2.x; s->rows[1].J_a[4] = -rxa_t2.y; s->rows[1].J_a[5] = -rxa_t2.z;
-		s->rows[1].J_b[0] =  t2.x; s->rows[1].J_b[1] =  t2.y; s->rows[1].J_b[2] =  t2.z;
-		s->rows[1].J_b[3] =  rxb_t2.x; s->rows[1].J_b[4] =  rxb_t2.y; s->rows[1].J_b[5] =  rxb_t2.z;
 
 		// Angular rows 2-4: lock all relative rotation
-		s->rows[2].J_a[3] = 1; s->rows[2].J_b[3] = -1;
-		s->rows[3].J_a[4] = 1; s->rows[3].J_b[4] = -1;
-		s->rows[4].J_a[5] = 1; s->rows[4].J_b[5] = -1;
 
 		// Lateral position error
 		v3 anchor_a = add(sa->position, s->r_a);
@@ -615,10 +569,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		if (j->prismatic.motor_max_impulse > 0.0f) {
 			s->dof = 6;
 			v3 rxa_s = cross(ra, slide_axis), rxb_s = cross(rb, slide_axis);
-			s->rows[5].J_a[0] = -slide_axis.x; s->rows[5].J_a[1] = -slide_axis.y; s->rows[5].J_a[2] = -slide_axis.z;
-			s->rows[5].J_a[3] = -rxa_s.x; s->rows[5].J_a[4] = -rxa_s.y; s->rows[5].J_a[5] = -rxa_s.z;
-			s->rows[5].J_b[0] = slide_axis.x; s->rows[5].J_b[1] = slide_axis.y; s->rows[5].J_b[2] = slide_axis.z;
-			s->rows[5].J_b[3] = rxb_s.x; s->rows[5].J_b[4] = rxb_s.y; s->rows[5].J_b[5] = rxb_s.z;
 			s->pos_error[5] = 0;
 			s->lo[5] = -j->prismatic.motor_max_impulse;
 			s->hi[5] = j->prismatic.motor_max_impulse;
@@ -637,8 +587,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		v3 axis_a_w = norm(rotate(sa->rotation, j->angular_motor.local_axis_a));
 		v3 axis_b_w = norm(rotate(sb->rotation, j->angular_motor.local_axis_b));
 		v3 axis = norm(add(axis_a_w, axis_b_w)); // symmetric average for stability
-		s->rows[0].J_a[3] = axis.x; s->rows[0].J_a[4] = axis.y; s->rows[0].J_a[5] = axis.z;
-		s->rows[0].J_b[3] = -axis.x; s->rows[0].J_b[4] = -axis.y; s->rows[0].J_b[5] = -axis.z;
 		s->pos_error[0] = 0;
 		s->lo[0] = -j->angular_motor.max_impulse;
 		s->hi[0] = j->angular_motor.max_impulse;
@@ -666,8 +614,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 			float slen = len(swing);
 			if (slen > 1e-6f) swing = scale(swing, 1.0f / slen);
 			else { v3 t2; hinge_tangent_basis(axis_a_w, &swing, &t2); }
-			s->rows[0].J_a[3] = swing.x; s->rows[0].J_a[4] = swing.y; s->rows[0].J_a[5] = swing.z;
-			s->rows[0].J_b[3] = -swing.x; s->rows[0].J_b[4] = -swing.y; s->rows[0].J_b[5] = -swing.z;
 			s->pos_error[0] = acosf(cos_theta > 1.0f ? 1.0f : (cos_theta < -1.0f ? -1.0f : cos_theta)) - j->cone_limit.half_angle;
 			s->lo[0] = 0.0f; s->hi[0] = FLT_MAX;
 			// bounded[0]: pure-angular along swing axis.
@@ -701,8 +647,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		else q_twist = (quat){ 0, 0, 0, 1 };
 		float sign = q_twist.w >= 0 ? 1.0f : -1.0f;
 		float twist_angle = 2.0f * atan2f(sign * proj, sign * q_twist.w);
-		s->rows[0].J_a[3] = twist_axis.x; s->rows[0].J_a[4] = twist_axis.y; s->rows[0].J_a[5] = twist_axis.z;
-		s->rows[0].J_b[3] = -twist_axis.x; s->rows[0].J_b[4] = -twist_axis.y; s->rows[0].J_b[5] = -twist_axis.z;
 		float tmin = j->twist_limit.limit_min, tmax = j->twist_limit.limit_max;
 		// Jv = (w_a - w_b) . axis = -d(twist)/dt (same convention as hinge limit).
 		// twist > tmax: want d(twist)/dt<0, Jv>0, positive lambda -> lo=0.
@@ -738,12 +682,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->softness = soft;
 		s->dof = 5;
 		v3 ra = s->r_a, rb = s->r_b;
-		s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
-		s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
-		s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
-		s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
-		s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
-		s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
 		v3 anchor_a = add(sa->position, s->r_a);
 		v3 anchor_b = add(sb->position, s->r_b);
 		v3 err = sub(anchor_b, anchor_a);
@@ -760,8 +698,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 			float slen = len(swing);
 			if (slen > 1e-6f) swing = scale(swing, 1.0f / slen);
 			else { v3 t2; hinge_tangent_basis(axis_a_w, &swing, &t2); }
-			s->rows[3].J_a[3] = swing.x; s->rows[3].J_a[4] = swing.y; s->rows[3].J_a[5] = swing.z;
-			s->rows[3].J_b[3] = -swing.x; s->rows[3].J_b[4] = -swing.y; s->rows[3].J_b[5] = -swing.z;
 			s->pos_error[3] = acosf(cos_theta > 1.0f ? 1.0f : (cos_theta < -1.0f ? -1.0f : cos_theta)) - j->swing_twist.cone_half_angle;
 			s->lo[3] = 0.0f; s->hi[3] = FLT_MAX;
 			s->bounded[0].axis = swing;
@@ -787,8 +723,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		else q_twist = (quat){ 0, 0, 0, 1 };
 		float sign = q_twist.w >= 0 ? 1.0f : -1.0f;
 		float twist_angle = 2.0f * atan2f(sign * proj, sign * q_twist.w);
-		s->rows[4].J_a[3] = twist_axis.x; s->rows[4].J_a[4] = twist_axis.y; s->rows[4].J_a[5] = twist_axis.z;
-		s->rows[4].J_b[3] = -twist_axis.x; s->rows[4].J_b[4] = -twist_axis.y; s->rows[4].J_b[5] = -twist_axis.z;
 		float tmin = j->swing_twist.twist_min, tmax = j->swing_twist.twist_max;
 		int twist_active = 0;
 		if (twist_angle > tmax) { s->pos_error[4] = twist_angle - tmax; s->lo[4] = 0.0f; s->hi[4] = FLT_MAX; twist_active = 1; }
@@ -808,7 +742,6 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 
 	// Generic: compute eff_mass and bias from pos_error for all DOFs
 	for (int d = 0; d < s->dof; d++) {
-		s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, sa, sb, soft);
 		s->bias[d] = ptv * s->pos_error[d];
 	}
 
@@ -908,7 +841,6 @@ static void joints_refresh_substep(WorldInternal* w, SolverJoint* joints, int co
 		int old_dof = s->dof;
 		// Reset DOF to base (joint_fill_rows will set final dof including limits/motors)
 		s->dof = j->type == JOINT_DISTANCE ? 1 : 6; // hinge with limits or prismatic with motor = 6
-		memset(s->rows, 0, sizeof(s->rows));
 		solver_joint_init_bounds(s);
 		float saved_lambda[JOINT_MAX_DOF];
 		memcpy(saved_lambda, s->lambda, sizeof(saved_lambda));

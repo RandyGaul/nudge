@@ -3,21 +3,24 @@
 // there's a sign, scale, or convention bug in the LDL pipeline.
 
 // Helper: run generic PGS solve N times on given bodies. Returns final lambda as v3 (for ball-socket).
-// Uses per-DOF Jacobian rows, matching the production solver.
+// Uses per-DOF Jacobian rows in a local scratch buffer (rows[] no longer on SolverJoint).
 static v3 pgs_solve_ball_socket_n(SolverJoint* s, BodyHot* bodies, BodyState* states, int n_iters)
 {
 	BodyHot a = bodies[s->body_a];
 	BodyHot b = bodies[s->body_b];
 	BodyState sa = states[s->body_a];
 	BodyState sb = states[s->body_b];
+	JacobianRow rows[3];
+	test_fill_bs_jac(rows, s->r_a, s->r_b);
+	for (int d = 0; d < 3; d++) rows[d].eff_mass = jac_eff_mass(&rows[d], &a, &b, &sa, &sb, s->softness);
 	s->lambda[0] = 0; s->lambda[1] = 0; s->lambda[2] = 0;
 	for (int iter = 0; iter < n_iters; iter++) {
 		for (int d = 0; d < s->dof; d++) {
-			float vel_err = jac_velocity_f(&s->rows[d], &a, &b);
+			float vel_err = jac_velocity_f(&rows[d], &a, &b);
 			float rhs = -vel_err - s->bias[d] - s->softness * s->lambda[d];
-			float delta = s->rows[d].eff_mass * rhs;
+			float delta = rows[d].eff_mass * rhs;
 			s->lambda[d] += delta;
-			jac_apply(&s->rows[d], delta, &a, &b, &sa, &sb);
+			jac_apply(&rows[d], delta, &a, &b, &sa, &sb);
 		}
 	}
 	bodies[s->body_a] = a;
@@ -25,11 +28,11 @@ static v3 pgs_solve_ball_socket_n(SolverJoint* s, BodyHot* bodies, BodyState* st
 	return V3(s->lambda[0], s->lambda[1], s->lambda[2]);
 }
 
-// Helper: fill rows + eff_mass for a ball-socket SolverJoint from body state.
+// Helper: ensure SolverJoint has the geometry LDL needs (just r_a/r_b for ball socket).
 static void compute_ball_socket_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
 {
-	test_fill_bs_rows(s);
-	for (int d = 0; d < 3; d++) s->rows[d].eff_mass = jac_eff_mass(&s->rows[d], a, b, sa, sb, s->softness);
+	(void)a; (void)b; (void)sa; (void)sb; (void)s;
+	// r_a/r_b are already set by the caller; nothing else needed.
 }
 
 // ============================================================================
@@ -159,12 +162,15 @@ static void test_pgs_vs_ldl_chain_gravity()
 			SolverJoint* s = &pgs_sols[ji];
 			BodyHot* a = &bodies_pgs[s->body_a];
 			BodyHot* b = &bodies_pgs[s->body_b]; BodyState* sa = &states_pgs[s->body_a]; BodyState* sb = &states_pgs[s->body_b];
+			JacobianRow rows[3];
+			test_fill_bs_jac(rows, s->r_a, s->r_b);
+			for (int d = 0; d < 3; d++) rows[d].eff_mass = jac_eff_mass(&rows[d], a, b, sa, sb, s->softness);
 			for (int d = 0; d < s->dof; d++) {
-				float vel_err = jac_velocity_f(&s->rows[d], a, b);
+				float vel_err = jac_velocity_f(&rows[d], a, b);
 				float rhs = -vel_err - s->bias[d] - s->softness * s->lambda[d];
-				float delta = s->rows[d].eff_mass * rhs;
+				float delta = rows[d].eff_mass * rhs;
 				s->lambda[d] += delta;
-				jac_apply(&s->rows[d], delta, a, b, sa, sb);
+				jac_apply(&rows[d], delta, a, b, sa, sb);
 			}
 		}
 	}
@@ -273,12 +279,15 @@ static void test_pgs_vs_ldl_star_gravity()
 			SolverJoint* s = &pgs_sols[ji];
 			BodyHot* a = &bodies_pgs[s->body_a];
 			BodyHot* b = &bodies_pgs[s->body_b]; BodyState* sa = &states_pgs[s->body_a]; BodyState* sb = &states_pgs[s->body_b];
+			JacobianRow rows[3];
+			test_fill_bs_jac(rows, s->r_a, s->r_b);
+			for (int d = 0; d < 3; d++) rows[d].eff_mass = jac_eff_mass(&rows[d], a, b, sa, sb, s->softness);
 			for (int d = 0; d < s->dof; d++) {
-				float vel_err = jac_velocity_f(&s->rows[d], a, b);
+				float vel_err = jac_velocity_f(&rows[d], a, b);
 				float rhs = -vel_err - s->bias[d] - s->softness * s->lambda[d];
-				float delta = s->rows[d].eff_mass * rhs;
+				float delta = rows[d].eff_mass * rhs;
 				s->lambda[d] += delta;
-				jac_apply(&s->rows[d], delta, a, b, sa, sb);
+				jac_apply(&rows[d], delta, a, b, sa, sb);
 			}
 		}
 	}
@@ -389,12 +398,15 @@ static void test_pgs_vs_ldl_star_shattering()
 			SolverJoint* s = &pgs_sols[ji];
 			BodyHot* a = &bodies_pgs[s->body_a];
 			BodyHot* b = &bodies_pgs[s->body_b]; BodyState* sa = &states_pgs[s->body_a]; BodyState* sb = &states_pgs[s->body_b];
+			JacobianRow rows[3];
+			test_fill_bs_jac(rows, s->r_a, s->r_b);
+			for (int d = 0; d < 3; d++) rows[d].eff_mass = jac_eff_mass(&rows[d], a, b, sa, sb, s->softness);
 			for (int d = 0; d < s->dof; d++) {
-				float vel_err = jac_velocity_f(&s->rows[d], a, b);
+				float vel_err = jac_velocity_f(&rows[d], a, b);
 				float rhs = -vel_err - s->bias[d] - s->softness * s->lambda[d];
-				float delta = s->rows[d].eff_mass * rhs;
+				float delta = rows[d].eff_mass * rhs;
 				s->lambda[d] += delta;
-				jac_apply(&s->rows[d], delta, a, b, sa, sb);
+				jac_apply(&rows[d], delta, a, b, sa, sb);
 			}
 		}
 	}

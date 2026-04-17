@@ -518,8 +518,6 @@ typedef struct SolverJoint
 	float lo[JOINT_MAX_DOF];
 	float hi[JOINT_MAX_DOF];
 
-	JacobianRow rows[JOINT_MAX_DOF];
-
 	// Ball-socket-like 3-DOF linear block (packed sym3x3 inverse: xx,xy,xz,yy,yz,zz).
 	// Used by ball socket, hinge linear (DOF 0-2), fixed linear (DOF 0-2),
 	// prismatic lateral pair (computed differently), swing-twist linear.
