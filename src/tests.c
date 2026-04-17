@@ -12874,16 +12874,17 @@ static void bench_incremental_np(int base_2d, int base_3d, int frames)
 	printf("=================================================\n");
 }
 
-// Builds the same 25x25 terrain + 49 mixed bodies as scene_trimesh_stress
-// (without any rendering dependency) and measures per-frame narrowphase cost
-// both with and without the SIMD 4-triangle batch path enabled. All 49 bodies
+// Builds a tessellated terrain + grid of mixed-shape bodies and measures
+// per-frame narrowphase cost both with and without the SIMD 4-triangle batch
+// path enabled. `mesh_n` controls tessellation (mesh_n x mesh_n verts),
+// `body_grid` controls body count (body_grid x body_grid bodies). All bodies
 // contact the mesh simultaneously by frame ~60, so the measurement captures
 // steady-state narrowphase work under a representative load.
-static void bench_trimesh_stress_run(int simd_enabled, int frames)
+static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid, int frames)
 {
-	#define N 25
-	#define EXTENT 12.0f
-	v3 verts[N * N];
+	int N = mesh_n;
+	float EXTENT = 12.0f * (mesh_n / 25.0f);
+	v3* verts = (v3*)malloc(sizeof(v3) * N * N);
 	for (int z = 0; z < N; z++) {
 		for (int x = 0; x < N; x++) {
 			float fx = ((float)x / (N - 1)) * 2.0f - 1.0f;
@@ -12895,7 +12896,7 @@ static void bench_trimesh_stress_run(int simd_enabled, int frames)
 			verts[z * N + x] = V3(px, py, pz);
 		}
 	}
-	uint32_t indices[(N - 1) * (N - 1) * 6];
+	uint32_t* indices = (uint32_t*)malloc(sizeof(uint32_t) * (N - 1) * (N - 1) * 6);
 	int ti = 0;
 	for (int z = 0; z < N - 1; z++) {
 		for (int x = 0; x < N - 1; x++) {
@@ -12915,8 +12916,8 @@ static void bench_trimesh_stress_run(int simd_enabled, int frames)
 	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
 	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
 
-	// 7x7 = 49 mixed-shape bodies.
-	int grid = 7;
+	// body_grid x body_grid mixed-shape bodies.
+	int grid = body_grid;
 	float spacing = 1.3f;
 	float x0 = -(spacing * (grid - 1)) * 0.5f;
 	float z0 = x0;
@@ -12956,7 +12957,10 @@ static void bench_trimesh_stress_run(int simd_enabled, int frames)
 		acc_bp += t.broadphase;
 	}
 	double n = (double)frames;
-	printf("  SIMD=%-3s   total=%7.3f ms/frame   broadphase+NP=%7.3f ms/frame\n",
+	int body_count = body_grid * body_grid;
+	int tri_count = (mesh_n - 1) * (mesh_n - 1) * 2;
+	printf("  %dx%d mesh (%d tris) x %d bodies  SIMD=%-3s   total=%7.3f ms   bp+NP=%7.3f ms\n",
+		mesh_n, mesh_n, tri_count, body_count,
 		simd_enabled ? "ON" : "OFF",
 		acc_total / n * 1000.0,
 		acc_bp / n * 1000.0);
@@ -12964,16 +12968,21 @@ static void bench_trimesh_stress_run(int simd_enabled, int frames)
 	destroy_world(w);
 	trimesh_free(mesh);
 	hull_free(test_hull);
-	#undef N
-	#undef EXTENT
+	free(verts);
+	free(indices);
 }
 
 static void bench_trimesh_stress()
 {
-	printf("=== Trimesh stress A/B (25x25 mesh, 49 bodies, 300 frames, 2 substeps) ===\n");
-	bench_trimesh_stress_run(0, 300);
-	bench_trimesh_stress_run(1, 300);
-	printf("==========================================================================\n");
+	printf("=== Trimesh stress A/B (2 substeps, 300 frames each) ===\n");
+	int mesh_sizes[]  = {  25,  50, 100, 150 };
+	int body_grids[]  = {   7,  10,  15,  20 };
+	int n_scales = sizeof(mesh_sizes) / sizeof(mesh_sizes[0]);
+	for (int s = 0; s < n_scales; s++) {
+		bench_trimesh_stress_run(0, mesh_sizes[s], body_grids[s], 300);
+		bench_trimesh_stress_run(1, mesh_sizes[s], body_grids[s], 300);
+	}
+	printf("========================================================\n");
 }
 
 // Run bench_box_pile at multiple scales for scaling analysis.
