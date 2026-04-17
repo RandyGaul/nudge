@@ -108,22 +108,6 @@ static void ball_socket_eff_mass(BodyHot* a, BodyHot* b, BodyState* sa, BodyStat
 	sym3x3_inverse(K, out);
 }
 
-// Ball socket 3-DOF PGS step. Uses precomputed sym3x3 inverse effective mass
-// (built once per substep by ball_socket_eff_mass). Jv and impulse application
-// are inline from r_a, r_b -- no stored Jacobian reads, no per-iter K factor.
-static void solve_ball_socket(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
-{
-	v3 ra = s->r_a, rb = s->r_b;
-	v3 jv = sub(add(b->velocity, cross(b->angular_velocity, rb)), add(a->velocity, cross(a->angular_velocity, ra)));
-	v3 rhs = V3(-jv.x - s->bias[0] - s->softness * s->lambda[0], -jv.y - s->bias[1] - s->softness * s->lambda[1], -jv.z - s->bias[2] - s->softness * s->lambda[2]);
-	v3 delta = sym3x3_mul_v3(s->bs_inv_eff_mass, rhs);
-	s->lambda[0] += delta.x; s->lambda[1] += delta.y; s->lambda[2] += delta.z;
-	a->velocity = sub(a->velocity, scale(delta, a->inv_mass));
-	b->velocity = add(b->velocity, scale(delta, b->inv_mass));
-	a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, cross(ra, delta)));
-	b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, cross(rb, delta)));
-}
-
 static void hinge_tangent_basis(v3 axis, v3* t1, v3* t2)
 {
 	v3 ref = fabsf(axis.x) < 0.9f ? V3(1, 0, 0) : V3(0, 1, 0);
@@ -175,6 +159,64 @@ static float jac_eff_mass(JacobianRow* row, BodyHot* a, BodyHot* b, BodyState* s
 	return k > 1e-12f ? 1.0f / k : 0.0f;
 }
 
+// Shared 3-DOF linear block step (ball socket, hinge linear, fixed linear).
+// Uses precomputed sym3x3 inverse lin_inv_eff_mass. Jv and impulse apply inline
+// from r_a, r_b. lambda_base is the starting DOF index (0 for all current uses).
+static inline void solve_point_block(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb, int lambda_base)
+{
+	v3 ra = s->r_a, rb = s->r_b;
+	v3 jv = sub(add(b->velocity, cross(b->angular_velocity, rb)), add(a->velocity, cross(a->angular_velocity, ra)));
+	float* lam = &s->lambda[lambda_base];
+	float* bias = &s->bias[lambda_base];
+	v3 rhs = V3(-jv.x - bias[0] - s->softness * lam[0], -jv.y - bias[1] - s->softness * lam[1], -jv.z - bias[2] - s->softness * lam[2]);
+	v3 delta = sym3x3_mul_v3(s->lin_inv_eff_mass, rhs);
+	lam[0] += delta.x; lam[1] += delta.y; lam[2] += delta.z;
+	a->velocity = sub(a->velocity, scale(delta, a->inv_mass));
+	b->velocity = add(b->velocity, scale(delta, b->inv_mass));
+	a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, cross(ra, delta)));
+	b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, cross(rb, delta)));
+}
+
+static void solve_ball_socket(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
+{
+	solve_point_block(s, a, b, sa, sb, 0);
+}
+
+// Hinge 5- or 6-DOF PGS step. Linear (DOF 0-2) uses sym3x3 inverse; angular
+// alignment (DOF 3-4) uses sym2x2 inverse with stored u1/u2 axes. Bounded
+// limit/motor (DOF 5, optional) reads rows[5] / eff_mass as before.
+static void solve_hinge(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
+{
+	solve_point_block(s, a, b, sa, sb, 0);
+
+	// Angular 2-DOF: Jv_i = dot(u_i, w_a - w_b). Impulse along u1*d0 + u2*d1 (world frame).
+	v3 u1 = s->hinge_u1, u2 = s->hinge_u2;
+	v3 dw = sub(a->angular_velocity, b->angular_velocity);
+	float jv0 = dot(u1, dw), jv1 = dot(u2, dw);
+	float rhs0 = -jv0 - s->bias[3] - s->softness * s->lambda[3];
+	float rhs1 = -jv1 - s->bias[4] - s->softness * s->lambda[4];
+	float m00 = s->hinge_ang_inv_eff_mass[0], m01 = s->hinge_ang_inv_eff_mass[1], m11 = s->hinge_ang_inv_eff_mass[2];
+	float d0 = m00 * rhs0 + m01 * rhs1;
+	float d1 = m01 * rhs0 + m11 * rhs1;
+	s->lambda[3] += d0;
+	s->lambda[4] += d1;
+	v3 ang_impulse = add(scale(u1, d0), scale(u2, d1));
+	a->angular_velocity = add(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, ang_impulse));
+	b->angular_velocity = sub(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, ang_impulse));
+
+	// Optional DOF 5 (limit/motor): bounded, still uses rows[5]/eff_mass.
+	if (s->dof > 5) {
+		float vel_err = jac_velocity_f(&s->rows[5], a, b);
+		float r = -vel_err - s->bias[5] - s->softness * s->lambda[5];
+		float dl = s->rows[5].eff_mass * r;
+		float old = s->lambda[5];
+		s->lambda[5] += dl;
+		if (s->lambda[5] < s->lo[5]) s->lambda[5] = s->lo[5];
+		if (s->lambda[5] > s->hi[5]) s->lambda[5] = s->hi[5];
+		jac_apply(&s->rows[5], s->lambda[5] - old, a, b, sa, sb);
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Centralized Jacobian fill: the ONE function that knows about joint types.
 // Fills s->r_a, s->r_b, s->rows[], s->bias[], s->rows[].eff_mass from current body state.
@@ -207,7 +249,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
 
 		// Precompute sym3x3 inverse for the inline block solve in solve_ball_socket.
-		ball_socket_eff_mass(a, b, sa, sb, ra, rb, soft, s->bs_inv_eff_mass);
+		ball_socket_eff_mass(a, b, sa, sb, ra, rb, soft, s->lin_inv_eff_mass);
 	} else if (s->type == JOINT_DISTANCE) {
 		s->r_a = rotate(sa->rotation, j->distance.local_a);
 		s->r_b = rotate(sb->rotation, j->distance.local_b);
@@ -276,6 +318,23 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
 		s->pos_error[3] = dot(t1, axis_b);
 		s->pos_error[4] = dot(t2, axis_b);
+
+		// Precompute inline-solve data: sym3x3 linear inverse (same as ball socket)
+		// and sym2x2 angular inverse. K_ang[i,j] = u_i . (I_a^-1 + I_b^-1) u_j.
+		ball_socket_eff_mass(a, b, sa, sb, ra, rb, soft, s->lin_inv_eff_mass);
+		s->hinge_u1 = u1; s->hinge_u2 = u2;
+		v3 ia_u1 = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, u1);
+		v3 ia_u2 = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, u2);
+		v3 ib_u1 = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, u1);
+		v3 ib_u2 = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, u2);
+		float k00 = dot(u1, add(ia_u1, ib_u1)) + soft;
+		float k11 = dot(u2, add(ia_u2, ib_u2)) + soft;
+		float k01 = dot(u1, add(ia_u2, ib_u2));
+		float det = k00 * k11 - k01 * k01;
+		float inv_det = det > 1e-20f ? 1.0f / det : 0.0f;
+		s->hinge_ang_inv_eff_mass[0] =  k11 * inv_det;
+		s->hinge_ang_inv_eff_mass[1] = -k01 * inv_det;
+		s->hinge_ang_inv_eff_mass[2] =  k00 * inv_det;
 
 		// Hinge DOF 5: motor and/or limit along the hinge axis.
 		float hmin = j->hinge.limit_min, hmax = j->hinge.limit_max;
@@ -593,10 +652,14 @@ static void solve_joint(WorldInternal* w, SolverJoint* s)
 	BodyState* sa = &w->body_state[s->body_a];
 	BodyState* sb = &w->body_state[s->body_b];
 
-	// Ball socket: 3-DOF bilateral. Inline solve with precomputed sym3x3 inverse;
-	// skips per-iteration K factorization and stored-Jacobian reads.
+	// Specialized per-type solvers (inline solve with precomputed effective mass,
+	// no per-iteration K factorization or stored-Jacobian reads for bilateral DOFs).
 	if (s->type == JOINT_BALL_SOCKET && s->dof == 3) {
 		solve_ball_socket(s, a, b, sa, sb);
+		return;
+	}
+	if (s->type == JOINT_HINGE) {
+		solve_hinge(s, a, b, sa, sb);
 		return;
 	}
 

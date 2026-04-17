@@ -466,7 +466,14 @@ typedef struct SolverJoint
 	float hi[JOINT_MAX_DOF];
 
 	JacobianRow rows[JOINT_MAX_DOF];
-	float bs_inv_eff_mass[6];  // ball socket: inverse 3x3 effective mass (packed sym: xx,xy,xz,yy,yz,zz)
+
+	// Ball-socket-like 3-DOF linear block (packed sym3x3 inverse: xx,xy,xz,yy,yz,zz).
+	// Used by ball socket, hinge linear (DOF 0-2), fixed linear (DOF 0-2).
+	float lin_inv_eff_mass[6];
+
+	// Hinge angular 2-DOF block: constraint axes u1,u2 and packed sym2x2 inverse [00,01,11].
+	v3 hinge_u1, hinge_u2;
+	float hinge_ang_inv_eff_mass[3];
 } SolverJoint;
 
 // Constraint ref for graph coloring dispatch.
