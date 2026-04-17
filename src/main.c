@@ -206,7 +206,7 @@ static Scene g_scenes[] = {
 	{ "Mass Ratio",      scene_mass_ratio_setup },
 	{ "Heavy Chain",     scene_heavy_chain_setup },
 	{ "Mini Chain",      scene_mini_chain_setup },
-	{ "Joint Demo",      scene_joint_demo_setup },
+	{ "Rope Bridge",     scene_joint_demo_setup },
 	{ "Hub Star",        scene_hub_star_setup },
 	{ "Hull Pile",       scene_hull_pile_setup },
 	{ "Weld Bridge",     scene_weld_bridge_setup },
@@ -214,6 +214,7 @@ static Scene g_scenes[] = {
 	{ "Hinge Limits",    scene_hinge_limits_setup },
 	{ "Cylinder Playground", scene_cylinder_playground_setup },
 	{ "Capsule Test", scene_capsule_test_setup },
+	{ "Joint Gallery", scene_joint_gallery_setup },
 	{ "Ragdoll",      scene_ragdoll_setup },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))

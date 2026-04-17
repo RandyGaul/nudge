@@ -904,6 +904,7 @@ Body create_body(World world, BodyParams params)
 		.island_next = -1,
 		.collision_group = 0xFFFFFFFFu,
 		.collision_mask  = 0xFFFFFFFFu,
+		.compound_id     = 0,
 	};
 	float fric = params.friction;
 	if (fric == 0.0f) fric = 0.5f; // default for all bodies
@@ -1089,8 +1090,7 @@ int world_get_sleep_enabled(World world)
 
 // Collision filter: two bodies collide iff (a.group & b.mask) && (b.group & a.mask).
 // Default on create is group=mask=0xFFFFFFFF (collide with everything).
-// Useful for ragdoll parts, cranes, levers -- bodies that shouldn't contact
-// each other even though no joint directly pairs them.
+// Useful for category-level filtering (terrain vs character vs projectile vs ...).
 void body_set_collision_filter(World world, Body body, uint32_t group, uint32_t mask)
 {
 	WorldInternal* w = (WorldInternal*)world.id;
@@ -1098,7 +1098,25 @@ void body_set_collision_filter(World world, Body body, uint32_t group, uint32_t 
 	assert(split_valid(w->body_gen, body));
 	w->body_cold[idx].collision_group = group;
 	w->body_cold[idx].collision_mask = mask;
-	// Wake bodies so the broadphase picks up the change on the next step.
+	int isl = w->body_cold[idx].island_id;
+	if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
+		island_wake(w, isl);
+}
+
+// Compound/instance id. Bodies sharing the same nonzero compound_id never
+// collide with each other (e.g. all parts of one ragdoll). Independent of the
+// group/mask filter -- both must allow collision for a pair to reach
+// narrowphase. Default 0 = no compound.
+//
+// Scales to unlimited instances: assign each ragdoll/vehicle/chain a unique
+// nonzero id; their parts phase through each other but instances of the same
+// class still collide normally.
+void body_set_compound_id(World world, Body body, uint32_t compound_id)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	assert(split_valid(w->body_gen, body));
+	w->body_cold[idx].compound_id = compound_id;
 	int isl = w->body_cold[idx].island_id;
 	if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
 		island_wake(w, isl);

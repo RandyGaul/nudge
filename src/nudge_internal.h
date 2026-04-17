@@ -43,6 +43,14 @@ typedef struct BodyCold
 	// Default both to 0xFFFFFFFF so new bodies collide with everything.
 	uint32_t collision_group;
 	uint32_t collision_mask;
+
+	// Compound/instance id. Bodies sharing a non-zero compound_id never
+	// collide with each other -- the cheap fast-path for ragdolls, vehicles,
+	// and articulated chains where every part of one instance must phase
+	// through every other part of the same instance, but instances of the
+	// same class still collide with each other and with the world. Default 0
+	// = no compound (collisions follow group/mask only).
+	uint32_t compound_id;
 } BodyCold;
 
 // Hot: solver working set, iterated every PGS step, packed for cache.

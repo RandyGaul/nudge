@@ -711,98 +711,108 @@ static void scene_slider_crane_setup()
 {
 	add_floor();
 
-	// Horizontal rail (static box)
+	// --- Crane assembly (compound_id 1) ---
+	// Rail, trolley, hook arm, and hook all share compound_id so they don't
+	// generate fighting contacts when they overlap (e.g. trolley sliding under
+	// rail, hook swinging through the rail). Cargo is NOT in the compound,
+	// so it can be picked up.
+	const uint32_t crane_cid = 1;
+
+	// Horizontal rail along X.
 	Body rail = create_body(g_world, (BodyParams){
-		.position = V3(0, 6, 0),
-		.rotation = quat_identity(),
-		.mass = 0,
+		.position = V3(0, 6, 0), .rotation = quat_identity(), .mass = 0,
 	});
-	body_add_shape(g_world, rail, (ShapeParams){
-		.type = SHAPE_BOX,
-		.box.half_extents = V3(5, 0.1f, 0.1f),
-	});
-	apush(g_draw_list, ((DrawEntry){ rail, MESH_BOX, V3(5, 0.1f, 0.1f), V3(0.5f, 0.5f, 0.6f) }));
+	body_add_shape(g_world, rail, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(5, 0.10f, 0.10f) });
+	apush(g_draw_list, ((DrawEntry){ rail, MESH_BOX, V3(5, 0.10f, 0.10f), V3(0.50f, 0.50f, 0.60f) }));
+	body_set_compound_id(g_world, rail, crane_cid);
 
-	// Trolley slides along the rail
+	// Trolley slides along the rail; motor lets you drive it back and forth.
 	Body trolley = create_body(g_world, (BodyParams){
-		.position = V3(-3, 6, 0),
-		.rotation = quat_identity(),
-		.mass = 3.0f,
+		.position = V3(-3, 6, 0), .rotation = quat_identity(), .mass = 3.0f,
 	});
-	body_add_shape(g_world, trolley, (ShapeParams){
-		.type = SHAPE_BOX,
-		.box.half_extents = V3(0.4f, 0.3f, 0.3f),
-	});
-	apush(g_draw_list, ((DrawEntry){ trolley, MESH_BOX, V3(0.4f, 0.3f, 0.3f), V3(0.3f, 0.7f, 0.3f) }));
-	create_prismatic(g_world, (PrismaticParams){
+	body_add_shape(g_world, trolley, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.40f, 0.30f, 0.30f) });
+	apush(g_draw_list, ((DrawEntry){ trolley, MESH_BOX, V3(0.40f, 0.30f, 0.30f), V3(0.30f, 0.70f, 0.30f) }));
+	body_set_compound_id(g_world, trolley, crane_cid);
+	Joint trolley_p = create_prismatic(g_world, (PrismaticParams){
 		.body_a = rail, .body_b = trolley,
-		.local_offset_a = V3(-3, 0, 0),
-		.local_offset_b = V3(0, 0, 0),
-		.local_axis_a = V3(1, 0, 0),
-		.local_axis_b = V3(1, 0, 0),
+		.local_offset_a = V3(-3, 0, 0), .local_offset_b = V3(0, 0, 0),
+		.local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0),
+	});
+	joint_set_prismatic_motor(g_world, trolley_p, 0.0f, 80.0f); // motor at rest = position hold
+
+	// Hook arm: a chain of 3 segments hanging from the trolley.
+	const int chain_n = 3;
+	const float seg_hh = 0.35f;
+	Body chain[3];
+	Body parent = trolley;
+	float anchor_y = -0.30f; // bottom of trolley
+	for (int i = 0; i < chain_n; i++) {
+		float seg_y = 6.0f - 0.30f - (2 * i + 1) * seg_hh - i * 0.05f;
+		chain[i] = create_body(g_world, (BodyParams){ .position = V3(-3, seg_y, 0), .rotation = quat_identity(), .mass = 0.5f });
+		body_add_shape(g_world, chain[i], (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.06f, seg_hh, 0.06f) });
+		apush(g_draw_list, ((DrawEntry){ chain[i], MESH_BOX, V3(0.06f, seg_hh, 0.06f), V3(0.85f, 0.65f, 0.30f) }));
+		body_set_compound_id(g_world, chain[i], crane_cid);
+		create_swing_twist(g_world, (SwingTwistParams){
+			.body_a = parent, .body_b = chain[i],
+			.local_offset_a = V3(0, anchor_y, 0),
+			.local_offset_b = V3(0, seg_hh, 0),
+			.local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0),
+			.cone_half_angle = 0.6f, .twist_min = -0.3f, .twist_max = 0.3f,
+		});
+		parent = chain[i];
+		anchor_y = -seg_hh;
+	}
+
+	// Hook (hung off the bottom of the chain) -- still in the crane compound.
+	Body hook = create_body(g_world, (BodyParams){ .position = V3(-3, 6.0f - 0.30f - 2 * chain_n * seg_hh - chain_n * 0.05f - 0.20f, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(g_world, hook, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.30f, 0.10f, 0.30f) });
+	apush(g_draw_list, ((DrawEntry){ hook, MESH_BOX, V3(0.30f, 0.10f, 0.30f), V3(0.85f, 0.40f, 0.30f) }));
+	body_set_compound_id(g_world, hook, crane_cid);
+	create_swing_twist(g_world, (SwingTwistParams){
+		.body_a = chain[chain_n - 1], .body_b = hook,
+		.local_offset_a = V3(0, -seg_hh, 0), .local_offset_b = V3(0, 0.10f, 0),
+		.local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0),
+		.cone_half_angle = 0.4f, .twist_min = -0.3f, .twist_max = 0.3f,
 	});
 
-	// Hang a payload from the trolley via distance joint (rope)
-	Body payload = create_body(g_world, (BodyParams){
-		.position = V3(-3, 3, 0),
-		.rotation = quat_identity(),
-		.mass = 2.0f,
-	});
-	body_add_shape(g_world, payload, (ShapeParams){
-		.type = SHAPE_BOX,
-		.box.half_extents = V3(0.5f, 0.5f, 0.5f),
-	});
-	apush(g_draw_list, ((DrawEntry){ payload, MESH_BOX, V3(0.5f, 0.5f, 0.5f), V3(0.8f, 0.5f, 0.2f) }));
-	create_distance(g_world, (DistanceParams){
-		.body_a = trolley, .body_b = payload,
-		.local_offset_a = V3(0, -0.3f, 0),
-		.local_offset_b = V3(0, 0.5f, 0),
-		.rest_length = 2.5f,
-	});
+	// --- Cargo (NO compound) ---
+	// Three crates of varying mass for the crane to pick up. They do collide with
+	// the hook (different compound) and with each other and the floor.
+	for (int i = 0; i < 3; i++) {
+		float cargo_x = 1.5f + i * 0.85f;
+		float cargo_size = 0.30f;
+		float mass = 1.0f + i * 1.5f;
+		Body crate = create_body(g_world, (BodyParams){ .position = V3(cargo_x, cargo_size, 0), .rotation = quat_identity(), .mass = mass });
+		body_add_shape(g_world, crate, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(cargo_size, cargo_size, cargo_size) });
+		v3 col = V3(0.30f + 0.20f * i, 0.50f - 0.10f * i, 0.20f);
+		apush(g_draw_list, ((DrawEntry){ crate, MESH_BOX, V3(cargo_size, cargo_size, cargo_size), col }));
+	}
 
-	// Second vertical slider: an elevator platform
-	Body pole = create_body(g_world, (BodyParams){
-		.position = V3(4, 3, 0),
-		.rotation = quat_identity(),
-		.mass = 0,
-	});
-	body_add_shape(g_world, pole, (ShapeParams){
-		.type = SHAPE_BOX,
-		.box.half_extents = V3(0.08f, 3, 0.08f),
-	});
-	apush(g_draw_list, ((DrawEntry){ pole, MESH_BOX, V3(0.08f, 3, 0.08f), V3(0.4f, 0.4f, 0.45f) }));
+	// --- Elevator (compound_id 2) ---
+	// Pole + platform share their own compound; cargo on top is independent.
+	const uint32_t elev_cid = 2;
 
-	Body platform = create_body(g_world, (BodyParams){
-		.position = V3(4, 5, 0),
-		.rotation = quat_identity(),
-		.mass = 1.0f,
-	});
-	body_add_shape(g_world, platform, (ShapeParams){
-		.type = SHAPE_BOX,
-		.box.half_extents = V3(0.8f, 0.1f, 0.8f),
-	});
-	apush(g_draw_list, ((DrawEntry){ platform, MESH_BOX, V3(0.8f, 0.1f, 0.8f), V3(0.3f, 0.5f, 0.8f) }));
+	Body pole = create_body(g_world, (BodyParams){ .position = V3(4, 3, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(g_world, pole, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.08f, 3, 0.08f) });
+	apush(g_draw_list, ((DrawEntry){ pole, MESH_BOX, V3(0.08f, 3, 0.08f), V3(0.40f, 0.40f, 0.45f) }));
+	body_set_compound_id(g_world, pole, elev_cid);
+
+	Body platform = create_body(g_world, (BodyParams){ .position = V3(4, 5, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(g_world, platform, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.80f, 0.10f, 0.80f) });
+	apush(g_draw_list, ((DrawEntry){ platform, MESH_BOX, V3(0.80f, 0.10f, 0.80f), V3(0.30f, 0.50f, 0.80f) }));
+	body_set_compound_id(g_world, platform, elev_cid);
 	Joint elev = create_prismatic(g_world, (PrismaticParams){
 		.body_a = pole, .body_b = platform,
-		.local_offset_a = V3(0, 2, 0),
-		.local_offset_b = V3(0, 0, 0),
-		.local_axis_a = V3(0, 1, 0),
-		.local_axis_b = V3(0, 1, 0),
+		.local_offset_a = V3(0, 2, 0), .local_offset_b = V3(0, 0, 0),
+		.local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0),
 	});
-	// Motor holds the platform at the anchor with gentle upward push
-	joint_set_prismatic_motor(g_world, elev, 0.0f, 20.0f);
+	joint_set_prismatic_motor(g_world, elev, 0.0f, 60.0f);
 
-	// Box sitting on the platform
-	Body cargo = create_body(g_world, (BodyParams){
-		.position = V3(4, 5.6f, 0),
-		.rotation = quat_identity(),
-		.mass = 0.5f,
-	});
-	body_add_shape(g_world, cargo, (ShapeParams){
-		.type = SHAPE_BOX,
-		.box.half_extents = V3(0.3f, 0.3f, 0.3f),
-	});
-	apush(g_draw_list, ((DrawEntry){ cargo, MESH_BOX, V3(0.3f, 0.3f, 0.3f), V3(0.9f, 0.8f, 0.2f) }));
+	// Box sitting on the platform off to one side (pole runs through the
+	// platform center; load sits clear of it). No compound -- can fall off.
+	Body load = create_body(g_world, (BodyParams){ .position = V3(4.5f, 5.6f, 0.4f), .rotation = quat_identity(), .mass = 0.5f });
+	body_add_shape(g_world, load, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.25f, 0.25f, 0.25f) });
+	apush(g_draw_list, ((DrawEntry){ load, MESH_BOX, V3(0.25f, 0.25f, 0.25f), V3(0.90f, 0.80f, 0.20f) }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,160 +1048,332 @@ static void scene_capsule_test_setup()
 }
 
 // ---------------------------------------------------------------------------
-// Scene: Ragdoll
-// Single humanoid figure built from swing-twist (ball + cone + twist) joints
-// at the spine/neck/shoulders/hips and hinge joints at the elbows/knees.
-// Uses body_set_collision_filter so ragdoll parts don't self-collide.
+// Scene: Joint Gallery -- one clear example of every joint type, in a row.
+// Each station is anchored to a static post on top so the joint behavior is
+// obvious as the dynamic part swings/spins/extends under gravity.
 // ---------------------------------------------------------------------------
-static void scene_ragdoll_setup()
+static void scene_joint_gallery_setup()
 {
 	add_big_floor();
 
-	// Ragdoll geometry constants (rough humanoid proportions in metres).
-	const float pelvis_hh = 0.15f;     // pelvis half-height
-	const float chest_hh  = 0.30f;     // chest half-height
-	const float head_r    = 0.15f;     // head radius
-	const float upper_arm_hh = 0.20f;  // upper arm half-length
-	const float forearm_hh   = 0.18f;  // forearm half-length
-	const float thigh_hh  = 0.25f;     // thigh half-length
-	const float shin_hh   = 0.22f;     // shin half-length
-	const float limb_r    = 0.07f;     // arm/leg "thickness"
-	const float spawn_y   = 4.5f;      // pelvis height at spawn
+	// Ceiling rail of static posts. 9 stations, each ~1.6m apart.
+	const int n_stations = 9;
+	const float spacing = 1.8f;
+	const float row_x0 = -(spacing * (n_stations - 1)) * 0.5f;
+	const float ceiling_y = 5.5f;
 
-	// Build the body parts. All bones aligned along world +Y at rest.
-	// Bone position = midpoint; local anchors are at the bone's tip toward the parent.
-	float pelvis_y = spawn_y;
-	float chest_y  = pelvis_y + pelvis_hh + chest_hh;        // chest sits on top of pelvis
-	float head_y   = chest_y  + chest_hh + head_r + 0.05f;   // head perched above chest
-	float thigh_y  = pelvis_y - pelvis_hh - thigh_hh;        // thighs hang below pelvis
+	v3 col_post = V3(0.40f, 0.40f, 0.45f);
+
+	#define MAKE_POST(_var, _xpos, _ypos) \
+		Body _var = create_body(g_world, (BodyParams){ .position = V3(_xpos, _ypos, 0), .rotation = quat_identity(), .mass = 0 }); \
+		body_add_shape(g_world, _var, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.10f, 0.10f, 0.10f) }); \
+		apush(g_draw_list, ((DrawEntry){ _var, MESH_BOX, V3(0.10f, 0.10f, 0.10f), col_post }))
+
+	#define DROP_BOX(_var, _xpos, _ypos, _hx, _hy, _hz, _mass, _color) \
+		Body _var = create_body(g_world, (BodyParams){ .position = V3(_xpos, _ypos, 0), .rotation = quat_identity(), .mass = _mass }); \
+		body_add_shape(g_world, _var, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(_hx, _hy, _hz) }); \
+		apush(g_draw_list, ((DrawEntry){ _var, MESH_BOX, V3(_hx, _hy, _hz), _color }))
+
+	int i = 0;
+
+	// Station 0: BALL SOCKET -- free 3-DOF swing pendulum.
+	{
+		float x = row_x0 + i * spacing;
+		MAKE_POST(post, x, ceiling_y);
+		DROP_BOX(bob, x, ceiling_y - 1.2f, 0.20f, 0.20f, 0.20f, 1.0f, V3(0.85f, 0.55f, 0.30f));
+		create_ball_socket(g_world, (BallSocketParams){
+			.body_a = post, .body_b = bob,
+			.local_offset_a = V3(0, -0.10f, 0), .local_offset_b = V3(0, 1.10f, 0),
+		});
+		i++;
+	}
+
+	// Station 1: DISTANCE -- rope (rest length, soft spring).
+	{
+		float x = row_x0 + i * spacing;
+		MAKE_POST(post, x, ceiling_y);
+		Body bob = create_body(g_world, (BodyParams){ .position = V3(x, ceiling_y - 1.4f, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(g_world, bob, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.20f });
+		apush(g_draw_list, ((DrawEntry){ bob, MESH_SPHERE, V3(0.20f, 0.20f, 0.20f), V3(0.30f, 0.85f, 0.55f) }));
+		create_distance(g_world, (DistanceParams){
+			.body_a = post, .body_b = bob,
+			.local_offset_a = V3(0, -0.10f, 0), .local_offset_b = V3(0, 0, 0),
+			.rest_length = 1.3f, .spring = { .frequency = 4.0f, .damping_ratio = 0.7f },
+		});
+		i++;
+	}
+
+	// Station 2: HINGE -- arm limited to +-30 deg, swings like a clock pendulum.
+	{
+		float x = row_x0 + i * spacing;
+		MAKE_POST(post, x, ceiling_y);
+		DROP_BOX(arm, x, ceiling_y - 0.8f, 0.08f, 0.7f, 0.08f, 1.0f, V3(0.55f, 0.55f, 0.85f));
+		Joint h = create_hinge(g_world, (HingeParams){
+			.body_a = post, .body_b = arm,
+			.local_offset_a = V3(0, -0.10f, 0), .local_offset_b = V3(0, 0.7f, 0),
+			.local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1),
+		});
+		joint_set_hinge_limits(g_world, h, -0.5f, 0.5f);
+		i++;
+	}
+
+	// Station 3: FIXED -- rigid weld; bob hangs straight down with no rotation freedom.
+	{
+		float x = row_x0 + i * spacing;
+		MAKE_POST(post, x, ceiling_y);
+		DROP_BOX(arm, x, ceiling_y - 0.8f, 0.08f, 0.7f, 0.08f, 1.0f, V3(0.85f, 0.85f, 0.30f));
+		create_fixed(g_world, (FixedParams){
+			.body_a = post, .body_b = arm,
+			.local_offset_a = V3(0, -0.10f, 0), .local_offset_b = V3(0, 0.7f, 0),
+		});
+		i++;
+	}
+
+	// Station 4: PRISMATIC + MOTOR -- elevator with motor that pushes upward.
+	{
+		float x = row_x0 + i * spacing;
+		MAKE_POST(post, x, ceiling_y);
+		DROP_BOX(plat, x, ceiling_y - 1.2f, 0.40f, 0.05f, 0.40f, 1.5f, V3(0.55f, 0.85f, 0.85f));
+		Joint p = create_prismatic(g_world, (PrismaticParams){
+			.body_a = post, .body_b = plat,
+			.local_offset_a = V3(0, -0.10f, 0), .local_offset_b = V3(0, 0, 0),
+			.local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0),
+		});
+		joint_set_prismatic_motor(g_world, p, 0.0f, 30.0f);
+		i++;
+	}
+
+	// Station 5: ANGULAR MOTOR -- spinning rotor about Y axis.
+	{
+		float x = row_x0 + i * spacing;
+		MAKE_POST(post, x, ceiling_y);
+		// Anchor sphere holds rotor in place via ball socket; angular motor adds spin.
+		Body rotor = create_body(g_world, (BodyParams){ .position = V3(x, ceiling_y - 0.8f, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(g_world, rotor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.6f, 0.05f, 0.10f) });
+		apush(g_draw_list, ((DrawEntry){ rotor, MESH_BOX, V3(0.6f, 0.05f, 0.10f), V3(0.85f, 0.30f, 0.55f) }));
+		create_ball_socket(g_world, (BallSocketParams){
+			.body_a = post, .body_b = rotor,
+			.local_offset_a = V3(0, -0.10f, 0), .local_offset_b = V3(0, 0, 0),
+		});
+		create_angular_motor(g_world, (AngularMotorParams){
+			.body_a = post, .body_b = rotor,
+			.local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0),
+			.target_speed = 4.0f, .max_impulse = 50.0f,
+		});
+		i++;
+	}
+
+	// Station 6: CONE LIMIT -- pendulum that can swing within a cone but not past.
+	{
+		float x = row_x0 + i * spacing;
+		MAKE_POST(post, x, ceiling_y);
+		DROP_BOX(arm, x, ceiling_y - 1.0f, 0.06f, 0.9f, 0.06f, 1.0f, V3(0.85f, 0.55f, 0.55f));
+		create_ball_socket(g_world, (BallSocketParams){
+			.body_a = post, .body_b = arm,
+			.local_offset_a = V3(0, -0.10f, 0), .local_offset_b = V3(0, 0.9f, 0),
+		});
+		// Arm's local +Y points up toward post when at rest; limit deviation to ~25 deg.
+		create_cone_limit(g_world, (ConeLimitParams){
+			.body_a = post, .body_b = arm,
+			.local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0),
+			.half_angle = 0.45f,
+		});
+		i++;
+	}
+
+	// Station 7: TWIST LIMIT -- bob hangs and can spin around the rope, but only +-45 deg.
+	{
+		float x = row_x0 + i * spacing;
+		MAKE_POST(post, x, ceiling_y);
+		DROP_BOX(bob, x, ceiling_y - 1.2f, 0.50f, 0.10f, 0.10f, 1.0f, V3(0.55f, 0.30f, 0.85f));
+		create_ball_socket(g_world, (BallSocketParams){
+			.body_a = post, .body_b = bob,
+			.local_offset_a = V3(0, -0.10f, 0), .local_offset_b = V3(0, 1.10f, 0),
+		});
+		create_twist_limit(g_world, (TwistLimitParams){
+			.body_a = post, .body_b = bob,
+			.local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0),
+			.limit_min = -0.8f, .limit_max = 0.8f,
+		});
+		i++;
+	}
+
+	// Station 8: SWING-TWIST -- single ragdoll-style joint (cone + twist + ball socket).
+	{
+		float x = row_x0 + i * spacing;
+		MAKE_POST(post, x, ceiling_y);
+		DROP_BOX(bone, x, ceiling_y - 1.0f, 0.10f, 0.7f, 0.10f, 1.0f, V3(0.30f, 0.55f, 0.85f));
+		create_swing_twist(g_world, (SwingTwistParams){
+			.body_a = post, .body_b = bone,
+			.local_offset_a = V3(0, -0.10f, 0), .local_offset_b = V3(0, 0.7f, 0),
+			.local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0),
+			.cone_half_angle = 0.6f, .twist_min = -0.5f, .twist_max = 0.5f,
+		});
+	}
+
+	#undef MAKE_POST
+	#undef DROP_BOX
+}
+
+// ---------------------------------------------------------------------------
+// Scene: Ragdoll
+// Multiple humanoid figures built from swing-twist (ball + cone + twist) joints
+// at the spine/neck/shoulders/hips and hinge joints at the elbows/knees.
+// Each ragdoll uses a unique compound_id so its parts don't self-collide,
+// while different ragdolls (and the floor) collide normally.
+// ---------------------------------------------------------------------------
+
+// Spawn one ragdoll at world position `origin`. compound_id must be nonzero
+// and unique per ragdoll instance. Color tints the torso/limbs slightly so
+// multiple ragdolls in the same scene are easy to tell apart.
+static void spawn_ragdoll(v3 origin, uint32_t compound_id, v3 tint)
+{
+	const float pelvis_hh = 0.15f;
+	const float chest_hh  = 0.30f;
+	const float head_r    = 0.15f;
+	const float upper_arm_hh = 0.20f;
+	const float forearm_hh   = 0.18f;
+	const float thigh_hh  = 0.25f;
+	const float shin_hh   = 0.22f;
+	const float limb_r    = 0.07f;
+
+	float pelvis_y = origin.y;
+	float chest_y  = pelvis_y + pelvis_hh + chest_hh;
+	float head_y   = chest_y  + chest_hh + head_r + 0.05f;
+	float thigh_y  = pelvis_y - pelvis_hh - thigh_hh;
 	float shin_y   = thigh_y  - thigh_hh - shin_hh;
-	float ua_y     = chest_y  + chest_hh - upper_arm_hh;     // upper arm hangs from shoulder
+	float ua_y     = chest_y  + chest_hh - upper_arm_hh;
 	float fa_y     = ua_y     - upper_arm_hh - forearm_hh;
 	float shoulder_dx = 0.30f;
 	float hip_dx      = 0.12f;
 
-	v3 col_torso = V3(0.55f, 0.40f, 0.35f);
-	v3 col_head  = V3(0.85f, 0.70f, 0.55f);
-	v3 col_arm   = V3(0.45f, 0.55f, 0.75f);
-	v3 col_leg   = V3(0.40f, 0.35f, 0.55f);
+	v3 col_torso = V3(0.55f * tint.x, 0.40f * tint.y, 0.35f * tint.z);
+	v3 col_head  = V3(0.85f * tint.x, 0.70f * tint.y, 0.55f * tint.z);
+	v3 col_arm   = V3(0.45f * tint.x, 0.55f * tint.y, 0.75f * tint.z);
+	v3 col_leg   = V3(0.40f * tint.x, 0.35f * tint.y, 0.55f * tint.z);
 
 	#define MAKE_BONE(_var, _pos, _hx, _hy, _hz, _mass, _color) \
-		Body _var = create_body(g_world, (BodyParams){ .position = (_pos), .rotation = quat_identity(), .mass = (_mass) }); \
+		Body _var = create_body(g_world, (BodyParams){ .position = add(origin, _pos), .rotation = quat_identity(), .mass = (_mass) }); \
 		body_add_shape(g_world, _var, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(_hx, _hy, _hz) }); \
 		apush(g_draw_list, ((DrawEntry){ _var, MESH_BOX, V3(_hx, _hy, _hz), _color }))
 
-	MAKE_BONE(pelvis, V3(0, pelvis_y, 0), 0.20f, pelvis_hh, 0.15f, 5.0f, col_torso);
-	MAKE_BONE(chest,  V3(0, chest_y,  0), 0.25f, chest_hh,  0.18f, 6.0f, col_torso);
+	MAKE_BONE(pelvis, V3(0, pelvis_y - origin.y, 0), 0.20f, pelvis_hh, 0.15f, 5.0f, col_torso);
+	MAKE_BONE(chest,  V3(0, chest_y  - origin.y, 0), 0.25f, chest_hh,  0.18f, 6.0f, col_torso);
 
-	// Head as sphere
-	Body head = create_body(g_world, (BodyParams){ .position = V3(0, head_y, 0), .rotation = quat_identity(), .mass = 2.0f });
+	Body head = create_body(g_world, (BodyParams){ .position = V3(origin.x, head_y, origin.z), .rotation = quat_identity(), .mass = 2.0f });
 	body_add_shape(g_world, head, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = head_r });
 	apush(g_draw_list, ((DrawEntry){ head, MESH_SPHERE, V3(head_r, head_r, head_r), col_head }));
 
-	MAKE_BONE(ua_l, V3(-shoulder_dx, ua_y, 0), limb_r, upper_arm_hh, limb_r, 1.8f, col_arm);
-	MAKE_BONE(ua_r, V3( shoulder_dx, ua_y, 0), limb_r, upper_arm_hh, limb_r, 1.8f, col_arm);
-	MAKE_BONE(fa_l, V3(-shoulder_dx, fa_y, 0), limb_r, forearm_hh,   limb_r, 1.3f, col_arm);
-	MAKE_BONE(fa_r, V3( shoulder_dx, fa_y, 0), limb_r, forearm_hh,   limb_r, 1.3f, col_arm);
-
-	MAKE_BONE(thigh_l, V3(-hip_dx, thigh_y, 0), limb_r * 1.2f, thigh_hh, limb_r * 1.2f, 4.0f, col_leg);
-	MAKE_BONE(thigh_r, V3( hip_dx, thigh_y, 0), limb_r * 1.2f, thigh_hh, limb_r * 1.2f, 4.0f, col_leg);
-	MAKE_BONE(shin_l,  V3(-hip_dx, shin_y,  0), limb_r * 1.0f, shin_hh,  limb_r * 1.0f, 2.5f, col_leg);
-	MAKE_BONE(shin_r,  V3( hip_dx, shin_y,  0), limb_r * 1.0f, shin_hh,  limb_r * 1.0f, 2.5f, col_leg);
-
+	MAKE_BONE(ua_l, V3(-shoulder_dx, ua_y - origin.y, 0), limb_r, upper_arm_hh, limb_r, 1.8f, col_arm);
+	MAKE_BONE(ua_r, V3( shoulder_dx, ua_y - origin.y, 0), limb_r, upper_arm_hh, limb_r, 1.8f, col_arm);
+	MAKE_BONE(fa_l, V3(-shoulder_dx, fa_y - origin.y, 0), limb_r, forearm_hh,   limb_r, 1.3f, col_arm);
+	MAKE_BONE(fa_r, V3( shoulder_dx, fa_y - origin.y, 0), limb_r, forearm_hh,   limb_r, 1.3f, col_arm);
+	MAKE_BONE(thigh_l, V3(-hip_dx, thigh_y - origin.y, 0), limb_r * 1.2f, thigh_hh, limb_r * 1.2f, 4.0f, col_leg);
+	MAKE_BONE(thigh_r, V3( hip_dx, thigh_y - origin.y, 0), limb_r * 1.2f, thigh_hh, limb_r * 1.2f, 4.0f, col_leg);
+	MAKE_BONE(shin_l,  V3(-hip_dx, shin_y  - origin.y, 0), limb_r * 1.0f, shin_hh,  limb_r * 1.0f, 2.5f, col_leg);
+	MAKE_BONE(shin_r,  V3( hip_dx, shin_y  - origin.y, 0), limb_r * 1.0f, shin_hh,  limb_r * 1.0f, 2.5f, col_leg);
 	#undef MAKE_BONE
 
-	// Self-collision filter: every ragdoll part shares group bit 1, mask excludes
-	// the same bit so they don't collide with each other but DO collide with floor.
-	const uint32_t ragdoll_grp = 1u << 1;
-	const uint32_t ragdoll_mask = ~ragdoll_grp; // collide with everything except self
+	// One compound_id per ragdoll: parts of the SAME ragdoll skip pairwise
+	// collision; parts of DIFFERENT ragdolls (and world geometry) collide
+	// normally. Scales to unlimited ragdolls -- no bit budget.
 	Body parts[] = { pelvis, chest, head, ua_l, ua_r, fa_l, fa_r, thigh_l, thigh_r, shin_l, shin_r };
 	for (int i = 0; i < (int)(sizeof(parts) / sizeof(parts[0])); i++)
-		body_set_collision_filter(g_world, parts[i], ragdoll_grp, ragdoll_mask);
+		body_set_compound_id(g_world, parts[i], compound_id);
 
-	// Joints. Anchors expressed in each body's local space: pelvis top = (0, +pelvis_hh, 0),
-	// chest bottom = (0, -chest_hh, 0), etc. Twist axis is each bone's +Y (along its length).
 	const v3 axis_up = V3(0, 1, 0);
 
-	// Spine: pelvis <-> chest. Swing 35 deg, twist +-25 deg.
+	// Spine: pelvis <-> chest.
 	create_swing_twist(g_world, (SwingTwistParams){
 		.body_a = pelvis, .body_b = chest,
-		.local_offset_a = V3(0,  pelvis_hh, 0),
-		.local_offset_b = V3(0, -chest_hh, 0),
+		.local_offset_a = V3(0,  pelvis_hh, 0), .local_offset_b = V3(0, -chest_hh, 0),
 		.local_axis_a = axis_up, .local_axis_b = axis_up,
 		.cone_half_angle = 0.6f, .twist_min = -0.45f, .twist_max = 0.45f,
 	});
-
-	// Neck: chest <-> head. Wider cone, modest twist.
+	// Neck: chest <-> head.
 	create_swing_twist(g_world, (SwingTwistParams){
 		.body_a = chest, .body_b = head,
-		.local_offset_a = V3(0,  chest_hh + 0.05f, 0),
-		.local_offset_b = V3(0, -head_r,           0),
+		.local_offset_a = V3(0,  chest_hh + 0.05f, 0), .local_offset_b = V3(0, -head_r, 0),
 		.local_axis_a = axis_up, .local_axis_b = axis_up,
 		.cone_half_angle = 0.7f, .twist_min = -0.6f, .twist_max = 0.6f,
 	});
-
-	// Shoulders: chest <-> upper arm. Big cone (arm can swing wide), small twist.
-	// Local twist axis on chest points outward toward each arm; on the arm it's its own +Y.
+	// Shoulders.
 	create_swing_twist(g_world, (SwingTwistParams){
 		.body_a = chest, .body_b = ua_l,
-		.local_offset_a = V3(-shoulder_dx,  chest_hh, 0),
-		.local_offset_b = V3(0, upper_arm_hh, 0),
+		.local_offset_a = V3(-shoulder_dx,  chest_hh, 0), .local_offset_b = V3(0, upper_arm_hh, 0),
 		.local_axis_a = V3(-1, 0, 0), .local_axis_b = V3(0, 1, 0),
 		.cone_half_angle = 1.4f, .twist_min = -0.6f, .twist_max = 0.6f,
 	});
 	create_swing_twist(g_world, (SwingTwistParams){
 		.body_a = chest, .body_b = ua_r,
-		.local_offset_a = V3( shoulder_dx,  chest_hh, 0),
-		.local_offset_b = V3(0, upper_arm_hh, 0),
+		.local_offset_a = V3( shoulder_dx,  chest_hh, 0), .local_offset_b = V3(0, upper_arm_hh, 0),
 		.local_axis_a = V3(1, 0, 0), .local_axis_b = V3(0, 1, 0),
 		.cone_half_angle = 1.4f, .twist_min = -0.6f, .twist_max = 0.6f,
 	});
-
-	// Elbows: hinge along chest-aligned X axis, limited so elbow only bends one way.
+	// Elbows -- hinges, single-direction bend.
 	Joint elbow_l = create_hinge(g_world, (HingeParams){
 		.body_a = ua_l, .body_b = fa_l,
-		.local_offset_a = V3(0, -upper_arm_hh, 0),
-		.local_offset_b = V3(0,  forearm_hh,   0),
+		.local_offset_a = V3(0, -upper_arm_hh, 0), .local_offset_b = V3(0,  forearm_hh, 0),
 		.local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0),
 	});
-	joint_set_hinge_limits(g_world, elbow_l, -2.2f, 0.05f); // bend up to ~125 deg, almost no hyperextension
+	joint_set_hinge_limits(g_world, elbow_l, -2.2f, 0.05f);
 	Joint elbow_r = create_hinge(g_world, (HingeParams){
 		.body_a = ua_r, .body_b = fa_r,
-		.local_offset_a = V3(0, -upper_arm_hh, 0),
-		.local_offset_b = V3(0,  forearm_hh,   0),
+		.local_offset_a = V3(0, -upper_arm_hh, 0), .local_offset_b = V3(0,  forearm_hh, 0),
 		.local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0),
 	});
 	joint_set_hinge_limits(g_world, elbow_r, -2.2f, 0.05f);
-
-	// Hips: pelvis <-> thigh. Cone allows leg to swing forward/sideways within reason.
+	// Hips.
 	create_swing_twist(g_world, (SwingTwistParams){
 		.body_a = pelvis, .body_b = thigh_l,
-		.local_offset_a = V3(-hip_dx, -pelvis_hh, 0),
-		.local_offset_b = V3(0,  thigh_hh, 0),
+		.local_offset_a = V3(-hip_dx, -pelvis_hh, 0), .local_offset_b = V3(0,  thigh_hh, 0),
 		.local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0),
 		.cone_half_angle = 1.0f, .twist_min = -0.4f, .twist_max = 0.4f,
 	});
 	create_swing_twist(g_world, (SwingTwistParams){
 		.body_a = pelvis, .body_b = thigh_r,
-		.local_offset_a = V3( hip_dx, -pelvis_hh, 0),
-		.local_offset_b = V3(0,  thigh_hh, 0),
+		.local_offset_a = V3( hip_dx, -pelvis_hh, 0), .local_offset_b = V3(0,  thigh_hh, 0),
 		.local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0),
 		.cone_half_angle = 1.0f, .twist_min = -0.4f, .twist_max = 0.4f,
 	});
-
-	// Knees: hinge along pelvis-aligned X axis, single-direction bend.
+	// Knees -- hinges, single-direction bend.
 	Joint knee_l = create_hinge(g_world, (HingeParams){
 		.body_a = thigh_l, .body_b = shin_l,
-		.local_offset_a = V3(0, -thigh_hh, 0),
-		.local_offset_b = V3(0,  shin_hh,  0),
+		.local_offset_a = V3(0, -thigh_hh, 0), .local_offset_b = V3(0,  shin_hh, 0),
 		.local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0),
 	});
-	joint_set_hinge_limits(g_world, knee_l, -0.05f, 2.2f); // back-bend, like a real knee
+	joint_set_hinge_limits(g_world, knee_l, -0.05f, 2.2f);
 	Joint knee_r = create_hinge(g_world, (HingeParams){
 		.body_a = thigh_r, .body_b = shin_r,
-		.local_offset_a = V3(0, -thigh_hh, 0),
-		.local_offset_b = V3(0,  shin_hh,  0),
+		.local_offset_a = V3(0, -thigh_hh, 0), .local_offset_b = V3(0,  shin_hh, 0),
 		.local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0),
 	});
 	joint_set_hinge_limits(g_world, knee_r, -0.05f, 2.2f);
+}
+
+static void scene_ragdoll_setup()
+{
+	add_big_floor();
+
+	// 3x3 grid of ragdolls: each gets a unique compound_id so its own parts
+	// don't collide, but different ragdolls do collide with each other.
+	v3 tints[9] = {
+		V3(1.0f, 1.0f, 1.0f),  // default
+		V3(1.4f, 0.6f, 0.6f),  // red-ish
+		V3(0.6f, 1.4f, 0.6f),  // green-ish
+		V3(0.6f, 0.6f, 1.4f),  // blue-ish
+		V3(1.4f, 1.4f, 0.6f),  // yellow-ish
+		V3(1.4f, 0.6f, 1.4f),  // magenta-ish
+		V3(0.6f, 1.4f, 1.4f),  // cyan-ish
+		V3(1.2f, 1.0f, 0.7f),  // warm
+		V3(0.7f, 1.0f, 1.2f),  // cool
+	};
+	int idx = 0;
+	for (int row = -1; row <= 1; row++) {
+		for (int col = -1; col <= 1; col++) {
+			v3 origin = V3((float)col * 1.6f, 4.5f + (float)row * 0.05f, (float)row * 1.6f);
+			spawn_ragdoll(origin, (uint32_t)(idx + 1), tints[idx]);
+			idx++;
+		}
+	}
 }

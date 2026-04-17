@@ -419,6 +419,7 @@ Joint create_hinge(World world, HingeParams params);
 Joint create_fixed(World world, FixedParams params);
 Joint create_prismatic(World world, PrismaticParams params);
 void body_set_collision_filter(World world, Body body, uint32_t group, uint32_t mask);
+void body_set_compound_id(World world, Body body, uint32_t compound_id);
 
 Joint create_angular_motor(World world, AngularMotorParams params);
 Joint create_twist_limit(World world, TwistLimitParams params);

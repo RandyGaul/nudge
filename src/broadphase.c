@@ -15,10 +15,14 @@ static int jointed_pair_skip(CK_MAP(uint8_t) joint_pairs, int a, int b)
 	return map_get_ptr(joint_pairs, key) != NULL;
 }
 
-// Collision filter: two bodies collide iff (a.group & b.mask) && (b.group & a.mask).
+// Collision filter: two bodies collide iff
+//   - (a.group & b.mask) && (b.group & a.mask) (category-level), AND
+//   - compound_id == 0 OR a.compound_id != b.compound_id (instance-level).
 // Cheap bitwise check; skips the narrowphase entirely for filtered pairs.
 static int filter_pair_skip(WorldInternal* w, int a, int b)
 {
+	uint32_t ca = w->body_cold[a].compound_id, cb = w->body_cold[b].compound_id;
+	if (ca != 0 && ca == cb) return 1;
 	uint32_t ga = w->body_cold[a].collision_group, ma = w->body_cold[a].collision_mask;
 	uint32_t gb = w->body_cold[b].collision_group, mb = w->body_cold[b].collision_mask;
 	return ((ga & mb) == 0) || ((gb & ma) == 0);

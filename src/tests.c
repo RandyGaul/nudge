@@ -12942,11 +12942,10 @@ static void bench_ragdoll(int n_ragdolls, int frames, WorldParams wp)
 		create_hinge(w, (HingeParams){ .body_a = th_r, .body_b = sh_r, .local_offset_a = V3(0, -0.3f, 0), .local_offset_b = V3(0, 0.3f, 0), .local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0) });
 		joint_count += 8;
 
-		// Same-ragdoll collision filter: each ragdoll in its own group, self-collides none.
-		uint32_t grp = 1u << (r & 31);
-		uint32_t others = ~grp;
+		// Same-ragdoll parts share compound_id (instance filter, scales beyond 32).
+		uint32_t cid = (uint32_t)(r + 1);
 		Body ragdoll_bodies[9] = { pelvis, chest, head, ua_l, ua_r, th_l, th_r, sh_l, sh_r };
-		for (int k = 0; k < 9; k++) body_set_collision_filter(w, ragdoll_bodies[k], grp, others);
+		for (int k = 0; k < 9; k++) body_set_compound_id(w, ragdoll_bodies[k], cid);
 	}
 
 	printf("bench_ragdoll: %d ragdolls, %d bodies, %d joints, %d frames\n", n_ragdolls, body_count, joint_count, frames);
