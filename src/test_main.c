@@ -25,6 +25,7 @@
 #include "tests_gjk_perf.c"
 #include "tests_arena_unit.c"
 #include "tests_threading_unit.c"
+#include "tests_weld_bridge_unit.c"
 #include "tests_epa_debug.c"
 #include "tests_epa_perf.c"
 
@@ -236,6 +237,7 @@ int main(int argc, char* argv[])
 		test_aalign();
 		run_arena_unit_tests();
 		run_threading_unit_tests();
+		run_weld_bridge_unit_tests();
 		run_ldl_unit_tests();
 		run_inertia_unit_tests();
 		run_jacobian_unit_tests();
@@ -315,6 +317,7 @@ int main(int argc, char* argv[])
 		run_tests();
 		run_arena_unit_tests();
 		run_threading_unit_tests();
+		run_weld_bridge_unit_tests();
 		run_ldl_unit_tests();
 		run_inertia_unit_tests();
 		run_jacobian_unit_tests();
