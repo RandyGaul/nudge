@@ -395,6 +395,15 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->rows[0].J_b[0] =  axis.x; s->rows[0].J_b[1] =  axis.y; s->rows[0].J_b[2] =  axis.z;
 		s->rows[0].J_b[3] =  rxb.x;  s->rows[0].J_b[4] =  rxb.y;  s->rows[0].J_b[5] =  rxb.z;
 		s->dist_axis = axis; // LDL reads this instead of reconstructing from positions
+		// bounded[0]: 1-DOF linear along axis (works for both rigid and limit cases).
+		s->bounded[0].axis = axis;
+		s->bounded[0].r_cross_a = rxa;
+		s->bounded[0].r_cross_b = rxb;
+		float im_dist = a->inv_mass + b->inv_mass;
+		v3 ia_rxa = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, rxa);
+		v3 ib_rxb = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, rxb);
+		float k_dist = im_dist + dot(rxa, ia_rxa) + dot(rxb, ib_rxb) + soft;
+		s->bounded[0].eff_mass = k_dist > 1e-12f ? 1.0f / k_dist : 0.0f;
 
 		s->pos_error[0] = dist_val - j->distance.rest_length;
 
@@ -636,6 +645,13 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		// Bias convention matches hinge motor: bias = target_speed drives d(angle)/dt = +speed.
 		ptv = 0.0f;
 		s->bias[0] = j->angular_motor.target_speed;
+		// bounded[0]: pure-angular 1-DOF along axis.
+		s->bounded[0].axis = axis;
+		s->bounded[0].r_cross_a = V3(0,0,0); s->bounded[0].r_cross_b = V3(0,0,0);
+		v3 ia_ax = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, axis);
+		v3 ib_ax = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, axis);
+		float k_am = dot(axis, add(ia_ax, ib_ax));
+		s->bounded[0].eff_mass = k_am > 1e-12f ? 1.0f / k_am : 0.0f;
 	} else if (s->type == JOINT_CONE_LIMIT) {
 		spring_compute(j->cone_limit.spring, dt, &ptv, &soft);
 		s->softness = soft;
@@ -654,10 +670,18 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 			s->rows[0].J_b[3] = -swing.x; s->rows[0].J_b[4] = -swing.y; s->rows[0].J_b[5] = -swing.z;
 			s->pos_error[0] = acosf(cos_theta > 1.0f ? 1.0f : (cos_theta < -1.0f ? -1.0f : cos_theta)) - j->cone_limit.half_angle;
 			s->lo[0] = 0.0f; s->hi[0] = FLT_MAX;
+			// bounded[0]: pure-angular along swing axis.
+			s->bounded[0].axis = swing;
+			s->bounded[0].r_cross_a = V3(0,0,0); s->bounded[0].r_cross_b = V3(0,0,0);
+			v3 ia_sw = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, swing);
+			v3 ib_sw = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, swing);
+			float k_cone = dot(swing, add(ia_sw, ib_sw)) + soft;
+			s->bounded[0].eff_mass = k_cone > 1e-12f ? 1.0f / k_cone : 0.0f;
 		} else {
 			// Inactive: zero row, zero bounds = no-op.
 			s->pos_error[0] = 0;
 			s->lo[0] = 0; s->hi[0] = 0;
+			s->bounded[0].eff_mass = 0.0f;
 		}
 	} else if (s->type == JOINT_TWIST_LIMIT) {
 		spring_compute(j->twist_limit.spring, dt, &ptv, &soft);
@@ -683,15 +707,28 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		// Jv = (w_a - w_b) . axis = -d(twist)/dt (same convention as hinge limit).
 		// twist > tmax: want d(twist)/dt<0, Jv>0, positive lambda -> lo=0.
 		// twist < tmin: want d(twist)/dt>0, Jv<0, negative lambda -> hi=0.
+		int twist_active = 0;
 		if (twist_angle > tmax) {
 			s->pos_error[0] = twist_angle - tmax;
 			s->lo[0] = 0.0f; s->hi[0] = FLT_MAX;
+			twist_active = 1;
 		} else if (twist_angle < tmin) {
 			s->pos_error[0] = twist_angle - tmin;
 			s->lo[0] = -FLT_MAX; s->hi[0] = 0.0f;
+			twist_active = 1;
 		} else {
 			s->pos_error[0] = 0;
 			s->lo[0] = 0; s->hi[0] = 0;
+		}
+		if (twist_active) {
+			s->bounded[0].axis = twist_axis;
+			s->bounded[0].r_cross_a = V3(0,0,0); s->bounded[0].r_cross_b = V3(0,0,0);
+			v3 ia_tw = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, twist_axis);
+			v3 ib_tw = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, twist_axis);
+			float k_tw = dot(twist_axis, add(ia_tw, ib_tw)) + soft;
+			s->bounded[0].eff_mass = k_tw > 1e-12f ? 1.0f / k_tw : 0.0f;
+		} else {
+			s->bounded[0].eff_mass = 0.0f;
 		}
 	} else if (s->type == JOINT_SWING_TWIST) {
 		// Linear 3-DOF ball socket at DOFs 0-2, cone at DOF 3, twist at DOF 4.
@@ -727,7 +764,16 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 			s->rows[3].J_b[3] = -swing.x; s->rows[3].J_b[4] = -swing.y; s->rows[3].J_b[5] = -swing.z;
 			s->pos_error[3] = acosf(cos_theta > 1.0f ? 1.0f : (cos_theta < -1.0f ? -1.0f : cos_theta)) - j->swing_twist.cone_half_angle;
 			s->lo[3] = 0.0f; s->hi[3] = FLT_MAX;
-		} else { s->pos_error[3] = 0; s->lo[3] = 0; s->hi[3] = 0; }
+			s->bounded[0].axis = swing;
+			s->bounded[0].r_cross_a = V3(0,0,0); s->bounded[0].r_cross_b = V3(0,0,0);
+			v3 ia_sw = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, swing);
+			v3 ib_sw = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, swing);
+			float k_cone = dot(swing, add(ia_sw, ib_sw)) + soft;
+			s->bounded[0].eff_mass = k_cone > 1e-12f ? 1.0f / k_cone : 0.0f;
+		} else {
+			s->pos_error[3] = 0; s->lo[3] = 0; s->hi[3] = 0;
+			s->bounded[0].eff_mass = 0.0f;
+		}
 
 		// Twist DOF 4.
 		v3 twist_axis = norm(add(axis_a_w, axis_b_w));
@@ -744,9 +790,20 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->rows[4].J_a[3] = twist_axis.x; s->rows[4].J_a[4] = twist_axis.y; s->rows[4].J_a[5] = twist_axis.z;
 		s->rows[4].J_b[3] = -twist_axis.x; s->rows[4].J_b[4] = -twist_axis.y; s->rows[4].J_b[5] = -twist_axis.z;
 		float tmin = j->swing_twist.twist_min, tmax = j->swing_twist.twist_max;
-		if (twist_angle > tmax) { s->pos_error[4] = twist_angle - tmax; s->lo[4] = 0.0f; s->hi[4] = FLT_MAX; }
-		else if (twist_angle < tmin) { s->pos_error[4] = twist_angle - tmin; s->lo[4] = -FLT_MAX; s->hi[4] = 0.0f; }
+		int twist_active = 0;
+		if (twist_angle > tmax) { s->pos_error[4] = twist_angle - tmax; s->lo[4] = 0.0f; s->hi[4] = FLT_MAX; twist_active = 1; }
+		else if (twist_angle < tmin) { s->pos_error[4] = twist_angle - tmin; s->lo[4] = -FLT_MAX; s->hi[4] = 0.0f; twist_active = 1; }
 		else { s->pos_error[4] = 0; s->lo[4] = 0; s->hi[4] = 0; }
+		if (twist_active) {
+			s->bounded[1].axis = twist_axis;
+			s->bounded[1].r_cross_a = V3(0,0,0); s->bounded[1].r_cross_b = V3(0,0,0);
+			v3 ia_tw = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, twist_axis);
+			v3 ib_tw = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, twist_axis);
+			float k_tw = dot(twist_axis, add(ia_tw, ib_tw)) + soft;
+			s->bounded[1].eff_mass = k_tw > 1e-12f ? 1.0f / k_tw : 0.0f;
+		} else {
+			s->bounded[1].eff_mass = 0.0f;
+		}
 	}
 
 	// Generic: compute eff_mass and bias from pos_error for all DOFs
@@ -866,7 +923,46 @@ static void joints_refresh_substep(WorldInternal* w, SolverJoint* joints, int co
 	}
 }
 
-// Generic warm start: iterate DOFs, apply each row's warm lambda.
+// Apply a 3-DOF linear (point) impulse: lambda[0..2] is a world-space impulse
+// vector at lever arms r_a, r_b. Used by ball socket / hinge / fixed / swing
+// twist linear blocks during warm start. Mirrors solve_point_block's apply.
+static inline void apply_point_impulse(v3 r_a, v3 r_b, v3 impulse, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
+{
+	if (impulse.x == 0 && impulse.y == 0 && impulse.z == 0) return;
+	a->velocity = sub(a->velocity, scale(impulse, a->inv_mass));
+	b->velocity = add(b->velocity, scale(impulse, b->inv_mass));
+	a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, cross(r_a, impulse)));
+	b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, cross(r_b, impulse)));
+}
+
+// Apply a 3-DOF angular identity impulse (fixed-style): impulse vector applied
+// directly to angular velocities, no linear component.
+static inline void apply_ang3_impulse(v3 impulse, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
+{
+	if (impulse.x == 0 && impulse.y == 0 && impulse.z == 0) return;
+	a->angular_velocity = add(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, impulse));
+	b->angular_velocity = sub(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, impulse));
+}
+
+// Apply a bounded-1-DOF impulse (lambda * axis). is_angular controls whether
+// linear velocities are touched. Mirrors solve_bounded_{angular,linear} apply.
+static inline void apply_bounded_impulse(BoundedAxis* br, float lambda, int is_angular, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
+{
+	if (lambda == 0.0f) return;
+	v3 axis = br->axis;
+	if (is_angular) {
+		a->angular_velocity = add(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, scale(axis, lambda)));
+		b->angular_velocity = sub(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, scale(axis, lambda)));
+	} else {
+		a->velocity = sub(a->velocity, scale(axis, lambda * a->inv_mass));
+		b->velocity = add(b->velocity, scale(axis, lambda * b->inv_mass));
+		a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, scale(br->r_cross_a, lambda)));
+		b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, scale(br->r_cross_b, lambda)));
+	}
+}
+
+// Type-specialized warm start: apply cached warm lambdas as constraint impulses
+// using the same geometric data the per-type solvers use. No rows[] reads.
 static void joints_warm_start(WorldInternal* w, SolverJoint* joints, int count)
 {
 	for (int i = 0; i < count; i++) {
@@ -875,9 +971,49 @@ static void joints_warm_start(WorldInternal* w, SolverJoint* joints, int count)
 		BodyHot* b = &w->body_hot[s->body_b];
 		BodyState* sa = &w->body_state[s->body_a];
 		BodyState* sb = &w->body_state[s->body_b];
-		for (int d = 0; d < s->dof; d++) {
-			if (s->lambda[d] == 0) continue;
-			jac_apply(&s->rows[d], s->lambda[d], a, b, sa, sb);
+		switch (s->type) {
+		case JOINT_BALL_SOCKET:
+			apply_point_impulse(s->r_a, s->r_b, V3(s->lambda[0], s->lambda[1], s->lambda[2]), a, b, sa, sb);
+			break;
+		case JOINT_HINGE:
+			apply_point_impulse(s->r_a, s->r_b, V3(s->lambda[0], s->lambda[1], s->lambda[2]), a, b, sa, sb);
+			apply_ang3_impulse(add(scale(s->hinge_u1, s->lambda[3]), scale(s->hinge_u2, s->lambda[4])), a, b, sa, sb);
+			if (s->dof > 5) apply_bounded_impulse(&s->bounded[0], s->lambda[5], 1, a, b, sa, sb);
+			break;
+		case JOINT_FIXED:
+			apply_point_impulse(s->r_a, s->r_b, V3(s->lambda[0], s->lambda[1], s->lambda[2]), a, b, sa, sb);
+			apply_ang3_impulse(V3(s->lambda[3], s->lambda[4], s->lambda[5]), a, b, sa, sb);
+			break;
+		case JOINT_PRISMATIC: {
+			// Lateral linear: impulse = t1*lambda[0] + t2*lambda[1] with cross terms.
+			v3 t1 = s->prism_t1, t2 = s->prism_t2;
+			float l0 = s->lambda[0], l1 = s->lambda[1];
+			v3 lin_imp = add(scale(t1, l0), scale(t2, l1));
+			if (lin_imp.x != 0 || lin_imp.y != 0 || lin_imp.z != 0) {
+				a->velocity = sub(a->velocity, scale(lin_imp, a->inv_mass));
+				b->velocity = add(b->velocity, scale(lin_imp, b->inv_mass));
+				v3 ra_cross = add(scale(cross(s->r_a, t1), l0), scale(cross(s->r_a, t2), l1));
+				v3 rb_cross = add(scale(cross(s->r_b, t1), l0), scale(cross(s->r_b, t2), l1));
+				a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, ra_cross));
+				b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, rb_cross));
+			}
+			apply_ang3_impulse(V3(s->lambda[2], s->lambda[3], s->lambda[4]), a, b, sa, sb);
+			if (s->dof > 5) apply_bounded_impulse(&s->bounded[0], s->lambda[5], 0, a, b, sa, sb);
+			break;
+		}
+		case JOINT_DISTANCE:
+			apply_bounded_impulse(&s->bounded[0], s->lambda[0], 0, a, b, sa, sb);
+			break;
+		case JOINT_ANGULAR_MOTOR:
+		case JOINT_CONE_LIMIT:
+		case JOINT_TWIST_LIMIT:
+			apply_bounded_impulse(&s->bounded[0], s->lambda[0], 1, a, b, sa, sb);
+			break;
+		case JOINT_SWING_TWIST:
+			apply_point_impulse(s->r_a, s->r_b, V3(s->lambda[0], s->lambda[1], s->lambda[2]), a, b, sa, sb);
+			apply_bounded_impulse(&s->bounded[0], s->lambda[3], 1, a, b, sa, sb);
+			apply_bounded_impulse(&s->bounded[1], s->lambda[4], 1, a, b, sa, sb);
+			break;
 		}
 	}
 }
@@ -890,10 +1026,20 @@ static int solver_joint_has_limits(SolverJoint* s)
 	return 0;
 }
 
-// Generic PGS joint solve: no type switch.
-// Multi-DOF joints (ball-socket 3, hinge 5) use a coupled block solve
-// for the full K-matrix instead of the diagonal (eff_mass) approximation.
-// When limits are active, uses diagonal PGS with per-DOF clamping.
+// Swing-twist 5-DOF PGS step: linear 3-DOF (point block) + cone (DOF 3, bounded
+// angular) + twist (DOF 4, bounded angular). Each part either fires (when active)
+// or short-circuits via eff_mass==0 (set by joint_fill_rows when within range).
+static void solve_swing_twist(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
+{
+	solve_point_block(s, a, b, sa, sb, 0);
+	solve_bounded_angular(&s->bounded[0], &s->lambda[3], s->bias[3], s->lo[3], s->hi[3], s->softness, a, b, sa, sb);
+	solve_bounded_angular(&s->bounded[1], &s->lambda[4], s->bias[4], s->lo[4], s->hi[4], s->softness, a, b, sa, sb);
+}
+
+// PGS joint solve: dispatches to a specialized inline solver per type. No
+// generic block-LDL path -- every joint type has a specialized solver that
+// uses precomputed effective-mass blocks (lin_inv_eff_mass, ang3_inv_eff_mass,
+// hinge_ang_inv_eff_mass, prism_lateral_inv_eff_mass) or per-DOF bounded[].
 static void solve_joint(WorldInternal* w, SolverJoint* s)
 {
 	BodyHot* a = &w->body_hot[s->body_a];
@@ -901,90 +1047,16 @@ static void solve_joint(WorldInternal* w, SolverJoint* s)
 	BodyState* sa = &w->body_state[s->body_a];
 	BodyState* sb = &w->body_state[s->body_b];
 
-	// Specialized per-type solvers (inline solve with precomputed effective mass,
-	// no per-iteration K factorization or stored-Jacobian reads for bilateral DOFs).
-	if (s->type == JOINT_BALL_SOCKET && s->dof == 3) {
-		solve_ball_socket(s, a, b, sa, sb);
-		return;
-	}
-	if (s->type == JOINT_HINGE) {
-		solve_hinge(s, a, b, sa, sb);
-		return;
-	}
-	if (s->type == JOINT_FIXED) {
-		solve_fixed(s, a, b, sa, sb);
-		return;
-	}
-	if (s->type == JOINT_PRISMATIC) {
-		solve_prismatic(s, a, b, sa, sb);
-		return;
-	}
-
-	if (s->dof == 1) {
-		// Scalar path (distance joints, possibly with limits)
-		float vel_err = jac_velocity_f(&s->rows[0], a, b);
-		float rhs = -vel_err - s->bias[0] - s->softness * s->lambda[0];
-		float delta = s->rows[0].eff_mass * rhs;
-		float old = s->lambda[0];
-		s->lambda[0] += delta;
-		if (s->lambda[0] < s->lo[0]) s->lambda[0] = s->lo[0];
-		if (s->lambda[0] > s->hi[0]) s->lambda[0] = s->hi[0];
-		jac_apply(&s->rows[0], s->lambda[0] - old, a, b, sa, sb);
-		return;
-	}
-
-	// Find how many trailing DOFs have bounds (limit DOFs are always at the end).
-	int base_dof = s->dof;
-	for (int d = s->dof - 1; d >= 0; d--) {
-		if (s->lo[d] > -1e18f || s->hi[d] < 1e18f) base_dof = d;
-		else break;
-	}
-
-	// Block solve for the bilateral (base) DOFs
-	if (base_dof > 1) {
-		float K[BLOCK_MAX_DOF * (BLOCK_MAX_DOF + 1) / 2];
-		memset(K, 0, sizeof(K));
-		block_K_body_f(s->rows, base_dof, 0, a, sa, K);
-		block_K_body_f(s->rows, base_dof, 1, b, sb, K);
-		for (int d = 0; d < base_dof; d++) K[BTRI(d,d)] += s->softness;
-		float D[JOINT_MAX_DOF], rhs[JOINT_MAX_DOF], delta[JOINT_MAX_DOF];
-		if (block_ldl_f(K, D, base_dof) == 0) {
-			for (int d = 0; d < base_dof; d++) {
-				float vel_err = jac_velocity_f(&s->rows[d], a, b);
-				rhs[d] = -vel_err - s->bias[d] - s->softness * s->lambda[d];
-			}
-			block_solve_f(K, D, rhs, delta, base_dof);
-			for (int d = 0; d < base_dof; d++) {
-				s->lambda[d] += delta[d];
-				jac_apply(&s->rows[d], delta[d], a, b, sa, sb);
-			}
-		} else {
-			for (int d = 0; d < base_dof; d++) {
-				float vel_err = jac_velocity_f(&s->rows[d], a, b);
-				float r = -vel_err - s->bias[d] - s->softness * s->lambda[d];
-				float dl = s->rows[d].eff_mass * r;
-				s->lambda[d] += dl;
-				jac_apply(&s->rows[d], dl, a, b, sa, sb);
-			}
-		}
-	} else if (base_dof == 1) {
-		float vel_err = jac_velocity_f(&s->rows[0], a, b);
-		float r = -vel_err - s->bias[0] - s->softness * s->lambda[0];
-		float dl = s->rows[0].eff_mass * r;
-		s->lambda[0] += dl;
-		jac_apply(&s->rows[0], dl, a, b, sa, sb);
-	}
-
-	// Scalar clamped PGS for bounded (limit) DOFs
-	for (int d = base_dof; d < s->dof; d++) {
-		float vel_err = jac_velocity_f(&s->rows[d], a, b);
-		float r = -vel_err - s->bias[d] - s->softness * s->lambda[d];
-		float dl = s->rows[d].eff_mass * r;
-		float old = s->lambda[d];
-		s->lambda[d] += dl;
-		if (s->lambda[d] < s->lo[d]) s->lambda[d] = s->lo[d];
-		if (s->lambda[d] > s->hi[d]) s->lambda[d] = s->hi[d];
-		jac_apply(&s->rows[d], s->lambda[d] - old, a, b, sa, sb);
+	switch (s->type) {
+	case JOINT_BALL_SOCKET: solve_ball_socket(s, a, b, sa, sb); break;
+	case JOINT_HINGE:       solve_hinge(s, a, b, sa, sb); break;
+	case JOINT_FIXED:       solve_fixed(s, a, b, sa, sb); break;
+	case JOINT_PRISMATIC:   solve_prismatic(s, a, b, sa, sb); break;
+	case JOINT_DISTANCE:    solve_bounded_linear(&s->bounded[0], &s->lambda[0], s->bias[0], s->lo[0], s->hi[0], s->softness, a, b, sa, sb); break;
+	case JOINT_ANGULAR_MOTOR:
+	case JOINT_CONE_LIMIT:
+	case JOINT_TWIST_LIMIT: solve_bounded_angular(&s->bounded[0], &s->lambda[0], s->bias[0], s->lo[0], s->hi[0], s->softness, a, b, sa, sb); break;
+	case JOINT_SWING_TWIST: solve_swing_twist(s, a, b, sa, sb); break;
 	}
 }
 
