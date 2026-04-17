@@ -217,6 +217,108 @@ static void solve_hinge(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, B
 	}
 }
 
+// Shared 3-DOF angular block step (fixed rotation lock, prismatic rotation lock).
+// Jv = w_a - w_b (identity Jacobian). Impulse = delta (world frame).
+// Pre-computed ang3_inv_eff_mass = (I_a_world^-1 + I_b_world^-1 + softness*I)^-1.
+static inline void solve_ang3_block(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb, int lambda_base)
+{
+	v3 dw = sub(a->angular_velocity, b->angular_velocity);
+	float* lam = &s->lambda[lambda_base];
+	float* bias = &s->bias[lambda_base];
+	v3 rhs = V3(-dw.x - bias[0] - s->softness * lam[0], -dw.y - bias[1] - s->softness * lam[1], -dw.z - bias[2] - s->softness * lam[2]);
+	v3 delta = sym3x3_mul_v3(s->ang3_inv_eff_mass, rhs);
+	lam[0] += delta.x; lam[1] += delta.y; lam[2] += delta.z;
+	a->angular_velocity = add(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, delta));
+	b->angular_velocity = sub(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, delta));
+}
+
+// Fixed joint 6-DOF PGS step: linear 3-DOF (point block) + angular 3-DOF (ang3 block).
+static void solve_fixed(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
+{
+	solve_point_block(s, a, b, sa, sb, 0);
+	solve_ang3_block(s, a, b, sa, sb, 3);
+}
+
+// Prismatic 5- or 6-DOF PGS step: lateral 2-DOF linear + angular 3-DOF + optional motor.
+static void solve_prismatic(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb)
+{
+	// Lateral 2-DOF linear: Jv_i = t_i . (v_b - v_a) + (r_b x t_i) . w_b - (r_a x t_i) . w_a.
+	v3 t1 = s->prism_t1, t2 = s->prism_t2;
+	v3 ra = s->r_a, rb = s->r_b;
+	v3 dv = sub(b->velocity, a->velocity);
+	v3 rat1 = cross(ra, t1), rat2 = cross(ra, t2);
+	v3 rbt1 = cross(rb, t1), rbt2 = cross(rb, t2);
+	float jv0 = dot(t1, dv) + dot(rbt1, b->angular_velocity) - dot(rat1, a->angular_velocity);
+	float jv1 = dot(t2, dv) + dot(rbt2, b->angular_velocity) - dot(rat2, a->angular_velocity);
+	float rhs0 = -jv0 - s->bias[0] - s->softness * s->lambda[0];
+	float rhs1 = -jv1 - s->bias[1] - s->softness * s->lambda[1];
+	float m00 = s->prism_lateral_inv_eff_mass[0], m01 = s->prism_lateral_inv_eff_mass[1], m11 = s->prism_lateral_inv_eff_mass[2];
+	float d0 = m00 * rhs0 + m01 * rhs1;
+	float d1 = m01 * rhs0 + m11 * rhs1;
+	s->lambda[0] += d0; s->lambda[1] += d1;
+	v3 lin_impulse = add(scale(t1, d0), scale(t2, d1));
+	a->velocity = sub(a->velocity, scale(lin_impulse, a->inv_mass));
+	b->velocity = add(b->velocity, scale(lin_impulse, b->inv_mass));
+	v3 ang_a = add(scale(rat1, d0), scale(rat2, d1));
+	v3 ang_b = add(scale(rbt1, d0), scale(rbt2, d1));
+	a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, ang_a));
+	b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, ang_b));
+
+	// Angular 3-DOF: identical to fixed joint rotation lock.
+	solve_ang3_block(s, a, b, sa, sb, 2);
+
+	// Optional DOF 5 (motor along slide axis): bounded, uses rows[5]/eff_mass.
+	if (s->dof > 5) {
+		float vel_err = jac_velocity_f(&s->rows[5], a, b);
+		float r = -vel_err - s->bias[5] - s->softness * s->lambda[5];
+		float dl = s->rows[5].eff_mass * r;
+		float old = s->lambda[5];
+		s->lambda[5] += dl;
+		if (s->lambda[5] < s->lo[5]) s->lambda[5] = s->lo[5];
+		if (s->lambda[5] > s->hi[5]) s->lambda[5] = s->hi[5];
+		jac_apply(&s->rows[5], s->lambda[5] - old, a, b, sa, sb);
+	}
+}
+
+// Helper: build world-frame angular K (= I_a_world^-1 + I_b_world^-1 + soft*I)
+// and invert it (sym3x3). BodyHot has precomputed world-space inverse inertia
+// at iw_diag/iw_off; we just add the two bodies' contributions plus softness.
+static void ang3_build_inv_eff_mass(BodyHot* a, BodyHot* b, float softness, float* out)
+{
+	float K[6] = {
+		a->iw_diag.x + b->iw_diag.x + softness,  // xx
+		a->iw_off.x  + b->iw_off.x,               // xy
+		a->iw_off.y  + b->iw_off.y,               // xz
+		a->iw_diag.y + b->iw_diag.y + softness,  // yy
+		a->iw_off.z  + b->iw_off.z,               // yz
+		a->iw_diag.z + b->iw_diag.z + softness,  // zz
+	};
+	sym3x3_inverse(K, out);
+}
+
+// Helper: pre-compute sym2x2 inverse for prismatic lateral (2x2 K block).
+// K[0,0] = (im_a+im_b) + (r_a x t1)^T I_a^-1 (r_a x t1) + (r_b x t1)^T I_b^-1 (r_b x t1) + soft
+// K[1,1] = ... with t2 ... + soft
+// K[0,1] = (r_a x t1)^T I_a^-1 (r_a x t2) + same for B (linear cross zero since t1 perp t2)
+static void prism_build_lateral_inv_eff_mass(BodyHot* a, BodyHot* b, BodyState* sa, BodyState* sb, v3 ra, v3 rb, v3 t1, v3 t2, float softness, float* out)
+{
+	float im_sum = a->inv_mass + b->inv_mass;
+	v3 rat1 = cross(ra, t1), rat2 = cross(ra, t2);
+	v3 rbt1 = cross(rb, t1), rbt2 = cross(rb, t2);
+	v3 ia_rat1 = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, rat1);
+	v3 ia_rat2 = inv_inertia_mul(sa->rotation, sa->inv_inertia_local, rat2);
+	v3 ib_rbt1 = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, rbt1);
+	v3 ib_rbt2 = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, rbt2);
+	float k00 = im_sum + dot(rat1, ia_rat1) + dot(rbt1, ib_rbt1) + softness;
+	float k11 = im_sum + dot(rat2, ia_rat2) + dot(rbt2, ib_rbt2) + softness;
+	float k01 = dot(rat1, ia_rat2) + dot(rbt1, ib_rbt2); // linear part is 0 since t1 perp t2
+	float det = k00 * k11 - k01 * k01;
+	float inv_det = det > 1e-20f ? 1.0f / det : 0.0f;
+	out[0] =  k11 * inv_det;
+	out[1] = -k01 * inv_det;
+	out[2] =  k00 * inv_det;
+}
+
 // -----------------------------------------------------------------------------
 // Centralized Jacobian fill: the ONE function that knows about joint types.
 // Fills s->r_a, s->r_b, s->rows[], s->bias[], s->rows[].eff_mass from current body state.
@@ -400,7 +502,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		v3 err = sub(anchor_b, anchor_a);
 		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
 
-		// Angular error: world-frame quaternion (Jolt RotationEulerConstraintPart).
+		// Angular error: world-frame quaternion.
 		// diff = R_b * R_b0^-1 * R_a0 * R_a^-1 = delta_b * delta_a^-1 (world frame).
 		// Matches identity Jacobian [I, -I] which operates on world-frame angular velocity.
 		quat q_err = mul(mul(sb->rotation, inv(j->fixed.local_rel_quat)), inv(sa->rotation));
@@ -408,6 +510,10 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->pos_error[3] = 2.0f * q_err.x * sign_w;
 		s->pos_error[4] = 2.0f * q_err.y * sign_w;
 		s->pos_error[5] = 2.0f * q_err.z * sign_w;
+
+		// Precompute inline-solve data for solve_fixed.
+		ball_socket_eff_mass(a, b, sa, sb, ra, rb, soft, s->lin_inv_eff_mass);
+		ang3_build_inv_eff_mass(a, b, soft, s->ang3_inv_eff_mass);
 	} else if (s->type == JOINT_PRISMATIC) {
 		s->r_a = rotate(sa->rotation, j->prismatic.local_a);
 		s->r_b = rotate(sb->rotation, j->prismatic.local_b);
@@ -452,6 +558,11 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->pos_error[2] = 2.0f * q_err.x * sign_w;
 		s->pos_error[3] = 2.0f * q_err.y * sign_w;
 		s->pos_error[4] = 2.0f * q_err.z * sign_w;
+
+		// Precompute inline-solve data for solve_prismatic.
+		s->prism_t1 = t1; s->prism_t2 = t2;
+		prism_build_lateral_inv_eff_mass(a, b, sa, sb, ra, rb, t1, t2, soft, s->prism_lateral_inv_eff_mass);
+		ang3_build_inv_eff_mass(a, b, soft, s->ang3_inv_eff_mass);
 
 		// Prismatic motor: DOF 5 along slide axis
 		if (j->prismatic.motor_max_impulse > 0.0f) {
@@ -742,6 +853,14 @@ static void solve_joint(WorldInternal* w, SolverJoint* s)
 	}
 	if (s->type == JOINT_HINGE) {
 		solve_hinge(s, a, b, sa, sb);
+		return;
+	}
+	if (s->type == JOINT_FIXED) {
+		solve_fixed(s, a, b, sa, sb);
+		return;
+	}
+	if (s->type == JOINT_PRISMATIC) {
+		solve_prismatic(s, a, b, sa, sb);
 		return;
 	}
 

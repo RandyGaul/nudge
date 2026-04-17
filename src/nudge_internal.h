@@ -503,12 +503,22 @@ typedef struct SolverJoint
 	JacobianRow rows[JOINT_MAX_DOF];
 
 	// Ball-socket-like 3-DOF linear block (packed sym3x3 inverse: xx,xy,xz,yy,yz,zz).
-	// Used by ball socket, hinge linear (DOF 0-2), fixed linear (DOF 0-2).
+	// Used by ball socket, hinge linear (DOF 0-2), fixed linear (DOF 0-2),
+	// prismatic lateral pair (computed differently), swing-twist linear.
 	float lin_inv_eff_mass[6];
 
 	// Hinge angular 2-DOF block: constraint axes u1,u2 and packed sym2x2 inverse [00,01,11].
 	v3 hinge_u1, hinge_u2;
 	float hinge_ang_inv_eff_mass[3];
+
+	// 3-DOF world-frame angular block (sym3x3 inverse of I_a^-1 + I_b^-1, packed).
+	// Used by fixed (DOF 3-5) and prismatic (DOF 2-4).
+	float ang3_inv_eff_mass[6];
+
+	// Prismatic lateral-linear block: 2 tangent axes perp. to slide axis +
+	// packed sym2x2 inverse of the 2-DOF lateral K matrix.
+	v3 prism_t1, prism_t2;
+	float prism_lateral_inv_eff_mass[3];
 } SolverJoint;
 
 // Constraint ref for graph coloring dispatch.
