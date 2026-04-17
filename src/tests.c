@@ -1326,6 +1326,149 @@ static void test_box_box()
 }
 
 // ============================================================================
+// EPA (expanding polytope algorithm) -- verify penetration depth and normal
+// for canonical deep-contact configurations. These tests invoke EPA directly
+// via epa_sphere_hull / epa_hull_hull entry points (no world / toggle).
+
+static void test_epa()
+{
+	const Hull* box = hull_unit_box();
+	quat id = quat_identity();
+
+	// --- Sphere-hull deep penetration ---
+	// Sphere radius 1 at origin vs unit box at origin: sphere center inside box.
+	// Expected depth ~ radius + box_half_along_axis - dist_from_center.
+	// For center-to-center = 0: EPA should report significant depth (>= 1.0).
+	{
+		TEST_BEGIN("epa sphere-box concentric has depth");
+		Manifold m = {0};
+		ConvexHull hb = { box, V3(0,0,0), id, V3(1,1,1) };
+		int hit = epa_sphere_hull((Sphere){ V3(0,0,0), 1.0f }, hb, &m);
+		TEST_ASSERT(hit);
+		TEST_ASSERT(m.count == 1);
+		TEST_ASSERT(m.contacts[0].penetration > 0.5f);
+	}
+
+	// Sphere center outside box but overlapping: analytical penetration known.
+	// Sphere (A) at (1.5, 0, 0), r=1; box (B) at origin, half=1. Overlap=0.5.
+	// Normal convention: from A toward B = from sphere to box = -X.
+	{
+		TEST_BEGIN("epa sphere-box shallow +X");
+		Manifold m = {0};
+		ConvexHull hb = { box, V3(0,0,0), id, V3(1,1,1) };
+		int hit = epa_sphere_hull((Sphere){ V3(1.5f, 0, 0), 1.0f }, hb, &m);
+		TEST_ASSERT(hit);
+		TEST_ASSERT(m.count == 1);
+		TEST_ASSERT(m.contacts[0].normal.x < -0.7f);
+		TEST_ASSERT_FLOAT(m.contacts[0].penetration, 0.5f, 0.05f);
+	}
+
+	// --- Hull-hull deep overlap (axis-aligned boxes) ---
+	// Two unit boxes centered at (0,0,0) and (1.0, 0, 0): overlap = 1.0 along X.
+	// Expected normal: roughly +X or -X.
+	{
+		TEST_BEGIN("epa box-box deep +X");
+		Manifold m = {0};
+		ConvexHull ha = { box, V3(0,0,0), id, V3(1,1,1) };
+		ConvexHull hb = { box, V3(1.0f, 0, 0), id, V3(1,1,1) };
+		int hit = epa_hull_hull(ha, hb, &m);
+		TEST_ASSERT(hit);
+		TEST_ASSERT(m.count == 1);
+		TEST_ASSERT(fabsf(m.contacts[0].normal.x) > 0.85f);
+		TEST_ASSERT(m.contacts[0].penetration > 0.5f);
+		TEST_ASSERT(m.contacts[0].penetration < 1.5f);
+	}
+
+	// Two unit boxes overlapping on Y: normal should be Y-ish.
+	{
+		TEST_BEGIN("epa box-box deep +Y");
+		Manifold m = {0};
+		ConvexHull ha = { box, V3(0,0,0), id, V3(1,1,1) };
+		ConvexHull hb = { box, V3(0, 1.0f, 0), id, V3(1,1,1) };
+		int hit = epa_hull_hull(ha, hb, &m);
+		TEST_ASSERT(hit);
+		TEST_ASSERT(m.count == 1);
+		TEST_ASSERT(fabsf(m.contacts[0].normal.y) > 0.85f);
+	}
+
+	// Rotated hull-hull: box rotated 45 deg around Y, deep overlap along X.
+	{
+		TEST_BEGIN("epa rotated box-box deep");
+		Manifold m = {0};
+		quat rot45y = { 0, 0.3827f, 0, 0.9239f };
+		ConvexHull ha = { box, V3(0,0,0), id, V3(1,1,1) };
+		ConvexHull hb = { box, V3(1.5f, 0, 0), rot45y, V3(1,1,1) };
+		int hit = epa_hull_hull(ha, hb, &m);
+		TEST_ASSERT(hit);
+		TEST_ASSERT(m.count == 1);
+		// Penetration should be positive and bounded.
+		TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+		TEST_ASSERT(m.contacts[0].penetration < 2.0f);
+	}
+
+	// Separated pair: EPA should return no hit (GJK distance > threshold).
+	{
+		TEST_BEGIN("epa box-box separated");
+		Manifold m = {0};
+		ConvexHull ha = { box, V3(0,0,0), id, V3(1,1,1) };
+		ConvexHull hb = { box, V3(3.0f, 0, 0), id, V3(1,1,1) };
+		int hit = epa_hull_hull(ha, hb, &m);
+		TEST_ASSERT(!hit);
+	}
+}
+
+// Smoke test: drop a few boxes onto a floor under the EPA backend. Verify no
+// NaN, no tunneling, solver runs to completion. Quality differences vs SAT
+// are expected (incremental manifold).
+static void test_epa_world_smoke()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .narrowphase_backend = NARROWPHASE_GJK_EPA };
+	World w = create_world(wp);
+
+	// Floor.
+	Body floor = create_body(w, (BodyParams){ .position = V3(0, -0.5f, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 0.5f, 10) });
+
+	// Drop 3 boxes in a stack.
+	Body b[3];
+	for (int i = 0; i < 3; i++) {
+		b[i] = create_body(w, (BodyParams){ .position = V3(0, 1.0f + (float)i * 1.1f, 0), .rotation = quat_identity(), .mass = 1.0f, .friction = 0.5f });
+		body_add_shape(w, b[i], (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+	}
+
+	int nan_frame = -1;
+	int tunnel_frame = -1;
+	for (int i = 0; i < 120; i++) {
+		world_step(w, 1.0f / 60.0f);
+		for (int k = 0; k < 3; k++) {
+			v3 p = body_get_position(w, b[k]);
+			if (!is_valid(p)) { nan_frame = i; break; }
+			if (p.y < -5.0f) { tunnel_frame = i; break; } // fell through floor
+		}
+		if (nan_frame >= 0 || tunnel_frame >= 0) break;
+	}
+
+	TEST_BEGIN("epa world smoke: no NaN"); TEST_ASSERT(nan_frame == -1);
+	TEST_BEGIN("epa world smoke: no tunnel"); TEST_ASSERT(tunnel_frame == -1);
+
+	destroy_world(w);
+}
+
+// ============================================================================
+// EPA fuzz + stress tests (Phase A of ship-readiness plan).
+
+// Pairwise EPA fuzz. For `iterations` rounds per shape-pair combination, build
+// two fuzz hulls, position them at a known overlap depth along a random axis,
+// and feed through epa_hull_hull. Assert: contact count = 1, finite positive
+// depth, unit normal, finite contact point. Forward-declares s_fuzz_shapes
+// which is defined further down; see test_quickhull_fuzz.
+static Hull* epa_fuzz_build_hull_from_idx(int shape_idx, float hull_scale, float jitter);
+static void test_epa_fuzz(int iterations);
+static void test_epa_deep_stress();
+static void test_epa_sep_rejoin();
+static void test_epa_deep_threshold_dispatch();
+
+// ============================================================================
 // Normal direction convention: all narrowphase routines must produce
 // contact normals pointing from body A toward body B.
 // For each shape pair, place A on the left, B on the right, verify n.x > 0.
@@ -2902,6 +3045,240 @@ static void test_quickhull_fuzz(int iterations)
 }
 
 // ============================================================================
+// EPA fuzz + stress tests (Phase A of ship-readiness plan). Placed here so
+// s_fuzz_shapes[] is already declared above.
+
+static Hull* epa_fuzz_build_hull_from_idx(int shape_idx, float hull_scale, float jitter)
+{
+	const FuzzShape* base = &s_fuzz_shapes[shape_idx];
+	CK_DYNA v3* pts = NULL;
+	for (int i = 0; i < base->vert_count; i++) {
+		v3 p = scale(base->verts[i], hull_scale);
+		p = add(p, scale(fuzz_rand_dir(), jitter));
+		apush(pts, p);
+	}
+	Hull* h = quickhull(pts, asize(pts));
+	afree(pts);
+	return h;
+}
+
+static void test_epa_fuzz(int iterations)
+{
+	fuzz_rng_state = 12345;
+	fuzz_rng_seed = 12345;
+	int total = 0;
+	int fails = 0;
+	int reported = 0;
+
+	for (int sa = 0; sa < (int)FUZZ_SHAPE_COUNT; sa++) {
+		for (int sb = 0; sb < (int)FUZZ_SHAPE_COUNT; sb++) {
+			for (int iter = 0; iter < iterations; iter++) {
+				float scale_a = 1.0f + fuzz_rand_range(-0.3f, 0.3f);
+				float scale_b = 1.0f + fuzz_rand_range(-0.3f, 0.3f);
+				float jitter  = fuzz_rand_range(0.0f, 0.02f);
+				Hull* ha = epa_fuzz_build_hull_from_idx(sa, scale_a, jitter);
+				Hull* hb = epa_fuzz_build_hull_from_idx(sb, scale_b, jitter);
+				if (!ha || !hb) { if (ha) hull_free(ha); if (hb) hull_free(hb); continue; }
+
+				v3 axis = fuzz_rand_dir();
+				float min_ext = scale_a < scale_b ? scale_a : scale_b;
+				float overlap = fuzz_rand_range(0.1f, 1.0f) * min_ext;
+				float sep = (scale_a + scale_b) - overlap;
+				v3 pos_b = scale(axis, sep);
+
+				float ta = fuzz_rand_range(0.0f, 6.283f);
+				v3 axa = fuzz_rand_dir();
+				float sa_s = sinf(ta * 0.5f), ca_s = cosf(ta * 0.5f);
+				quat ra = { axa.x * sa_s, axa.y * sa_s, axa.z * sa_s, ca_s };
+				float tb = fuzz_rand_range(0.0f, 6.283f);
+				v3 axb = fuzz_rand_dir();
+				float sb_s = sinf(tb * 0.5f), cb_s = cosf(tb * 0.5f);
+				quat rb = { axb.x * sb_s, axb.y * sb_s, axb.z * sb_s, cb_s };
+
+				ConvexHull A = { ha, V3(0,0,0), ra, V3(1,1,1) };
+				ConvexHull B = { hb, pos_b, rb, V3(1,1,1) };
+
+				Manifold m = { 0 };
+				int hit = epa_hull_hull(A, B, &m);
+				total++;
+
+				int bad = 0;
+				const char* reason = "";
+				if (hit) {
+					if (m.count != 1) { bad = 1; reason = "count != 1"; }
+					else {
+						Contact* c = &m.contacts[0];
+						if (!isfinite(c->penetration)) { bad = 1; reason = "non-finite depth"; }
+						else if (c->penetration < 0.0f) { bad = 1; reason = "negative depth"; }
+						float nlen = len(c->normal);
+						if (!isfinite(nlen) || fabsf(nlen - 1.0f) > 1e-3f) { bad = 1; reason = "non-unit normal"; }
+						if (!is_valid(c->point)) { bad = 1; reason = "NaN point"; }
+					}
+				}
+				if (bad) {
+					fails++;
+					if (reported < 5) {
+						printf("  EPA FUZZ FAIL: %s-%s iter %d (%s): hit=%d count=%d sep=%.3f overlap=%.3f\n",
+							s_fuzz_shapes[sa].name, s_fuzz_shapes[sb].name, iter, reason, hit, m.count, sep, overlap);
+						reported++;
+					}
+				}
+				hull_free(ha);
+				hull_free(hb);
+			}
+		}
+	}
+	TEST_BEGIN("epa fuzz hull-hull pairwise"); TEST_ASSERT(fails == 0);
+	printf("  epa fuzz: %d queries, %d failures\n", total, fails);
+}
+
+static void test_epa_deep_stress()
+{
+	const Hull* box = hull_unit_box();
+	quat id = quat_identity();
+
+	// 1. Fully-enclosed: tiny box inside big box.
+	{
+		TEST_BEGIN("epa deep: enclosed box");
+		ConvexHull big   = { box, V3(0,0,0), id, V3(5, 5, 5) };
+		ConvexHull small = { box, V3(0,0,0), id, V3(0.5f, 0.5f, 0.5f) };
+		Manifold m = { 0 };
+		int hit = epa_hull_hull(big, small, &m);
+		TEST_ASSERT(hit);
+		TEST_ASSERT(m.count == 1);
+		TEST_ASSERT(isfinite(m.contacts[0].penetration));
+		TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+		TEST_ASSERT(fabsf(len(m.contacts[0].normal) - 1.0f) < 1e-3f);
+	}
+
+	// 2. Extreme scale ratio: very large vs small box, shallow overlap.
+	{
+		TEST_BEGIN("epa deep: extreme scale ratio");
+		ConvexHull big  = { box, V3(0,0,0), id, V3(500, 500, 500) };
+		ConvexHull tiny = { box, V3(100, 0, 0), id, V3(0.5f, 0.5f, 0.5f) };
+		Manifold m = { 0 };
+		int hit = epa_hull_hull(big, tiny, &m);
+		TEST_ASSERT(hit);
+		TEST_ASSERT(isfinite(m.contacts[0].penetration));
+		TEST_ASSERT(fabsf(len(m.contacts[0].normal) - 1.0f) < 1e-2f);
+	}
+
+	// 3. Thin stick (1:1:100 ratio) vs unit box deep overlap.
+	{
+		TEST_BEGIN("epa deep: thin hull");
+		ConvexHull stick = { box, V3(0,0,0), id, V3(0.5f, 0.5f, 50.0f) };
+		ConvexHull cube  = { box, V3(0, 0, 0), id, V3(1, 1, 1) };
+		Manifold m = { 0 };
+		int hit = epa_hull_hull(stick, cube, &m);
+		TEST_ASSERT(hit);
+		TEST_ASSERT(m.count == 1);
+		TEST_ASSERT(isfinite(m.contacts[0].penetration));
+		TEST_ASSERT(fabsf(len(m.contacts[0].normal) - 1.0f) < 1e-2f);
+	}
+
+	// 4. Concentric sphere in box.
+	{
+		TEST_BEGIN("epa deep: sphere in box concentric");
+		ConvexHull hb = { box, V3(0,0,0), id, V3(5, 5, 5) };
+		Manifold m = { 0 };
+		int hit = epa_sphere_hull((Sphere){ V3(0,0,0), 1.0f }, hb, &m);
+		TEST_ASSERT(hit);
+		TEST_ASSERT(m.count == 1);
+		TEST_ASSERT(isfinite(m.contacts[0].penetration));
+	}
+
+	// 5. Near-coplanar face alignment (rotated by tiny angle).
+	{
+		TEST_BEGIN("epa deep: near-coplanar");
+		float ang = 0.001f;
+		quat rot = { 0, sinf(ang * 0.5f), 0, cosf(ang * 0.5f) };
+		ConvexHull a = { box, V3(0,0,0),       id,  V3(1, 1, 1) };
+		ConvexHull b = { box, V3(0, 1.5f, 0),  rot, V3(1, 1, 1) };
+		Manifold m = { 0 };
+		int hit = epa_hull_hull(a, b, &m);
+		TEST_ASSERT(hit);
+		TEST_ASSERT(fabsf(m.contacts[0].normal.y) > 0.85f);
+	}
+}
+
+static void test_epa_sep_rejoin()
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .narrowphase_backend = NARROWPHASE_GJK_EPA };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body ba = create_body(w, (BodyParams){ .position = V3(0,0,0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, ba, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+	Body bb = create_body(w, (BodyParams){ .position = V3(0.7f,0,0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, bb, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+
+	// Phase 1: step a few frames in overlap — manifold fills up.
+	for (int i = 0; i < 10; i++) world_step(w, 1.0f / 60.0f);
+
+	// Phase 2: separate far apart; stop motion; step past the age-out window.
+	body_set_velocity(w, ba, V3(0, 0, 0));
+	body_set_velocity(w, bb, V3(0, 0, 0));
+	body_set_position(w, bb, V3(5.0f, 0, 0));
+	for (int i = 0; i < EPA_MAX_CONTACT_AGE + 6; i++) world_step(w, 1.0f / 60.0f);
+
+	TEST_BEGIN("epa sep/rejoin: no stale contacts after separation");
+	int bad = 0;
+	for (int i = 0; i < map_size(wi->epa_cache); i++) {
+		EpaManifold* em = &wi->epa_cache[i];
+		if (em->count > 0) bad = 1;
+	}
+	TEST_ASSERT(!bad);
+
+	// Phase 3: return to overlap, fresh contacts must appear.
+	body_set_position(w, bb, V3(0.7f, 0, 0));
+	body_set_velocity(w, ba, V3(0, 0, 0));
+	body_set_velocity(w, bb, V3(0, 0, 0));
+	for (int i = 0; i < 5; i++) world_step(w, 1.0f / 60.0f);
+
+	TEST_BEGIN("epa sep/rejoin: contacts after rejoin");
+	int got_contact = 0;
+	for (int i = 0; i < map_size(wi->epa_cache); i++) {
+		EpaManifold* em = &wi->epa_cache[i];
+		if (em->count > 0) { got_contact = 1; break; }
+	}
+	TEST_ASSERT(got_contact);
+
+	destroy_world(w);
+}
+
+static void test_epa_deep_threshold_dispatch()
+{
+	const Hull* box = hull_unit_box();
+	quat id = quat_identity();
+
+	// Shallow: sphere just outside box. Shallow path uses GJK witness.
+	{
+		TEST_BEGIN("epa threshold: sphere outside by epsilon");
+		ConvexHull hb = { box, V3(0,0,0), id, V3(1, 1, 1) };
+		Manifold m = { 0 };
+		int hit = epa_sphere_hull((Sphere){ V3(1.0f + 0.5f + 5e-5f, 0, 0), 0.5f }, hb, &m);
+		TEST_ASSERT(hit);
+		if (hit) {
+			TEST_ASSERT(m.contacts[0].penetration >= 0.0f);
+			TEST_ASSERT(fabsf(len(m.contacts[0].normal) - 1.0f) < 1e-3f);
+		}
+	}
+
+	// Deep: sphere inside box by small amount — EPA path.
+	{
+		TEST_BEGIN("epa threshold: sphere inside by epsilon");
+		ConvexHull hb = { box, V3(0,0,0), id, V3(1, 1, 1) };
+		Manifold m = { 0 };
+		int hit = epa_sphere_hull((Sphere){ V3(1.0f + 0.5f - 5e-3f, 0, 0), 0.5f }, hb, &m);
+		TEST_ASSERT(hit);
+		if (hit) {
+			TEST_ASSERT(m.contacts[0].penetration > 0.0f);
+		}
+	}
+}
+
+// ============================================================================
 // Cylinder stress test for face merging.
 //
 // A discretized cylinder has N coplanar triangles on each cap and N coplanar
@@ -3529,6 +3906,159 @@ static void test_quickhull_geometry_stress()
 	}
 
 	printf("  geometry stress: %d shapes tested\n", total);
+}
+
+// ============================================================================
+// Hull8 compact variant tests.
+
+static int hull8_check_twins(const Hull8* h)
+{
+	if ((h->edge_count & 1) != 0) return 0;
+	for (int i = 0; i < h->edge_count; i++) {
+		int head = h->edge_origin[h->edge_next[i]];
+		int tail_of_twin = h->edge_origin[i ^ 1];
+		if (head != tail_of_twin) return 0;
+	}
+	return 1;
+}
+
+static int hull8_check_face_loops(const Hull8* h)
+{
+	for (int fi = 0; fi < h->face_count; fi++) {
+		int start = h->face_edge[fi];
+		int e = start;
+		int count = 0;
+		do {
+			if (h->edge_face[e] != fi) return 0;
+			e = h->edge_next[e];
+			if (++count > h->edge_count) return 0;
+		} while (e != start);
+		if (count < 3) return 0;
+	}
+	return 1;
+}
+
+static int hull8_check_planes_match(const Hull8* h8, const Hull* src)
+{
+	if (h8->face_count != src->face_count) return 0;
+	for (int f = 0; f < h8->face_count; f++) {
+		HullPlane a = h8->planes[f], b = src->planes[f];
+		if (a.normal.x != b.normal.x || a.normal.y != b.normal.y || a.normal.z != b.normal.z) return 0;
+		if (a.offset != b.offset) return 0;
+	}
+	return 1;
+}
+
+static size_t hull_estimate_bytes(const Hull* h)
+{
+	size_t s = sizeof(Hull);
+	s += sizeof(v3) * (size_t)h->vert_count;
+	int padded = (h->vert_count + 3) & ~3;
+	s += sizeof(float) * (size_t)padded * 3;
+	s += sizeof(int) * 4 * (size_t)h->edge_count;
+	s += sizeof(HullFace) * (size_t)h->face_count;
+	s += sizeof(HullPlane) * (size_t)h->face_count;
+	return s;
+}
+
+static size_t hull8_estimate_bytes(const Hull8* h)
+{
+	size_t a_hp = _Alignof(HullPlane);
+	size_t a_v3 = _Alignof(v3);
+	size_t off_planes = (sizeof(Hull8) + a_hp - 1) & ~(a_hp - 1);
+	size_t off_verts  = off_planes + sizeof(HullPlane) * (size_t)h->face_count;
+	off_verts = (off_verts + a_v3 - 1) & ~(a_v3 - 1);
+	size_t total = off_verts + sizeof(v3) * (size_t)h->vert_count
+		+ 3 * (size_t)h->edge_count + (size_t)h->face_count;
+	return total;
+}
+
+static void test_hull8_roundtrip(const char* label, const Hull* h)
+{
+	char buf[128];
+	Hull8* h8 = hull_to_hull8(h);
+	snprintf(buf, sizeof(buf), "hull8 %s built", label);
+	TEST_BEGIN(buf);
+	TEST_ASSERT(h8 != NULL);
+	if (!h8) return;
+
+	snprintf(buf, sizeof(buf), "hull8 %s counts match", label);
+	TEST_BEGIN(buf);
+	TEST_ASSERT(h8->vert_count == h->vert_count);
+	TEST_ASSERT(h8->edge_count == h->edge_count);
+	TEST_ASSERT(h8->face_count == h->face_count);
+
+	snprintf(buf, sizeof(buf), "hull8 %s twin i^1", label);
+	TEST_BEGIN(buf);
+	TEST_ASSERT(hull8_check_twins(h8));
+
+	snprintf(buf, sizeof(buf), "hull8 %s face loops", label);
+	TEST_BEGIN(buf);
+	TEST_ASSERT(hull8_check_face_loops(h8));
+
+	snprintf(buf, sizeof(buf), "hull8 %s planes match", label);
+	TEST_BEGIN(buf);
+	TEST_ASSERT(hull8_check_planes_match(h8, h));
+
+	size_t hb = hull_estimate_bytes(h), h8b = hull8_estimate_bytes(h8);
+	printf("  hull8 %s: V=%d E=%d F=%d  Hull=%zu B  Hull8=%zu B  (%.2fx smaller)\n",
+		label, h->vert_count, h->edge_count, h->face_count, hb, h8b, (double)hb / (double)h8b);
+
+	hull8_free(h8);
+}
+
+static void test_hull8()
+{
+	// Unit box (static Hull, known 8/24/6).
+	const Hull* box = hull_unit_box();
+	test_hull8_roundtrip("unit box", box);
+
+	// Tetrahedron.
+	{
+		v3 pts[] = { {0,1,0}, {-1,-1,1}, {1,-1,1}, {0,-1,-1} };
+		Hull* h = quickhull(pts, 4);
+		TEST_BEGIN("hull8 tet source built");
+		TEST_ASSERT(h != NULL);
+		if (h) { test_hull8_roundtrip("tet", h); hull_free(h); }
+	}
+
+	// Icosahedron.
+	{
+		Hull* h = quickhull(s_ico_pts, COUNTOF(s_ico_pts));
+		TEST_BEGIN("hull8 ico source built");
+		TEST_ASSERT(h != NULL);
+		if (h) { test_hull8_roundtrip("icosahedron", h); hull_free(h); }
+	}
+
+	// NULL input + NULL free.
+	TEST_BEGIN("hull8 rejects NULL src");
+	TEST_ASSERT(hull_to_hull8(NULL) == NULL);
+	hull8_free(NULL); // must be a no-op
+
+	// Too-large rejection: 300 pts on a fibonacci sphere -> > 256 verts.
+	{
+		int n = 300;
+		v3* pts = CK_ALLOC(sizeof(v3) * (size_t)n);
+		float golden = 3.14159265f * (3.0f - sqrtf(5.0f));
+		for (int i = 0; i < n; i++) {
+			float y = 1.0f - 2.0f * ((float)i + 0.5f) / (float)n;
+			float r = sqrtf(1.0f - y * y);
+			float t = golden * (float)i;
+			pts[i] = V3(cosf(t) * r, y, sinf(t) * r);
+		}
+		Hull* h = quickhull(pts, n);
+		TEST_BEGIN("hull8 large sphere source built");
+		TEST_ASSERT(h != NULL);
+		if (h) {
+			int too_big = h->vert_count > 256 || h->edge_count > 256 || h->face_count > 256;
+			TEST_BEGIN("hull8 fibonacci sphere exceeds caps");
+			TEST_ASSERT(too_big);
+			TEST_BEGIN("hull8 rejects too-large source");
+			TEST_ASSERT(hull_to_hull8(h) == NULL);
+			hull_free(h);
+		}
+		CK_FREE(pts);
+	}
 }
 
 // ============================================================================
@@ -12470,6 +13000,12 @@ static void run_tests()
 	test_gjk_distance();
 	test_contact_sanity();
 	test_box_box();
+	test_epa();
+	test_epa_world_smoke();
+	test_epa_deep_stress();
+	test_epa_sep_rejoin();
+	test_epa_deep_threshold_dispatch();
+	test_epa_fuzz(20); // pairwise fuzz — light count for regression run
 	test_normal_convention();
 	test_cyl_classify_point();
 	test_cyl_sphere_native();
@@ -12492,6 +13028,7 @@ static void run_tests()
 	test_quickhull_cylinder();
 	test_quickhull_bipyramid_loops();
 	test_quickhull_geometry_stress();
+	test_hull8();
 
 	// Quickhull fuzz: moderate count for regular runs.
 	test_quickhull_fuzz(20); // use 1000+ for stress testing

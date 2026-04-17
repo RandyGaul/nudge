@@ -118,6 +118,47 @@ typedef struct CachedFeaturePair
 
 typedef struct WarmManifold WarmManifold; // forward decl for warm cache
 
+// Incremental manifold for EPA-backed narrowphase. One contact is produced per
+// frame by EPA; the cache accumulates up to MAX_CONTACTS contacts over frames
+// by merging via feature_id and aging out stale entries.
+#define EPA_MAX_CONTACT_AGE 8
+#define EPA_CONTACT_REFRESH_DIST 0.05f         // re-validate tolerance along normal
+#define EPA_CONTACT_TANGENTIAL_DRIFT 0.1f      // drop contact if it slid this far tangentially
+
+typedef struct EpaContact
+{
+	v3 point_a_local;    // in body A local space
+	v3 point_b_local;    // in body B local space
+	v3 normal_local_a;   // contact normal in body A local space (from A toward B)
+	float penetration;
+	uint32_t feature_id;
+	int age;             // frames since last refresh
+} EpaContact;
+
+typedef struct EpaManifold
+{
+	EpaContact contacts[MAX_CONTACTS];
+	int count;
+	int stale;           // frames since last touched (for eviction)
+	// Warm-start seed from prior-frame terminating face. Stored in Minkowski
+	// difference space: directions used to resupport a near-converged tetra on
+	// the next EPA call for this pair. Invalidated when the pair goes dormant.
+	v3 warm_dirs[4];
+	int warm_valid;      // 1 if warm_dirs contains last-frame data
+} EpaManifold;
+
+// Per-frame EPA telemetry. Reset at the top of world_step, mutated inside
+// epa_narrowphase_pair and epa_run. Published via world_get_epa_stats.
+typedef struct EpaStats
+{
+	int queries;             // EPA calls this frame (epa_hit_from_gjk_shapes invocations)
+	int iter_cap_hits;       // queries that ran to EPA_MAX_ITERATIONS
+	int total_iters;         // sum of iteration counts across queries
+	int warm_reseeds;        // queries that used warm_dirs seed
+	int contacts_emitted;    // total contacts emitted to manifolds
+	int pair_count;          // EPA pairs with at least one contact this frame
+} EpaStats;
+
 
 // Joint persistent storage (handle-based, parallel arrays like bodies).
 typedef enum JointType {
@@ -376,6 +417,9 @@ typedef struct WorldInternal
 	int incremental_np_enabled; // 1 = incremental narrowphase (cached feature pair refresh)
 	int warm_start_enabled;    // 1 = warm-start contact impulses from cache
 	int trimesh_simd_enabled;  // 1 = SIMD 4-triangle batch in convex-mesh pair routines (0 = scalar)
+	int narrowphase_backend;   // NarrowphaseBackend: 0=SAT, 1=GJK_EPA
+	CK_MAP(EpaManifold) epa_cache; // per body-pair incremental manifold cache (EPA backend)
+	EpaStats epa_stats;        // per-frame EPA telemetry (reset at start of world_step)
 	// Native cylinder narrowphase toggles (0 = route through hull-backed fallback).
 	// Flipped on per-pair as native routines land; default 0 until Phase 6 cleanup.
 	int cyl_native_sphere;
@@ -582,6 +626,32 @@ typedef struct ConstraintRef
 	int index;
 	int body_a, body_b;
 } ConstraintRef;
+
+// Per-island solver state for a single step. One SolveIsland per active island
+// (plus optional -1 orphan bucket for both-static joints). Stores absolute
+// offsets into the flat crefs / simd_batches arrays so the PGS iter loop can
+// operate on one island at a time without needing per-island allocations.
+//
+// Invariants:
+//   refs for this island live in crefs[crefs_start .. crefs_start + crefs_count)
+//   color c's refs live in crefs[batch_starts[c] .. batch_starts[c + 1])
+//   contacts of color c: crefs[batch_starts[c] .. contact_end[c])
+//   joints   of color c: crefs[contact_end[c]  .. batch_starts[c + 1])
+//   SIMD contact batches of color c: simd_batches[simd_color_batch_starts[c] .. simd_color_batch_starts[c + 1])
+#define SOLVE_ISLAND_MAX_COLORS 64
+
+typedef struct SolveIsland
+{
+	int island_id;
+	int crefs_start;
+	int crefs_count;
+	int color_count;
+	int batch_starts[SOLVE_ISLAND_MAX_COLORS + 1];
+	int contact_end[SOLVE_ISLAND_MAX_COLORS];
+	int simd_batch_start;
+	int simd_batch_count;
+	int simd_color_batch_starts[SOLVE_ISLAND_MAX_COLORS + 1];
+} SolveIsland;
 
 // -----------------------------------------------------------------------------
 // LDL debug visualization data (populated by solver_ldl.c, read by UI).

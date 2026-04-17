@@ -117,17 +117,14 @@ const float DT = 1.0f / 60.0f;
 
 var scenes = new (string name, SceneSetup setup)[]
 {
-	("1: Box Stack",      VisualScenes.BoxStack50),
-	("2: Pyramid",        VisualScenes.Pyramid15),
-	("3: Sphere Drop",    VisualScenes.SphereDrop),
-	("4: Dominos",        VisualScenes.Dominos),
-	("5: Box Wall",       VisualScenes.BoxWall),
-	("6: Friction Ramp",  VisualScenes.FrictionRamp),
-	("7: Pendulum Chain", VisualScenes.PendulumChain),
-	("8: Avalanche",      VisualScenes.ShapeAvalanche),
-	("9: Bowling",        VisualScenes.Bowling),
-	("A: Bouncy Pit",     VisualScenes.BouncyPit),
-	("B: Funnel",         VisualScenes.Funnel),
+	("1: Box Stack",         VisualScenes.BoxStack50),
+	("2: Pyramid",           VisualScenes.Pyramid15),
+	("3: Dominos",           VisualScenes.Dominos),
+	("4: Box Wall",          VisualScenes.BoxWall),
+	("5: Pendulum Chain",    VisualScenes.PendulumChain),
+	("6: Newton's Cradle",   VisualScenes.NewtonsCradle),
+	("7: Suspension Bridge", VisualScenes.SuspensionBridge),
+	("8: Tetherball",        VisualScenes.Tetherball),
 };
 
 Raylib.SetConfigFlags(ConfigFlags.Msaa4xHint);

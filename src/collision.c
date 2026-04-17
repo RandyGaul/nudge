@@ -2355,6 +2355,9 @@ static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, Con
 static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds);
 static int ray_mesh(v3 ro, v3 rd, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, float max_t, float* t_out, v3* n_out);
 
+// Forward decls (defined in epa.c, included later in the unity build).
+static int epa_narrowphase_pair(WorldInternal* w, int body_a_idx, int body_b_idx, ShapeInternal* s0, ShapeInternal* s1, BodyState* bs0, BodyState* bs1, Manifold* manifold);
+
 static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** manifolds)
 {
 	g_sat_hillclimb_enabled = w->sat_hillclimb_enabled;
@@ -2423,6 +2426,24 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	// Upper-triangle dispatch: simple pairs first, then SAT-based pairs.
 	int hit = 0;
 	CachedFeaturePair out_pair = {0};
+
+	// EPA backend: divert hull-involved pairs to incremental-manifold EPA path.
+	// Pairs covered: sphere-hull/box, capsule-hull/box, box-box, box-hull, hull-hull.
+	// Cylinder pairs continue to use native analytical routines.
+	int epa_backend = w->narrowphase_backend == NARROWPHASE_GJK_EPA;
+	int hull_involved_pair = (s0->type == SHAPE_BOX || s0->type == SHAPE_HULL || s1->type == SHAPE_BOX || s1->type == SHAPE_HULL)
+	                      && (s0->type != SHAPE_CYLINDER && s1->type != SHAPE_CYLINDER);
+	if (epa_backend && hull_involved_pair) {
+		hit = epa_narrowphase_pair(w, i, j, s0, s1, bs0, bs1, &im.m);
+		// Track timing + emit manifold.
+		int idx = np_pair_idx(s0->type, s1->type);
+		np_call_acc[idx]++;
+		if (hit) {
+			im.warm = NULL; // EPA uses its own cache; warm_start doesn't apply
+			apush(*manifolds, im);
+		}
+		return;
+	}
 
 	if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE)
 		hit = collide_sphere_sphere(make_sphere(bs0, s0), make_sphere(bs1, s1), &im.m);

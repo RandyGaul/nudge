@@ -168,6 +168,8 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		// Skip sleeping dynamic vs static
 		int isl_a = w->body_cold[a].island_id;
 		if (isl_a >= 0 && (w->island_gen[isl_a] & 1) && !w->islands[isl_a].awake) continue;
+		if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
+		if (filter_pair_skip(w, a, b)) continue;
 		apush(dd_pairs, ((BroadPair){ a, b }));
 	}
 	afree(pairs);

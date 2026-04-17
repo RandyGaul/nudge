@@ -957,16 +957,17 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 
 	double t_fill_start = perf_now();
 
-	// Lazy allocation of solve scratch buffers. Ensures direct callers (tests,
-	// ldl_island_solve standalone) have them ready since they pass through
-	// numeric_factor first.
-	if (!c->solve_rhs && c->n > 0) {
+	// Ensure solve scratch + L_factors have capacity for the current topology.
+	// Topology changes (joint add/destroy) grow c->n; afit/asetlen unconditionally
+	// so a stale buffer sized to an older (smaller) c->n gets resized instead of
+	// being silently overflowed by downstream vel_rhs[oi + d] writes.
+	if (c->n > 0) {
 		afit(c->solve_rhs, c->n);
 		asetlen(c->solve_rhs, c->n);
 		afit(c->solve_lambda, c->n);
 		asetlen(c->solve_lambda, c->n);
 	}
-	if (!c->L_factors && c->topo && c->topo->L_factors_size > 0) {
+	if (c->topo && c->topo->L_factors_size > 0) {
 		afit(c->L_factors, c->topo->L_factors_size);
 		asetlen(c->L_factors, c->topo->L_factors_size);
 	}
@@ -1658,6 +1659,65 @@ static void ldl_refresh_lever_arms_light(WorldInternal* w, SolverJoint* sol_join
 	}
 }
 
+// Per-island factor context. Shared between serial and parallel dispatch paths.
+typedef struct LDL_FactorCtx
+{
+	WorldInternal* w;
+	SolverJoint* sol_joints;
+	int joint_count;
+	int sub;
+	LDL_CompBody* comp_bodies;
+} LDL_FactorCtx;
+
+// Factor one island: topology rebuild if needed, scratch resize, numeric
+// factorization. Per-island writes to LDL_Cache fields (disjoint across
+// islands); reads from sol_joints (body indices, softness) and comp_bodies
+// are read-only. Timing accumulators (ldl_topo_acc etc.) race under parallel
+// dispatch -- accepted as diagnostic imprecision.
+static void ldl_factor_island_work_fn(void* ctx, int start, int count)
+{
+	LDL_FactorCtx* lfc = (LDL_FactorCtx*)ctx;
+	WorldInternal* w = lfc->w;
+	for (int ii = start; ii < start + count; ii++) {
+		if (!(w->island_gen[ii] & 1)) continue;
+		Island* isl = &w->islands[ii];
+		if (!isl->awake) continue;
+		if (isl->joint_count == 0) continue;
+
+		LDL_Cache* c = &isl->ldl;
+
+		// Rebuild blocks on first substep or topology change.
+		if (lfc->sub == 0 || c->topo_version != w->ldl_topo_version) {
+			double t_topo_start = perf_now();
+			ldl_cache_rebuild_blocks(c, w, ii, lfc->sol_joints, lfc->joint_count);
+			ldl_apply_shattering(c, w);
+			ldl_build_bundles(c);
+			if (c->topo_version != w->ldl_topo_version)
+				ldl_build_topology(c, w);
+			c->topo_version = w->ldl_topo_version;
+			ldl_topo_acc += perf_now() - t_topo_start;
+		}
+		if (c->n == 0) continue;
+
+		// Debug capture is gated to a single island by index; parallel path is
+		// only taken when g_ldl_debug_island < 0 (see ldl_factor dispatch).
+		g_ldl_debug_enabled = (ii == g_ldl_debug_island);
+
+		if (c->topo && c->topo->L_factors_size > 0) {
+			afit(c->L_factors, c->topo->L_factors_size);
+			asetlen(c->L_factors, c->topo->L_factors_size);
+		}
+		if (c->n > 0) {
+			afit(c->solve_rhs, c->n);
+			asetlen(c->solve_rhs, c->n);
+			afit(c->solve_lambda, c->n);
+			asetlen(c->solve_lambda, c->n);
+		}
+
+		ldl_numeric_factor(c, w, lfc->sol_joints, lfc->comp_bodies);
+	}
+}
+
 // Factor K for all islands (topology rebuild + numeric factorization). No solve.
 // Factorizes with compressed masses for better K conditioning, then restores real masses.
 // The factored K is reused for both velocity solve (real-mass apply) and position solve
@@ -1691,50 +1751,56 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 		}
 	}
 
+	LDL_FactorCtx lfc = { .w = w, .sol_joints = sol_joints, .joint_count = joint_count, .sub = sub, .comp_bodies = comp_bodies };
+
 	int island_count = asize(w->islands);
-	for (int ii = 0; ii < island_count; ii++) {
+#ifdef _WIN32
+	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
+	// Debug capture writes a global; force serial when debug is active.
+	int can_parallel = n_workers > 1 && island_count >= 2 && g_ldl_debug_island < 0;
+	if (can_parallel) {
+		pool_dispatch(ldl_factor_island_work_fn, &lfc, island_count, 1, n_workers);
+	} else
+#endif
+	{
+		ldl_factor_island_work_fn(&lfc, 0, island_count);
+	}
+}
+
+// Per-island LDL work context (shared by velocity_correct and position_solve
+// dispatch paths). Each worker claims a range of island indices and filters
+// out inactive / jointless / uninitialized islands internally.
+typedef struct LDL_IslandCtx
+{
+	WorldInternal* w;
+	SolverJoint* sol_joints;
+	int joint_count;
+	float sub_dt;
+	LDL_CompBody* comp_bodies;
+	// Position-solve only:
+	dv3* pos_delta;
+	dv3* ang_delta;
+} LDL_IslandCtx;
+
+static void ldl_velocity_correct_island_work_fn(void* ctx, int start, int count)
+{
+	LDL_IslandCtx* lc = (LDL_IslandCtx*)ctx;
+	WorldInternal* w = lc->w;
+	for (int ii = start; ii < start + count; ii++) {
 		if (!(w->island_gen[ii] & 1)) continue;
 		Island* isl = &w->islands[ii];
 		if (!isl->awake) continue;
 		if (isl->joint_count == 0) continue;
-
 		LDL_Cache* c = &isl->ldl;
-
-		// Rebuild blocks on first substep or topology change
-		if (sub == 0 || c->topo_version != w->ldl_topo_version) {
-			double t_topo_start = perf_now();
-			ldl_cache_rebuild_blocks(c, w, ii, sol_joints, joint_count);
-			ldl_apply_shattering(c, w);
-			ldl_build_bundles(c);
-			// Only rebuild topology on actual graph change (skip if only solver indices changed)
-			if (c->topo_version != w->ldl_topo_version)
-				ldl_build_topology(c, w);
-			c->topo_version = w->ldl_topo_version;
-			ldl_topo_acc += perf_now() - t_topo_start;
-		}
-		if (c->n == 0) continue;
-
-		// Enable debug capture only for the inspected island
-		g_ldl_debug_enabled = (ii == g_ldl_debug_island);
-
-		// Re-allocate L_factors and solve scratch if freed by sleep cache
-		if (!c->L_factors && c->topo && c->topo->L_factors_size > 0) {
-			afit(c->L_factors, c->topo->L_factors_size);
-			asetlen(c->L_factors, c->topo->L_factors_size);
-		}
-		if (!c->solve_rhs && c->n > 0) {
-			afit(c->solve_rhs, c->n);
-			asetlen(c->solve_rhs, c->n);
-			afit(c->solve_lambda, c->n);
-			asetlen(c->solve_lambda, c->n);
-		}
-
-		// Numeric factorization: K fill reads from compressed comp_bodies, not BodyHot
-		ldl_numeric_factor(c, w, sol_joints, comp_bodies);
+		if (c->n == 0 || !c->topo) continue;
+		ldl_island_solve(c, w, lc->sol_joints, lc->joint_count, lc->sub_dt, lc->comp_bodies);
 	}
 }
 
 // Velocity correction using already-factored K. Solves and applies impulses.
+// Parallelizable across islands: ldl_island_solve writes to the island's own
+// LDL_Cache and to body_hot slots only for bodies in that island; both are
+// disjoint across workers.
 static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt)
 {
 	if (joint_count == 0) return;
@@ -1755,15 +1821,15 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 	}
 
 	int island_count = asize(w->islands);
-	for (int ii = 0; ii < island_count; ii++) {
-		if (!(w->island_gen[ii] & 1)) continue;
-		Island* isl = &w->islands[ii];
-		if (!isl->awake) continue;
-		if (isl->joint_count == 0) continue;
-		LDL_Cache* c = &isl->ldl;
-		if (c->n == 0 || !c->topo) continue;
-
-		ldl_island_solve(c, w, sol_joints, joint_count, sub_dt, comp_bodies);
+	LDL_IslandCtx lc = { .w = w, .sol_joints = sol_joints, .joint_count = joint_count, .sub_dt = sub_dt, .comp_bodies = comp_bodies };
+#ifdef _WIN32
+	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
+	if (n_workers > 1 && island_count >= 2) {
+		pool_dispatch(ldl_velocity_correct_island_work_fn, &lc, island_count, 1, n_workers);
+	} else
+#endif
+	{
+		ldl_velocity_correct_island_work_fn(&lc, 0, island_count);
 	}
 }
 

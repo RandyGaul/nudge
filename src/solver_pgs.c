@@ -256,11 +256,16 @@ static void warm_cache_age_and_evict(WorldInternal* w)
 // Graph coloring: assign colors to constraints so no two in same color share a body.
 // Uses uint64_t bitmask per body (max 64 colors).
 
-static void color_constraints(ConstraintRef* refs, int count, int body_count, Arena* arena, int* out_batch_starts, int* out_color_count)
+// Color a single island's slice of refs. body_colors is a SHARED bitmap across
+// islands: because islands have disjoint bodies, bits set by one island's
+// coloring don't intersect another's reads, so per-ref color assignments are
+// bit-identical to flat coloring over the same ref order. Saves N body-count
+// allocations across N islands.
+//
+// out_batch_starts receives length = *out_color_count + 1. Offsets are
+// RELATIVE to refs (start at 0; last entry equals count).
+static void color_constraints_island(ConstraintRef* refs, int count, uint64_t* body_colors, Arena* arena, int* out_batch_starts, int* out_color_count)
 {
-	// Scratch buffers live in the per-frame arena -- no per-call malloc traffic.
-	uint64_t* body_colors = (uint64_t*)arena_alloc(arena, (size_t)body_count * sizeof(uint64_t), 16);
-	memset(body_colors, 0, body_count * sizeof(uint64_t));
 	int max_color = 0;
 
 	for (int i = 0; i < count; i++) {
@@ -277,7 +282,7 @@ static void color_constraints(ConstraintRef* refs, int count, int body_count, Ar
 			color = __builtin_ctzll(avail);
 #endif
 		}
-		assert(color < 64);
+		assert(color < SOLVE_ISLAND_MAX_COLORS);
 		refs[i].color = (uint8_t)color;
 		uint64_t bit = 1ULL << color;
 		body_colors[refs[i].body_a] |= bit;
@@ -285,18 +290,17 @@ static void color_constraints(ConstraintRef* refs, int count, int body_count, Ar
 		if (color > max_color) max_color = color;
 	}
 
-	// Counting sort by color
+	// Counting sort by color within this slice.
 	int color_count = max_color + 1;
-	int counts[64] = {0};
+	int counts[SOLVE_ISLAND_MAX_COLORS] = {0};
 	for (int i = 0; i < count; i++) counts[refs[i].color]++;
 
-	int offsets[64];
+	int offsets[SOLVE_ISLAND_MAX_COLORS];
 	offsets[0] = 0;
-	for (int c = 1; c < color_count; c++) offsets[c] = offsets[c-1] + counts[c-1];
+	for (int c = 1; c < color_count; c++) offsets[c] = offsets[c - 1] + counts[c - 1];
 
-	// Record batch starts before sorting
 	for (int c = 0; c < color_count; c++) out_batch_starts[c] = offsets[c];
-	out_batch_starts[color_count] = count; // sentinel
+	out_batch_starts[color_count] = count;
 
 	ConstraintRef* sorted = (ConstraintRef*)arena_alloc(arena, (size_t)count * sizeof(ConstraintRef), _Alignof(ConstraintRef));
 	for (int i = 0; i < count; i++) {
