@@ -359,11 +359,69 @@ typedef struct PrismaticParams
 	SpringParams spring;
 } PrismaticParams;
 
+// Angular motor: drives relative angular velocity along a shared axis toward
+// target_speed, bounded by max_impulse. No linear constraint, no position
+// correction -- purely velocity-level actuation. Useful for powered doors,
+// turrets, etc.
+typedef struct AngularMotorParams
+{
+	Body body_a, body_b;
+	v3 local_axis_a;      // motor axis in body A local space
+	v3 local_axis_b;      // motor axis in body B local space (usually parallel to A's)
+	float target_speed;   // relative angular velocity to drive toward, rad/s
+	float max_impulse;    // |lambda| clamp per step
+} AngularMotorParams;
+
+// Twist limit: clamps the relative rotation about a shared axis to [min, max]
+// radians, measured via quaternion swing-twist decomposition. Unilateral at
+// whichever boundary is violated. No linear constraint.
+typedef struct TwistLimitParams
+{
+	Body body_a, body_b;
+	v3 local_axis_a;      // twist axis in body A local space
+	v3 local_axis_b;      // twist axis in body B local space (parallel at zero twist)
+	float limit_min;      // radians; must be <= 0
+	float limit_max;      // radians; must be >= 0
+	SpringParams spring;  // softness for the limit constraint
+} TwistLimitParams;
+
+// Cone limit: clamps the angle between two body-local axes to <= half_angle.
+// Unilateral (lambda >= 0, can only push). No linear constraint.
+typedef struct ConeLimitParams
+{
+	Body body_a, body_b;
+	v3 local_axis_a;      // cone reference axis in body A local space
+	v3 local_axis_b;      // cone reference axis in body B local space
+	float half_angle;     // radians; max deviation between axes
+	SpringParams spring;  // softness for the limit constraint
+} ConeLimitParams;
+
+// Swing-twist: ball socket (3-DOF linear) + cone limit (swing) + twist limit.
+// The composite ragdoll joint: anchor two bodies at a pair of local points,
+// limit how far body B's twist axis can deviate from body A's (swing cone),
+// and limit twist rotation about that axis to [twist_min, twist_max].
+typedef struct SwingTwistParams
+{
+	Body body_a, body_b;
+	v3 local_offset_a;    // anchor in body A local space
+	v3 local_offset_b;    // anchor in body B local space
+	v3 local_axis_a;      // twist axis in body A local space
+	v3 local_axis_b;      // twist axis in body B local space (parallel at rest)
+	float cone_half_angle; // radians; max swing of axis_b from axis_a
+	float twist_min;      // radians; min twist about the axis
+	float twist_max;      // radians; max twist about the axis
+	SpringParams spring;  // softness for anchor + limits
+} SwingTwistParams;
+
 Joint create_ball_socket(World world, BallSocketParams params);
 Joint create_distance(World world, DistanceParams params);
 Joint create_hinge(World world, HingeParams params);
 Joint create_fixed(World world, FixedParams params);
 Joint create_prismatic(World world, PrismaticParams params);
+Joint create_angular_motor(World world, AngularMotorParams params);
+Joint create_twist_limit(World world, TwistLimitParams params);
+Joint create_cone_limit(World world, ConeLimitParams params);
+Joint create_swing_twist(World world, SwingTwistParams params);
 void destroy_joint(World world, Joint joint);
 void joint_set_hinge_limits(World world, Joint joint, float min_angle, float max_angle);
 void joint_set_distance_limits(World world, Joint joint, float min_distance, float max_distance);

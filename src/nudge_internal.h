@@ -106,7 +106,10 @@ typedef struct WarmManifold WarmManifold; // forward decl for warm cache
 
 
 // Joint persistent storage (handle-based, parallel arrays like bodies).
-typedef enum JointType { JOINT_BALL_SOCKET, JOINT_DISTANCE, JOINT_HINGE, JOINT_FIXED, JOINT_PRISMATIC } JointType;
+typedef enum JointType {
+	JOINT_BALL_SOCKET, JOINT_DISTANCE, JOINT_HINGE, JOINT_FIXED, JOINT_PRISMATIC,
+	JOINT_ANGULAR_MOTOR, JOINT_TWIST_LIMIT, JOINT_CONE_LIMIT, JOINT_SWING_TWIST
+} JointType;
 
 typedef struct JointInternal
 {
@@ -118,6 +121,10 @@ typedef struct JointInternal
 		struct { v3 local_a, local_b; v3 local_axis_a, local_axis_b; v3 local_ref_a, local_ref_b; SpringParams spring; float limit_min, limit_max; float motor_speed, motor_max_impulse; } hinge;
 		struct { v3 local_a, local_b; quat local_rel_quat; SpringParams spring; } fixed;
 		struct { v3 local_a, local_b; v3 local_axis_a, local_axis_b; quat local_rel_quat; SpringParams spring; float motor_speed, motor_max_impulse; } prismatic;
+		struct { v3 local_axis_a, local_axis_b; float target_speed, max_impulse; } angular_motor;
+		struct { v3 local_axis_a, local_axis_b; float limit_min, limit_max; SpringParams spring; } twist_limit;
+		struct { v3 local_axis_a, local_axis_b; float half_angle; SpringParams spring; } cone_limit;
+		struct { v3 local_a, local_b; v3 local_axis_a, local_axis_b; float cone_half_angle, twist_min, twist_max; SpringParams spring; } swing_twist;
 	};
 	// Warm starting: accumulated impulses persisted across frames (up to 6 DOF).
 	float warm_lambda[6];

@@ -465,6 +465,126 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 			s->lo[5] = -j->prismatic.motor_max_impulse;
 			s->hi[5] = j->prismatic.motor_max_impulse;
 		}
+	} else if (s->type == JOINT_ANGULAR_MOTOR) {
+		s->softness = 0.0f; // motor is velocity-only; no spring
+		v3 axis_a_w = norm(rotate(sa->rotation, j->angular_motor.local_axis_a));
+		v3 axis_b_w = norm(rotate(sb->rotation, j->angular_motor.local_axis_b));
+		v3 axis = norm(add(axis_a_w, axis_b_w)); // symmetric average for stability
+		s->rows[0].J_a[3] = axis.x; s->rows[0].J_a[4] = axis.y; s->rows[0].J_a[5] = axis.z;
+		s->rows[0].J_b[3] = -axis.x; s->rows[0].J_b[4] = -axis.y; s->rows[0].J_b[5] = -axis.z;
+		s->pos_error[0] = 0;
+		s->lo[0] = -j->angular_motor.max_impulse;
+		s->hi[0] = j->angular_motor.max_impulse;
+		// Bias convention matches hinge motor: bias = target_speed drives d(angle)/dt = +speed.
+		ptv = 0.0f;
+		s->bias[0] = j->angular_motor.target_speed;
+	} else if (s->type == JOINT_CONE_LIMIT) {
+		spring_compute(j->cone_limit.spring, dt, &ptv, &soft);
+		s->softness = soft;
+		v3 axis_a_w = norm(rotate(sa->rotation, j->cone_limit.local_axis_a));
+		v3 axis_b_w = norm(rotate(sb->rotation, j->cone_limit.local_axis_b));
+		float cos_theta = dot(axis_a_w, axis_b_w);
+		float cos_limit = cosf(j->cone_limit.half_angle);
+		if (cos_theta < cos_limit) {
+			// Violated: constrain relative angular velocity along swing axis.
+			v3 swing = cross(axis_b_w, axis_a_w); // Jolt convention: t2 x t1
+			float slen = len(swing);
+			if (slen > 1e-6f) swing = scale(swing, 1.0f / slen);
+			else { v3 t2; hinge_tangent_basis(axis_a_w, &swing, &t2); }
+			s->rows[0].J_a[3] = swing.x; s->rows[0].J_a[4] = swing.y; s->rows[0].J_a[5] = swing.z;
+			s->rows[0].J_b[3] = -swing.x; s->rows[0].J_b[4] = -swing.y; s->rows[0].J_b[5] = -swing.z;
+			s->pos_error[0] = acosf(cos_theta > 1.0f ? 1.0f : (cos_theta < -1.0f ? -1.0f : cos_theta)) - j->cone_limit.half_angle;
+			s->lo[0] = 0.0f; s->hi[0] = FLT_MAX; // unilateral
+		} else {
+			// Inactive: zero row, zero bounds = no-op.
+			s->pos_error[0] = 0;
+			s->lo[0] = 0; s->hi[0] = 0;
+		}
+	} else if (s->type == JOINT_TWIST_LIMIT) {
+		spring_compute(j->twist_limit.spring, dt, &ptv, &soft);
+		s->softness = soft;
+		// Twist axis in world (symmetric average for stability when axes nearly aligned).
+		v3 axis_a_w = norm(rotate(sa->rotation, j->twist_limit.local_axis_a));
+		v3 axis_b_w = norm(rotate(sb->rotation, j->twist_limit.local_axis_b));
+		v3 twist_axis = norm(add(axis_a_w, axis_b_w));
+		// Twist angle via quaternion swing-twist decomposition: project q_rel onto twist axis.
+		quat q_rel = mul(inv(sa->rotation), sb->rotation);
+		v3 qv = V3(q_rel.x, q_rel.y, q_rel.z);
+		v3 local_axis = j->twist_limit.local_axis_a;
+		float proj = dot(qv, local_axis);
+		quat q_twist = { proj * local_axis.x, proj * local_axis.y, proj * local_axis.z, q_rel.w };
+		float tl = sqrtf(q_twist.x*q_twist.x + q_twist.y*q_twist.y + q_twist.z*q_twist.z + q_twist.w*q_twist.w);
+		if (tl > 1e-12f) { q_twist.x /= tl; q_twist.y /= tl; q_twist.z /= tl; q_twist.w /= tl; }
+		else q_twist = (quat){ 0, 0, 0, 1 };
+		float sign = q_twist.w >= 0 ? 1.0f : -1.0f;
+		float twist_angle = 2.0f * atan2f(sign * proj, sign * q_twist.w);
+		s->rows[0].J_a[3] = twist_axis.x; s->rows[0].J_a[4] = twist_axis.y; s->rows[0].J_a[5] = twist_axis.z;
+		s->rows[0].J_b[3] = -twist_axis.x; s->rows[0].J_b[4] = -twist_axis.y; s->rows[0].J_b[5] = -twist_axis.z;
+		float tmin = j->twist_limit.limit_min, tmax = j->twist_limit.limit_max;
+		if (twist_angle > tmax) {
+			s->pos_error[0] = twist_angle - tmax;
+			s->lo[0] = -FLT_MAX; s->hi[0] = 0.0f;
+		} else if (twist_angle < tmin) {
+			s->pos_error[0] = twist_angle - tmin;
+			s->lo[0] = 0.0f; s->hi[0] = FLT_MAX;
+		} else {
+			s->pos_error[0] = 0;
+			s->lo[0] = 0; s->hi[0] = 0;
+		}
+	} else if (s->type == JOINT_SWING_TWIST) {
+		// Linear 3-DOF ball socket at DOFs 0-2, cone at DOF 3, twist at DOF 4.
+		s->r_a = rotate(sa->rotation, j->swing_twist.local_a);
+		s->r_b = rotate(sb->rotation, j->swing_twist.local_b);
+		spring_compute(j->swing_twist.spring, dt, &ptv, &soft);
+		s->softness = soft;
+		s->dof = 5;
+		v3 ra = s->r_a, rb = s->r_b;
+		s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
+		s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
+		s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
+		s->rows[1].J_b[1] =  1; s->rows[1].J_b[3] = -rb.z; s->rows[1].J_b[5] =  rb.x;
+		s->rows[2].J_a[2] = -1; s->rows[2].J_a[3] = -ra.y; s->rows[2].J_a[4] =  ra.x;
+		s->rows[2].J_b[2] =  1; s->rows[2].J_b[3] =  rb.y; s->rows[2].J_b[4] = -rb.x;
+		v3 anchor_a = add(sa->position, s->r_a);
+		v3 anchor_b = add(sb->position, s->r_b);
+		v3 err = sub(anchor_b, anchor_a);
+		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
+		ball_socket_eff_mass(a, b, sa, sb, ra, rb, soft, s->lin_inv_eff_mass);
+
+		// Cone DOF 3.
+		v3 axis_a_w = norm(rotate(sa->rotation, j->swing_twist.local_axis_a));
+		v3 axis_b_w = norm(rotate(sb->rotation, j->swing_twist.local_axis_b));
+		float cos_theta = dot(axis_a_w, axis_b_w);
+		float cos_limit = cosf(j->swing_twist.cone_half_angle);
+		if (cos_theta < cos_limit) {
+			v3 swing = cross(axis_b_w, axis_a_w);
+			float slen = len(swing);
+			if (slen > 1e-6f) swing = scale(swing, 1.0f / slen);
+			else { v3 t2; hinge_tangent_basis(axis_a_w, &swing, &t2); }
+			s->rows[3].J_a[3] = swing.x; s->rows[3].J_a[4] = swing.y; s->rows[3].J_a[5] = swing.z;
+			s->rows[3].J_b[3] = -swing.x; s->rows[3].J_b[4] = -swing.y; s->rows[3].J_b[5] = -swing.z;
+			s->pos_error[3] = acosf(cos_theta > 1.0f ? 1.0f : (cos_theta < -1.0f ? -1.0f : cos_theta)) - j->swing_twist.cone_half_angle;
+			s->lo[3] = 0.0f; s->hi[3] = FLT_MAX;
+		} else { s->pos_error[3] = 0; s->lo[3] = 0; s->hi[3] = 0; }
+
+		// Twist DOF 4.
+		v3 twist_axis = norm(add(axis_a_w, axis_b_w));
+		quat q_rel = mul(inv(sa->rotation), sb->rotation);
+		v3 qv = V3(q_rel.x, q_rel.y, q_rel.z);
+		v3 local_axis = j->swing_twist.local_axis_a;
+		float proj = dot(qv, local_axis);
+		quat q_twist = { proj * local_axis.x, proj * local_axis.y, proj * local_axis.z, q_rel.w };
+		float tl = sqrtf(q_twist.x*q_twist.x + q_twist.y*q_twist.y + q_twist.z*q_twist.z + q_twist.w*q_twist.w);
+		if (tl > 1e-12f) { q_twist.x /= tl; q_twist.y /= tl; q_twist.z /= tl; q_twist.w /= tl; }
+		else q_twist = (quat){ 0, 0, 0, 1 };
+		float sign = q_twist.w >= 0 ? 1.0f : -1.0f;
+		float twist_angle = 2.0f * atan2f(sign * proj, sign * q_twist.w);
+		s->rows[4].J_a[3] = twist_axis.x; s->rows[4].J_a[4] = twist_axis.y; s->rows[4].J_a[5] = twist_axis.z;
+		s->rows[4].J_b[3] = -twist_axis.x; s->rows[4].J_b[4] = -twist_axis.y; s->rows[4].J_b[5] = -twist_axis.z;
+		float tmin = j->swing_twist.twist_min, tmax = j->swing_twist.twist_max;
+		if (twist_angle > tmax) { s->pos_error[4] = twist_angle - tmax; s->lo[4] = -FLT_MAX; s->hi[4] = 0.0f; }
+		else if (twist_angle < tmin) { s->pos_error[4] = twist_angle - tmin; s->lo[4] = 0.0f; s->hi[4] = FLT_MAX; }
+		else { s->pos_error[4] = 0; s->lo[4] = 0; s->hi[4] = 0; }
 	}
 
 	// Generic: compute eff_mass and bias from pos_error for all DOFs
@@ -527,7 +647,7 @@ static void joints_pre_solve(WorldInternal* w, float dt, SolverJoint** out_joint
 		s.body_b = j->body_b;
 		s.joint_idx = i;
 		s.type = j->type;
-		int base_dof = j->type == JOINT_BALL_SOCKET ? 3 : j->type == JOINT_DISTANCE ? 1 : j->type == JOINT_FIXED ? 6 : 5;
+		int base_dof = j->type == JOINT_BALL_SOCKET ? 3 : j->type == JOINT_DISTANCE ? 1 : j->type == JOINT_FIXED ? 6 : j->type == JOINT_SWING_TWIST ? 5 : (j->type == JOINT_ANGULAR_MOTOR || j->type == JOINT_CONE_LIMIT || j->type == JOINT_TWIST_LIMIT) ? 1 : 5;
 		if (j->type == JOINT_HINGE && (j->hinge.limit_min != 0.0f || j->hinge.limit_max != 0.0f || j->hinge.motor_max_impulse > 0.0f)) base_dof = 6;
 		if (j->type == JOINT_PRISMATIC && j->prismatic.motor_max_impulse > 0.0f) base_dof = 6;
 		s.dof = base_dof;

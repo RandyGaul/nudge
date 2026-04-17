@@ -599,16 +599,16 @@ void world_step(World world, float dt)
 		apush(crefs, r);
 	}
 	if (!w->ldl_enabled) {
-		// No LDL: all joints go into PGS
+		// No LDL: all joints go into PGS (solve_joint handles all DOFs incl. bounded).
 		for (int i = 0; i < asize(sol_joints); i++) {
 			ConstraintRef r = { .type = CTYPE_JOINT, .index = i,
 				.body_a = sol_joints[i].body_a, .body_b = sol_joints[i].body_b };
 			apush(crefs, r);
 		}
-	} else {
-		// LDL enabled: LDL handles all joints (bilateral DOFs).
-		// Limit DOFs are solved separately after PGS via joints_solve_limits().
 	}
+	// When LDL is enabled: LDL handles bilateral DOFs of rigid joints; bounded
+	// DOFs and pure-bounded joint types (angular motor, cone/twist limits) are
+	// handled by joints_solve_limits. Nothing to add to crefs.
 
 	int cref_count = asize(crefs);
 	int batch_starts[65] = {0};
@@ -1324,6 +1324,150 @@ Joint create_prismatic(World world, PrismaticParams params)
 			.local_axis_a = norm(params.local_axis_a),
 			.local_axis_b = norm(params.local_axis_b),
 			.local_rel_quat = mul(inv(q_a), q_b),
+			.spring = params.spring,
+		},
+		.island_id = -1, .island_prev = -1, .island_next = -1,
+	};
+	link_joint_to_islands(w, idx);
+	w->ldl_topo_version++;
+	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
+}
+
+// Common body-pair validation + slot allocation used by all create_* joints.
+static int joint_alloc_slot(WorldInternal* w, Body ba_h, Body bb_h)
+{
+	(void)ba_h; (void)bb_h;
+	int idx;
+	if (asize(w->joint_free) > 0) {
+		idx = apop(w->joint_free);
+		w->joint_gen[idx]++;
+	} else {
+		idx = asize(w->joints);
+		JointInternal zero = {0};
+		apush(w->joints, zero);
+		apush(w->joint_gen, 1);
+	}
+	return idx;
+}
+
+Joint create_angular_motor(World world, AngularMotorParams params)
+{
+	assert(is_valid(params.local_axis_a) && "create_angular_motor: local_axis_a is NaN/inf");
+	assert(is_valid(params.local_axis_b) && "create_angular_motor: local_axis_b is NaN/inf");
+	WorldInternal* w = (WorldInternal*)world.id;
+	int ba = handle_index(params.body_a);
+	int bb = handle_index(params.body_b);
+	assert(split_valid(w->body_gen, params.body_a));
+	assert(split_valid(w->body_gen, params.body_b));
+	assert(ba != bb && "joint requires two distinct bodies");
+	assert((body_inv_mass(w, ba) > 0.0f || body_inv_mass(w, bb) > 0.0f) && "at least one body must be dynamic");
+
+	int idx = joint_alloc_slot(w, params.body_a, params.body_b);
+	w->joints[idx] = (JointInternal){
+		.type = JOINT_ANGULAR_MOTOR,
+		.body_a = ba, .body_b = bb,
+		.angular_motor = {
+			.local_axis_a = norm(params.local_axis_a),
+			.local_axis_b = norm(params.local_axis_b),
+			.target_speed = params.target_speed,
+			.max_impulse = params.max_impulse,
+		},
+		.island_id = -1, .island_prev = -1, .island_next = -1,
+	};
+	link_joint_to_islands(w, idx);
+	w->ldl_topo_version++;
+	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
+}
+
+Joint create_twist_limit(World world, TwistLimitParams params)
+{
+	assert(is_valid(params.local_axis_a) && "create_twist_limit: local_axis_a is NaN/inf");
+	assert(is_valid(params.local_axis_b) && "create_twist_limit: local_axis_b is NaN/inf");
+	assert(params.limit_min <= 0.0f && params.limit_max >= 0.0f && "twist limits must bracket zero");
+	WorldInternal* w = (WorldInternal*)world.id;
+	int ba = handle_index(params.body_a);
+	int bb = handle_index(params.body_b);
+	assert(split_valid(w->body_gen, params.body_a));
+	assert(split_valid(w->body_gen, params.body_b));
+	assert(ba != bb && "joint requires two distinct bodies");
+	assert((body_inv_mass(w, ba) > 0.0f || body_inv_mass(w, bb) > 0.0f) && "at least one body must be dynamic");
+
+	int idx = joint_alloc_slot(w, params.body_a, params.body_b);
+	w->joints[idx] = (JointInternal){
+		.type = JOINT_TWIST_LIMIT,
+		.body_a = ba, .body_b = bb,
+		.twist_limit = {
+			.local_axis_a = norm(params.local_axis_a),
+			.local_axis_b = norm(params.local_axis_b),
+			.limit_min = params.limit_min,
+			.limit_max = params.limit_max,
+			.spring = params.spring,
+		},
+		.island_id = -1, .island_prev = -1, .island_next = -1,
+	};
+	link_joint_to_islands(w, idx);
+	w->ldl_topo_version++;
+	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
+}
+
+Joint create_cone_limit(World world, ConeLimitParams params)
+{
+	assert(is_valid(params.local_axis_a) && "create_cone_limit: local_axis_a is NaN/inf");
+	assert(is_valid(params.local_axis_b) && "create_cone_limit: local_axis_b is NaN/inf");
+	assert(params.half_angle > 0.0f && "cone half_angle must be positive");
+	WorldInternal* w = (WorldInternal*)world.id;
+	int ba = handle_index(params.body_a);
+	int bb = handle_index(params.body_b);
+	assert(split_valid(w->body_gen, params.body_a));
+	assert(split_valid(w->body_gen, params.body_b));
+	assert(ba != bb && "joint requires two distinct bodies");
+	assert((body_inv_mass(w, ba) > 0.0f || body_inv_mass(w, bb) > 0.0f) && "at least one body must be dynamic");
+
+	int idx = joint_alloc_slot(w, params.body_a, params.body_b);
+	w->joints[idx] = (JointInternal){
+		.type = JOINT_CONE_LIMIT,
+		.body_a = ba, .body_b = bb,
+		.cone_limit = {
+			.local_axis_a = norm(params.local_axis_a),
+			.local_axis_b = norm(params.local_axis_b),
+			.half_angle = params.half_angle,
+			.spring = params.spring,
+		},
+		.island_id = -1, .island_prev = -1, .island_next = -1,
+	};
+	link_joint_to_islands(w, idx);
+	w->ldl_topo_version++;
+	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
+}
+
+Joint create_swing_twist(World world, SwingTwistParams params)
+{
+	assert(is_valid(params.local_offset_a) && "create_swing_twist: local_offset_a is NaN/inf");
+	assert(is_valid(params.local_offset_b) && "create_swing_twist: local_offset_b is NaN/inf");
+	assert(is_valid(params.local_axis_a) && "create_swing_twist: local_axis_a is NaN/inf");
+	assert(is_valid(params.local_axis_b) && "create_swing_twist: local_axis_b is NaN/inf");
+	assert(params.cone_half_angle > 0.0f && "swing_twist cone_half_angle must be positive");
+	assert(params.twist_min <= 0.0f && params.twist_max >= 0.0f && "swing_twist twist limits must bracket zero");
+	WorldInternal* w = (WorldInternal*)world.id;
+	int ba = handle_index(params.body_a);
+	int bb = handle_index(params.body_b);
+	assert(split_valid(w->body_gen, params.body_a));
+	assert(split_valid(w->body_gen, params.body_b));
+	assert(ba != bb && "joint requires two distinct bodies");
+	assert((body_inv_mass(w, ba) > 0.0f || body_inv_mass(w, bb) > 0.0f) && "at least one body must be dynamic");
+
+	int idx = joint_alloc_slot(w, params.body_a, params.body_b);
+	w->joints[idx] = (JointInternal){
+		.type = JOINT_SWING_TWIST,
+		.body_a = ba, .body_b = bb,
+		.swing_twist = {
+			.local_a = params.local_offset_a,
+			.local_b = params.local_offset_b,
+			.local_axis_a = norm(params.local_axis_a),
+			.local_axis_b = norm(params.local_axis_b),
+			.cone_half_angle = params.cone_half_angle,
+			.twist_min = params.twist_min,
+			.twist_max = params.twist_max,
 			.spring = params.spring,
 		},
 		.island_id = -1, .island_prev = -1, .island_next = -1,

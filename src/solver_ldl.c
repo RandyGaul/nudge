@@ -1260,8 +1260,13 @@ static int ldl_cache_rebuild_blocks(LDL_Cache* c, WorldInternal* w, int island_i
 				// base DOF count (excluding the limit DOF which is solved separately).
 				int ldl_dof = sj->dof;
 				JointInternal* jj = &w->joints[ji];
+				// Pure bounded types (no bilateral DOF) can't go through LDL at all.
+				if (jj->type == JOINT_ANGULAR_MOTOR || jj->type == JOINT_CONE_LIMIT || jj->type == JOINT_TWIST_LIMIT) break;
 				if (jj->type == JOINT_HINGE && (jj->hinge.limit_min != 0.0f || jj->hinge.limit_max != 0.0f || jj->hinge.motor_max_impulse > 0.0f)) ldl_dof = 5;
 				if (jj->type == JOINT_PRISMATIC && jj->prismatic.motor_max_impulse > 0.0f) ldl_dof = 5;
+				// Swing-twist: ball socket (3-DOF bilateral) goes through LDL;
+				// cone/twist bounded DOFs (3-4) stay in joints_solve_limits.
+				if (jj->type == JOINT_SWING_TWIST) ldl_dof = 3;
 				LDL_Constraint con = { .type = sj->type, .dof = ldl_dof, .body_a = sj->body_a, .body_b = sj->body_b, .real_body_a = sj->body_a, .real_body_b = sj->body_b, .weight_a = 1.0f, .weight_b = 1.0f, .solver_idx = i };
 				assert(con.body_a != con.body_b && "Joint between body and itself");
 				assert((body_inv_mass(w, con.body_a) > 0.0f || body_inv_mass(w, con.body_b) > 0.0f) && "Both bodies are static");
