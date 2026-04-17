@@ -45,6 +45,7 @@ int main(int argc, char* argv[])
 	int bench_pile_height = 5;
 	int bench_pile_frames = 300;
 	int bench_mixed = 0;
+	int bench_ragdoll_flag = 0;
 	int bench_incr_np = 0;
 	int bench_planes = 0;
 	int pyramid_test = 0;
@@ -106,6 +107,8 @@ int main(int argc, char* argv[])
 			bench_qh = 1;
 		else if (strcmp(argv[i], "--bench-mixed") == 0)
 			bench_mixed = 1;
+		else if (strcmp(argv[i], "--bench-ragdoll") == 0)
+			bench_ragdoll_flag = (i + 1 < argc && argv[i+1][0] != '-') ? atoi(argv[++i]) : 20;
 		else if (strcmp(argv[i], "--bench-ldl") == 0)
 			bench_ldl = 1;
 		else if (strcmp(argv[i], "--ldl-chains") == 0 && i + 1 < argc)
@@ -141,6 +144,12 @@ int main(int argc, char* argv[])
 	if (bench_mixed) {
 		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
 		bench_mixed_contacts_joints(8, 8, 20, 6, 300, wp);
+		return 0;
+	}
+
+	if (bench_ragdoll_flag) {
+		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
+		bench_ragdoll(bench_ragdoll_flag, 300, wp);
 		return 0;
 	}
 

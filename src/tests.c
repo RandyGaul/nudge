@@ -8844,6 +8844,138 @@ static void run_new_joint_tests()
 }
 
 // ============================================================================
+// Angular motor / cone / twist / swing-twist tests.
+
+static void test_angular_motor_reaches_target()
+{
+	TEST_BEGIN("angular motor drives relative spin to target");
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body base = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, base, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	Body rotor = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, rotor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	create_angular_motor(w, (AngularMotorParams){ .body_a = base, .body_b = rotor, .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0), .target_speed = 5.0f, .max_impulse = 100.0f });
+	step_n(w, 60);
+	// Motor drives omega_a - omega_b = -target_speed per hinge convention -> rotor spins at +target_speed.
+	WorldInternal* wi = (WorldInternal*)w.id;
+	v3 wv = body_angvel(wi, handle_index(rotor));
+	float ang_y = wv.y;
+	printf("  [angular motor] rotor omega.y=%.3f (target=%.3f)\n", ang_y, 5.0f);
+	TEST_ASSERT(fabsf(ang_y - 5.0f) < 0.3f);
+	destroy_world(w);
+}
+
+static void test_cone_limit_holds()
+{
+	TEST_BEGIN("cone limit clamps axis angle");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	// Anchor body with axis +y, free body with axis initially +y. Gravity pulls free body
+	// down, tilting its axis. Cone limits to 0.3 rad.
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+	Body pivot = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, pivot, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 1.0f, 0.1f) });
+	// Ball-socket at origin keeps pivot anchored; cone limits the swing of +y axis.
+	create_ball_socket(w, (BallSocketParams){ .body_a = anchor, .body_b = pivot, .local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, -1.0f, 0) });
+	float half_angle = 0.3f;
+	create_cone_limit(w, (ConeLimitParams){ .body_a = anchor, .body_b = pivot, .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0), .half_angle = half_angle });
+	// Initial kick: tumble the pivot sideways so the cone actually catches it.
+	WorldInternal* wi0 = (WorldInternal*)w.id;
+	body_angvel(wi0, handle_index(pivot)) = V3(0, 0, 5.0f);
+	step_n(w, 240);
+	// Measure angle between axis_a_world and axis_b_world
+	WorldInternal* wi = (WorldInternal*)w.id;
+	quat qa = body_rot(wi, handle_index(anchor));
+	quat qb = body_rot(wi, handle_index(pivot));
+	v3 aw = rotate(qa, V3(0, 1, 0));
+	v3 bw = rotate(qb, V3(0, 1, 0));
+	float c = dot(aw, bw);
+	float angle = acosf(c > 1.0f ? 1.0f : (c < -1.0f ? -1.0f : c));
+	printf("  [cone limit] angle=%.3f half_angle=%.3f\n", angle, half_angle);
+	TEST_ASSERT(angle <= half_angle + 0.1f); // within limit + solver tolerance
+	destroy_world(w);
+}
+
+static void test_twist_limit_holds()
+{
+	TEST_BEGIN("twist limit clamps rotation about axis");
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+	Body pivot = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, pivot, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	float tmax = 0.5f;
+	create_twist_limit(w, (TwistLimitParams){ .body_a = anchor, .body_b = pivot, .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0), .limit_min = -tmax, .limit_max = tmax });
+	// Give pivot a one-time spin. The limit should catch and clamp it at +tmax.
+	WorldInternal* wi = (WorldInternal*)w.id;
+	body_angvel(wi, handle_index(pivot)) = V3(0, 5.0f, 0);
+	step_n(w, 300);
+	// Twist angle should be clamped near +tmax (solver tolerance).
+	quat qa = body_rot(wi, handle_index(anchor));
+	quat qb = body_rot(wi, handle_index(pivot));
+	quat q_rel = mul(inv(qa), qb);
+	float proj = q_rel.y;
+	quat q_twist = { 0, proj, 0, q_rel.w };
+	float tl = sqrtf(q_twist.y*q_twist.y + q_twist.w*q_twist.w);
+	if (tl > 1e-12f) { q_twist.y /= tl; q_twist.w /= tl; }
+	float sign = q_twist.w >= 0 ? 1.0f : -1.0f;
+	float twist = 2.0f * atan2f(sign * proj, sign * q_twist.w);
+	printf("  [twist limit] twist=%.3f max=%.3f\n", twist, tmax);
+	TEST_ASSERT(twist >= -tmax - 0.15f && twist <= tmax + 0.15f);
+	destroy_world(w);
+}
+
+static void test_swing_twist_ragdoll_segment()
+{
+	TEST_BEGIN("swing-twist holds anchor + respects cone");
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0) });
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.05f });
+	// Bone positioned so its +top (local y=+0.5) coincides with anchor.
+	Body bone = create_body(w, (BodyParams){ .position = V3(0, 4.5f, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, bone, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 0.5f, 0.1f) });
+	float cone_half = 0.6f;
+	create_swing_twist(w, (SwingTwistParams){
+		.body_a = anchor, .body_b = bone,
+		.local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0.5f, 0),
+		.local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0),
+		.cone_half_angle = cone_half,
+		.twist_min = -0.5f, .twist_max = 0.5f,
+	});
+	step_n(w, 240);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	v3 p_bone = body_get_position(w, bone);
+	// Anchor at (0,5,0); bone's +top should be at anchor. Bone local_b = (0,0.5,0).
+	quat qb = body_rot(wi, handle_index(bone));
+	v3 r_b = rotate(qb, V3(0, 0.5f, 0));
+	v3 anchor_world_from_bone = add(p_bone, r_b);
+	float anchor_err = len(sub(anchor_world_from_bone, V3(0, 5, 0)));
+	// Swing angle between -y axes
+	quat qa = body_rot(wi, handle_index(anchor));
+	v3 aw = rotate(qa, V3(0, -1, 0));
+	v3 bw = rotate(qb, V3(0, -1, 0));
+	float c = dot(aw, bw);
+	float swing = acosf(c > 1.0f ? 1.0f : (c < -1.0f ? -1.0f : c));
+	printf("  [swing-twist] anchor_err=%.4f swing=%.3f cone=%.3f\n", anchor_err, swing, cone_half);
+	TEST_ASSERT(anchor_err < 0.1f);
+	TEST_ASSERT(swing <= cone_half + 0.15f);
+	destroy_world(w);
+}
+
+static void run_ragdoll_joint_tests()
+{
+	printf("--- ragdoll joint tests (angular motor, cone, twist, swing-twist) ---\n");
+	test_angular_motor_reaches_target();
+	test_cone_limit_holds();
+	test_twist_limit_holds();
+	test_swing_twist_ragdoll_segment();
+}
+
+// ============================================================================
 // Motor tests: actuate joints and verify motion is smooth and correct.
 
 static void test_hinge_motor_spins()
@@ -12053,6 +12185,7 @@ static void run_tests()
 	TIMED(run_solver_tests());
 	TIMED(run_new_joint_tests());
 	TIMED(run_motor_tests());
+	TIMED(run_ragdoll_joint_tests());
 	TIMED(run_motor_comprehensive_tests());
 	TIMED(run_ldl_stress_tests());
 	TIMED(run_bvh_tests());
@@ -12755,6 +12888,95 @@ static void bench_mixed_contacts_joints(int pile_grid, int pile_height, int n_ch
 	printf("  position_correct:  %8.3f ms\n", acc.position_correct / n * 1000.0);
 	printf("METRIC: mixed_total_ms=%.6f\n", acc.total / n * 1000.0);
 	printf("METRIC: mixed_pgs_iter_ms=%.6f\n", pacc.iterations / n * 1000.0);
+
+	destroy_world(w);
+}
+
+// Bench: ragdoll stress. N ragdolls with swing-twist joints at hips/knees/shoulders,
+// falling onto a floor. Exercises the new joint types in an island-heavy scenario.
+static void bench_ragdoll(int n_ragdolls, int frames, WorldParams wp)
+{
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	// Floor
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50) });
+
+	int body_count = 0, joint_count = 0;
+	for (int r = 0; r < n_ragdolls; r++) {
+		float x0 = (float)(r - n_ragdolls/2) * 2.0f;
+		float y0 = 5.0f;
+		// Pelvis, chest, head, 2x upper-arms, 2x forearms, 2x thighs, 2x shins = 10 bodies.
+		Body pelvis = create_body(w, (BodyParams){ .position = V3(x0, y0, 0), .rotation = quat_identity(), .mass = 5.0f });
+		body_add_shape(w, pelvis, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.25f, 0.15f, 0.15f) });
+		Body chest  = create_body(w, (BodyParams){ .position = V3(x0, y0 + 0.6f, 0), .rotation = quat_identity(), .mass = 5.0f });
+		body_add_shape(w, chest, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.2f) });
+		Body head   = create_body(w, (BodyParams){ .position = V3(x0, y0 + 1.2f, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, head, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+		Body ua_l = create_body(w, (BodyParams){ .position = V3(x0 - 0.5f, y0 + 0.8f, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, ua_l, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.25f, 0.08f, 0.08f) });
+		Body ua_r = create_body(w, (BodyParams){ .position = V3(x0 + 0.5f, y0 + 0.8f, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, ua_r, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.25f, 0.08f, 0.08f) });
+		Body th_l = create_body(w, (BodyParams){ .position = V3(x0 - 0.15f, y0 - 0.5f, 0), .rotation = quat_identity(), .mass = 3.0f });
+		body_add_shape(w, th_l, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 0.3f, 0.1f) });
+		Body th_r = create_body(w, (BodyParams){ .position = V3(x0 + 0.15f, y0 - 0.5f, 0), .rotation = quat_identity(), .mass = 3.0f });
+		body_add_shape(w, th_r, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 0.3f, 0.1f) });
+		Body sh_l = create_body(w, (BodyParams){ .position = V3(x0 - 0.15f, y0 - 1.1f, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, sh_l, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.08f, 0.3f, 0.08f) });
+		Body sh_r = create_body(w, (BodyParams){ .position = V3(x0 + 0.15f, y0 - 1.1f, 0), .rotation = quat_identity(), .mass = 2.0f });
+		body_add_shape(w, sh_r, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.08f, 0.3f, 0.08f) });
+		body_count += 9;
+
+		// Swing-twist at spine (pelvis-chest), neck (chest-head), shoulders (chest-ua), hips (pelvis-th).
+		// Hinge at elbows (ua-?) -- skipped for this bench; use swing-twist for knees too.
+		create_swing_twist(w, (SwingTwistParams){ .body_a = pelvis, .body_b = chest, .local_offset_a = V3(0, 0.15f, 0), .local_offset_b = V3(0, -0.3f, 0), .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0), .cone_half_angle = 0.6f, .twist_min = -0.5f, .twist_max = 0.5f });
+		create_swing_twist(w, (SwingTwistParams){ .body_a = chest, .body_b = head, .local_offset_a = V3(0, 0.3f, 0), .local_offset_b = V3(0, -0.15f, 0), .local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0), .cone_half_angle = 0.5f, .twist_min = -0.6f, .twist_max = 0.6f });
+		create_swing_twist(w, (SwingTwistParams){ .body_a = chest, .body_b = ua_l, .local_offset_a = V3(-0.3f, 0.3f, 0), .local_offset_b = V3(0.25f, 0, 0), .local_axis_a = V3(-1, 0, 0), .local_axis_b = V3(-1, 0, 0), .cone_half_angle = 1.2f, .twist_min = -0.8f, .twist_max = 0.8f });
+		create_swing_twist(w, (SwingTwistParams){ .body_a = chest, .body_b = ua_r, .local_offset_a = V3(0.3f, 0.3f, 0), .local_offset_b = V3(-0.25f, 0, 0), .local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0), .cone_half_angle = 1.2f, .twist_min = -0.8f, .twist_max = 0.8f });
+		create_swing_twist(w, (SwingTwistParams){ .body_a = pelvis, .body_b = th_l, .local_offset_a = V3(-0.15f, -0.15f, 0), .local_offset_b = V3(0, 0.3f, 0), .local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0), .cone_half_angle = 1.0f, .twist_min = -0.5f, .twist_max = 0.5f });
+		create_swing_twist(w, (SwingTwistParams){ .body_a = pelvis, .body_b = th_r, .local_offset_a = V3(0.15f, -0.15f, 0), .local_offset_b = V3(0, 0.3f, 0), .local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0), .cone_half_angle = 1.0f, .twist_min = -0.5f, .twist_max = 0.5f });
+		// Knees as hinges.
+		create_hinge(w, (HingeParams){ .body_a = th_l, .body_b = sh_l, .local_offset_a = V3(0, -0.3f, 0), .local_offset_b = V3(0, 0.3f, 0), .local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0) });
+		create_hinge(w, (HingeParams){ .body_a = th_r, .body_b = sh_r, .local_offset_a = V3(0, -0.3f, 0), .local_offset_b = V3(0, 0.3f, 0), .local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0) });
+		joint_count += 8;
+
+		// Same-ragdoll collision filter: each ragdoll in its own group, self-collides none.
+		uint32_t grp = 1u << (r & 31);
+		uint32_t others = ~grp;
+		Body ragdoll_bodies[9] = { pelvis, chest, head, ua_l, ua_r, th_l, th_r, sh_l, sh_r };
+		for (int k = 0; k < 9; k++) body_set_collision_filter(w, ragdoll_bodies[k], grp, others);
+	}
+
+	printf("bench_ragdoll: %d ragdolls, %d bodies, %d joints, %d frames\n", n_ragdolls, body_count, joint_count, frames);
+	printf("  sizeof(SolverJoint) = %d bytes\n", (int)sizeof(SolverJoint));
+
+	extern void narrowphase_reset_timers();
+	extern void narrowphase_end_frame();
+	narrowphase_reset_timers();
+
+	PerfTimers acc = {0};
+	PGSTimers pacc = {0};
+	float dt = 1.0f / 60.0f;
+	for (int frame = 0; frame < frames; frame++) {
+		world_step(w, dt);
+		narrowphase_end_frame();
+		PerfTimers p = world_get_perf(w);
+		acc.total += p.total; acc.broadphase += p.broadphase; acc.pre_solve += p.pre_solve;
+		acc.pgs_solve += p.pgs_solve;
+		PGSTimers pg = p.pgs;
+		pacc.iterations += pg.iterations; pacc.ldl += pg.ldl; pacc.warm_start += pg.warm_start;
+	}
+
+	double n = (double)frames;
+	printf("  avg total:      %8.3f ms\n", acc.total / n * 1000.0);
+	printf("  broadphase:     %8.3f ms\n", acc.broadphase / n * 1000.0);
+	printf("  pre_solve:      %8.3f ms\n", acc.pre_solve / n * 1000.0);
+	printf("  pgs.iterations: %8.3f ms\n", pacc.iterations / n * 1000.0);
+	printf("  pgs.ldl:        %8.3f ms\n", pacc.ldl / n * 1000.0);
+	printf("METRIC: ragdoll_total_ms=%.6f\n", acc.total / n * 1000.0);
+	printf("METRIC: ragdoll_pgs_iter_ms=%.6f\n", pacc.iterations / n * 1000.0);
 
 	destroy_world(w);
 }

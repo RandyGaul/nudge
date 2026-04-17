@@ -597,15 +597,16 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		float cos_theta = dot(axis_a_w, axis_b_w);
 		float cos_limit = cosf(j->cone_limit.half_angle);
 		if (cos_theta < cos_limit) {
-			// Violated: constrain relative angular velocity along swing axis.
-			v3 swing = cross(axis_b_w, axis_a_w); // Jolt convention: t2 x t1
+			// Violated: swing axis = axis_a x axis_b. Jv = (w_a - w_b) . swing =
+			// d(cos_theta)/dt. Positive lambda drives cos_theta up (angle down).
+			v3 swing = cross(axis_a_w, axis_b_w);
 			float slen = len(swing);
 			if (slen > 1e-6f) swing = scale(swing, 1.0f / slen);
 			else { v3 t2; hinge_tangent_basis(axis_a_w, &swing, &t2); }
 			s->rows[0].J_a[3] = swing.x; s->rows[0].J_a[4] = swing.y; s->rows[0].J_a[5] = swing.z;
 			s->rows[0].J_b[3] = -swing.x; s->rows[0].J_b[4] = -swing.y; s->rows[0].J_b[5] = -swing.z;
 			s->pos_error[0] = acosf(cos_theta > 1.0f ? 1.0f : (cos_theta < -1.0f ? -1.0f : cos_theta)) - j->cone_limit.half_angle;
-			s->lo[0] = 0.0f; s->hi[0] = FLT_MAX; // unilateral
+			s->lo[0] = 0.0f; s->hi[0] = FLT_MAX;
 		} else {
 			// Inactive: zero row, zero bounds = no-op.
 			s->pos_error[0] = 0;
@@ -632,12 +633,15 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->rows[0].J_a[3] = twist_axis.x; s->rows[0].J_a[4] = twist_axis.y; s->rows[0].J_a[5] = twist_axis.z;
 		s->rows[0].J_b[3] = -twist_axis.x; s->rows[0].J_b[4] = -twist_axis.y; s->rows[0].J_b[5] = -twist_axis.z;
 		float tmin = j->twist_limit.limit_min, tmax = j->twist_limit.limit_max;
+		// Jv = (w_a - w_b) . axis = -d(twist)/dt (same convention as hinge limit).
+		// twist > tmax: want d(twist)/dt<0, Jv>0, positive lambda -> lo=0.
+		// twist < tmin: want d(twist)/dt>0, Jv<0, negative lambda -> hi=0.
 		if (twist_angle > tmax) {
 			s->pos_error[0] = twist_angle - tmax;
-			s->lo[0] = -FLT_MAX; s->hi[0] = 0.0f;
+			s->lo[0] = 0.0f; s->hi[0] = FLT_MAX;
 		} else if (twist_angle < tmin) {
 			s->pos_error[0] = twist_angle - tmin;
-			s->lo[0] = 0.0f; s->hi[0] = FLT_MAX;
+			s->lo[0] = -FLT_MAX; s->hi[0] = 0.0f;
 		} else {
 			s->pos_error[0] = 0;
 			s->lo[0] = 0; s->hi[0] = 0;
@@ -668,7 +672,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		float cos_theta = dot(axis_a_w, axis_b_w);
 		float cos_limit = cosf(j->swing_twist.cone_half_angle);
 		if (cos_theta < cos_limit) {
-			v3 swing = cross(axis_b_w, axis_a_w);
+			v3 swing = cross(axis_a_w, axis_b_w);
 			float slen = len(swing);
 			if (slen > 1e-6f) swing = scale(swing, 1.0f / slen);
 			else { v3 t2; hinge_tangent_basis(axis_a_w, &swing, &t2); }
@@ -693,8 +697,8 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->rows[4].J_a[3] = twist_axis.x; s->rows[4].J_a[4] = twist_axis.y; s->rows[4].J_a[5] = twist_axis.z;
 		s->rows[4].J_b[3] = -twist_axis.x; s->rows[4].J_b[4] = -twist_axis.y; s->rows[4].J_b[5] = -twist_axis.z;
 		float tmin = j->swing_twist.twist_min, tmax = j->swing_twist.twist_max;
-		if (twist_angle > tmax) { s->pos_error[4] = twist_angle - tmax; s->lo[4] = -FLT_MAX; s->hi[4] = 0.0f; }
-		else if (twist_angle < tmin) { s->pos_error[4] = twist_angle - tmin; s->lo[4] = 0.0f; s->hi[4] = FLT_MAX; }
+		if (twist_angle > tmax) { s->pos_error[4] = twist_angle - tmax; s->lo[4] = 0.0f; s->hi[4] = FLT_MAX; }
+		else if (twist_angle < tmin) { s->pos_error[4] = twist_angle - tmin; s->lo[4] = -FLT_MAX; s->hi[4] = 0.0f; }
 		else { s->pos_error[4] = 0; s->lo[4] = 0; s->hi[4] = 0; }
 	}
 
@@ -734,6 +738,11 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		// Prismatic Jv = (v_b - v_a).axis = d(disp)/dt. Convergence: Jv = -bias.
 		// Negate so positive motor_speed drives positive displacement.
 		if (s->pos_error[5] == 0.0f) s->bias[5] = -j->prismatic.motor_speed;
+	}
+	// Angular motor: bias = target_speed (hinge motor convention). Override the
+	// generic bias=ptv*pos_error pass above since pos_error is 0 for a pure motor.
+	if (s->type == JOINT_ANGULAR_MOTOR) {
+		s->bias[0] = j->angular_motor.target_speed;
 	}
 }
 
