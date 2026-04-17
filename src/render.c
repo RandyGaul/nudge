@@ -755,6 +755,40 @@ int render_create_hull_mesh(const Hull* hull, v3 sc)
 	return idx;
 }
 
+// Flat-shaded mesh from (verts, indices). One MeshVertex per triangle-corner
+// (3*tri_count total) so each triangle's face normal can flat-shade.
+static void mesh_generate_trimesh(Mesh* mesh, const v3* verts, int vcount, const uint32_t* indices, int tri_count)
+{
+	(void)vcount;
+	MeshVertex* mv = NULL;
+	uint16_t* tris = NULL;
+	for (int t = 0; t < tri_count; t++) {
+		v3 a = verts[indices[3*t + 0]];
+		v3 b = verts[indices[3*t + 1]];
+		v3 c = verts[indices[3*t + 2]];
+		v3 n = v3_norm(v3_cross(v3_sub(b, a), v3_sub(c, a)));
+		int base = asize(mv);
+		apush(mv, ((MeshVertex){ a, n }));
+		apush(mv, ((MeshVertex){ b, n }));
+		apush(mv, ((MeshVertex){ c, n }));
+		apush(tris, (uint16_t)(base + 0));
+		apush(tris, (uint16_t)(base + 1));
+		apush(tris, (uint16_t)(base + 2));
+	}
+	mesh_upload(mesh, mv, asize(mv), tris, asize(tris));
+	afree(mv);
+	afree(tris);
+}
+
+int render_create_trimesh_mesh(const v3* verts, int vcount, const uint32_t* indices, int tri_count)
+{
+	assert(r_mesh_count < MAX_MESH_TYPES);
+	int idx = r_mesh_count++;
+	mesh_generate_trimesh(&r_meshes[idx], verts, vcount, indices, tri_count);
+	r_mesh_ready[idx] = 1;
+	return idx;
+}
+
 void render_init()
 {
 	gl_load();

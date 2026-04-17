@@ -206,12 +206,14 @@ static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count
 	for (int i = 0; i < sm_count; i++) {
 		SolverManifold* m = &sm[i];
 		if (m->contact_count == 0) continue;
-		uint64_t key = body_pair_key(m->body_a, m->body_b);
+		uint64_t key = warm_cache_key(m->body_a, m->body_b, m->sub_id);
 
 		WarmManifold* wm = map_get_ptr(w->warm_cache, key);
 		if (!wm) { map_set(w->warm_cache, key, (WarmManifold){0}); wm = map_get_ptr(w->warm_cache, key); }
 		wm->count = m->contact_count;
 		wm->stale = 0;
+		wm->body_a = m->body_a;
+		wm->body_b = m->body_b;
 		for (int ci = 0; ci < m->contact_count; ci++) {
 			SolverContact* s = &sc[m->contact_start + ci];
 			wm->contacts[ci] = (WarmContact){
@@ -239,8 +241,7 @@ static void warm_cache_age_and_evict(WorldInternal* w)
 		WarmManifold* wm = &w->warm_cache[i];
 		wm->stale++;
 		uint64_t key = map_key(w->warm_cache, i);
-		int ba = (int)(key & 0xFFFFFFFF);
-		int bb = (int)(key >> 32);
+		int ba = wm->body_a, bb = wm->body_b;
 		int ia = w->body_cold[ba].island_id;
 		int ib = w->body_cold[bb].island_id;
 		int awake = (ia >= 0 && (w->island_gen[ia] & 1) && w->islands[ia].awake) || (ib >= 0 && (w->island_gen[ib] & 1) && w->islands[ib].awake);

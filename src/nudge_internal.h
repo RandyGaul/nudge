@@ -26,6 +26,7 @@ typedef struct ShapeInternal
 		struct { v3 half_extents; } box;
 		struct { const Hull* hull; v3 scale; } hull;
 		struct { float half_height; float radius; } cylinder;
+		struct { const TriMesh* mesh; } mesh;
 	};
 } ShapeInternal;
 
@@ -442,6 +443,7 @@ typedef struct SolverContact
 typedef struct SolverManifold
 {
 	int body_a, body_b;
+	uint32_t sub_id;              // 0 = convex pair; (tri_idx + 1) = mesh-triangle sub-manifold
 	int contact_start;
 	int contact_count;
 	float friction;
@@ -472,6 +474,11 @@ struct WarmManifold
 	WarmContact contacts[MAX_CONTACTS];
 	int count;
 	int stale; // 0 = updated this frame, incremented each frame not touched, evicted at >1
+	// Body indices are stored explicitly so warm_cache_age_and_evict can read
+	// them back without decoding the map key. For mesh pairs the key is
+	// hashed with sub_id and no longer round-trips to a (body_a, body_b) pair.
+	int body_a;
+	int body_b;
 	// Manifold-level friction warm data (patch friction)
 	float manifold_lambda_t1;
 	float manifold_lambda_t2;

@@ -1377,3 +1377,192 @@ static void scene_ragdoll_setup()
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Scene: Trimesh Terrain -- a procedural low-poly hill mesh with a V-groove.
+// Drop boxes, spheres, capsules, hulls, cylinders onto it. Exercises:
+//   - flat edges between coplanar triangles (no ghost collisions)
+//   - convex ridges (Gauss map Voronoi classification)
+//   - concave valleys (snap normal to owning face)
+//   - per-triangle manifold simultaneity (shapes wedging in V-groove)
+// ---------------------------------------------------------------------------
+static TriMesh* g_scene_trimesh = NULL;
+static int g_mesh_trimesh = -1;
+
+static void scene_trimesh_terrain_setup()
+{
+	// Scene setup runs after world destroy; bodies have been freed but the
+	// trimesh heap block is ours to clean up. Rebuild fresh each time.
+	if (g_scene_trimesh) { trimesh_free(g_scene_trimesh); g_scene_trimesh = NULL; }
+
+	// Grid parameters. 13x13 vertices -> 12x12 quads -> 288 triangles. Apply a
+	// procedural height field with a ridge, a concave dip, and a flat plateau.
+	#define TM_N 13
+	#define TM_EXTENT 6.0f
+	v3 verts[TM_N * TM_N];
+	for (int z = 0; z < TM_N; z++) {
+		for (int x = 0; x < TM_N; x++) {
+			float fx = ((float)x / (TM_N - 1)) * 2.0f - 1.0f;  // [-1, 1]
+			float fz = ((float)z / (TM_N - 1)) * 2.0f - 1.0f;
+			float px = fx * TM_EXTENT;
+			float pz = fz * TM_EXTENT;
+			// Two hills (convex ridge) + a V-shaped trench through the middle.
+			float hill = 1.2f * expf(-8.0f * ((fx + 0.45f) * (fx + 0.45f) + (fz - 0.45f) * (fz - 0.45f)))
+			           + 0.8f * expf(-10.0f * ((fx - 0.5f) * (fx - 0.5f) + (fz + 0.4f) * (fz + 0.4f)));
+			float trench = 0.6f * expf(-40.0f * fz * fz) * (1.0f - fabsf(fx));
+			float py = hill - trench;
+			verts[z * TM_N + x] = V3(px, py, pz);
+		}
+	}
+
+	uint32_t indices[(TM_N - 1) * (TM_N - 1) * 6];
+	int ti = 0;
+	for (int z = 0; z < TM_N - 1; z++) {
+		for (int x = 0; x < TM_N - 1; x++) {
+			int i00 = z * TM_N + x;
+			int i10 = i00 + 1;
+			int i01 = i00 + TM_N;
+			int i11 = i01 + 1;
+			// Two triangles per quad, CCW when viewed from +Y (normal up).
+			indices[ti++] = i00; indices[ti++] = i01; indices[ti++] = i10;
+			indices[ti++] = i10; indices[ti++] = i01; indices[ti++] = i11;
+		}
+	}
+
+	g_scene_trimesh = trimesh_create(verts, TM_N * TM_N, indices, (TM_N - 1) * (TM_N - 1) * 2);
+	g_mesh_trimesh = render_create_trimesh_mesh(verts, TM_N * TM_N, indices, (TM_N - 1) * (TM_N - 1) * 2);
+
+	Body floor_b = create_body(g_world, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(g_world, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = g_scene_trimesh });
+	apush(g_draw_list, ((DrawEntry){ floor_b, g_mesh_trimesh, V3(1, 1, 1), V3(0.35f, 0.5f, 0.35f) }));
+
+	// A pile of mixed shapes dropped from varied starting positions.
+	v3 drop_positions[] = {
+		V3(-2.0f, 6.0f,  1.5f), V3( 1.5f, 5.5f, -1.5f),
+		V3( 0.0f, 7.0f,  0.0f), V3(-3.5f, 4.5f, -0.5f),
+		V3( 2.5f, 5.0f,  2.5f), V3(-1.0f, 6.5f, -2.5f),
+		V3( 3.0f, 5.5f, -2.0f), V3(-2.5f, 4.0f,  2.0f),
+	};
+	v3 colors[] = {
+		V3(0.9f, 0.3f, 0.2f), V3(0.2f, 0.8f, 0.3f),
+		V3(0.3f, 0.5f, 0.9f), V3(0.9f, 0.7f, 0.2f),
+		V3(0.8f, 0.4f, 0.6f), V3(0.5f, 0.9f, 0.9f),
+		V3(0.95f, 0.55f, 0.35f), V3(0.7f, 0.5f, 0.8f),
+	};
+	for (int i = 0; i < 8; i++) {
+		Body b = create_body(g_world, (BodyParams){ .position = drop_positions[i], .rotation = quat_identity(), .mass = 1.0f, .friction = 0.6f });
+		switch (i % 5) {
+			case 0:
+				body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.35f });
+				apush(g_draw_list, ((DrawEntry){ b, MESH_SPHERE, V3(0.35f, 0.35f, 0.35f), colors[i] }));
+				break;
+			case 1:
+				body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) });
+				apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(0.3f, 0.3f, 0.3f), colors[i] }));
+				break;
+			case 2:
+				body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = CAP_HALF_H, .radius = CAP_RADIUS } });
+				apush(g_draw_list, ((DrawEntry){ b, g_mesh_capsule, V3(1, 1, 1), colors[i] }));
+				break;
+			case 3:
+				body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = g_test_hull, .scale = V3(1, 1, 1) } });
+				apush(g_draw_list, ((DrawEntry){ b, g_mesh_hull, V3(1, 1, 1), colors[i] }));
+				break;
+			case 4:
+				body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_CYLINDER, .cylinder = { .half_height = 0.4f, .radius = 0.3f } });
+				apush(g_draw_list, ((DrawEntry){ b, g_mesh_cylinder, V3(1, 1, 1), colors[i] }));
+				break;
+		}
+	}
+	#undef TM_N
+	#undef TM_EXTENT
+}
+
+// ---------------------------------------------------------------------------
+// Scene: Trimesh Stress -- many bodies dropped onto a large fine-tessellated
+// terrain mesh. Exercises the SIMD-batched narrowphase + pair sort under load.
+// ---------------------------------------------------------------------------
+static void scene_trimesh_stress_setup()
+{
+	if (g_scene_trimesh) { trimesh_free(g_scene_trimesh); g_scene_trimesh = NULL; }
+
+	#define TMS_N 25
+	#define TMS_EXTENT 12.0f
+	v3 verts[TMS_N * TMS_N];
+	for (int z = 0; z < TMS_N; z++) {
+		for (int x = 0; x < TMS_N; x++) {
+			float fx = ((float)x / (TMS_N - 1)) * 2.0f - 1.0f;
+			float fz = ((float)z / (TMS_N - 1)) * 2.0f - 1.0f;
+			float px = fx * TMS_EXTENT;
+			float pz = fz * TMS_EXTENT;
+			// Gentle undulating terrain with a few bumps.
+			float py = 0.4f * sinf(px * 0.6f) * cosf(pz * 0.6f)
+			         + 0.2f * sinf(px * 1.7f + pz * 1.3f);
+			verts[z * TMS_N + x] = V3(px, py, pz);
+		}
+	}
+	uint32_t indices[(TMS_N - 1) * (TMS_N - 1) * 6];
+	int ti = 0;
+	for (int z = 0; z < TMS_N - 1; z++) {
+		for (int x = 0; x < TMS_N - 1; x++) {
+			int i00 = z * TMS_N + x;
+			int i10 = i00 + 1;
+			int i01 = i00 + TMS_N;
+			int i11 = i01 + 1;
+			indices[ti++] = i00; indices[ti++] = i01; indices[ti++] = i10;
+			indices[ti++] = i10; indices[ti++] = i01; indices[ti++] = i11;
+		}
+	}
+
+	g_scene_trimesh = trimesh_create(verts, TMS_N * TMS_N, indices, (TMS_N - 1) * (TMS_N - 1) * 2);
+	int mesh_render = render_create_trimesh_mesh(verts, TMS_N * TMS_N, indices, (TMS_N - 1) * (TMS_N - 1) * 2);
+
+	Body floor_b = create_body(g_world, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(g_world, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = g_scene_trimesh });
+	apush(g_draw_list, ((DrawEntry){ floor_b, mesh_render, V3(1, 1, 1), V3(0.3f, 0.45f, 0.32f) }));
+
+	// Drop 7x7 = 49 mixed bodies from varying heights.
+	int grid = 7;
+	float spacing = 1.3f;
+	float x0 = -(spacing * (grid - 1)) * 0.5f;
+	float z0 = x0;
+	int idx = 0;
+	for (int gz = 0; gz < grid; gz++) {
+		for (int gx = 0; gx < grid; gx++) {
+			float px = x0 + gx * spacing + 0.1f * sinf((float)(gz * 7 + gx));
+			float pz = z0 + gz * spacing + 0.1f * cosf((float)(gz * 5 + gx * 3));
+			float py = 4.0f + 0.3f * (float)((gx + gz) % 3);
+			v3 pos = V3(px, py, pz);
+			v3 color = V3(0.4f + 0.5f * ((idx * 37) % 7) / 7.0f,
+			              0.4f + 0.5f * ((idx * 19) % 11) / 11.0f,
+			              0.4f + 0.5f * ((idx * 53) % 13) / 13.0f);
+			Body b = create_body(g_world, (BodyParams){ .position = pos, .rotation = quat_identity(), .mass = 1.0f, .friction = 0.6f });
+			switch (idx % 5) {
+				case 0:
+					body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+					apush(g_draw_list, ((DrawEntry){ b, MESH_SPHERE, V3(0.3f, 0.3f, 0.3f), color }));
+					break;
+				case 1:
+					body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) });
+					apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, V3(0.3f, 0.3f, 0.3f), color }));
+					break;
+				case 2:
+					body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = CAP_HALF_H, .radius = CAP_RADIUS } });
+					apush(g_draw_list, ((DrawEntry){ b, g_mesh_capsule, V3(1, 1, 1), color }));
+					break;
+				case 3:
+					body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = g_test_hull, .scale = V3(1, 1, 1) } });
+					apush(g_draw_list, ((DrawEntry){ b, g_mesh_hull, V3(1, 1, 1), color }));
+					break;
+				case 4:
+					body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_CYLINDER, .cylinder = { .half_height = 0.35f, .radius = 0.25f } });
+					apush(g_draw_list, ((DrawEntry){ b, g_mesh_cylinder, V3(1, 1, 1), color }));
+					break;
+			}
+			idx++;
+		}
+	}
+	#undef TMS_N
+	#undef TMS_EXTENT
+}
+

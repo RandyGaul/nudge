@@ -16,7 +16,7 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	WarmManifold* wm = im->warm; // cached from narrowphase (avoids duplicate hash lookup)
 	int contact_base = idx * MAX_CONTACTS;
 
-	SolverManifold smf = { .body_a = im->body_a, .body_b = im->body_b, .contact_start = contact_base, .contact_count = im->m.count, .friction = mu, .inv_mass_a = a->inv_mass, .inv_mass_b = b->inv_mass };
+	SolverManifold smf = { .body_a = im->body_a, .body_b = im->body_b, .sub_id = im->sub_id, .contact_start = contact_base, .contact_count = im->m.count, .friction = mu, .inv_mass_a = a->inv_mass, .inv_mass_b = b->inv_mass };
 
 	// Skip per-contact restitution velocity when both bodies are slow (settled stacks).
 	float rest_thresh2 = SOLVER_RESTITUTION_THRESH * SOLVER_RESTITUTION_THRESH;

@@ -6,6 +6,10 @@
 
 typedef struct AABB { v3 min, max; } AABB;
 
+// Forward decl: trimesh.c is included later in the unity build but bvh.c's
+// shape_aabb needs the mesh's local-space AABB for SHAPE_MESH.
+static AABB trimesh_local_aabb(const TriMesh* m);
+
 static AABB aabb_empty() { return (AABB){ V3(1e18f, 1e18f, 1e18f), V3(-1e18f, -1e18f, -1e18f) }; }
 
 static AABB aabb_merge(AABB a, AABB b) { return (AABB){ v3_min(a.min, b.min), v3_max(a.max, b.max) }; }
@@ -62,6 +66,24 @@ static AABB shape_aabb(BodyState* s, ShapeInternal* sh)
 		float ez2 = 1.0f - ay.z*ay.z; if (ez2 < 0.0f) ez2 = 0.0f;
 		v3 half = V3(fabsf(ay.x)*hh + sqrtf(ex2)*r, fabsf(ay.y)*hh + sqrtf(ey2)*r, fabsf(ay.z)*hh + sqrtf(ez2)*r);
 		return (AABB){ sub(world_pos, half), add(world_pos, half) };
+	}
+	case SHAPE_MESH: {
+		// Transform mesh's precomputed local AABB by body pose. Take the
+		// 8 corners of the local box and bound them in world space.
+		AABB local = trimesh_local_aabb(sh->mesh.mesh);
+		v3 lo = local.min, hi = local.max;
+		AABB box = aabb_from_point(add(world_pos, rotate(s->rotation, lo)));
+		v3 corners[7] = {
+			V3(lo.x, lo.y, hi.z), V3(lo.x, hi.y, lo.z), V3(lo.x, hi.y, hi.z),
+			V3(hi.x, lo.y, lo.z), V3(hi.x, lo.y, hi.z), V3(hi.x, hi.y, lo.z),
+			V3(hi.x, hi.y, hi.z),
+		};
+		for (int i = 0; i < 7; i++) {
+			v3 p = add(world_pos, rotate(s->rotation, corners[i]));
+			box.min = v3_min(box.min, p);
+			box.max = v3_max(box.max, p);
+		}
+		return box;
 	}
 	}
 	return aabb_empty();

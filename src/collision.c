@@ -160,6 +160,7 @@ typedef struct InternalManifold
 	Manifold m;
 	int body_a;
 	int body_b;
+	uint32_t sub_id;    // 0 for convex-vs-convex pairs; (tri_idx + 1) for mesh pairs
 	WarmManifold* warm; // cached warm cache pointer (avoids duplicate hash lookup in pre_solve)
 } InternalManifold;
 
@@ -2343,6 +2344,16 @@ void narrowphase_print_timers()
 }
 
 static uint64_t body_pair_key(int a, int b);
+static uint64_t warm_cache_key(int a, int b, uint32_t sub_id);
+
+// Forward-declared mesh emit routines (defined in trimesh.c). Each handles its
+// own BVH traversal, per-triangle warm-cache lookup, and manifold push.
+static void collide_sphere_mesh_emit(WorldInternal* w, int body_a, int body_b, Sphere sphere_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds);
+static void collide_capsule_mesh_emit(WorldInternal* w, int body_a, int body_b, Capsule capsule_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds);
+static void collide_box_mesh_emit(WorldInternal* w, int body_a, int body_b, Box box_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds);
+static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, ConvexHull hull_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds);
+static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds);
+static int ray_mesh(v3 ro, v3 rd, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, float max_t, float* t_out, v3* n_out);
 
 static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** manifolds)
 {
@@ -2357,10 +2368,30 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 	ShapeInternal* s1 = &w->body_cold[j].shapes[0];
 	BodyState* bs0 = &w->body_state[i];
 	BodyState* bs1 = &w->body_state[j];
+
+	// Mesh pairs emit one manifold per contacted triangle; they own the full
+	// narrowphase path including per-triangle warm lookup. Bypass the single-
+	// manifold dispatch below.
+	if (s1->type == SHAPE_MESH) {
+		np_call_acc[np_pair_idx(s0->type, s1->type)]++;
+		if (s0->type == SHAPE_SPHERE) {
+			collide_sphere_mesh_emit(w, i, j, make_sphere(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, manifolds);
+		} else if (s0->type == SHAPE_CAPSULE) {
+			collide_capsule_mesh_emit(w, i, j, make_capsule(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, manifolds);
+		} else if (s0->type == SHAPE_BOX) {
+			collide_box_mesh_emit(w, i, j, make_box(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, manifolds);
+		} else if (s0->type == SHAPE_HULL) {
+			collide_hull_mesh_emit(w, i, j, make_convex_hull(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, manifolds);
+		} else if (s0->type == SHAPE_CYLINDER) {
+			collide_cylinder_mesh_emit(w, i, j, make_cylinder(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, manifolds);
+		}
+		return;
+	}
+
 	InternalManifold im = { .body_a = i, .body_b = j };
 
 	// Warm cache lookup: used for SAT hints, geometry caching, and passed to pre_solve.
-	uint64_t pkey = body_pair_key(i, j);
+	uint64_t pkey = warm_cache_key(i, j, 0);
 	WarmManifold* wm = w->warm_start_enabled ? map_get_ptr(w->warm_cache, pkey) : NULL;
 
 	// SAT hint from warm cache (skip for box-box — 15 axes is cheap).
@@ -2665,6 +2696,7 @@ static int ray_body(WorldInternal* w, int body_idx, v3 origin, v3 dir, float max
 		case SHAPE_BOX:      hit = ray_box(origin, dir, make_box(bs, s), best_t, &t, &n); break;
 		case SHAPE_HULL:     hit = ray_hull(origin, dir, make_convex_hull(bs, s), best_t, &t, &n); break;
 		case SHAPE_CYLINDER: hit = ray_cylinder(origin, dir, make_cylinder(bs, s), best_t, &t, &n); break;
+		case SHAPE_MESH:     hit = ray_mesh(origin, dir, bs->position, bs->rotation, s->mesh.mesh, best_t, &t, &n); break;
 		}
 		if (hit && t < best_t) { best_t = t; best_n = n; found = 1; }
 	}

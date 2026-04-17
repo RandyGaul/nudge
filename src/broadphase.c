@@ -8,6 +8,15 @@ static uint64_t body_pair_key(int a, int b)
 	return ((uint64_t)lo << 32) | (uint64_t)hi;
 }
 
+// Warm-cache key. For convex-vs-convex pairs sub_id=0, which reduces to
+// body_pair_key (zero behavior change for the common path). For mesh pairs
+// sub_id = triangle_index + 1 (non-zero), mixed into the key so each
+// contacted triangle warm-starts independently across frames.
+static uint64_t warm_cache_key(int a, int b, uint32_t sub_id)
+{
+	return body_pair_key(a, b) ^ ((uint64_t)sub_id * 0x9E3779B185EBCA87ULL);
+}
+
 static int jointed_pair_skip(CK_MAP(uint8_t) joint_pairs, int a, int b)
 {
 	if (!joint_pairs) return 0;
@@ -164,6 +173,28 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	afree(pairs);
 	bp_cross_acc += perf_now() - t3;
 
+	// Sort pairs by canonical shape-type key. Clusters same-type pairs for
+	// cache locality (shared mesh data, warm dispatch branch) in the
+	// narrowphase. Insertion sort: stable, O(n) for nearly-sorted input
+	// (settled frames produce stable pair order), acceptable O(n^2) worst.
+	int dd_count = asize(dd_pairs);
+	for (int i = 1; i < dd_count; i++) {
+		BroadPair key = dd_pairs[i];
+		int ka = w->body_cold[key.a].shapes[0].type;
+		int kb = w->body_cold[key.b].shapes[0].type;
+		uint32_t kk = (ka <= kb) ? ((uint32_t)ka << 8) | (uint32_t)kb : ((uint32_t)kb << 8) | (uint32_t)ka;
+		int j = i - 1;
+		while (j >= 0) {
+			int ja = w->body_cold[dd_pairs[j].a].shapes[0].type;
+			int jb = w->body_cold[dd_pairs[j].b].shapes[0].type;
+			uint32_t jk = (ja <= jb) ? ((uint32_t)ja << 8) | (uint32_t)jb : ((uint32_t)jb << 8) | (uint32_t)ja;
+			if (jk <= kk) break;
+			dd_pairs[j + 1] = dd_pairs[j];
+			j--;
+		}
+		dd_pairs[j + 1] = key;
+	}
+
 	// Narrowphase on all collected pairs.
 	// If parallel dispatch is available (thread_count > 1), output pairs for external dispatch.
 	// Otherwise run narrowphase inline.
@@ -172,7 +203,6 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		CK_DYNA BroadPair** out = (CK_DYNA BroadPair**)w->np_pairs_out;
 		for (int i = 0; i < asize(dd_pairs); i++) apush(*out, dd_pairs[i]);
 	} else {
-		int dd_count = asize(dd_pairs);
 		for (int i = 0; i < dd_count; i++) {
 			narrowphase_pair(w, dd_pairs[i].a, dd_pairs[i].b, manifolds);
 		}

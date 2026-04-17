@@ -546,6 +546,312 @@ static void test_sphere_settles_on_floor()
 }
 
 // ============================================================================
+// Triangle mesh: quad floor with a shared diagonal edge. Tests that a sphere
+// dropped over the seam settles flat without being kicked off by the inner
+// edge (classic internal-edge "ghost collision"). The mesh lies on y=0 with
+// its normal pointing +Y.
+//
+//   v3 --- v2
+//    | \   |
+//    |  \  |
+//    |   \ |
+//   v0 --- v1
+//
+// triangles: (v0,v1,v2) and (v0,v2,v3). Shared edge is v0->v2, internally a
+// flat (coplanar) seam. Smooth-normal handling must admit only from the
+// owner side so neither triangle kicks the sphere off its face.
+static void test_sphere_on_quad_mesh_floor()
+{
+	TEST_BEGIN("sphere settles on trimesh quad floor (smooth edge)");
+	v3 verts[4] = { V3(-2, 0, -2), V3(2, 0, -2), V3(2, 0, 2), V3(-2, 0, 2) };
+	uint32_t indices[6] = { 0, 2, 1, 0, 3, 2 }; // CCW from +Y (normal points up)
+	TriMesh* mesh = trimesh_create(verts, 4, indices, 2);
+	TEST_ASSERT(mesh != NULL);
+	TEST_ASSERT(trimesh_tri_count(mesh) == 2);
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
+
+	// Drop sphere directly above the shared diagonal (x=z line).
+	Body sphere_b = create_body(w, (BodyParams){ .position = V3(0.5f, 3.0f, 0.5f), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, sphere_b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 300; i++) world_step(w, dt);
+
+	v3 p = body_get_position(w, sphere_b);
+	v3 vel = body_get_velocity(w, sphere_b);
+	printf("  trimesh sphere final y=%.4f vel=%.4f\n", p.y, len(vel));
+	TEST_ASSERT(p.y > 0.4f);      // not sunk through
+	TEST_ASSERT(p.y < 0.6f);      // resting on top (radius=0.5)
+	TEST_ASSERT(len(vel) < 0.1f); // actually settled, not bouncing
+
+	destroy_world(w);
+	trimesh_free(mesh);
+}
+
+// Box dropped over the shared diagonal seam of a quad mesh. Tests that
+// box-mesh GJK-based contact generation lands the box flat across both
+// triangles without tipping.
+static void test_box_on_quad_mesh_floor()
+{
+	TEST_BEGIN("box settles on trimesh quad floor");
+	v3 verts[4] = { V3(-2, 0, -2), V3(2, 0, -2), V3(2, 0, 2), V3(-2, 0, 2) };
+	uint32_t indices[6] = { 0, 2, 1, 0, 3, 2 }; // CCW from +Y (normal points up)
+	TriMesh* mesh = trimesh_create(verts, 4, indices, 2);
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
+
+	Body box_b = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, box_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, 0.4f, 0.4f) });
+
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 300; i++) world_step(w, dt);
+
+	v3 p = body_get_position(w, box_b);
+	v3 vel = body_get_velocity(w, box_b);
+	printf("  trimesh box final y=%.4f vel=%.4f\n", p.y, len(vel));
+	TEST_ASSERT(p.y > 0.3f);      // half_extent=0.4, center rests near 0.4
+	TEST_ASSERT(p.y < 0.5f);
+	TEST_ASSERT(len(vel) < 0.1f);
+
+	destroy_world(w);
+	trimesh_free(mesh);
+}
+
+// Raycast against a quad mesh floor. Shoots a ray straight down from +Y;
+// expects a hit at y=0 with normal +Y.
+static void test_raycast_quad_mesh()
+{
+	TEST_BEGIN("raycast vs trimesh quad floor");
+	v3 verts[4] = { V3(-2, 0, -2), V3(2, 0, -2), V3(2, 0, 2), V3(-2, 0, 2) };
+	uint32_t indices[6] = { 0, 2, 1, 0, 3, 2 };
+	TriMesh* mesh = trimesh_create(verts, 4, indices, 2);
+
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
+
+	RayHit hit;
+	int got = world_raycast(w, V3(0.3f, 5, 0.5f), V3(0, -1, 0), 10.0f, &hit);
+	printf("  raycast mesh: hit=%d t=%.3f pt=(%.2f,%.2f,%.2f) n=(%.2f,%.2f,%.2f)\n",
+		got, hit.distance, hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z);
+	TEST_ASSERT(got == 1);
+	TEST_ASSERT_FLOAT(hit.distance, 5.0f, 0.01f);
+	TEST_ASSERT_FLOAT(hit.normal.y, 1.0f, 0.01f);
+
+	// Miss: ray outside mesh bounds
+	got = world_raycast(w, V3(10, 5, 0), V3(0, -1, 0), 10.0f, &hit);
+	TEST_ASSERT(got == 0);
+
+	destroy_world(w);
+	trimesh_free(mesh);
+}
+
+// V-groove test: two triangles meeting at a concave angle. Drop a box into
+// the valley — both triangle faces contact the box simultaneously, each with
+// a different normal, producing TWO manifolds. The box should come to rest
+// wedged in the valley, not slide through either side.
+static void test_box_in_vgroove_mesh()
+{
+	TEST_BEGIN("box wedges in V-groove mesh");
+	// Two triangles forming a V along the X axis. Vertices:
+	//   v0 = (-3, 0.5, -1)  v1 = (3, 0.5, -1)  -- top-back edge
+	//   v2 = (-3, 0, 0)     v3 = (3, 0, 0)     -- bottom seam
+	//   v4 = (-3, 0.5, 1)   v5 = (3, 0.5, 1)   -- top-front edge
+	v3 verts[6] = {
+		V3(-3, 0.5f, -1), V3(3, 0.5f, -1),
+		V3(-3, 0,     0), V3(3, 0,     0),
+		V3(-3, 0.5f,  1), V3(3, 0.5f,  1),
+	};
+	// Triangles (CCW from above-concave side = +Y-ish):
+	// back panel: v0, v2, v3 and v0, v3, v1 -- slopes down from y=0.5 to y=0
+	// front panel: v2, v4, v5 and v2, v5, v3 -- slopes up from y=0 to y=0.5
+	uint32_t indices[12] = {
+		0, 2, 3,  0, 3, 1,
+		2, 4, 5,  2, 5, 3,
+	};
+	TriMesh* mesh = trimesh_create(verts, 6, indices, 4);
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
+
+	Body box_b = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, box_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) });
+
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 300; i++) world_step(w, dt);
+
+	v3 p = body_get_position(w, box_b);
+	v3 vel = body_get_velocity(w, box_b);
+	printf("  V-groove box final y=%.4f z=%.4f vel=%.4f\n", p.y, p.z, len(vel));
+	// Box should rest wedged above y=0 (valley bottom) with center above the seam.
+	TEST_ASSERT(p.y > 0.1f);
+	TEST_ASSERT(p.y < 0.5f);
+	TEST_ASSERT(fabsf(p.z) < 0.3f); // stays near the seam
+	TEST_ASSERT(len(vel) < 0.2f);
+
+	destroy_world(w);
+	trimesh_free(mesh);
+}
+
+// Convex ridge test: two triangles meeting at a convex (ridge) edge. A
+// sphere dropped on the ridge should slide off one side deterministically,
+// not bounce between contacts. Tests that the Gauss-map Voronoi rule
+// (Skip/Admit) correctly assigns the contact to exactly one side.
+static void test_sphere_on_ridge_mesh()
+{
+	TEST_BEGIN("sphere slides off convex ridge (Gauss map classify)");
+	// Tent/roof along X: ridge at y=1, slopes down to y=0 at z=-5 and z=+5.
+	// Gentle slope (~11 deg) so sphere settles on the slope without flying off.
+	v3 verts[6] = {
+		V3(-5, 0, -5), V3(5, 0, -5),   // back foot
+		V3(-5, 1,  0), V3(5, 1,  0),   // ridge top
+		V3(-5, 0,  5), V3(5, 0,  5),   // front foot
+	};
+	// Back panel slopes up: v0,v1 up to v2,v3. Front panel slopes down: v2,v3 down to v4,v5.
+	// CCW from outward normal (+Y, -Z for back; +Y, +Z for front).
+	uint32_t indices[12] = {
+		0, 3, 1,  0, 2, 3,   // back panel (outward normal = +Y, -Z)
+		2, 5, 3,  2, 4, 5,   // front panel (outward normal = +Y, +Z)
+	};
+	TriMesh* mesh = trimesh_create(verts, 6, indices, 4);
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
+
+	// Drop sphere slightly off-center so it commits to one side. Heavy friction
+	// so it doesn't slide off the mesh boundary.
+	Body sphere_b = create_body(w, (BodyParams){ .position = V3(0, 3, 0.1f), .rotation = quat_identity(), .mass = 1.0f, .friction = 1.0f });
+	body_add_shape(w, sphere_b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f });
+
+	// Check at 60 frames (1 sec): sphere has descended from ridge and moved
+	// to the +z side (initial bias committed). Not stuck at the ridge top.
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 60; i++) world_step(w, dt);
+
+	v3 p = body_get_position(w, sphere_b);
+	printf("  ridge sphere @60f y=%.3f z=%.3f\n", p.y, p.z);
+	int on_ridge = (p.y > 0.9f) && (fabsf(p.z) < 0.2f);
+	TEST_ASSERT(!on_ridge);   // not stuck on ridge top
+	TEST_ASSERT(p.y < 3.0f);  // has descended from start (y=3)
+	TEST_ASSERT(p.z > 0.1f);  // committed to +z side (initial bias was +0.1)
+
+	destroy_world(w);
+	trimesh_free(mesh);
+}
+
+// Convex hull (octahedron) dropped onto a quad mesh floor. Tests that the
+// hull-mesh GJK path handles arbitrary hulls.
+static void test_hull_on_quad_mesh_floor()
+{
+	TEST_BEGIN("hull settles on trimesh quad floor");
+	v3 verts[4] = { V3(-2, 0, -2), V3(2, 0, -2), V3(2, 0, 2), V3(-2, 0, 2) };
+	uint32_t indices[6] = { 0, 2, 1, 0, 3, 2 }; // CCW from +Y (normal points up)
+	TriMesh* mesh = trimesh_create(verts, 4, indices, 2);
+
+	// Octahedron hull: 6 vertices.
+	v3 ho_pts[6] = {
+		V3( 0.5f,  0,    0), V3(-0.5f,  0,    0),
+		V3( 0,    0.5f,  0), V3( 0,   -0.5f,  0),
+		V3( 0,    0,    0.5f), V3( 0, 0,   -0.5f),
+	};
+	Hull* ho = quickhull(ho_pts, 6);
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
+
+	Body hull_b = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, hull_b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = ho, .scale = V3(1, 1, 1) } });
+
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 300; i++) world_step(w, dt);
+
+	v3 p = body_get_position(w, hull_b);
+	v3 vel = body_get_velocity(w, hull_b);
+	printf("  trimesh hull final y=%.4f vel=%.4f\n", p.y, len(vel));
+	TEST_ASSERT(p.y > 0.4f); // octahedron radius 0.5 along each axis
+	TEST_ASSERT(p.y < 1.0f);
+	TEST_ASSERT(len(vel) < 0.2f);
+
+	destroy_world(w);
+	trimesh_free(mesh);
+	hull_free(ho);
+}
+
+// Cylinder dropped vertically onto quad mesh.
+static void test_cylinder_on_quad_mesh_floor()
+{
+	TEST_BEGIN("cylinder settles on trimesh quad floor");
+	v3 verts[4] = { V3(-2, 0, -2), V3(2, 0, -2), V3(2, 0, 2), V3(-2, 0, 2) };
+	uint32_t indices[6] = { 0, 2, 1, 0, 3, 2 };
+	TriMesh* mesh = trimesh_create(verts, 4, indices, 2);
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
+
+	Body cyl_b = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1.0f });
+	body_add_shape(w, cyl_b, (ShapeParams){ .type = SHAPE_CYLINDER, .cylinder = { .half_height = 0.5f, .radius = 0.3f } });
+
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 300; i++) world_step(w, dt);
+
+	v3 p = body_get_position(w, cyl_b);
+	v3 vel = body_get_velocity(w, cyl_b);
+	printf("  trimesh cylinder final y=%.4f vel=%.4f\n", p.y, len(vel));
+	TEST_ASSERT(p.y > 0.4f); // half_height 0.5 along Y, center near y=0.5
+	TEST_ASSERT(p.y < 0.7f);
+	TEST_ASSERT(len(vel) < 0.2f);
+
+	destroy_world(w);
+	trimesh_free(mesh);
+}
+
+// Capsule dropped horizontally over a quad mesh floor. Tests:
+//   - multiple triangles contact at once (one manifold per triangle)
+//   - smooth-normal handling for a capsule sliding across the diagonal seam
+//   - rotational stability: capsule stays flat (not kicked over by edge contact)
+static void test_capsule_on_quad_mesh_floor()
+{
+	TEST_BEGIN("capsule settles flat on trimesh quad floor");
+	v3 verts[4] = { V3(-2, 0, -2), V3(2, 0, -2), V3(2, 0, 2), V3(-2, 0, 2) };
+	uint32_t indices[6] = { 0, 2, 1, 0, 3, 2 }; // CCW from +Y (normal points up)
+	TriMesh* mesh = trimesh_create(verts, 4, indices, 2);
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
+
+	// Horizontal capsule (axis along X after 90deg Z rotation). Dropped at y=3.
+	float a90 = 90.0f * 3.14159265f / 180.0f;
+	quat rotx = { 0, 0, sinf(a90 * 0.5f), cosf(a90 * 0.5f) };
+	Body cap_b = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = rotx, .mass = 1.0f });
+	body_add_shape(w, cap_b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.6f, .radius = 0.3f } });
+
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 300; i++) world_step(w, dt);
+
+	v3 p = body_get_position(w, cap_b);
+	v3 vel = body_get_velocity(w, cap_b);
+	quat final_rot = body_get_rotation(w, cap_b);
+	printf("  trimesh capsule final y=%.4f vel=%.4f q=(%.2f,%.2f,%.2f,%.2f)\n",
+		p.y, len(vel), final_rot.x, final_rot.y, final_rot.z, final_rot.w);
+	TEST_ASSERT(p.y > 0.2f);       // capsule radius = 0.3, center should rest near 0.3
+	TEST_ASSERT(p.y < 0.5f);
+	TEST_ASSERT(len(vel) < 0.1f);  // settled, not bouncing
+
+	destroy_world(w);
+	trimesh_free(mesh);
+}
+
+// ============================================================================
 // Sphere/Capsule-Hull shallow vs deep boundary tests.
 // Validates the GJK-first dispatch: shallow (GJK witness), deep (face search).
 
@@ -12152,6 +12458,14 @@ static void run_tests()
 	test_capsule_rolls_no_lurch();
 	test_capsule_box_tilted_direct();
 	test_sphere_settles_on_floor();
+	test_sphere_on_quad_mesh_floor();
+	test_box_on_quad_mesh_floor();
+	test_hull_on_quad_mesh_floor();
+	test_cylinder_on_quad_mesh_floor();
+	test_capsule_on_quad_mesh_floor();
+	test_raycast_quad_mesh();
+	test_box_in_vgroove_mesh();
+	test_sphere_on_ridge_mesh();
 	test_gjk_dispatch();
 	test_gjk_distance();
 	test_contact_sanity();

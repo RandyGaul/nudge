@@ -129,6 +129,28 @@ typedef struct ConvexHull
 } ConvexHull;
 
 // -----------------------------------------------------------------------------
+// Triangle mesh -- static (indexed) collision geometry with smooth-normal
+// (ghost-edge) handling. Box2D's chain shape is the 2D analog.
+//
+// Input contract (caller responsibility, not validated):
+//   - Mesh is a manifold surface: every interior edge is shared by at most two
+//     triangles. Non-manifold meshes (>2 triangles per edge) will abort during
+//     build. Boundary edges (exactly one triangle) are allowed.
+//   - Triangle winding is consistent (CCW when viewed from the intended
+//     collision side). Face normal is taken as cross(v1-v0, v2-v0).
+//   - No degenerate triangles (zero-area); build asserts.
+//   - Vertex positions are in the mesh-local frame. No welding is performed;
+//     shared vertices must share their index.
+//   - indices[] has length 3 * tri_count.
+typedef struct TriMesh TriMesh;
+
+TriMesh* trimesh_create(const v3* verts, int vert_count, const uint32_t* indices, int tri_count);
+void trimesh_free(TriMesh* mesh);
+
+// Debug: number of triangles in the mesh.
+int trimesh_tri_count(const TriMesh* mesh);
+
+// -----------------------------------------------------------------------------
 // Contact manifold.
 
 // Contact feature ID for warm starting.
@@ -204,6 +226,7 @@ typedef enum ShapeType
 	SHAPE_BOX,
 	SHAPE_HULL,
 	SHAPE_CYLINDER,
+	SHAPE_MESH,    // static triangle mesh; allowed only on mass=0 bodies
 } ShapeType;
 
 typedef struct ShapeParams
@@ -216,6 +239,7 @@ typedef struct ShapeParams
 		struct { v3 half_extents; } box;
 		struct { const Hull* hull; v3 scale; } hull;
 		struct { float half_height; float radius; } cylinder; // segment along local Y, flat caps
+		struct { const TriMesh* mesh; } mesh;                 // static only
 	};
 } ShapeParams;
 

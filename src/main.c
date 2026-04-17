@@ -216,6 +216,8 @@ static Scene g_scenes[] = {
 	{ "Capsule Test", scene_capsule_test_setup },
 	{ "Joint Gallery", scene_joint_gallery_setup },
 	{ "Ragdoll",      scene_ragdoll_setup },
+	{ "Trimesh Terrain", scene_trimesh_terrain_setup },
+	{ "Trimesh Stress",  scene_trimesh_stress_setup },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 

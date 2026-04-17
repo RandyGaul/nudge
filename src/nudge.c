@@ -8,6 +8,7 @@
 #include "quickhull.c"
 #include "bvh.c"
 #include "collision.c"
+#include "trimesh.c"
 #include "broadphase.c"
 #include "inertia.c"
 #include "solver_pgs.c"
@@ -381,6 +382,11 @@ static void np_work_fn(void* ctx, int start, int count)
 		ShapeInternal* s1 = &np->w->body_cold[p->b].shapes[0];
 		int ia = p->a, ib = p->b;
 		if (s0->type > s1->type || (s0->type == s1->type && ia > ib)) { int tmp = ia; ia = ib; ib = tmp; s0 = &np->w->body_cold[ia].shapes[0]; s1 = &np->w->body_cold[ib].shapes[0]; }
+		// Mesh pairs emit a variable number of manifolds (one per contacted
+		// triangle). They don't fit the one-slot-per-pair pre-allocation used
+		// by the lock-free merge below, so the main thread handles them after
+		// pool_dispatch via a sequential post-pass.
+		if (s0->type == SHAPE_MESH || s1->type == SHAPE_MESH) continue;
 		BodyState* bs0 = &np->w->body_state[ia];
 		BodyState* bs1 = &np->w->body_state[ib];
 		InternalManifold im = { .body_a = ia, .body_b = ib };
@@ -497,6 +503,15 @@ void world_step(World world, float dt)
 		NP_WorkCtx np_ctx = { .w = w, .pairs = np_pairs, .output = manifolds + existing, .next_slot = 0 };
 		pool_dispatch(np_work_fn, &np_ctx, asize(np_pairs), 32, n_workers);
 		asetlen(manifolds, existing + np_ctx.next_slot);
+		// Sequential post-pass for mesh pairs skipped by workers (they may
+		// emit more than one manifold each, breaking the lock-free slot
+		// scheme). Also runs the warm-cache and persistent-manifold path.
+		for (int i = 0; i < asize(np_pairs); i++) {
+			int a = np_pairs[i].a, b = np_pairs[i].b;
+			if (w->body_cold[a].shapes[0].type == SHAPE_MESH || w->body_cold[b].shapes[0].type == SHAPE_MESH) {
+				narrowphase_pair(w, a, b, &manifolds);
+			}
+		}
 	} else if (asize(np_pairs) > 0) {
 		for (int i = 0; i < asize(np_pairs); i++) {
 			narrowphase_pair(w, np_pairs[i].a, np_pairs[i].b, &manifolds);
@@ -1016,6 +1031,9 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	                    s.hull.scale = params.hull.scale; break;
 	case SHAPE_CYLINDER: s.cylinder.half_height = params.cylinder.half_height;
 	                     s.cylinder.radius = params.cylinder.radius; break;
+	case SHAPE_MESH:    assert(w->body_hot[idx].inv_mass == 0.0f && "SHAPE_MESH requires mass=0 (static body)");
+	                    assert(params.mesh.mesh && "SHAPE_MESH.mesh is NULL");
+	                    s.mesh.mesh = params.mesh.mesh; break;
 	}
 	apush(w->body_cold[idx].shapes, s);
 	if (params.type == SHAPE_CYLINDER && w->body_state[idx].angular_damping < 0.15f)
