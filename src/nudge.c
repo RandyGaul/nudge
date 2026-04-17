@@ -3,6 +3,14 @@
 
 #include "perf.h"
 #include "nudge_internal.h"
+
+// Forward declarations for the thread-pool dispatch primitives. The full
+// definitions live later in this TU; ldl per-island dispatch paths in
+// solver_ldl.c (included below) call pool_dispatch, so the typedef + decl
+// need to be visible before that include.
+typedef void (*WorkFn)(void* ctx, int start, int count);
+static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size, int n_workers);
+
 #include "gjk.c"
 #include "gjk_batch.c"
 #include "quickhull.c"
