@@ -1,33 +1,4 @@
-// joints.c -- joint constraint solvers (ball socket, distance, hinge)
-
-// Block K-matrix builder for JacobianRow arrays.
-// Accumulates one body's contribution to the packed symmetric K block:
-//   K[BTRI(r,c)] += J_r * M^{-1} * J_c  (for the given side: 0=A, 1=B).
-// Call twice (side=0, side=1) to get the full K = J M^{-1} J^T.
-static void block_K_body_f(const JacobianRow* rows, int dof, int side, const BodyHot* body, const BodyState* bs, float* K_packed)
-{
-	float im = body->inv_mass;
-	float W[6 * BLOCK_MAX_DOF]; // W[6][dof]: M^{-1} * J^T columns
-	for (int d = 0; d < dof; d++) {
-		const float* J = side ? rows[d].J_b : rows[d].J_a;
-		W[0*dof+d] = im * J[0];
-		W[1*dof+d] = im * J[1];
-		W[2*dof+d] = im * J[2];
-		v3 j_ang = V3(J[3], J[4], J[5]);
-		v3 w_ang = inv_inertia_mul(bs->rotation, bs->inv_inertia_local, j_ang);
-		W[3*dof+d] = w_ang.x;
-		W[4*dof+d] = w_ang.y;
-		W[5*dof+d] = w_ang.z;
-	}
-	for (int r = 0; r < dof; r++) {
-		const float* Jr = side ? rows[r].J_b : rows[r].J_a;
-		for (int c = 0; c <= r; c++) {
-			float sum = 0;
-			for (int k = 0; k < 6; k++) sum += Jr[k] * W[k*dof + c];
-			K_packed[BTRI(r, c)] += sum;
-		}
-	}
-}
+// joints.c -- joint constraint solvers (ball socket, distance, hinge, etc.)
 
 // Symmetric 3x3 stored as 6 floats: [xx, xy, xz, yy, yz, zz].
 static void sym3x3_inverse(const float* in, float* out)
