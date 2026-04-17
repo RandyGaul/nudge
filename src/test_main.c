@@ -184,6 +184,13 @@ int main(int argc, char* argv[])
 		bench_incremental_np(20, 8, 600);
 		return 0;
 	}
+	// --bench-trimesh: stress test on 25x25 terrain mesh with 49 mixed bodies,
+	// runs twice (SIMD on + off) and prints narrowphase ms per frame.
+	for (int ai = 1; ai < argc; ai++) {
+		if (strcmp(argv[ai], "--bench-trimesh") != 0) continue;
+		bench_trimesh_stress();
+		return 0;
+	}
 
 	if (bench_stack > 0) {
 		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };

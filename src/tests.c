@@ -12874,6 +12874,108 @@ static void bench_incremental_np(int base_2d, int base_3d, int frames)
 	printf("=================================================\n");
 }
 
+// Builds the same 25x25 terrain + 49 mixed bodies as scene_trimesh_stress
+// (without any rendering dependency) and measures per-frame narrowphase cost
+// both with and without the SIMD 4-triangle batch path enabled. All 49 bodies
+// contact the mesh simultaneously by frame ~60, so the measurement captures
+// steady-state narrowphase work under a representative load.
+static void bench_trimesh_stress_run(int simd_enabled, int frames)
+{
+	#define N 25
+	#define EXTENT 12.0f
+	v3 verts[N * N];
+	for (int z = 0; z < N; z++) {
+		for (int x = 0; x < N; x++) {
+			float fx = ((float)x / (N - 1)) * 2.0f - 1.0f;
+			float fz = ((float)z / (N - 1)) * 2.0f - 1.0f;
+			float px = fx * EXTENT;
+			float pz = fz * EXTENT;
+			float py = 0.4f * sinf(px * 0.6f) * cosf(pz * 0.6f)
+			         + 0.2f * sinf(px * 1.7f + pz * 1.3f);
+			verts[z * N + x] = V3(px, py, pz);
+		}
+	}
+	uint32_t indices[(N - 1) * (N - 1) * 6];
+	int ti = 0;
+	for (int z = 0; z < N - 1; z++) {
+		for (int x = 0; x < N - 1; x++) {
+			int i00 = z * N + x, i10 = i00 + 1, i01 = i00 + N, i11 = i01 + 1;
+			indices[ti++] = i00; indices[ti++] = i01; indices[ti++] = i10;
+			indices[ti++] = i10; indices[ti++] = i01; indices[ti++] = i11;
+		}
+	}
+	TriMesh* mesh = trimesh_create(verts, N * N, indices, (N - 1) * (N - 1) * 2);
+
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = 2, .velocity_iters = 8 };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+	wi->trimesh_simd_enabled = simd_enabled;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
+
+	// 7x7 = 49 mixed-shape bodies.
+	int grid = 7;
+	float spacing = 1.3f;
+	float x0 = -(spacing * (grid - 1)) * 0.5f;
+	float z0 = x0;
+	int idx = 0;
+	Hull* test_hull = NULL;
+	{
+		v3 pts[6] = { V3(0.5f,0,0), V3(-0.5f,0,0), V3(0,0.5f,0), V3(0,-0.5f,0), V3(0,0,0.5f), V3(0,0,-0.5f) };
+		test_hull = quickhull(pts, 6);
+	}
+	for (int gz = 0; gz < grid; gz++) {
+		for (int gx = 0; gx < grid; gx++) {
+			float px = x0 + gx * spacing + 0.1f * sinf((float)(gz * 7 + gx));
+			float pz = z0 + gz * spacing + 0.1f * cosf((float)(gz * 5 + gx * 3));
+			float py = 4.0f + 0.3f * (float)((gx + gz) % 3);
+			Body b = create_body(w, (BodyParams){ .position = V3(px, py, pz), .rotation = quat_identity(), .mass = 1.0f, .friction = 0.6f });
+			switch (idx % 5) {
+				case 0: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f }); break;
+				case 1: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) }); break;
+				case 2: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.4f, .radius = 0.25f } }); break;
+				case 3: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = test_hull, .scale = V3(1, 1, 1) } }); break;
+				case 4: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_CYLINDER, .cylinder = { .half_height = 0.35f, .radius = 0.25f } }); break;
+			}
+			idx++;
+		}
+	}
+
+	// Warmup: settle the pile for ~60 frames before timing.
+	float dt = 1.0f / 60.0f;
+	for (int f = 0; f < 60; f++) world_step(w, dt);
+
+	// Measurement phase.
+	double acc_total = 0, acc_bp = 0;
+	for (int f = 0; f < frames; f++) {
+		world_step(w, dt);
+		PerfTimers t = world_get_perf(w);
+		acc_total += t.total;
+		acc_bp += t.broadphase;
+	}
+	double n = (double)frames;
+	printf("  SIMD=%-3s   total=%7.3f ms/frame   broadphase+NP=%7.3f ms/frame\n",
+		simd_enabled ? "ON" : "OFF",
+		acc_total / n * 1000.0,
+		acc_bp / n * 1000.0);
+
+	destroy_world(w);
+	trimesh_free(mesh);
+	hull_free(test_hull);
+	#undef N
+	#undef EXTENT
+}
+
+static void bench_trimesh_stress()
+{
+	printf("=== Trimesh stress A/B (25x25 mesh, 49 bodies, 300 frames, 2 substeps) ===\n");
+	bench_trimesh_stress_run(0, 300);
+	bench_trimesh_stress_run(1, 300);
+	printf("==========================================================================\n");
+}
+
 // Run bench_box_pile at multiple scales for scaling analysis.
 // Simple deterministic RNG for benchmark reproducibility.
 static uint32_t bench_rng_state = 12345;

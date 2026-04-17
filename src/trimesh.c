@@ -1042,22 +1042,24 @@ static void collide_box_mesh_emit(WorldInternal* w, int body_a, int body_b, Box 
 	}
 
 	int i = 0;
-	// SIMD batch: 4 triangles at a time.
-	for (; i + 4 <= n; i += 4) {
-		TriNeighbor ctx[4];
-		trimesh_load_ctx(mesh, cands[i + 0], &ctx[0]);
-		trimesh_load_ctx(mesh, cands[i + 1], &ctx[1]);
-		trimesh_load_ctx(mesh, cands[i + 2], &ctx[2]);
-		trimesh_load_ctx(mesh, cands[i + 3], &ctx[3]);
-		Manifold mfs[4];
-		int hit = collide_samples_tris_batch4(corners, 8, 0.0f, ctx, mfs);
-		if (!hit) continue;
-		for (int lane = 0; lane < 4; lane++) {
-			if (!(hit & (1 << lane))) continue;
-			trimesh_push_box_manifold(w, body_a, body_b, cands[i + lane], &mfs[lane], mesh_pos, mesh_rot, manifolds);
+	// SIMD batch: 4 triangles at a time (gated for perf comparison).
+	if (w->trimesh_simd_enabled) {
+		for (; i + 4 <= n; i += 4) {
+			TriNeighbor ctx[4];
+			trimesh_load_ctx(mesh, cands[i + 0], &ctx[0]);
+			trimesh_load_ctx(mesh, cands[i + 1], &ctx[1]);
+			trimesh_load_ctx(mesh, cands[i + 2], &ctx[2]);
+			trimesh_load_ctx(mesh, cands[i + 3], &ctx[3]);
+			Manifold mfs[4];
+			int hit = collide_samples_tris_batch4(corners, 8, 0.0f, ctx, mfs);
+			if (!hit) continue;
+			for (int lane = 0; lane < 4; lane++) {
+				if (!(hit & (1 << lane))) continue;
+				trimesh_push_box_manifold(w, body_a, body_b, cands[i + lane], &mfs[lane], mesh_pos, mesh_rot, manifolds);
+			}
 		}
 	}
-	// Scalar tail.
+	// Scalar tail (also handles everything when SIMD is disabled).
 	for (; i < n; i++) {
 		int t = cands[i];
 		TriNeighbor ctx;
@@ -1104,18 +1106,20 @@ static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, Con
 	int n = asize(cands);
 
 	int i = 0;
-	for (; i + 4 <= n; i += 4) {
-		TriNeighbor ctx[4];
-		trimesh_load_ctx(mesh, cands[i + 0], &ctx[0]);
-		trimesh_load_ctx(mesh, cands[i + 1], &ctx[1]);
-		trimesh_load_ctx(mesh, cands[i + 2], &ctx[2]);
-		trimesh_load_ctx(mesh, cands[i + 3], &ctx[3]);
-		Manifold mfs[4];
-		int hit = collide_samples_tris_batch4(samples, vn, 0.0f, ctx, mfs);
-		if (!hit) continue;
-		for (int lane = 0; lane < 4; lane++) {
-			if (!(hit & (1 << lane))) continue;
-			trimesh_push_box_manifold(w, body_a, body_b, cands[i + lane], &mfs[lane], mesh_pos, mesh_rot, manifolds);
+	if (w->trimesh_simd_enabled) {
+		for (; i + 4 <= n; i += 4) {
+			TriNeighbor ctx[4];
+			trimesh_load_ctx(mesh, cands[i + 0], &ctx[0]);
+			trimesh_load_ctx(mesh, cands[i + 1], &ctx[1]);
+			trimesh_load_ctx(mesh, cands[i + 2], &ctx[2]);
+			trimesh_load_ctx(mesh, cands[i + 3], &ctx[3]);
+			Manifold mfs[4];
+			int hit = collide_samples_tris_batch4(samples, vn, 0.0f, ctx, mfs);
+			if (!hit) continue;
+			for (int lane = 0; lane < 4; lane++) {
+				if (!(hit & (1 << lane))) continue;
+				trimesh_push_box_manifold(w, body_a, body_b, cands[i + lane], &mfs[lane], mesh_pos, mesh_rot, manifolds);
+			}
 		}
 	}
 	for (; i < n; i++) {
@@ -1165,18 +1169,20 @@ static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b,
 	int n = asize(cands);
 
 	int i = 0;
-	for (; i + 4 <= n; i += 4) {
-		TriNeighbor ctx[4];
-		trimesh_load_ctx(mesh, cands[i + 0], &ctx[0]);
-		trimesh_load_ctx(mesh, cands[i + 1], &ctx[1]);
-		trimesh_load_ctx(mesh, cands[i + 2], &ctx[2]);
-		trimesh_load_ctx(mesh, cands[i + 3], &ctx[3]);
-		Manifold mfs[4];
-		int hit = collide_samples_tris_batch4(samples, 8, 0.0f, ctx, mfs);
-		if (!hit) continue;
-		for (int lane = 0; lane < 4; lane++) {
-			if (!(hit & (1 << lane))) continue;
-			trimesh_push_box_manifold(w, body_a, body_b, cands[i + lane], &mfs[lane], mesh_pos, mesh_rot, manifolds);
+	if (w->trimesh_simd_enabled) {
+		for (; i + 4 <= n; i += 4) {
+			TriNeighbor ctx[4];
+			trimesh_load_ctx(mesh, cands[i + 0], &ctx[0]);
+			trimesh_load_ctx(mesh, cands[i + 1], &ctx[1]);
+			trimesh_load_ctx(mesh, cands[i + 2], &ctx[2]);
+			trimesh_load_ctx(mesh, cands[i + 3], &ctx[3]);
+			Manifold mfs[4];
+			int hit = collide_samples_tris_batch4(samples, 8, 0.0f, ctx, mfs);
+			if (!hit) continue;
+			for (int lane = 0; lane < 4; lane++) {
+				if (!(hit & (1 << lane))) continue;
+				trimesh_push_box_manifold(w, body_a, body_b, cands[i + lane], &mfs[lane], mesh_pos, mesh_rot, manifolds);
+			}
 		}
 	}
 	for (; i < n; i++) {
@@ -1212,27 +1218,29 @@ static void collide_capsule_mesh_emit(WorldInternal* w, int body_a, int body_b, 
 	int n = asize(cands);
 
 	int i = 0;
-	for (; i + 4 <= n; i += 4) {
-		TriNeighbor ctx[4];
-		trimesh_load_ctx(mesh, cands[i + 0], &ctx[0]);
-		trimesh_load_ctx(mesh, cands[i + 1], &ctx[1]);
-		trimesh_load_ctx(mesh, cands[i + 2], &ctx[2]);
-		trimesh_load_ctx(mesh, cands[i + 3], &ctx[3]);
-		Manifold mfs[4];
-		int hit = collide_samples_tris_batch4(samples, 2, rad, ctx, mfs);
-		// Missing-lane fallback: for any lane that didn't hit via endpoint
-		// sampling, try the scalar single-contact path (mid-segment edge case).
-		for (int lane = 0; lane < 4; lane++) {
-			if (hit & (1 << lane)) {
-				trimesh_push_box_manifold(w, body_a, body_b, cands[i + lane], &mfs[lane], mesh_pos, mesh_rot, manifolds);
-				continue;
+	if (w->trimesh_simd_enabled) {
+		for (; i + 4 <= n; i += 4) {
+			TriNeighbor ctx[4];
+			trimesh_load_ctx(mesh, cands[i + 0], &ctx[0]);
+			trimesh_load_ctx(mesh, cands[i + 1], &ctx[1]);
+			trimesh_load_ctx(mesh, cands[i + 2], &ctx[2]);
+			trimesh_load_ctx(mesh, cands[i + 3], &ctx[3]);
+			Manifold mfs[4];
+			int hit = collide_samples_tris_batch4(samples, 2, rad, ctx, mfs);
+			// Missing-lane fallback: for any lane that didn't hit via endpoint
+			// sampling, try the scalar single-contact path (mid-segment edge case).
+			for (int lane = 0; lane < 4; lane++) {
+				if (hit & (1 << lane)) {
+					trimesh_push_box_manifold(w, body_a, body_b, cands[i + lane], &mfs[lane], mesh_pos, mesh_rot, manifolds);
+					continue;
+				}
+				Manifold m = {0};
+				Contact c;
+				if (!collide_capsule_triangle_ctx(lp, lq, rad, &ctx[lane], &c)) continue;
+				m.contacts[0] = c;
+				m.count = 1;
+				trimesh_push_box_manifold(w, body_a, body_b, cands[i + lane], &m, mesh_pos, mesh_rot, manifolds);
 			}
-			Manifold m = {0};
-			Contact c;
-			if (!collide_capsule_triangle_ctx(lp, lq, rad, &ctx[lane], &c)) continue;
-			m.contacts[0] = c;
-			m.count = 1;
-			trimesh_push_box_manifold(w, body_a, body_b, cands[i + lane], &m, mesh_pos, mesh_rot, manifolds);
 		}
 	}
 	for (; i < n; i++) {

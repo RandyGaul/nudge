@@ -375,6 +375,7 @@ typedef struct WorldInternal
 	int box_use_hull;          // 1 = route box-box through hull-hull path (debug)
 	int incremental_np_enabled; // 1 = incremental narrowphase (cached feature pair refresh)
 	int warm_start_enabled;    // 1 = warm-start contact impulses from cache
+	int trimesh_simd_enabled;  // 1 = SIMD 4-triangle batch in convex-mesh pair routines (0 = scalar)
 	// Native cylinder narrowphase toggles (0 = route through hull-backed fallback).
 	// Flipped on per-pair as native routines land; default 0 until Phase 6 cleanup.
 	int cyl_native_sphere;
