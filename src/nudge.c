@@ -8,8 +8,8 @@
 #include "quickhull.c"
 #include "bvh.c"
 #include "collision.c"
-#include "epa.c"
 #include "broadphase.c"
+#include "epa.c"
 #include "inertia.c"
 #include "solver_pgs.c"
 #include "joints.c"
@@ -258,6 +258,60 @@ static void pgs_work_fn(void* ctx, int start, int count)
 				p->sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
 				for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < p->sm[mi].contact_count; cp2++) {
 					p->sc[p->sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
+				}
+			}
+		}
+	}
+}
+
+// --- Per-island PGS work function (parallel island dispatch) ---
+// Each worker claims a contiguous range of SolveIslands and runs the full
+// velocity_iters x color_count x batch pipeline for each, end-to-end. Islands
+// have disjoint bodies, manifolds, and joints, so per-body and per-manifold
+// writes are non-overlapping across workers; within a color, graph coloring
+// guarantees disjoint body writes across batches.
+typedef struct IslandSolveCtx
+{
+	WorldInternal* w;
+	SolveIsland* solve_islands;
+	ConstraintRef* crefs;
+	SolverManifold* sm;
+	SolverContact* sc;
+	SolverJoint* sol_joints;
+	PGS_Batch4* simd_batches;
+	int velocity_iters;
+} IslandSolveCtx;
+
+static void island_solve_work_fn(void* ctx, int start, int count)
+{
+	IslandSolveCtx* ic = (IslandSolveCtx*)ctx;
+	WorldInternal* w = ic->w;
+	int last_iter = ic->velocity_iters - 1;
+	for (int idx = start; idx < start + count; idx++) {
+		SolveIsland* island = &ic->solve_islands[idx];
+		for (int iter = 0; iter <= last_iter; iter++) {
+			int do_scatter = (iter == last_iter);
+			for (int c = 0; c < island->color_count; c++) {
+				int bs = island->simd_batch_start + island->simd_color_batch_starts[c];
+				int be = island->simd_batch_start + island->simd_color_batch_starts[c + 1];
+				for (int bi = bs; bi < be; bi++) {
+					solve_contact_batch4_sv(w->body_hot, &ic->simd_batches[bi]);
+					if (do_scatter) {
+						PGS_Batch4* bt = &ic->simd_batches[bi];
+						for (int j = 0; j < bt->lane_count; j++) {
+							int mi = bt->manifold_idx[j];
+							ic->sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
+							ic->sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
+							ic->sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
+							for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < ic->sm[mi].contact_count; cp2++) {
+								ic->sc[ic->sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
+							}
+						}
+					}
+				}
+				// Scalar joint solves for this color in this island.
+				for (int i = island->contact_end[c]; i < island->batch_starts[c + 1]; i++) {
+					solve_joint(w, &ic->sol_joints[ic->crefs[i].index]);
 				}
 			}
 		}
@@ -860,56 +914,29 @@ void world_step(World world, float dt)
 			}
 		}
 
-		// PGS iter loop: outer iter, then per-island, then per-color.
-		// Islands have disjoint bodies, so order across islands within an
-		// iteration doesn't affect physics (body state reads/writes for
-		// island A are never touched by island B's color-c update). Within
-		// an island, color order is preserved (color 0 updates propagate to
-		// color 1 via body state, etc.), which is what PGS depends on.
+		// PGS: dispatch islands across workers. Each worker runs the full
+		// velocity_iters x color_count x batch pipeline for its island(s)
+		// end-to-end. Islands have disjoint bodies / manifolds / joints, so
+		// per-body writes and per-manifold scatters don't overlap across
+		// workers; within a color, graph coloring guarantees disjoint body
+		// writes across batches.
 		//
-		// Last iteration fuses lambda scatter (batch -> sm/sc) into solve.
-		int last_iter = w->velocity_iters - 1;
-		for (int iter = 0; iter <= last_iter; iter++) {
-			int do_scatter = (iter == last_iter);
-			for (int sii = 0; sii < solve_island_count; sii++) {
-				SolveIsland* island = &solve_islands[sii];
-				for (int c = 0; c < island->color_count; c++) {
-					int bs = island->simd_batch_start + island->simd_color_batch_starts[c];
-					int be = island->simd_batch_start + island->simd_color_batch_starts[c + 1];
-					int n_color_batches = be - bs;
+		// Per-body update sequence is identical to a serial outer-iter /
+		// inner-island / inner-color loop (and to the pre-phase-2 code) for
+		// bodies within a single island, because island-B's work never
+		// touches island-A's bodies. Bit-identical across worker counts.
+		IslandSolveCtx island_ctx = {
+			.w = w, .solve_islands = solve_islands, .crefs = crefs,
+			.sm = sm, .sc = sc, .sol_joints = sol_joints,
+			.simd_batches = simd_batches, .velocity_iters = w->velocity_iters,
+		};
 #ifdef _WIN32
-					if (n_workers > 1 && n_color_batches >= n_workers * 2) {
-						PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs, .sm = sm, .sc = sc, .scatter = do_scatter };
-						pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
-					} else
+		if (n_workers > 1 && solve_island_count >= 2) {
+			pool_dispatch(island_solve_work_fn, &island_ctx, solve_island_count, 1, n_workers);
+		} else
 #endif
-					{
-						for (int bi = bs; bi < be; bi++) {
-							solve_contact_batch4_sv(w->body_hot, &simd_batches[bi]);
-							if (do_scatter) {
-								PGS_Batch4* bt = &simd_batches[bi];
-								for (int j = 0; j < bt->lane_count; j++) {
-									int mi = bt->manifold_idx[j];
-									sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
-									sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
-									sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
-									for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
-										sc[sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
-									}
-								}
-							}
-						}
-					}
-					// Scalar joint solves for this color in this island.
-					// Graph coloring guarantees no body conflicts with this color's contacts.
-					for (int i = island->contact_end[c]; i < island->batch_starts[c + 1]; i++) {
-						solve_joint(w, &sol_joints[crefs[i].index]);
-					}
-				}
-			}
-			// All joints are now either in crefs (solve_joint handles all DOFs
-			// incl. bounded) or in LDL (bilateral only, no bounded DOFs); no
-			// separate joint-limit pass is needed.
+		if (solve_island_count > 0) {
+			island_solve_work_fn(&island_ctx, 0, solve_island_count);
 		}
 #else
 #error "SIMD_SSE required: non-SSE solver path removed; add a SIMD_NEON backend if needed"
