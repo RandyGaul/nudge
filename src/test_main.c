@@ -33,6 +33,17 @@ int main(int argc, char* argv[])
 	setvbuf(stdout, NULL, _IONBF, 0);
 	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--debug-epa") == 0) { debug_epa(); return 0; }
 	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--bench-epa") == 0) { bench_epa_vs_sat(); return 0; }
+	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--bench-epa-scenes") == 0) { bench_epa_scenes(); return 0; }
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--fuzz-epa") == 0 && i + 1 < argc) {
+			int n = atoi(argv[i + 1]);
+			test_pass = 0; test_fail = 0;
+			printf("--- epa fuzz (%d iterations per pair) ---\n", n);
+			test_epa_fuzz(n);
+			printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
+			return test_fail > 0 ? 1 : 0;
+		}
+	}
 	int fuzz_iters = 0;
 	int soak = 0;
 	int bench_stack = 0;

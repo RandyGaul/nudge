@@ -119,6 +119,24 @@ typedef struct Hull
 	float maxoutside;   // max distance any vertex was widened beyond Newell plane
 } Hull;
 
+// Compact hull variant -- uint8_t indices, single heap block, no SoA or HullFace.
+// Caps: vert_count, edge_count, face_count all <= 256.
+// Twin is implicit: twin(i) = i ^ 1 (edges stored in pair-adjacent slots).
+// Built via hull_to_hull8(); returns NULL if the source exceeds any cap.
+typedef struct Hull8
+{
+	v3 centroid;
+	const v3*        verts;       // [vert_count]
+	const uint8_t*   edge_next;   // [edge_count] (twin implicit: i ^ 1)
+	const uint8_t*   edge_origin; // [edge_count]
+	const uint8_t*   edge_face;   // [edge_count]
+	const uint8_t*   face_edge;   // [face_count] first half-edge per face
+	const HullPlane* planes;      // [face_count]
+	int vert_count;
+	int edge_count;  // always even (twin pairs)
+	int face_count;
+} Hull8;
+
 // Positioned hull for collision queries.
 typedef struct ConvexHull
 {
@@ -194,6 +212,12 @@ const Hull* hull_unit_box();
 Hull* quickhull(const v3* points, int count);
 void hull_free(Hull* hull);
 
+// Compact Hull8 converter. Returns NULL if src exceeds any uint8 cap
+// (V/E/F > 256) or if src has inconsistent twin topology. The resulting
+// Hull8 is a single heap block; free with hull8_free().
+Hull8* hull_to_hull8(const Hull* src);
+void hull8_free(Hull8* h);
+
 // -----------------------------------------------------------------------------
 // Body params for world API.
 
@@ -232,6 +256,15 @@ typedef struct BodyParams
 
 typedef enum BroadphaseType { BROADPHASE_N2, BROADPHASE_BVH } BroadphaseType;
 
+// Narrowphase backend choice. Default SAT produces one-shot 4-contact manifolds
+// with feature-ID warm cache. GJK+EPA produces a single contact per frame and
+// accumulates contacts via an incremental per-pair manifold (see EpaManifold).
+typedef enum NarrowphaseBackend
+{
+	NARROWPHASE_SAT,
+	NARROWPHASE_GJK_EPA,
+} NarrowphaseBackend;
+
 typedef enum SolverType
 {
 	SOLVER_SOFT_STEP,  // soft contacts, relax each substep (default)
@@ -243,6 +276,7 @@ typedef struct WorldParams
 {
 	v3 gravity;
 	BroadphaseType broadphase;
+	NarrowphaseBackend narrowphase_backend; // default NARROWPHASE_SAT
 	SolverType solver_type;
 	int velocity_iters;  // 0 = default (10)
 	int position_iters;  // 0 = default (4)
@@ -282,6 +316,19 @@ void body_set_sleep_allowed(World world, Body body, int allowed);  // per-body o
 
 // Debug: contact points from last step. Returns count, *out valid until next step.
 int world_get_contacts(World world, const Contact** out);
+
+// Per-frame EPA narrowphase stats. Reset at the top of each world_step.
+// Only populated when narrowphase_backend == NARROWPHASE_GJK_EPA.
+typedef struct WorldEpaStats
+{
+	int queries;
+	int iter_cap_hits;
+	int total_iters;
+	int warm_reseeds;
+	int contacts_emitted;
+	int pair_count;
+} WorldEpaStats;
+WorldEpaStats world_get_epa_stats(World world);
 
 // -----------------------------------------------------------------------------
 // World queries.

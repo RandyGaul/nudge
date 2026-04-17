@@ -97,26 +97,60 @@ public static class VisualScenes
 		}
 	}
 
-	public static void SphereDrop(EngineSlot slot)
+	// Classic desk-toy Newton's cradle: 5 heavy spheres hanging from a top bar
+	// via paired cables (V-suspension so they swing only in X-Y plane). Leftmost
+	// ball is pulled back to start the sequential momentum transfer.
+	public static void NewtonsCradle(EngineSlot slot)
 	{
 		AddGround(slot);
-		int n = 8;
-		float spacing = 1.5f;
-		float startX = -(n - 1) * spacing * 0.5f;
-		for (int x = 0; x < n; x++)
+
+		const int nBalls = 5;
+		const float ballR = 0.45f;
+		const float spacing = ballR * 2.02f;
+		const float stringLen = 4.5f;
+		const float zOffset = 1.0f;
+		const float topBarY = 10f;
+
+		int topBar = slot.AddBody(new BodyDesc
 		{
-			for (int z = 0; z < n; z++)
+			Shape = ShapeType.Box,
+			PosX = 0, PosY = topBarY, PosZ = 0,
+			HalfExtentX = (nBalls - 1) * spacing * 0.5f + 0.5f,
+			HalfExtentY = 0.2f,
+			HalfExtentZ = zOffset + 0.2f,
+			Mass = 0, Friction = 0.5f,
+		});
+
+		float cableLen = MathF.Sqrt(stringLen * stringLen + zOffset * zOffset);
+
+		for (int i = 0; i < nBalls; i++)
+		{
+			float anchorX = (i - (nBalls - 1) * 0.5f) * spacing;
+			float px, py;
+			if (i == 0)
 			{
-				slot.AddBody(new BodyDesc
-				{
-					Shape = ShapeType.Sphere,
-					PosX = startX + x * spacing,
-					PosY = 5 + (x * n + z) * 0.2f,
-					PosZ = startX + z * spacing,
-					Radius = 0.5f,
-					Mass = 1, Friction = 0.3f, Restitution = 0.6f,
-				});
+				// Pull leftmost ball back ~60 degrees from vertical to start the cascade.
+				float theta = -1.05f;
+				px = anchorX + stringLen * MathF.Sin(theta);
+				py = topBarY - stringLen * MathF.Cos(theta);
 			}
+			else
+			{
+				px = anchorX;
+				py = topBarY - stringLen;
+			}
+
+			int ball = slot.AddBody(new BodyDesc
+			{
+				Shape = ShapeType.Sphere,
+				PosX = px, PosY = py, PosZ = 0,
+				Radius = ballR,
+				Mass = 2, Friction = 0.05f, Restitution = 0.95f,
+			});
+
+			// V-shaped paired cables from top bar to ball (two anchors at ±zOffset).
+			slot.Adapter.AddDistanceJoint(topBar, ball, anchorX, 0, +zOffset, 0, ballR, 0, cableLen);
+			slot.Adapter.AddDistanceJoint(topBar, ball, anchorX, 0, -zOffset, 0, ballR, 0, cableLen);
 		}
 	}
 
@@ -178,312 +212,225 @@ public static class VisualScenes
 
 	// ---- New scenes ----
 
-	public static void FrictionRamp(EngineSlot slot)
-	{
-		AddGround(slot);
-
-		// Ramp tilted 25 degrees around Z (left side high, right side low)
-		float halfAngle = 12.5f * MathF.PI / 180f;
-		slot.AddBody(new BodyDesc
-		{
-			Shape = ShapeType.Box,
-			PosX = 0, PosY = 3.5f, PosZ = 0,
-			RotZ = -MathF.Sin(halfAngle), RotW = MathF.Cos(halfAngle),
-			HalfExtentX = 8, HalfExtentY = 0.25f, HalfExtentZ = 5,
-			Mass = 0, Friction = 0.5f,
-		});
-
-		// 5 objects at top of ramp with different friction values
-		float[] frictions = { 0.0f, 0.1f, 0.3f, 0.5f, 1.0f };
-		for (int i = 0; i < frictions.Length; i++)
-		{
-			float z = -3.0f + i * 1.5f;
-			slot.AddBody(new BodyDesc
-			{
-				Shape = ShapeType.Box,
-				PosX = -5, PosY = 6.5f, PosZ = z,
-				HalfExtentX = 0.4f, HalfExtentY = 0.4f, HalfExtentZ = 0.4f,
-				Mass = 1, Friction = frictions[i],
-			});
-		}
-
-		// A few spheres too (different shape, same friction spread)
-		for (int i = 0; i < frictions.Length; i++)
-		{
-			float z = -3.0f + i * 1.5f;
-			slot.AddBody(new BodyDesc
-			{
-				Shape = ShapeType.Sphere,
-				PosX = -3.5f, PosY = 6.0f, PosZ = z,
-				Radius = 0.35f,
-				Mass = 1, Friction = frictions[i],
-			});
-		}
-	}
-
+	// Pendulum chain with a heavy bob, hurled at a tall box wall it actually
+	// demolishes. Starts displaced AND with tangential velocity so the bob
+	// reaches the wall with real momentum.
 	public static void PendulumChain(EngineSlot slot)
 	{
 		AddGround(slot);
 
-		// Static anchor at the top
+		// Geometry check: chain total length = (linkCount+1)*spacing = 9.
+		// Anchor at (-1, 11) puts the bottom of the arc at (-1, 2) (above ground)
+		// and the +θ reach touches the wall's front face (x=5.5) at y≈4.8.
+		const float anchorY = 11f;
+		const float anchorX = -1f;
+		const int linkCount = 8;
+		const float spacing = 1.0f;
+
 		int anchor = slot.AddBody(new BodyDesc
 		{
 			Shape = ShapeType.Box,
-			PosX = 0, PosY = 12, PosZ = 0,
+			PosX = anchorX, PosY = anchorY, PosZ = 0,
 			HalfExtentX = 0.3f, HalfExtentY = 0.3f, HalfExtentZ = 0.3f,
 			Mass = 0, Friction = 0.5f,
 		});
 
-		// Chain of 8 small spheres
-		float spacing = 1.0f;
-		int linkCount = 8;
+		// Chain begins displaced ~45 degrees to the LEFT (so it swings down and right into the wall).
+		const float launchAngle = -0.8f; // radians, negative = displaced -x side
 		int[] links = new int[linkCount];
 		for (int i = 0; i < linkCount; i++)
 		{
+			float t = (i + 1) * spacing;
 			links[i] = slot.AddBody(new BodyDesc
 			{
 				Shape = ShapeType.Sphere,
-				PosX = 0, PosY = 12 - (i + 1) * spacing, PosZ = 0,
-				Radius = 0.2f,
-				Mass = 0.5f, Friction = 0.3f,
+				PosX = anchorX + t * MathF.Sin(launchAngle),
+				PosY = anchorY - t * MathF.Cos(launchAngle),
+				PosZ = 0,
+				Radius = 0.22f,
+				Mass = 1.0f, Friction = 0.3f,
 			});
 		}
 
-		// Heavy wrecking ball at the end
+		float tBall = (linkCount + 1) * spacing;
 		int ball = slot.AddBody(new BodyDesc
 		{
 			Shape = ShapeType.Sphere,
-			PosX = 0, PosY = 12 - (linkCount + 1) * spacing, PosZ = 0,
-			Radius = 0.7f,
-			Mass = 12, Friction = 0.3f,
+			PosX = anchorX + tBall * MathF.Sin(launchAngle),
+			PosY = anchorY - tBall * MathF.Cos(launchAngle),
+			PosZ = 0,
+			Radius = 0.9f,
+			Mass = 60f, Friction = 0.4f,
 		});
 
-		// Distance joints: anchor -> link0 -> link1 -> ... -> ball
 		slot.Adapter.AddDistanceJoint(anchor, links[0], 0, 0, 0, 0, 0, 0, spacing);
 		for (int i = 0; i < linkCount - 1; i++)
 			slot.Adapter.AddDistanceJoint(links[i], links[i + 1], 0, 0, 0, 0, 0, 0, spacing);
 		slot.Adapter.AddDistanceJoint(links[linkCount - 1], ball, 0, 0, 0, 0, 0, 0, spacing);
 
-		// Swing the whole chain to the right
-		foreach (int link in links)
-			slot.Adapter.SetVelocity(link, 12, 0, 0);
-		slot.Adapter.SetVelocity(ball, 12, 0, 0);
-
-		// Target wall for the pendulum to smash
-		for (int r = 0; r < 5; r++)
-			for (int c = 0; c < 3; c++)
-				slot.AddBody(new BodyDesc
-				{
-					Shape = ShapeType.Box,
-					PosX = 7, PosY = 0.5f + r, PosZ = -1 + c,
-					HalfExtentX = 0.5f, HalfExtentY = 0.5f, HalfExtentZ = 0.5f,
-					Mass = 1, Friction = 0.5f,
-				});
+		// Target wall: 8 tall × 3 deep × 5 wide — dense enough to feel the hit.
+		const float wallX = 6f;
+		for (int r = 0; r < 8; r++)
+			for (int cz = 0; cz < 3; cz++)
+				for (int cy = 0; cy < 2; cy++)
+					slot.AddBody(new BodyDesc
+					{
+						Shape = ShapeType.Box,
+						PosX = wallX + cy * 1.0f, PosY = 0.5f + r, PosZ = (cz - 1) * 1.0f,
+						HalfExtentX = 0.5f, HalfExtentY = 0.5f, HalfExtentZ = 0.5f,
+						Mass = 1, Friction = 0.5f,
+					});
 	}
 
-	public static void ShapeAvalanche(EngineSlot slot)
+	// Plank suspension bridge between two towers. Each pair of adjacent planks
+	// is connected by 2 short cables at the front and back edges (so the planks
+	// can't twist apart). Heavy balls dropped onto it stress the chain.
+	public static void SuspensionBridge(EngineSlot slot)
 	{
 		AddGround(slot);
 
-		// Staircase of platforms at descending heights
-		slot.AddBody(new BodyDesc
+		// Bigger gap + lighter planks keep the distance joints in their stable
+		// regime. Tiny rest lengths with heavy masses cause wild oscillation.
+		const int nPlanks = 10;
+		const float plankHX = 0.5f, plankHY = 0.15f, plankHZ = 1.5f;
+		const float gap = 0.2f;
+		const float plankSpacing = plankHX * 2 + gap;
+		const float bridgeY = 6f;
+		const float towerHalfH = bridgeY * 0.5f;
+
+		float bridgeHalfLen = nPlanks * plankSpacing * 0.5f;
+		float leftTowerX = -bridgeHalfLen - 0.4f;
+		float rightTowerX = +bridgeHalfLen + 0.4f;
+
+		int leftTower = slot.AddBody(new BodyDesc
 		{
 			Shape = ShapeType.Box,
-			PosX = -7, PosY = 6, PosZ = 0,
-			HalfExtentX = 3, HalfExtentY = 0.25f, HalfExtentZ = 5,
-			Mass = 0, Friction = 0.4f,
+			PosX = leftTowerX, PosY = towerHalfH, PosZ = 0,
+			HalfExtentX = 0.4f, HalfExtentY = towerHalfH, HalfExtentZ = plankHZ + 0.3f,
+			Mass = 0, Friction = 0.5f,
 		});
-		slot.AddBody(new BodyDesc
+		int rightTower = slot.AddBody(new BodyDesc
 		{
 			Shape = ShapeType.Box,
-			PosX = -2, PosY = 4, PosZ = 0,
-			HalfExtentX = 3, HalfExtentY = 0.25f, HalfExtentZ = 5,
-			Mass = 0, Friction = 0.4f,
-		});
-		slot.AddBody(new BodyDesc
-		{
-			Shape = ShapeType.Box,
-			PosX = 3, PosY = 2, PosZ = 0,
-			HalfExtentX = 3, HalfExtentY = 0.25f, HalfExtentZ = 5,
-			Mass = 0, Friction = 0.4f,
+			PosX = rightTowerX, PosY = towerHalfH, PosZ = 0,
+			HalfExtentX = 0.4f, HalfExtentY = towerHalfH, HalfExtentZ = plankHZ + 0.3f,
+			Mass = 0, Friction = 0.5f,
 		});
 
-		// Drop mixed shapes onto the top platform
-		int idx = 0;
-		for (int x = 0; x < 3; x++)
+		int[] planks = new int[nPlanks];
+		for (int i = 0; i < nPlanks; i++)
 		{
-			for (int z = 0; z < 3; z++)
+			float x = -bridgeHalfLen + plankSpacing * (i + 0.5f);
+			planks[i] = slot.AddBody(new BodyDesc
 			{
-				float px = -8.0f + x * 1.0f;
-				float pz = -2.0f + z * 2.0f;
-
-				// Boxes
-				slot.AddBody(new BodyDesc
-				{
-					Shape = ShapeType.Box,
-					PosX = px, PosY = 8 + idx * 0.6f, PosZ = pz,
-					HalfExtentX = 0.3f, HalfExtentY = 0.3f, HalfExtentZ = 0.3f,
-					Mass = 1, Friction = 0.4f,
-				});
-
-				// Spheres (offset slightly)
-				slot.AddBody(new BodyDesc
-				{
-					Shape = ShapeType.Sphere,
-					PosX = px + 0.5f, PosY = 9 + idx * 0.6f, PosZ = pz,
-					Radius = 0.3f,
-					Mass = 1, Friction = 0.3f, Restitution = 0.3f,
-				});
-
-				// Capsules
-				slot.AddBody(new BodyDesc
-				{
-					Shape = ShapeType.Capsule,
-					PosX = px + 0.25f, PosY = 10 + idx * 0.6f, PosZ = pz,
-					HalfHeight = 0.3f, Radius = 0.15f,
-					Mass = 1, Friction = 0.3f,
-				});
-
-				idx++;
-			}
-		}
-	}
-
-	public static void Bowling(EngineSlot slot)
-	{
-		AddGround(slot);
-
-		// 10 pins in standard triangle formation (capsules standing upright)
-		float pinHH = 0.35f, pinR = 0.1f;
-		float pinY = pinHH + pinR;
-		float rowSpacing = 1.1f;
-		float pinSpacing = 0.7f;
-		float baseX = 6;
-		int[][] rows = { new[] { 0 }, new[] { -1, 1 }, new[] { -2, 0, 2 }, new[] { -3, -1, 1, 3 } };
-		for (int r = 0; r < rows.Length; r++)
-		{
-			foreach (int col in rows[r])
-			{
-				slot.AddBody(new BodyDesc
-				{
-					Shape = ShapeType.Capsule,
-					PosX = baseX + r * rowSpacing, PosY = pinY, PosZ = col * pinSpacing * 0.5f,
-					HalfHeight = pinHH, Radius = pinR,
-					Mass = 0.8f, Friction = 0.4f,
-				});
-			}
+				Shape = ShapeType.Box,
+				PosX = x, PosY = bridgeY, PosZ = 0,
+				HalfExtentX = plankHX, HalfExtentY = plankHY, HalfExtentZ = plankHZ,
+				Mass = 1f, Friction = 0.6f,
+			});
 		}
 
-		// Bowling ball
-		int ball = slot.AddBody(new BodyDesc
+		// Adjacent plank edges joined at ±Z corners.
+		for (int i = 0; i < nPlanks - 1; i++)
 		{
-			Shape = ShapeType.Sphere,
-			PosX = -6, PosY = 0.5f, PosZ = 0,
-			Radius = 0.5f,
-			Mass = 7, Friction = 0.2f,
-		});
-		slot.Adapter.SetVelocity(ball, 14, 0, 0);
-	}
+			slot.Adapter.AddDistanceJoint(planks[i], planks[i + 1],
+				+plankHX, 0, +plankHZ,
+				-plankHX, 0, +plankHZ,
+				gap);
+			slot.Adapter.AddDistanceJoint(planks[i], planks[i + 1],
+				+plankHX, 0, -plankHZ,
+				-plankHX, 0, -plankHZ,
+				gap);
+		}
 
-	public static void BouncyPit(EngineSlot slot)
-	{
-		// Bouncy ground
-		slot.AddBody(new BodyDesc
+		// End planks tethered to towers (top-inside corner of tower to outer edge of plank).
+		slot.Adapter.AddDistanceJoint(leftTower, planks[0],
+			+0.4f, +towerHalfH, +plankHZ,
+			-plankHX, 0, +plankHZ,
+			gap);
+		slot.Adapter.AddDistanceJoint(leftTower, planks[0],
+			+0.4f, +towerHalfH, -plankHZ,
+			-plankHX, 0, -plankHZ,
+			gap);
+		slot.Adapter.AddDistanceJoint(rightTower, planks[nPlanks - 1],
+			-0.4f, +towerHalfH, +plankHZ,
+			+plankHX, 0, +plankHZ,
+			gap);
+		slot.Adapter.AddDistanceJoint(rightTower, planks[nPlanks - 1],
+			-0.4f, +towerHalfH, -plankHZ,
+			+plankHX, 0, -plankHZ,
+			gap);
+
+		// Drop a few light balls along the bridge (heavier balls excite too much
+		// oscillation in the plank chain).
+		for (int i = 0; i < 3; i++)
 		{
-			Shape = ShapeType.Box,
-			PosX = 0, PosY = -0.5f, PosZ = 0,
-			HalfExtentX = 20, HalfExtentY = 0.5f, HalfExtentZ = 20,
-			Mass = 0, Friction = 0.3f, Restitution = 0.95f,
-		});
-
-		// Pit walls
-		float wallH = 3, wallHalf = 0.25f, pitSize = 5;
-		slot.AddBody(new BodyDesc { Shape = ShapeType.Box, PosX = 0, PosY = wallH, PosZ = -pitSize, HalfExtentX = pitSize, HalfExtentY = wallH, HalfExtentZ = wallHalf, Mass = 0, Friction = 0.3f, Restitution = 0.95f });
-		slot.AddBody(new BodyDesc { Shape = ShapeType.Box, PosX = 0, PosY = wallH, PosZ = pitSize, HalfExtentX = pitSize, HalfExtentY = wallH, HalfExtentZ = wallHalf, Mass = 0, Friction = 0.3f, Restitution = 0.95f });
-		slot.AddBody(new BodyDesc { Shape = ShapeType.Box, PosX = -pitSize, PosY = wallH, PosZ = 0, HalfExtentX = wallHalf, HalfExtentY = wallH, HalfExtentZ = pitSize, Mass = 0, Friction = 0.3f, Restitution = 0.95f });
-		slot.AddBody(new BodyDesc { Shape = ShapeType.Box, PosX = pitSize, PosY = wallH, PosZ = 0, HalfExtentX = wallHalf, HalfExtentY = wallH, HalfExtentZ = pitSize, Mass = 0, Friction = 0.3f, Restitution = 0.95f });
-
-		// Drop 25 bouncy spheres from varying heights
-		for (int i = 0; i < 25; i++)
-		{
-			float angle = i * 2.4f; // golden angle spread
-			float r = 2.0f * (i % 5) / 5.0f;
 			slot.AddBody(new BodyDesc
 			{
 				Shape = ShapeType.Sphere,
-				PosX = r * MathF.Cos(angle),
-				PosY = 6 + i * 0.5f,
-				PosZ = r * MathF.Sin(angle),
-				Radius = 0.25f + (i % 3) * 0.15f,
-				Mass = 1, Friction = 0.1f, Restitution = 0.95f,
+				PosX = -2f + i * 2f, PosY = 9 + i * 0.3f, PosZ = 0,
+				Radius = 0.4f,
+				Mass = 1.5f, Friction = 0.4f, Restitution = 0.05f,
 			});
 		}
 	}
 
-	public static void Funnel(EngineSlot slot)
+	// Heavy ball tethered to a central pole, launched tangentially so it orbits
+	// as a conical pendulum and scatters tall pillars arranged in two rings.
+	// Pillar height matches the ball's steady-state orbit height.
+	public static void Tetherball(EngineSlot slot)
 	{
 		AddGround(slot);
 
-		// Two angled walls forming a V-funnel
-		float wallAngle = 30.0f * MathF.PI / 180f;
-		float halfAngle = wallAngle * 0.5f;
-
-		// Left wall: tilted so top leans right (toward center)
-		slot.AddBody(new BodyDesc
+		const float poleH = 5f;
+		const float poleHalfH = poleH * 0.5f;
+		const float poleR = 0.25f;
+		int pole = slot.AddBody(new BodyDesc
 		{
 			Shape = ShapeType.Box,
-			PosX = -3.5f, PosY = 5, PosZ = 0,
-			RotZ = -MathF.Sin(halfAngle), RotW = MathF.Cos(halfAngle),
-			HalfExtentX = 0.2f, HalfExtentY = 4, HalfExtentZ = 5,
-			Mass = 0, Friction = 0.3f,
-		});
-		// Right wall: tilted so top leans left (toward center)
-		slot.AddBody(new BodyDesc
-		{
-			Shape = ShapeType.Box,
-			PosX = 3.5f, PosY = 5, PosZ = 0,
-			RotZ = MathF.Sin(halfAngle), RotW = MathF.Cos(halfAngle),
-			HalfExtentX = 0.2f, HalfExtentY = 4, HalfExtentZ = 5,
-			Mass = 0, Friction = 0.3f,
+			PosX = 0, PosY = poleHalfH, PosZ = 0,
+			HalfExtentX = poleR, HalfExtentY = poleHalfH, HalfExtentZ = poleR,
+			Mass = 0, Friction = 0.5f,
 		});
 
-		// Drop mixed objects from above the funnel
-		for (int i = 0; i < 20; i++)
+		const float tetherLen = 3.5f;
+		int ball = slot.AddBody(new BodyDesc
 		{
-			float px = -2.0f + (i % 5) * 1.0f;
-			float pz = -3.0f + (i / 5) * 2.0f;
-			float py = 12 + i * 0.4f;
+			Shape = ShapeType.Sphere,
+			PosX = tetherLen, PosY = poleH - 0.5f, PosZ = 0,
+			Radius = 0.7f,
+			Mass = 25f, Friction = 0.4f,
+		});
 
-			if (i % 3 == 0)
+		slot.Adapter.AddDistanceJoint(pole, ball, 0, +poleHalfH, 0, 0, 0, 0, tetherLen);
+
+		// Tangential launch (Z axis) -- orbits clockwise viewed from above.
+		// With tetherLen=3.5 and v=11, steady-state conical orbit sits at ~y=4
+		// with horizontal radius ~3.4 -- right through the ring of pillars.
+		slot.Adapter.SetVelocity(ball, 0, 0, 11f);
+
+		// Two concentric rings of tall pillars. Heights span roughly y=0..5 so
+		// the orbiting ball actually collides with them.
+		int[] ringCounts = { 10, 16 };
+		float[] ringR = { 2.7f, 4.2f };
+		for (int ring = 0; ring < 2; ring++)
+		{
+			int count = ringCounts[ring];
+			float r = ringR[ring];
+			for (int i = 0; i < count; i++)
 			{
+				float angle = i * 2f * MathF.PI / count + ring * 0.15f;
 				slot.AddBody(new BodyDesc
 				{
 					Shape = ShapeType.Box,
-					PosX = px, PosY = py, PosZ = pz,
-					HalfExtentX = 0.3f, HalfExtentY = 0.3f, HalfExtentZ = 0.3f,
-					Mass = 1, Friction = 0.4f,
-				});
-			}
-			else if (i % 3 == 1)
-			{
-				slot.AddBody(new BodyDesc
-				{
-					Shape = ShapeType.Sphere,
-					PosX = px, PosY = py, PosZ = pz,
-					Radius = 0.3f,
-					Mass = 1, Friction = 0.3f, Restitution = 0.3f,
-				});
-			}
-			else
-			{
-				slot.AddBody(new BodyDesc
-				{
-					Shape = ShapeType.Capsule,
-					PosX = px, PosY = py, PosZ = pz,
-					HalfHeight = 0.25f, Radius = 0.15f,
-					Mass = 1, Friction = 0.3f,
+					PosX = r * MathF.Cos(angle),
+					PosY = 2.5f,
+					PosZ = r * MathF.Sin(angle),
+					HalfExtentX = 0.35f, HalfExtentY = 2.5f, HalfExtentZ = 0.35f,
+					Mass = 1.5f, Friction = 0.5f,
 				});
 			}
 		}
 	}
+
 }

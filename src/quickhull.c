@@ -1296,3 +1296,83 @@ void hull_free(Hull* hull)
 	CK_FREE((void*)hull->planes);
 	CK_FREE(hull);
 }
+
+// -----------------------------------------------------------------------------
+// Hull8: compact single-block Hull variant (uint8 indices, no soa, no twin array).
+
+static size_t h8_align_up(size_t x, size_t a) { return (x + a - 1) & ~(a - 1); }
+
+Hull8* hull_to_hull8(const Hull* src)
+{
+	if (!src) return NULL;
+	const int V = src->vert_count;
+	const int E = src->edge_count;
+	const int F = src->face_count;
+	if (V > 256 || E > 256 || F > 256) return NULL;
+	if ((E & 1) != 0) return NULL;
+
+	// Reorder edges so every twin pair sits at (2k, 2k+1). Also validates
+	// that the source has a consistent twin relation.
+	int* map = CK_ALLOC(sizeof(int) * E);
+	for (int i = 0; i < E; i++) map[i] = -1;
+	int out = 0;
+	for (int i = 0; i < E; i++) {
+		if (map[i] >= 0) continue;
+		int t = src->edge_twin[i];
+		if (t == i || t < 0 || t >= E) { CK_FREE(map); return NULL; }
+		if (src->edge_twin[t] != i) { CK_FREE(map); return NULL; }
+		if (map[t] >= 0) { CK_FREE(map); return NULL; }
+		map[i] = out++;
+		map[t] = out++;
+	}
+
+	// Layout: header, then HullPlane[F], v3[V], uint8 edge_next[E], edge_origin[E],
+	// edge_face[E], face_edge[F]. Planes and verts are float-aligned (4); uint8
+	// arrays are 1-aligned and trail.
+	size_t off_planes = h8_align_up(sizeof(Hull8), _Alignof(HullPlane));
+	size_t off_verts  = h8_align_up(off_planes + sizeof(HullPlane) * (size_t)F, _Alignof(v3));
+	size_t off_en     = off_verts + sizeof(v3) * (size_t)V;
+	size_t off_eo     = off_en + (size_t)E;
+	size_t off_ef     = off_eo + (size_t)E;
+	size_t off_fe     = off_ef + (size_t)E;
+	size_t total      = off_fe + (size_t)F;
+
+	char* block = (char*)CK_ALLOC_ALIGNED(total, 16);
+	Hull8* h = (Hull8*)block;
+	HullPlane* planes = (HullPlane*)(block + off_planes);
+	v3* verts         = (v3*)(block + off_verts);
+	uint8_t* en       = (uint8_t*)(block + off_en);
+	uint8_t* eo       = (uint8_t*)(block + off_eo);
+	uint8_t* ef       = (uint8_t*)(block + off_ef);
+	uint8_t* fe       = (uint8_t*)(block + off_fe);
+
+	h->centroid    = src->centroid;
+	h->verts       = verts;
+	h->edge_next   = en;
+	h->edge_origin = eo;
+	h->edge_face   = ef;
+	h->face_edge   = fe;
+	h->planes      = planes;
+	h->vert_count  = V;
+	h->edge_count  = E;
+	h->face_count  = F;
+
+	for (int i = 0; i < V; i++) verts[i] = src->verts[i];
+	for (int f = 0; f < F; f++) planes[f] = src->planes[f];
+	for (int i = 0; i < E; i++) {
+		int ni = map[i];
+		en[ni] = (uint8_t)map[src->edge_next[i]];
+		eo[ni] = (uint8_t)src->edge_origin[i];
+		ef[ni] = (uint8_t)src->edge_face[i];
+	}
+	for (int f = 0; f < F; f++) fe[f] = (uint8_t)map[src->faces[f].edge];
+
+	CK_FREE(map);
+	return h;
+}
+
+void hull8_free(Hull8* h)
+{
+	if (!h) return;
+	CK_FREE_ALIGNED(h);
+}

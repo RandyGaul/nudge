@@ -465,6 +465,10 @@ void world_step(World world, float dt)
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
 
+	// Reset per-frame EPA telemetry. Only meaningful when EPA backend is active,
+	// but clearing unconditionally keeps the counters honest after backend toggles.
+	w->epa_stats = (EpaStats){ 0 };
+
 	afree(w->dbg_solver_manifolds); w->dbg_solver_manifolds = NULL;
 	afree(w->dbg_solver_contacts);  w->dbg_solver_contacts = NULL;
 	afree(w->dbg_solver_joints);    w->dbg_solver_joints = NULL;
@@ -1826,6 +1830,19 @@ int world_get_contacts(World world, const Contact** out)
 	if (!w->debug_contacts) { afit(w->debug_contacts, 1); asetlen(w->debug_contacts, 0); }
 	*out = w->debug_contacts;
 	return asize(w->debug_contacts);
+}
+
+WorldEpaStats world_get_epa_stats(World world)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	WorldEpaStats s;
+	s.queries          = w->epa_stats.queries;
+	s.iter_cap_hits    = w->epa_stats.iter_cap_hits;
+	s.total_iters      = w->epa_stats.total_iters;
+	s.warm_reseeds     = w->epa_stats.warm_reseeds;
+	s.contacts_emitted = w->epa_stats.contacts_emitted;
+	s.pair_count       = w->epa_stats.pair_count;
+	return s;
 }
 
 // -----------------------------------------------------------------------------

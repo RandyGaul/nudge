@@ -248,12 +248,16 @@ public class BepuAdapter : IPhysicsAdapter
 	{
 		var hA = EnsureDynamic(bodyA);
 		var hB = EnsureDynamic(bodyB);
+		// NOTE: ServoSettings must be set explicitly. The default-constructed value
+		// has MaximumForce = 0, which makes the servo unable to apply any force --
+		// joints created without this appear to do nothing.
 		_sim!.Solver.Add(hA, hB, new DistanceServo
 		{
 			LocalOffsetA = new Vector3(localAx, localAy, localAz),
 			LocalOffsetB = new Vector3(localBx, localBy, localBz),
 			TargetDistance = restLength,
-			SpringSettings = new SpringSettings(120, 1),
+			SpringSettings = new SpringSettings(30, 1),
+			ServoSettings = ServoSettings.Default,
 		});
 	}
 

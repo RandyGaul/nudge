@@ -121,7 +121,8 @@ typedef struct WarmManifold WarmManifold; // forward decl for warm cache
 // frame by EPA; the cache accumulates up to MAX_CONTACTS contacts over frames
 // by merging via feature_id and aging out stale entries.
 #define EPA_MAX_CONTACT_AGE 8
-#define EPA_CONTACT_REFRESH_DIST 0.05f  // re-validate tolerance along normal
+#define EPA_CONTACT_REFRESH_DIST 0.05f         // re-validate tolerance along normal
+#define EPA_CONTACT_TANGENTIAL_DRIFT 0.1f      // drop contact if it slid this far tangentially
 
 typedef struct EpaContact
 {
@@ -138,7 +139,24 @@ typedef struct EpaManifold
 	EpaContact contacts[MAX_CONTACTS];
 	int count;
 	int stale;           // frames since last touched (for eviction)
+	// Warm-start seed from prior-frame terminating face. Stored in Minkowski
+	// difference space: directions used to resupport a near-converged tetra on
+	// the next EPA call for this pair. Invalidated when the pair goes dormant.
+	v3 warm_dirs[4];
+	int warm_valid;      // 1 if warm_dirs contains last-frame data
 } EpaManifold;
+
+// Per-frame EPA telemetry. Reset at the top of world_step, mutated inside
+// epa_narrowphase_pair and epa_run. Published via world_get_epa_stats.
+typedef struct EpaStats
+{
+	int queries;             // EPA calls this frame (epa_hit_from_gjk_shapes invocations)
+	int iter_cap_hits;       // queries that ran to EPA_MAX_ITERATIONS
+	int total_iters;         // sum of iteration counts across queries
+	int warm_reseeds;        // queries that used warm_dirs seed
+	int contacts_emitted;    // total contacts emitted to manifolds
+	int pair_count;          // EPA pairs with at least one contact this frame
+} EpaStats;
 
 
 // Joint persistent storage (handle-based, parallel arrays like bodies).
@@ -399,6 +417,7 @@ typedef struct WorldInternal
 	int warm_start_enabled;    // 1 = warm-start contact impulses from cache
 	int narrowphase_backend;   // NarrowphaseBackend: 0=SAT, 1=GJK_EPA
 	CK_MAP(EpaManifold) epa_cache; // per body-pair incremental manifold cache (EPA backend)
+	EpaStats epa_stats;        // per-frame EPA telemetry (reset at start of world_step)
 	// Native cylinder narrowphase toggles (0 = route through hull-backed fallback).
 	// Flipped on per-pair as native routines land; default 0 until Phase 6 cleanup.
 	int cyl_native_sphere;
