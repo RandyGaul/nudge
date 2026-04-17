@@ -1057,11 +1057,12 @@ static void joints_position_correct(WorldInternal* w, SolverJoint* joints, int j
 			BodyHot* b = &w->body_hot[s->body_b];
 			BodyState* sa = &w->body_state[s->body_a];
 			BodyState* sb = &w->body_state[s->body_b];
-			if (s->type == JOINT_BALL_SOCKET || s->type == JOINT_HINGE || s->type == JOINT_FIXED) {
+			if (s->type == JOINT_BALL_SOCKET || s->type == JOINT_HINGE || s->type == JOINT_FIXED || s->type == JOINT_SWING_TWIST) {
 				v3 local_a, local_b;
 				if (s->type == JOINT_BALL_SOCKET) { local_a = w->joints[s->joint_idx].ball_socket.local_a; local_b = w->joints[s->joint_idx].ball_socket.local_b; }
 				else if (s->type == JOINT_HINGE) { local_a = w->joints[s->joint_idx].hinge.local_a; local_b = w->joints[s->joint_idx].hinge.local_b; }
-				else { local_a = w->joints[s->joint_idx].fixed.local_a; local_b = w->joints[s->joint_idx].fixed.local_b; }
+				else if (s->type == JOINT_FIXED) { local_a = w->joints[s->joint_idx].fixed.local_a; local_b = w->joints[s->joint_idx].fixed.local_b; }
+				else { local_a = w->joints[s->joint_idx].swing_twist.local_a; local_b = w->joints[s->joint_idx].swing_twist.local_b; }
 				v3 r_a = rotate(sa->rotation, local_a);
 				v3 r_b = rotate(sb->rotation, local_b);
 				v3 error = sub(add(sb->position, r_b), add(sa->position, r_a));

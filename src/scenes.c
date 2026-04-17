@@ -1036,3 +1036,162 @@ static void scene_capsule_test_setup()
 	});
 	apush(g_draw_list, ((DrawEntry){ c, g_mesh_cylinder, V3(1, 1, 1), V3(0.8f, 0.4f, 0.6f) }));
 }
+
+// ---------------------------------------------------------------------------
+// Scene: Ragdoll
+// Single humanoid figure built from swing-twist (ball + cone + twist) joints
+// at the spine/neck/shoulders/hips and hinge joints at the elbows/knees.
+// Uses body_set_collision_filter so ragdoll parts don't self-collide.
+// ---------------------------------------------------------------------------
+static void scene_ragdoll_setup()
+{
+	add_big_floor();
+
+	// Ragdoll geometry constants (rough humanoid proportions in metres).
+	const float pelvis_hh = 0.15f;     // pelvis half-height
+	const float chest_hh  = 0.30f;     // chest half-height
+	const float head_r    = 0.15f;     // head radius
+	const float upper_arm_hh = 0.20f;  // upper arm half-length
+	const float forearm_hh   = 0.18f;  // forearm half-length
+	const float thigh_hh  = 0.25f;     // thigh half-length
+	const float shin_hh   = 0.22f;     // shin half-length
+	const float limb_r    = 0.07f;     // arm/leg "thickness"
+	const float spawn_y   = 4.5f;      // pelvis height at spawn
+
+	// Build the body parts. All bones aligned along world +Y at rest.
+	// Bone position = midpoint; local anchors are at the bone's tip toward the parent.
+	float pelvis_y = spawn_y;
+	float chest_y  = pelvis_y + pelvis_hh + chest_hh;        // chest sits on top of pelvis
+	float head_y   = chest_y  + chest_hh + head_r + 0.05f;   // head perched above chest
+	float thigh_y  = pelvis_y - pelvis_hh - thigh_hh;        // thighs hang below pelvis
+	float shin_y   = thigh_y  - thigh_hh - shin_hh;
+	float ua_y     = chest_y  + chest_hh - upper_arm_hh;     // upper arm hangs from shoulder
+	float fa_y     = ua_y     - upper_arm_hh - forearm_hh;
+	float shoulder_dx = 0.30f;
+	float hip_dx      = 0.12f;
+
+	v3 col_torso = V3(0.55f, 0.40f, 0.35f);
+	v3 col_head  = V3(0.85f, 0.70f, 0.55f);
+	v3 col_arm   = V3(0.45f, 0.55f, 0.75f);
+	v3 col_leg   = V3(0.40f, 0.35f, 0.55f);
+
+	#define MAKE_BONE(_var, _pos, _hx, _hy, _hz, _mass, _color) \
+		Body _var = create_body(g_world, (BodyParams){ .position = (_pos), .rotation = quat_identity(), .mass = (_mass) }); \
+		body_add_shape(g_world, _var, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(_hx, _hy, _hz) }); \
+		apush(g_draw_list, ((DrawEntry){ _var, MESH_BOX, V3(_hx, _hy, _hz), _color }))
+
+	MAKE_BONE(pelvis, V3(0, pelvis_y, 0), 0.20f, pelvis_hh, 0.15f, 5.0f, col_torso);
+	MAKE_BONE(chest,  V3(0, chest_y,  0), 0.25f, chest_hh,  0.18f, 6.0f, col_torso);
+
+	// Head as sphere
+	Body head = create_body(g_world, (BodyParams){ .position = V3(0, head_y, 0), .rotation = quat_identity(), .mass = 2.0f });
+	body_add_shape(g_world, head, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = head_r });
+	apush(g_draw_list, ((DrawEntry){ head, MESH_SPHERE, V3(head_r, head_r, head_r), col_head }));
+
+	MAKE_BONE(ua_l, V3(-shoulder_dx, ua_y, 0), limb_r, upper_arm_hh, limb_r, 1.8f, col_arm);
+	MAKE_BONE(ua_r, V3( shoulder_dx, ua_y, 0), limb_r, upper_arm_hh, limb_r, 1.8f, col_arm);
+	MAKE_BONE(fa_l, V3(-shoulder_dx, fa_y, 0), limb_r, forearm_hh,   limb_r, 1.3f, col_arm);
+	MAKE_BONE(fa_r, V3( shoulder_dx, fa_y, 0), limb_r, forearm_hh,   limb_r, 1.3f, col_arm);
+
+	MAKE_BONE(thigh_l, V3(-hip_dx, thigh_y, 0), limb_r * 1.2f, thigh_hh, limb_r * 1.2f, 4.0f, col_leg);
+	MAKE_BONE(thigh_r, V3( hip_dx, thigh_y, 0), limb_r * 1.2f, thigh_hh, limb_r * 1.2f, 4.0f, col_leg);
+	MAKE_BONE(shin_l,  V3(-hip_dx, shin_y,  0), limb_r * 1.0f, shin_hh,  limb_r * 1.0f, 2.5f, col_leg);
+	MAKE_BONE(shin_r,  V3( hip_dx, shin_y,  0), limb_r * 1.0f, shin_hh,  limb_r * 1.0f, 2.5f, col_leg);
+
+	#undef MAKE_BONE
+
+	// Self-collision filter: every ragdoll part shares group bit 1, mask excludes
+	// the same bit so they don't collide with each other but DO collide with floor.
+	const uint32_t ragdoll_grp = 1u << 1;
+	const uint32_t ragdoll_mask = ~ragdoll_grp; // collide with everything except self
+	Body parts[] = { pelvis, chest, head, ua_l, ua_r, fa_l, fa_r, thigh_l, thigh_r, shin_l, shin_r };
+	for (int i = 0; i < (int)(sizeof(parts) / sizeof(parts[0])); i++)
+		body_set_collision_filter(g_world, parts[i], ragdoll_grp, ragdoll_mask);
+
+	// Joints. Anchors expressed in each body's local space: pelvis top = (0, +pelvis_hh, 0),
+	// chest bottom = (0, -chest_hh, 0), etc. Twist axis is each bone's +Y (along its length).
+	const v3 axis_up = V3(0, 1, 0);
+
+	// Spine: pelvis <-> chest. Swing 35 deg, twist +-25 deg.
+	create_swing_twist(g_world, (SwingTwistParams){
+		.body_a = pelvis, .body_b = chest,
+		.local_offset_a = V3(0,  pelvis_hh, 0),
+		.local_offset_b = V3(0, -chest_hh, 0),
+		.local_axis_a = axis_up, .local_axis_b = axis_up,
+		.cone_half_angle = 0.6f, .twist_min = -0.45f, .twist_max = 0.45f,
+	});
+
+	// Neck: chest <-> head. Wider cone, modest twist.
+	create_swing_twist(g_world, (SwingTwistParams){
+		.body_a = chest, .body_b = head,
+		.local_offset_a = V3(0,  chest_hh + 0.05f, 0),
+		.local_offset_b = V3(0, -head_r,           0),
+		.local_axis_a = axis_up, .local_axis_b = axis_up,
+		.cone_half_angle = 0.7f, .twist_min = -0.6f, .twist_max = 0.6f,
+	});
+
+	// Shoulders: chest <-> upper arm. Big cone (arm can swing wide), small twist.
+	// Local twist axis on chest points outward toward each arm; on the arm it's its own +Y.
+	create_swing_twist(g_world, (SwingTwistParams){
+		.body_a = chest, .body_b = ua_l,
+		.local_offset_a = V3(-shoulder_dx,  chest_hh, 0),
+		.local_offset_b = V3(0, upper_arm_hh, 0),
+		.local_axis_a = V3(-1, 0, 0), .local_axis_b = V3(0, 1, 0),
+		.cone_half_angle = 1.4f, .twist_min = -0.6f, .twist_max = 0.6f,
+	});
+	create_swing_twist(g_world, (SwingTwistParams){
+		.body_a = chest, .body_b = ua_r,
+		.local_offset_a = V3( shoulder_dx,  chest_hh, 0),
+		.local_offset_b = V3(0, upper_arm_hh, 0),
+		.local_axis_a = V3(1, 0, 0), .local_axis_b = V3(0, 1, 0),
+		.cone_half_angle = 1.4f, .twist_min = -0.6f, .twist_max = 0.6f,
+	});
+
+	// Elbows: hinge along chest-aligned X axis, limited so elbow only bends one way.
+	Joint elbow_l = create_hinge(g_world, (HingeParams){
+		.body_a = ua_l, .body_b = fa_l,
+		.local_offset_a = V3(0, -upper_arm_hh, 0),
+		.local_offset_b = V3(0,  forearm_hh,   0),
+		.local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0),
+	});
+	joint_set_hinge_limits(g_world, elbow_l, -2.2f, 0.05f); // bend up to ~125 deg, almost no hyperextension
+	Joint elbow_r = create_hinge(g_world, (HingeParams){
+		.body_a = ua_r, .body_b = fa_r,
+		.local_offset_a = V3(0, -upper_arm_hh, 0),
+		.local_offset_b = V3(0,  forearm_hh,   0),
+		.local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0),
+	});
+	joint_set_hinge_limits(g_world, elbow_r, -2.2f, 0.05f);
+
+	// Hips: pelvis <-> thigh. Cone allows leg to swing forward/sideways within reason.
+	create_swing_twist(g_world, (SwingTwistParams){
+		.body_a = pelvis, .body_b = thigh_l,
+		.local_offset_a = V3(-hip_dx, -pelvis_hh, 0),
+		.local_offset_b = V3(0,  thigh_hh, 0),
+		.local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0),
+		.cone_half_angle = 1.0f, .twist_min = -0.4f, .twist_max = 0.4f,
+	});
+	create_swing_twist(g_world, (SwingTwistParams){
+		.body_a = pelvis, .body_b = thigh_r,
+		.local_offset_a = V3( hip_dx, -pelvis_hh, 0),
+		.local_offset_b = V3(0,  thigh_hh, 0),
+		.local_axis_a = V3(0, -1, 0), .local_axis_b = V3(0, -1, 0),
+		.cone_half_angle = 1.0f, .twist_min = -0.4f, .twist_max = 0.4f,
+	});
+
+	// Knees: hinge along pelvis-aligned X axis, single-direction bend.
+	Joint knee_l = create_hinge(g_world, (HingeParams){
+		.body_a = thigh_l, .body_b = shin_l,
+		.local_offset_a = V3(0, -thigh_hh, 0),
+		.local_offset_b = V3(0,  shin_hh,  0),
+		.local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0),
+	});
+	joint_set_hinge_limits(g_world, knee_l, -0.05f, 2.2f); // back-bend, like a real knee
+	Joint knee_r = create_hinge(g_world, (HingeParams){
+		.body_a = thigh_r, .body_b = shin_r,
+		.local_offset_a = V3(0, -thigh_hh, 0),
+		.local_offset_b = V3(0,  shin_hh,  0),
+		.local_axis_a = V3(1, 0, 0), .local_axis_b = V3(1, 0, 0),
+	});
+	joint_set_hinge_limits(g_world, knee_r, -0.05f, 2.2f);
+}

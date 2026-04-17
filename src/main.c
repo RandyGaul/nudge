@@ -214,6 +214,7 @@ static Scene g_scenes[] = {
 	{ "Hinge Limits",    scene_hinge_limits_setup },
 	{ "Cylinder Playground", scene_cylinder_playground_setup },
 	{ "Capsule Test", scene_capsule_test_setup },
+	{ "Ragdoll",      scene_ragdoll_setup },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 
