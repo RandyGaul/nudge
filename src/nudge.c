@@ -64,6 +64,8 @@ void destroy_world(World world)
 	afree(w->islands); afree(w->island_gen); afree(w->island_free);
 	map_free(w->prev_touching);
 	map_free(w->joint_pairs);
+	for (int i = 0; i < asize(w->worker_arenas); i++) arena_free(&w->worker_arenas[i]);
+	afree(w->worker_arenas);
 	CK_FREE(w);
 }
 
@@ -430,6 +432,15 @@ void world_step(World world, float dt)
 #ifdef _WIN32
 	if (n_workers > 1) pool_ensure(n_workers);
 #endif
+	// Ensure one scratch arena per worker, lazily. 4 MB each; grows capacity
+	// only when thread_count rises. Reset (not freed) every step so solver-temp
+	// arrays bump-allocate with zero malloc traffic.
+	for (int wi = asize(w->worker_arenas); wi < n_workers; wi++) {
+		Arena a = {0};
+		arena_init(&a, 4 * 1024 * 1024);
+		apush(w->worker_arenas, a);
+	}
+	for (int wi = 0; wi < n_workers; wi++) arena_reset(&w->worker_arenas[wi]);
 	int body_count = asize(w->body_hot);
 #ifdef _WIN32
 	if (n_workers > 1 && body_count >= 256) {
@@ -497,6 +508,16 @@ void world_step(World world, float dt)
 	if (w->sleep_enabled) islands_update_contacts(w, manifolds, asize(manifolds));
 	w->perf.pgs.pos_joints = perf_now() - t_iuc;
 	w->perf.broadphase = perf_now() - t1;
+
+	// Phase 1: bucket manifolds by owning island. Consumed by per-island
+	// coloring / solve in later phases; computed now for wiring validation.
+	// Arena is reset each step; arrays become dangling at next step start.
+	int* island_manifold_offsets = NULL;
+	int* island_manifold_perm = NULL;
+	if (asize(manifolds) > 0) {
+		islands_bucket_manifolds(w, manifolds, asize(manifolds), &w->worker_arenas[0], &island_manifold_offsets, &island_manifold_perm);
+	}
+	(void)island_manifold_offsets;
 
 	// Only populate debug_contacts when the array was previously queried (non-NULL).
 	// Avoids 48KB of per-frame apush when debug visualization is unused.
@@ -592,11 +613,27 @@ void world_step(World world, float dt)
 	int count = asize(w->body_hot);
 	CK_DYNA ConstraintRef* crefs = NULL;
 	int sm_count = asize(sm);
-	for (int i = 0; i < sm_count; i++) {
-		if (sm[i].contact_count == 0) continue; // skip empty manifolds (static-static filtered out)
-		ConstraintRef r = { .type = CTYPE_CONTACT, .index = i,
-			.body_a = sm[i].body_a, .body_b = sm[i].body_b };
-		apush(crefs, r);
+	// Iterate manifolds in per-island bucketed order so refs are grouped by
+	// island. Greedy coloring output is identical to the unbucketed order
+	// because islands have disjoint bodies: within each island, manifold
+	// indices are in ascending original order (stable partition). When the
+	// bucket is absent (no manifolds), fall back to linear scan.
+	if (island_manifold_perm) {
+		int bucketed = asize(island_manifold_perm);
+		for (int k = 0; k < bucketed; k++) {
+			int i = island_manifold_perm[k];
+			if (sm[i].contact_count == 0) continue;
+			ConstraintRef r = { .type = CTYPE_CONTACT, .index = i,
+				.body_a = sm[i].body_a, .body_b = sm[i].body_b };
+			apush(crefs, r);
+		}
+	} else {
+		for (int i = 0; i < sm_count; i++) {
+			if (sm[i].contact_count == 0) continue; // skip empty manifolds (static-static filtered out)
+			ConstraintRef r = { .type = CTYPE_CONTACT, .index = i,
+				.body_a = sm[i].body_a, .body_b = sm[i].body_b };
+			apush(crefs, r);
+		}
 	}
 	// Joints go through PGS when:
 	//  - LDL is disabled (all joints), OR
@@ -615,7 +652,7 @@ void world_step(World world, float dt)
 	int contact_end[65] = {0}; // per-color split: contacts in [batch_starts[c], contact_end[c]), joints in [contact_end[c], batch_starts[c+1])
 	int color_count = 0;
 	if (cref_count > 0)
-		color_constraints(crefs, cref_count, count, batch_starts, &color_count);
+		color_constraints(crefs, cref_count, count, &w->worker_arenas[0], batch_starts, &color_count);
 	// Partition each color's crefs so contacts precede joints. This lets SIMD
 	// batch-build iterate only the contact portion while joint solves run
 	// scalar within the same color. Swap preserves color validity (graph

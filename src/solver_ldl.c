@@ -1675,7 +1675,7 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 	// BodyHot is never modified — no save/restore needed. Better cache: K fill reads
 	// from tight comp_bodies array instead of 112-byte BodyHot stride.
 	int body_count = asize(w->body_hot);
-	LDL_CompBody* comp_bodies = CK_ALLOC(body_count * sizeof(LDL_CompBody));
+	LDL_CompBody* comp_bodies = (LDL_CompBody*)arena_alloc(&w->worker_arenas[0], (size_t)body_count * sizeof(LDL_CompBody), 16);
 	for (int i = 0; i < body_count; i++) {
 		float inv_m = body_inv_mass(w, i);
 		if (inv_m > 0.0f) {
@@ -1732,8 +1732,6 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 		// Numeric factorization: K fill reads from compressed comp_bodies, not BodyHot
 		ldl_numeric_factor(c, w, sol_joints, comp_bodies);
 	}
-
-	CK_FREE(comp_bodies);
 }
 
 // Velocity correction using already-factored K. Solves and applies impulses.
@@ -1743,7 +1741,7 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 
 	// Build compressed masses for consistent impulse application (must match K factoring).
 	int body_count = asize(w->body_hot);
-	LDL_CompBody* comp_bodies = CK_ALLOC(body_count * sizeof(LDL_CompBody));
+	LDL_CompBody* comp_bodies = (LDL_CompBody*)arena_alloc(&w->worker_arenas[0], (size_t)body_count * sizeof(LDL_CompBody), 16);
 	for (int i = 0; i < body_count; i++) {
 		float inv_m = body_inv_mass(w, i);
 		if (inv_m > 0.0f) {
@@ -1767,7 +1765,6 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 
 		ldl_island_solve(c, w, sol_joints, joint_count, sub_dt, comp_bodies);
 	}
-	CK_FREE(comp_bodies);
 }
 
 // Mass ratio compression exponent for position correction.
@@ -1793,7 +1790,8 @@ static void ldl_position_solve(WorldInternal* w, SolverJoint* sol_joints, int jo
 	// ldl_island_position_correct uses these same compressed masses, keeping
 	// lambda (solved via K_comp^-1) consistent with the M^-1 in the apply.
 	int body_count = asize(w->body_hot);
-	LDL_CompBody* comp_bodies = CK_ALLOC(body_count * sizeof(LDL_CompBody));
+	Arena* arena = &w->worker_arenas[0];
+	LDL_CompBody* comp_bodies = (LDL_CompBody*)arena_alloc(arena, (size_t)body_count * sizeof(LDL_CompBody), 16);
 	for (int i = 0; i < body_count; i++) {
 		float inv_m = body_inv_mass(w, i);
 		if (inv_m > 0.0f) {
@@ -1809,8 +1807,8 @@ static void ldl_position_solve(WorldInternal* w, SolverJoint* sol_joints, int jo
 		}
 	}
 
-	dv3* pos_delta = CK_ALLOC(body_count * sizeof(dv3));
-	dv3* ang_delta = CK_ALLOC(body_count * sizeof(dv3));
+	dv3* pos_delta = (dv3*)arena_alloc(arena, (size_t)body_count * sizeof(dv3), 16);
+	dv3* ang_delta = (dv3*)arena_alloc(arena, (size_t)body_count * sizeof(dv3), 16);
 
 	int island_count = asize(w->islands);
 	for (int ii = 0; ii < island_count; ii++) {
@@ -1827,10 +1825,6 @@ static void ldl_position_solve(WorldInternal* w, SolverJoint* sol_joints, int jo
 		ldl_numeric_factor(c, w, sol_joints, comp_bodies);
 		ldl_island_position_correct(c, w, sol_joints, sub_dt, pos_delta, ang_delta, comp_bodies);
 	}
-
-	CK_FREE(comp_bodies);
-	CK_FREE(pos_delta);
-	CK_FREE(ang_delta);
 
 	ldl_pos_acc += perf_now() - t_pos_start;
 }

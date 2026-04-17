@@ -308,6 +308,74 @@ static void islands_update_contacts(WorldInternal* w, InternalManifold* manifold
 	w->prev_touching = curr_touching;
 }
 
+// Return the island that owns a manifold. Both bodies are dynamic and in the
+// same island after islands_update_contacts runs; one body may be static
+// (island_id == -1), in which case the other body's island owns it. Both-static
+// pairs are filtered out upstream and return -1 here as a safety net.
+static int manifold_owning_island(WorldInternal* w, InternalManifold* m)
+{
+	int a = m->body_a, b = m->body_b;
+	int isl_a = body_inv_mass(w, a) == 0.0f ? -1 : w->body_cold[a].island_id;
+	int isl_b = body_inv_mass(w, b) == 0.0f ? -1 : w->body_cold[b].island_id;
+	assert(isl_a < 0 || isl_b < 0 || isl_a == isl_b); // both-dynamic pairs share an island
+	if (isl_a >= 0) return isl_a;
+	if (isl_b >= 0) return isl_b;
+	return -1;
+}
+
+// Partition manifolds by owning island. Arrays are arena-allocated; callers
+// must not afree them.
+//
+//   *out_offsets -- int[n_islands + 1]. Exclusive prefix sum: island i's
+//                   manifolds live in perm[offsets[i] .. offsets[i+1]).
+//   *out_perm    -- int[offsets[n_islands]]. Permutation of manifold indices;
+//                   manifolds with two static bodies are omitted.
+//
+// Determinism: within each island, manifold indices appear in ascending
+// original order (stable partition over BVH pair-emission order).
+//
+// Returns n_islands (== asize(w->islands)).
+static int islands_bucket_manifolds(WorldInternal* w, InternalManifold* manifolds, int manifold_count, Arena* arena, int** out_offsets, int** out_perm)
+{
+	int n_islands = asize(w->islands);
+
+	int* offsets = NULL;
+	arena_fit(arena, offsets, n_islands + 1);
+	asetlen(offsets, n_islands + 1);
+	for (int i = 0; i <= n_islands; i++) offsets[i] = 0;
+
+	// Count pass. Store count in offsets[i+1] so the prefix sum below produces
+	// exclusive-prefix offsets[] in one forward scan.
+	for (int m = 0; m < manifold_count; m++) {
+		int isl = manifold_owning_island(w, &manifolds[m]);
+		if (isl < 0) continue;
+		offsets[isl + 1]++;
+	}
+	for (int i = 1; i <= n_islands; i++) offsets[i] += offsets[i - 1];
+	int total = offsets[n_islands];
+
+	int* perm = NULL;
+	arena_fit(arena, perm, total);
+	asetlen(perm, total);
+
+	// Running cursor per island, initialized from offsets[]. A copy avoids
+	// clobbering the exclusive-prefix offsets we return to the caller.
+	int* cursor = NULL;
+	arena_fit(arena, cursor, n_islands);
+	asetlen(cursor, n_islands);
+	for (int i = 0; i < n_islands; i++) cursor[i] = offsets[i];
+
+	for (int m = 0; m < manifold_count; m++) {
+		int isl = manifold_owning_island(w, &manifolds[m]);
+		if (isl < 0) continue;
+		perm[cursor[isl]++] = m;
+	}
+
+	*out_offsets = offsets;
+	*out_perm = perm;
+	return n_islands;
+}
+
 static void island_try_split(WorldInternal* w, int island_id); // forward decl
 
 // Split islands that lost contacts. Must run every frame regardless of sleep.

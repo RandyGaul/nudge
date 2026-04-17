@@ -255,9 +255,10 @@ static void warm_cache_age_and_evict(WorldInternal* w)
 // Graph coloring: assign colors to constraints so no two in same color share a body.
 // Uses uint64_t bitmask per body (max 64 colors).
 
-static void color_constraints(ConstraintRef* refs, int count, int body_count, int* out_batch_starts, int* out_color_count)
+static void color_constraints(ConstraintRef* refs, int count, int body_count, Arena* arena, int* out_batch_starts, int* out_color_count)
 {
-	uint64_t* body_colors = (uint64_t*)CK_ALLOC(body_count * sizeof(uint64_t));
+	// Scratch buffers live in the per-frame arena -- no per-call malloc traffic.
+	uint64_t* body_colors = (uint64_t*)arena_alloc(arena, (size_t)body_count * sizeof(uint64_t), 16);
 	memset(body_colors, 0, body_count * sizeof(uint64_t));
 	int max_color = 0;
 
@@ -296,14 +297,12 @@ static void color_constraints(ConstraintRef* refs, int count, int body_count, in
 	for (int c = 0; c < color_count; c++) out_batch_starts[c] = offsets[c];
 	out_batch_starts[color_count] = count; // sentinel
 
-	ConstraintRef* sorted = (ConstraintRef*)CK_ALLOC(count * sizeof(ConstraintRef));
+	ConstraintRef* sorted = (ConstraintRef*)arena_alloc(arena, (size_t)count * sizeof(ConstraintRef), _Alignof(ConstraintRef));
 	for (int i = 0; i < count; i++) {
 		sorted[offsets[refs[i].color]++] = refs[i];
 	}
 	memcpy(refs, sorted, count * sizeof(ConstraintRef));
 
-	CK_FREE(sorted);
-	CK_FREE(body_colors);
 	*out_color_count = color_count;
 }
 

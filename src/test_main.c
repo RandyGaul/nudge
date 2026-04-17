@@ -23,6 +23,7 @@
 #include "tests_shattering_unit.c"
 #include "tests_pgs_vs_ldl.c"
 #include "tests_gjk_perf.c"
+#include "tests_arena_unit.c"
 
 int main(int argc, char* argv[])
 {
@@ -209,6 +210,7 @@ int main(int argc, char* argv[])
 			if (strcmp(argv[i], "--bail") == 0) test_bail = 1;
 		}
 		test_aalign();
+		run_arena_unit_tests();
 		run_ldl_unit_tests();
 		run_inertia_unit_tests();
 		run_jacobian_unit_tests();
@@ -286,6 +288,7 @@ int main(int argc, char* argv[])
 			if (strcmp(argv[i], "--timing") == 0) test_timing = 1;
 		}
 		run_tests();
+		run_arena_unit_tests();
 		run_ldl_unit_tests();
 		run_inertia_unit_tests();
 		run_jacobian_unit_tests();

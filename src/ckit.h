@@ -170,6 +170,50 @@
 #define avalid(a)  ((a) && CK_AHDR(a)->cookie.val == CK_ACOOKIE)
 
 //--------------------------------------------------------------------------------------------------
+// Arena allocator.
+//
+// A fixed-size bump allocator for per-frame / per-phase scratch memory. Each
+// owner (typically one Arena per worker thread) holds its own block; there is
+// no locking. arena_reset rewinds the bump pointer so the block can be reused
+// each frame; arena_free releases it at shutdown.
+//
+// Companion macros arena_push / arena_fit allocate stretchy-buffer arrays out
+// of the arena. They share ckit's array header layout, so asize / indexing /
+// apop / alast / adel / aclear / aend / arev all work on arena-backed arrays
+// exactly as on apush arrays. afree is a no-op on arena arrays because
+// is_static is set on the header -- the arena owns the memory.
+//
+// Growth policy: if arena_push overflows capacity, a larger block is
+// bump-allocated inside the arena and old bytes are copied in. The previous
+// slot leaks until arena_reset, which is typically fine because arenas are
+// reset every frame. Allocation past the arena's fixed capacity asserts.
+//
+// Usage:
+//     Arena a = {0};
+//     arena_init(&a, 4 * 1024 * 1024);   // once at startup
+//
+//     int* xs = NULL;
+//     arena_push(&a, xs, 10);
+//     arena_push(&a, xs, 20);
+//     assert(asize(xs) == 2 && xs[0] == 10 && xs[1] == 20);
+//
+//     arena_reset(&a);    // at frame start -- all arena pointers are now dangling
+//     arena_free(&a);     // once at shutdown
+
+typedef struct Arena
+{
+	char* base;
+	size_t cap;
+	size_t used;
+} Arena;
+
+// arena_fit: Ensure arena-backed array has capacity for n elements. Mirrors afit().
+#define arena_fit(arena, a, n) ((n) <= acap(a) ? 0 : (*(void**)&(a) = ck_arena_agrow((arena), (a), (n), sizeof(*(a)))))
+
+// arena_push: Append element to arena-backed array. Mirrors apush().
+#define arena_push(arena, a, ...) (CK_ACANARY(a), arena_fit((arena), (a), 1 + asize(a)), (a)[CK_AHDR(a)->size++] = (__VA_ARGS__))
+
+//--------------------------------------------------------------------------------------------------
 // Dynamic strings (built on dynamic arrays).
 //
 // 100% compatible with normal C-strings. Free with sfree when done.
@@ -612,6 +656,12 @@ CK_API void* ck_astatic(const void* a, int buffer_size, size_t element_size);
 CK_API void* ck_aset(const void* a, const void* b, size_t element_size);
 CK_API void* ck_arev(const void* a, size_t element_size);
 
+CK_API void arena_init(Arena* a, size_t cap);
+CK_API void arena_free(Arena* a);
+CK_API void arena_reset(Arena* a);
+CK_API void* arena_alloc(Arena* a, size_t bytes, size_t align);
+CK_API void* ck_arena_agrow(Arena* a, const void* old, int new_size, size_t element_size);
+
 typedef struct CK_MapSlot
 {
 	uint64_t h;
@@ -796,6 +846,68 @@ void* ck_agrow(const void* a, int new_size, size_t element_size)
 	hdr->capacity = new_capacity;
 	hdr->is_static = 0;
 	hdr->alignment = align;
+	return (void*)(hdr + 1);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Arena.
+
+void arena_init(Arena* a, size_t cap)
+{
+	a->base = (char*)CK_ALLOC_ALIGNED(cap, 64);
+	a->cap = cap;
+	a->used = 0;
+}
+
+void arena_free(Arena* a)
+{
+	if (a->base) CK_FREE_ALIGNED(a->base);
+	a->base = NULL;
+	a->cap = 0;
+	a->used = 0;
+}
+
+void arena_reset(Arena* a)
+{
+	a->used = 0;
+}
+
+void* arena_alloc(Arena* a, size_t bytes, size_t align)
+{
+	uintptr_t base = (uintptr_t)a->base + a->used;
+	uintptr_t aligned = (base + align - 1) & ~((uintptr_t)align - 1);
+	size_t pad = (size_t)(aligned - base);
+	assert(a->used + pad + bytes <= a->cap);
+	a->used += pad + bytes;
+	return (void*)aligned;
+}
+
+// Grow an arena-backed stretchy buffer. Same return shape as ck_agrow: user
+// pointer (past header). Marks is_static on the new header so afree() is a
+// no-op -- the arena owns the memory. Old block leaks until arena_reset.
+void* ck_arena_agrow(Arena* a, const void* old, int new_size, size_t element_size)
+{
+	CK_ACANARY(old);
+	int new_capacity = 2 * acap(old);
+	int min_cap = new_size > 16 ? new_size : 16;
+	if (new_capacity < min_cap) new_capacity = min_cap;
+	size_t data_size = (size_t)new_capacity * element_size;
+	size_t total_size = sizeof(CK_ArrayHeader) + data_size;
+
+	// Arena block is 16-byte aligned; sizeof(CK_ArrayHeader) is 32 bytes (a
+	// multiple of 16), so the data portion lands on a 16-byte boundary.
+	char* block = (char*)arena_alloc(a, total_size, 16);
+	CK_ArrayHeader* hdr = (CK_ArrayHeader*)block;
+
+	int old_size = asize(old);
+	if (old && old_size > 0) memcpy(hdr + 1, old, (size_t)old_size * element_size);
+
+	hdr->size = old_size;
+	hdr->capacity = new_capacity;
+	hdr->is_static = 1;
+	hdr->alignment = 0;
+	hdr->alloc_base = block;
+	hdr->cookie.val = CK_ACOOKIE;
 	return (void*)(hdr + 1);
 }
 

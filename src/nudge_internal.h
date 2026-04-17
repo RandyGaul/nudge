@@ -382,6 +382,10 @@ typedef struct WorldInternal
 	int cyl_native_hull;
 	int cyl_native_cyl;
 	int thread_count;        // 0 or 1 = single-threaded, >1 = parallel PGS solver
+	// Per-worker scratch arenas. Lazily sized to max(1, thread_count) on first
+	// step; reset at the start of each step; freed in destroy_world. Workers
+	// allocate solver-temp arrays from their own arena with no locking.
+	CK_DYNA Arena* worker_arenas;
 	void* np_pairs_out; // CK_DYNA BroadPair** — when set, broadphase outputs pairs here instead of running narrowphase
 	int ldl_enabled;         // 1 = LDL direct correction for joints (dual solvers only)
 	int ldl_topo_version;    // incremented on joint create/destroy
