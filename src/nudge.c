@@ -1126,22 +1126,11 @@ Joint create_ball_socket(World world, BallSocketParams params)
 	assert(is_valid(params.local_offset_b) && "create_ball_socket: local_offset_b is NaN/inf");
 
 	WorldInternal* w = (WorldInternal*)world.id;
-	int idx;
 	int ba = handle_index(params.body_a);
 	int bb = handle_index(params.body_b);
 	assert(split_valid(w->body_gen, params.body_a));
 	assert(split_valid(w->body_gen, params.body_b));
-
-	// Grow joint arrays manually (no split_add -- joints don't need hot/cold split)
-	if (asize(w->joint_free) > 0) {
-		idx = apop(w->joint_free);
-		w->joint_gen[idx]++;
-	} else {
-		idx = asize(w->joints);
-		JointInternal zero = {0};
-		apush(w->joints, zero);
-		apush(w->joint_gen, 1); // odd = alive
-	}
+	int idx = joint_alloc_slot(w);
 
 	w->joints[idx] = (JointInternal){
 		.type = JOINT_BALL_SOCKET,
@@ -1169,17 +1158,7 @@ Joint create_distance(World world, DistanceParams params)
 	int bb = handle_index(params.body_b);
 	assert(split_valid(w->body_gen, params.body_a));
 	assert(split_valid(w->body_gen, params.body_b));
-
-	int idx;
-	if (asize(w->joint_free) > 0) {
-		idx = apop(w->joint_free);
-		w->joint_gen[idx]++;
-	} else {
-		idx = asize(w->joints);
-		JointInternal zero = {0};
-		apush(w->joints, zero);
-		apush(w->joint_gen, 1);
-	}
+	int idx = joint_alloc_slot(w);
 
 	// Auto-compute rest length if not specified
 	float rest = params.rest_length;
@@ -1219,17 +1198,7 @@ Joint create_hinge(World world, HingeParams params)
 	int bb = handle_index(params.body_b);
 	assert(split_valid(w->body_gen, params.body_a));
 	assert(split_valid(w->body_gen, params.body_b));
-
-	int idx;
-	if (asize(w->joint_free) > 0) {
-		idx = apop(w->joint_free);
-		w->joint_gen[idx]++;
-	} else {
-		idx = asize(w->joints);
-		JointInternal zero = {0};
-		apush(w->joints, zero);
-		apush(w->joint_gen, 1);
-	}
+	int idx = joint_alloc_slot(w);
 
 	v3 axis_a_local = norm(params.local_axis_a);
 	v3 axis_b_local = norm(params.local_axis_b);
@@ -1274,17 +1243,7 @@ Joint create_fixed(World world, FixedParams params)
 	int bb = handle_index(params.body_b);
 	assert(split_valid(w->body_gen, params.body_a));
 	assert(split_valid(w->body_gen, params.body_b));
-
-	int idx;
-	if (asize(w->joint_free) > 0) {
-		idx = apop(w->joint_free);
-		w->joint_gen[idx]++;
-	} else {
-		idx = asize(w->joints);
-		JointInternal zero = {0};
-		apush(w->joints, zero);
-		apush(w->joint_gen, 1);
-	}
+	int idx = joint_alloc_slot(w);
 
 	quat q_a = body_rot(w, ba);
 	quat q_b = body_rot(w, bb);
@@ -1316,17 +1275,7 @@ Joint create_prismatic(World world, PrismaticParams params)
 	int bb = handle_index(params.body_b);
 	assert(split_valid(w->body_gen, params.body_a));
 	assert(split_valid(w->body_gen, params.body_b));
-
-	int idx;
-	if (asize(w->joint_free) > 0) {
-		idx = apop(w->joint_free);
-		w->joint_gen[idx]++;
-	} else {
-		idx = asize(w->joints);
-		JointInternal zero = {0};
-		apush(w->joints, zero);
-		apush(w->joint_gen, 1);
-	}
+	int idx = joint_alloc_slot(w);
 
 	quat q_a = body_rot(w, ba);
 	quat q_b = body_rot(w, bb);
@@ -1348,19 +1297,23 @@ Joint create_prismatic(World world, PrismaticParams params)
 	return (Joint){ handle_make(idx, w->joint_gen[idx]) };
 }
 
-// Common body-pair validation + slot allocation used by all create_* joints.
-static int joint_alloc_slot(WorldInternal* w, Body ba_h, Body bb_h)
+// Common slot allocation used by all create_* joints. Keeps the joints[],
+// joint_hot[] and joint_gen[] arrays in lockstep. Hot slot is zeroed so
+// warm_lambda starts fresh (no stale impulse from a destroyed joint).
+static int joint_alloc_slot(WorldInternal* w)
 {
-	(void)ba_h; (void)bb_h;
 	int idx;
 	if (asize(w->joint_free) > 0) {
 		idx = apop(w->joint_free);
 		w->joint_gen[idx]++;
+		w->joint_hot[idx] = (JointHot){0};
 	} else {
 		idx = asize(w->joints);
 		JointInternal zero = {0};
 		apush(w->joints, zero);
 		apush(w->joint_gen, 1);
+		JointHot hot_zero = {0};
+		apush(w->joint_hot, hot_zero);
 	}
 	return idx;
 }
@@ -1377,7 +1330,7 @@ Joint create_angular_motor(World world, AngularMotorParams params)
 	assert(ba != bb && "joint requires two distinct bodies");
 	assert((body_inv_mass(w, ba) > 0.0f || body_inv_mass(w, bb) > 0.0f) && "at least one body must be dynamic");
 
-	int idx = joint_alloc_slot(w, params.body_a, params.body_b);
+	int idx = joint_alloc_slot(w);
 	w->joints[idx] = (JointInternal){
 		.type = JOINT_ANGULAR_MOTOR,
 		.body_a = ba, .body_b = bb,
@@ -1407,7 +1360,7 @@ Joint create_twist_limit(World world, TwistLimitParams params)
 	assert(ba != bb && "joint requires two distinct bodies");
 	assert((body_inv_mass(w, ba) > 0.0f || body_inv_mass(w, bb) > 0.0f) && "at least one body must be dynamic");
 
-	int idx = joint_alloc_slot(w, params.body_a, params.body_b);
+	int idx = joint_alloc_slot(w);
 	w->joints[idx] = (JointInternal){
 		.type = JOINT_TWIST_LIMIT,
 		.body_a = ba, .body_b = bb,
@@ -1438,7 +1391,7 @@ Joint create_cone_limit(World world, ConeLimitParams params)
 	assert(ba != bb && "joint requires two distinct bodies");
 	assert((body_inv_mass(w, ba) > 0.0f || body_inv_mass(w, bb) > 0.0f) && "at least one body must be dynamic");
 
-	int idx = joint_alloc_slot(w, params.body_a, params.body_b);
+	int idx = joint_alloc_slot(w);
 	w->joints[idx] = (JointInternal){
 		.type = JOINT_CONE_LIMIT,
 		.body_a = ba, .body_b = bb,
@@ -1471,7 +1424,7 @@ Joint create_swing_twist(World world, SwingTwistParams params)
 	assert(ba != bb && "joint requires two distinct bodies");
 	assert((body_inv_mass(w, ba) > 0.0f || body_inv_mass(w, bb) > 0.0f) && "at least one body must be dynamic");
 
-	int idx = joint_alloc_slot(w, params.body_a, params.body_b);
+	int idx = joint_alloc_slot(w);
 	w->joints[idx] = (JointInternal){
 		.type = JOINT_SWING_TWIST,
 		.body_a = ba, .body_b = bb,
@@ -1499,6 +1452,7 @@ void destroy_joint(World world, Joint joint)
 	assert(w->joint_gen[idx] == handle_gen(joint));
 	unlink_joint_from_island(w, idx);
 	memset(&w->joints[idx], 0, sizeof(JointInternal));
+	w->joint_hot[idx] = (JointHot){0};
 	w->joint_gen[idx]++; // even = dead
 	w->ldl_topo_version++;
 	apush(w->joint_free, idx);

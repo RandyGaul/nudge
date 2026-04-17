@@ -767,7 +767,7 @@ static void joints_pre_solve(WorldInternal* w, float dt, SolverJoint** out_joint
 		joint_fill_rows(&s, a, b, sa, sb, w, dt);
 
 		// Warm start from persistent storage
-		for (int d = 0; d < s.dof; d++) s.lambda[d] = j->warm_lambda[d];
+		for (int d = 0; d < s.dof; d++) s.lambda[d] = w->joint_hot[i].warm_lambda[d];
 
 		apush(joints, s);
 	}
@@ -1086,7 +1086,7 @@ static void joints_post_solve(WorldInternal* w, SolverJoint* joints, int count)
 {
 	for (int i = 0; i < count; i++) {
 		SolverJoint* s = &joints[i];
-		for (int d = 0; d < s->dof; d++) w->joints[s->joint_idx].warm_lambda[d] = s->lambda[d];
+		for (int d = 0; d < s->dof; d++) w->joint_hot[s->joint_idx].warm_lambda[d] = s->lambda[d];
 	}
 	// joints NOT freed -- kept in WorldInternal.dbg_solver_joints for remote viewer.
 }

@@ -131,13 +131,18 @@ typedef struct JointInternal
 		struct { v3 local_axis_a, local_axis_b; float half_angle; SpringParams spring; } cone_limit;
 		struct { v3 local_a, local_b; v3 local_axis_a, local_axis_b; float cone_half_angle, twist_min, twist_max; SpringParams spring; } swing_twist;
 	};
-	// Warm starting: accumulated impulses persisted across frames (up to 6 DOF).
-	float warm_lambda[6];
 	// Island linked list fields.
 	int island_id;    // -1 = none
 	int island_prev;  // -1 = head
 	int island_next;  // -1 = tail
 } JointInternal;
+
+// Hot joint data touched every substep by pre/post-solve warm starting.
+// Parallel array with JointInternal (indexed by joint handle's index).
+typedef struct JointHot
+{
+	float warm_lambda[6];
+} JointHot;
 
 // True when a joint has any bounded DOF (limit, motor, or always-bounded type).
 // Such joints are solved entirely in PGS so all DOFs stay coupled; LDL skips them.
@@ -337,8 +342,10 @@ typedef struct WorldInternal
 	CK_DYNA int*         body_free;
 	CK_DYNA Contact*     debug_contacts;
 	CK_MAP(WarmManifold) warm_cache;
-	// Joints
-	CK_DYNA JointInternal* joints;
+	// Joints (hot/cold split: warm_lambda is touched every frame in pre/post solve;
+	// cold geometry in JointInternal is accessed only during joint_fill_rows).
+	CK_DYNA JointInternal* joints;       // cold: type, geometry, spring, island links
+	CK_DYNA JointHot*      joint_hot;    // hot: warm-start lambdas (parallel array)
 	CK_DYNA uint32_t*      joint_gen;
 	CK_DYNA int*           joint_free;
 	// Broadphase
