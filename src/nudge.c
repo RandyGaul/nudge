@@ -612,9 +612,23 @@ void world_step(World world, float dt)
 
 	int cref_count = asize(crefs);
 	int batch_starts[65] = {0};
+	int contact_end[65] = {0}; // per-color split: contacts in [batch_starts[c], contact_end[c]), joints in [contact_end[c], batch_starts[c+1])
 	int color_count = 0;
 	if (cref_count > 0)
 		color_constraints(crefs, cref_count, count, batch_starts, &color_count);
+	// Partition each color's crefs so contacts precede joints. This lets SIMD
+	// batch-build iterate only the contact portion while joint solves run
+	// scalar within the same color. Swap preserves color validity (graph
+	// coloring is per-body-pair, not per-type).
+	for (int c = 0; c < color_count; c++) {
+		int i = batch_starts[c], j = batch_starts[c + 1] - 1;
+		while (i <= j) {
+			if (crefs[i].type == CTYPE_CONTACT) { i++; }
+			else if (crefs[j].type == CTYPE_JOINT) { j--; }
+			else { ConstraintRef tmp = crefs[i]; crefs[i] = crefs[j]; crefs[j] = tmp; i++; j--; }
+		}
+		contact_end[c] = i;
+	}
 	w->perf.pgs.graph_color = perf_now() - t_gc;
 
 	w->perf.pre_solve = perf_now() - t2;
@@ -625,8 +639,9 @@ void world_step(World world, float dt)
 	// K^-1 residual correction is applied at the configured iteration.
 	double t_pgs = 0, t_pos = 0, t_int_sub = 0;
 	double t_jlim = 0, t_ldl = 0, t_relax = 0, t_posJ = 0;
-	int use_simd_path = (asize(sol_joints) == 0);
 #if SIMD_SSE
+	// SIMD path handles mixed contacts + joints via per-color partition:
+	// contacts batch4, joints scalar within the same color.
 	CK_DYNA PGS_Batch4* simd_batches = NULL;
 	CK_DYNA int* simd_color_batch_starts = NULL;
 	int simd_batch_count = 0;
@@ -674,119 +689,104 @@ void world_step(World world, float dt)
 
 		// Build SIMD batches on first substep; refresh only bias/lambda on substep 2+.
 #if SIMD_SSE
-		if (sub == 0 && use_simd_path && cref_count > 0) {
-			// Pre-compute batch layout: total count and per-color offsets.
+		if (sub == 0 && cref_count > 0) {
+			// Pre-compute batch layout: only contacts go into SIMD batches.
+			// Joints in [contact_end[c], batch_starts[c+1]) are solved scalar.
 			int total_batches = 0;
 			apush(simd_color_batch_starts, 0);
 			for (int c = 0; c < color_count; c++) {
-				total_batches += (batch_starts[c+1] - batch_starts[c] + 3) / 4;
+				int contact_count = contact_end[c] - batch_starts[c];
+				total_batches += (contact_count + 3) / 4;
 				apush(simd_color_batch_starts, total_batches);
 			}
-			afit(simd_batches, total_batches); asetlen(simd_batches, total_batches);
-			// Fill batches (each batch writes to a unique pre-allocated slot).
-			for (int c = 0; c < color_count; c++) {
-				int start = batch_starts[c], end = batch_starts[c + 1];
-				int bi_out = simd_color_batch_starts[c];
-				for (int i = start; i + 3 < end; i += 4) {
-					int idx[4] = { crefs[i].index, crefs[i+1].index, crefs[i+2].index, crefs[i+3].index };
-					pgs_batch4_prepare(&simd_batches[bi_out++], sm, idx, 4, sc);
+			if (total_batches > 0) {
+				afit(simd_batches, total_batches); asetlen(simd_batches, total_batches);
+				// Fill batches (each batch writes to a unique pre-allocated slot).
+				for (int c = 0; c < color_count; c++) {
+					int start = batch_starts[c], end = contact_end[c];
+					int bi_out = simd_color_batch_starts[c];
+					for (int i = start; i + 3 < end; i += 4) {
+						int idx[4] = { crefs[i].index, crefs[i+1].index, crefs[i+2].index, crefs[i+3].index };
+						pgs_batch4_prepare(&simd_batches[bi_out++], sm, idx, 4, sc);
+					}
+					int rem_start = start + ((end - start) / 4) * 4;
+					if (rem_start < end) {
+						int idx[4] = {0};
+						int rem_count = end - rem_start;
+						for (int j = 0; j < rem_count; j++) idx[j] = crefs[rem_start + j].index;
+						pgs_batch4_prepare(&simd_batches[bi_out++], sm, idx, rem_count, sc);
+					}
 				}
-				int rem_start = start + ((end - start) / 4) * 4;
-				if (rem_start < end) {
-					int idx[4] = {0};
-					int rem_count = end - rem_start;
-					for (int j = 0; j < rem_count; j++) idx[j] = crefs[rem_start + j].index;
-					pgs_batch4_prepare(&simd_batches[bi_out++], sm, idx, rem_count, sc);
-				}
+				simd_batch_count = asize(simd_batches);
 			}
-			simd_batch_count = asize(simd_batches);
 		}
 #endif
 
 		double tp = perf_now();
-		if (use_simd_path) {
 #if SIMD_SSE
-			// On substep 2+, only refresh changing fields (bias + lambda).
-			if (sub > 0 && simd_batch_count > 0) {
+		// On substep 2+, only refresh changing fields (bias + lambda).
+		if (sub > 0 && simd_batch_count > 0) {
 #ifdef _WIN32
-				if (n_workers > 1 && simd_batch_count >= n_workers * 2) {
-					RefreshCtx rc = { .batches = simd_batches, .sm = sm, .sc = sc };
-					pool_dispatch(refresh_work_fn, &rc, simd_batch_count, SOLVER_BLOCK_SIZE, n_workers);
+			if (n_workers > 1 && simd_batch_count >= n_workers * 2) {
+				RefreshCtx rc = { .batches = simd_batches, .sm = sm, .sc = sc };
+				pool_dispatch(refresh_work_fn, &rc, simd_batch_count, SOLVER_BLOCK_SIZE, n_workers);
+			} else
+#endif
+			for (int bi = 0; bi < simd_batch_count; bi++) {
+				pgs_batch4_refresh(&simd_batches[bi], sm, sc);
+			}
+		}
+
+		// Iteration loop: dispatch per color within each iteration.
+		// SIMD batch4 for contacts + scalar solve for joints within each color.
+		// Graph coloring ensures no body conflicts within a color.
+		// Last iteration fuses lambda scatter (batch -> sm/sc) into solve.
+		int last_iter = w->velocity_iters - 1;
+		for (int iter = 0; iter <= last_iter; iter++) {
+			int do_scatter = (iter == last_iter);
+			for (int c = 0; c < color_count; c++) {
+				int bs = simd_color_batch_starts[c], be = simd_color_batch_starts[c + 1];
+				int n_color_batches = be - bs;
+#ifdef _WIN32
+				if (n_workers > 1 && n_color_batches >= n_workers * 2) {
+					PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs, .sm = sm, .sc = sc, .scatter = do_scatter };
+					pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
 				} else
 #endif
-				for (int bi = 0; bi < simd_batch_count; bi++) {
-					pgs_batch4_refresh(&simd_batches[bi], sm, sc);
-				}
-			}
-
-			// Iteration loop: dispatch per color within each iteration.
-			// Last iteration fuses lambda scatter (batch -> sm/sc) into solve
-			// to avoid a separate sequential pass. Safe: batches within a color
-			// write to disjoint manifold/contact slots.
-			int last_iter = w->velocity_iters - 1;
-			for (int iter = 0; iter <= last_iter; iter++) {
-				int do_scatter = (iter == last_iter);
-				for (int c = 0; c < color_count; c++) {
-					int bs = simd_color_batch_starts[c], be = simd_color_batch_starts[c + 1];
-					int n_color_batches = be - bs;
-#ifdef _WIN32
-					if (n_workers > 1 && n_color_batches >= n_workers * 2) {
-						PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs, .sm = sm, .sc = sc, .scatter = do_scatter };
-						pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
-					} else
-#endif
-					{
-						for (int bi = bs; bi < be; bi++) {
-							solve_contact_batch4_sv(w->body_hot, &simd_batches[bi]);
-							if (do_scatter) {
-								PGS_Batch4* bt = &simd_batches[bi];
-								for (int j = 0; j < bt->lane_count; j++) {
-									int mi = bt->manifold_idx[j];
-									sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
-									sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
-									sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
-									for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
-										sc[sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
-									}
+				{
+					for (int bi = bs; bi < be; bi++) {
+						solve_contact_batch4_sv(w->body_hot, &simd_batches[bi]);
+						if (do_scatter) {
+							PGS_Batch4* bt = &simd_batches[bi];
+							for (int j = 0; j < bt->lane_count; j++) {
+								int mi = bt->manifold_idx[j];
+								sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
+								sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
+								sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
+								for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
+									sc[sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
 								}
 							}
 						}
 					}
 				}
+				// Scalar joint solves for this color (populated when LDL is off).
+				// Graph coloring guarantees no body conflicts with this color's contacts.
+				for (int i = contact_end[c]; i < batch_starts[c + 1]; i++) {
+					solve_joint(w, &sol_joints[crefs[i].index]);
+				}
+			}
+			// Limit DOFs only need a separate pass when LDL handles bilateral DOFs
+			// (joints not in crefs). When LDL is off, solve_joint above handles limits.
+			if (w->ldl_enabled) {
 				double tjl = perf_now();
 				joints_solve_limits(w, sol_joints, asize(sol_joints));
 				t_jlim += perf_now() - tjl;
-			}
-#else
-			for (int iter = 0; iter < w->velocity_iters; iter++) {
-				for (int c = 0; c < color_count; c++) {
-					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++) {
-						if (crefs[i].type == CTYPE_CONTACT)
-							solve_contact_patch_sv(w->body_hot, &sm[crefs[i].index], sc);
-					}
-				}
-				double tjl = perf_now();
-				joints_solve_limits(w, sol_joints, asize(sol_joints));
-				t_jlim += perf_now() - tjl;
-			}
-#endif
-		} else {
-			for (int iter = 0; iter < w->velocity_iters; iter++) {
-				for (int c = 0; c < color_count; c++) {
-					for (int i = batch_starts[c]; i < batch_starts[c + 1]; i++) {
-						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
-					}
-				}
-				// When LDL is off, joints are in crefs and solve_joint already
-				// handles limit DOFs. Only call joints_solve_limits when LDL
-				// handles bilateral DOFs (joints not in crefs).
-				if (w->ldl_enabled) {
-					double tjl = perf_now();
-					joints_solve_limits(w, sol_joints, asize(sol_joints));
-					t_jlim += perf_now() - tjl;
-				}
 			}
 		}
+#else
+#error "SIMD_SSE required: non-SSE solver path removed; add a SIMD_NEON backend if needed"
+#endif
 		t_pgs += perf_now() - tp;
 
 		double ti2 = perf_now();
