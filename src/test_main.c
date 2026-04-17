@@ -44,7 +44,9 @@ int main(int argc, char* argv[])
 	int bench_pile_grid = 10;
 	int bench_pile_height = 5;
 	int bench_pile_frames = 300;
+	int bench_mixed = 0;
 	int bench_incr_np = 0;
+	int bench_planes = 0;
 	int pyramid_test = 0;
 	int pyramid_base = 5;
 	int pyramid_frames = 600;
@@ -70,6 +72,8 @@ int main(int argc, char* argv[])
 			bench_chaos = 1;
 		else if (strcmp(argv[i], "--bench-incr-np") == 0)
 			bench_incr_np = 1;
+		else if (strcmp(argv[i], "--bench-planes") == 0)
+			bench_planes = 1;
 		else if (strcmp(argv[i], "--chaos-bodies") == 0 && i + 1 < argc)
 			chaos_bodies = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--chaos-frames") == 0 && i + 1 < argc)
@@ -100,6 +104,8 @@ int main(int argc, char* argv[])
 			pyramid_frames = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--bench-qh") == 0)
 			bench_qh = 1;
+		else if (strcmp(argv[i], "--bench-mixed") == 0)
+			bench_mixed = 1;
 		else if (strcmp(argv[i], "--bench-ldl") == 0)
 			bench_ldl = 1;
 		else if (strcmp(argv[i], "--ldl-chains") == 0 && i + 1 < argc)
@@ -122,12 +128,19 @@ int main(int argc, char* argv[])
 
 	if (bench_qh) {
 		bench_quickhull();
+		bench_quickhull_10k();
 		return 0;
 	}
 
 	if (bench_ldl) {
 		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
 		bench_ldl_joints(ldl_chains, ldl_chain_len, ldl_frames, wp);
+		return 0;
+	}
+
+	if (bench_mixed) {
+		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
+		bench_mixed_contacts_joints(8, 8, 20, 6, 300, wp);
 		return 0;
 	}
 
@@ -150,6 +163,10 @@ int main(int argc, char* argv[])
 	}
 	if (bench_pyramid_base > 0) {
 		bench_pyramid(bench_pyramid_base, 600);
+		return 0;
+	}
+	if (bench_planes) {
+		bench_plane_compute();
 		return 0;
 	}
 	if (bench_incr_np) {

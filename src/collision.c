@@ -81,10 +81,10 @@ static const v3 s_box_verts[8] = {
 //  pair 8: 0->4 / 4->0     pair 9: 1->5 / 5->1
 //  pair10: 2->6 / 6->2     pair11: 3->7 / 7->3
 
-static const uint16_t s_box_edge_twin[24] = { 1,0, 3,2, 5,4, 7,6, 9,8, 11,10, 13,12, 15,14, 17,16, 19,18, 21,20, 23,22 };
-static const uint16_t s_box_edge_next[24] = { 2,16, 4,22, 6,20, 0,18, 10,17, 12,19, 14,21, 8,23, 15,7, 9,5, 11,3, 13,1 };
-static const uint16_t s_box_edge_origin[24] = { 0,3, 3,2, 2,1, 1,0, 4,5, 5,6, 6,7, 7,4, 0,4, 1,5, 2,6, 3,7 };
-static const uint16_t s_box_edge_face[24] = { 0,2, 0,5, 0,3, 0,4, 1,4, 1,3, 1,5, 1,2, 2,4, 4,3, 3,5, 5,2 };
+static const int s_box_edge_twin[24] = { 1,0, 3,2, 5,4, 7,6, 9,8, 11,10, 13,12, 15,14, 17,16, 19,18, 21,20, 23,22 };
+static const int s_box_edge_next[24] = { 2,16, 4,22, 6,20, 0,18, 10,17, 12,19, 14,21, 8,23, 15,7, 9,5, 11,3, 13,1 };
+static const int s_box_edge_origin[24] = { 0,3, 3,2, 2,1, 1,0, 4,5, 5,6, 6,7, 7,4, 0,4, 1,5, 2,6, 3,7 };
+static const int s_box_edge_face[24] = { 0,2, 0,5, 0,3, 0,4, 1,4, 1,3, 1,5, 1,2, 2,4, 4,3, 3,5, 5,2 };
 
 static const HullFace s_box_faces[6] = {
 	{ .edge =  0 },  // face 0 (-Z): starts at e0 (0->3)
@@ -1606,9 +1606,6 @@ static CylFeature cyl_classify_point(v3 x_world, v3 cyl_pos, quat cyl_rot, float
 	feat.normal = rotate(cyl_rot, n_local);
 	return feat;
 }
-
-// hull_build_csr, compact hull converters, face extension, hull_from_compact
-// all moved to quickhull.c -- live with hull construction code.
 
 // -----------------------------------------------------------------------------
 // Incremental narrowphase: validate + refresh cached feature pairs.

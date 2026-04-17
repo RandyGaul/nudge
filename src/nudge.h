@@ -82,10 +82,10 @@ typedef struct Cylinder
 // Edges stored in twin pairs: edge 2k and twin 2k+1.
 typedef struct HalfEdge
 {
-	uint16_t twin;
-	uint16_t next;
-	uint16_t origin;
-	uint16_t face;
+	int twin;
+	int next;
+	int origin;
+	int face;
 } HalfEdge;
 
 typedef struct HullPlane
@@ -96,7 +96,7 @@ typedef struct HullPlane
 
 typedef struct HullFace
 {
-	uint16_t edge;    // first half-edge on this face
+	int edge;    // first half-edge on this face
 } HullFace;
 
 // Convex hull -- half-edge mesh with precomputed face planes.
@@ -106,10 +106,10 @@ typedef struct Hull
 	v3 centroid;
 	const v3*        verts;
 	const float*     soa_verts; // SoA: x[0..n-1], y[0..n-1], z[0..n-1], 16-byte aligned
-	const uint16_t*  edge_twin;   // SoA half-edge arrays (cache-friendly vs AoS HalfEdge)
-	const uint16_t*  edge_next;
-	const uint16_t*  edge_origin;
-	const uint16_t*  edge_face;
+	const int*       edge_twin;   // SoA half-edge arrays
+	const int*       edge_next;
+	const int*       edge_origin;
+	const int*       edge_face;
 	const HullFace*  faces;
 	const HullPlane* planes;
 	int vert_count;
@@ -184,90 +184,6 @@ int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold);
 
 // Built-in unit box hull (half-extents 1,1,1). Use with ConvexHull + scale for boxes.
 const Hull* hull_unit_box();
-
-// -----------------------------------------------------------------------------
-// Compact hull representations.
-//
-// CompactHull32: fixed-size, no heap, for hulls <= 32 verts (e.g. Roblox decomp).
-//   CSR adjacency for O(sqrt(n)) hill-climbing GJK support. ~400 bytes typical.
-//
-// CompactHull: heap-allocated CSR, for hulls <= 65535 verts.
-//   ~3.5x smaller than full Hull. SAT extension built lazily when needed.
-
-#define COMPACT_HULL32_MAX_VERTS 32
-#define COMPACT_HULL32_MAX_NEIGHBORS 186 // Euler bound: 2*(3V-6) = 180 half-edge neighbor refs, +6 padding
-#define COMPACT_HULL32_MAX_FACES 60     // Euler bound: 2V-4 = 60
-
-typedef struct CompactHull32
-{
-	uint8_t   vert_count;
-	uint8_t   face_count;
-	uint8_t   neighbor_total;
-	uint8_t   _pad;
-	uint8_t   offsets[COMPACT_HULL32_MAX_VERTS + 1]; // CSR: offsets[vert_count+1]
-	uint8_t   neighbors[COMPACT_HULL32_MAX_NEIGHBORS]; // CSR: neighbor vertex indices
-	float     verts_x[COMPACT_HULL32_MAX_VERTS]; // SoA vertex positions
-	float     verts_y[COMPACT_HULL32_MAX_VERTS];
-	float     verts_z[COMPACT_HULL32_MAX_VERTS];
-	HullPlane planes[COMPACT_HULL32_MAX_FACES]; // face planes (captured from quickhull)
-	v3        centroid;
-} CompactHull32;
-
-typedef struct CompactHull
-{
-	uint16_t  vert_count;
-	uint16_t  neighbor_total;
-	uint16_t  face_count; // 0 until planes are attached
-	uint16_t  _pad;
-	uint16_t* offsets;    // [vert_count + 1]
-	uint16_t* neighbors;  // [neighbor_total]
-	float*    verts_x;    // SoA vertex positions
-	float*    verts_y;
-	float*    verts_z;
-	HullPlane* planes;    // NULL until compact_hull_attach_planes(); [face_count] when set
-	v3        centroid;
-} CompactHull;
-
-// Convert a full Hull to compact form. Returns 0 on success, -1 if too many verts.
-// Planes are NOT copied -- call compact_hull_attach_planes() separately if needed.
-int compact_hull32_from_hull(CompactHull32* out, const Hull* hull);
-int compact_hull_from_hull(CompactHull* out, const Hull* hull);
-void compact_hull_free(CompactHull* ch);
-
-// Attach face planes to a CompactHull (on-demand, from a full Hull).
-// Copies hull->planes into ch->planes. After this, face_count > 0 and
-// hull_face_extension_build will use these for bitwise-deterministic output.
-void compact_hull_attach_planes(CompactHull* ch, const Hull* hull);
-
-// On-demand face plane extension for SAT contact generation.
-// Built from compact hull CSR adjacency + vertex positions.
-// Produces the same half-edge topology and face planes as quickhull output.
-typedef struct HullFaceExtension
-{
-	uint16_t  face_count;
-	uint16_t  edge_count;   // total half-edges
-	uint16_t* edge_twin;    // [edge_count]
-	uint16_t* edge_next;    // [edge_count]
-	uint16_t* edge_origin;  // [edge_count]
-	uint16_t* edge_face;    // [edge_count]
-	HullFace* faces;        // [face_count] -- first edge per face
-	HullPlane* planes;      // [face_count] -- normal + offset
-} HullFaceExtension;
-
-// Build face extension from a CompactHull. Caller frees with hull_face_extension_free().
-// Reconstructs half-edge mesh and face planes from CSR adjacency.
-int hull_face_extension_build(HullFaceExtension* out, const CompactHull* ch);
-void hull_face_extension_free(HullFaceExtension* ext);
-
-// Build a full Hull referencing CompactHull vertex data + face extension.
-// The returned Hull points into ch and ext memory (does NOT copy).
-// Caller must keep ch and ext alive while using the Hull.
-Hull hull_from_compact(const CompactHull* ch, const HullFaceExtension* ext);
-
-// Validate compact hull round-trip: builds face extension, verifies
-// Euler/twin/loop invariants. If planes are attached, also checks
-// bitwise plane identity. Returns 0 on success, -1 on failure.
-int compact_hull_validate_roundtrip(const CompactHull* ch);
 
 // -----------------------------------------------------------------------------
 // Quickhull -- build a convex hull from a point cloud.

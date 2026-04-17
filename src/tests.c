@@ -2585,18 +2585,6 @@ static void test_quickhull_fuzz(int iterations)
 				}
 			}
 
-			// Compact hull round-trip validation on every fuzz hull.
-			if (h->vert_count <= 65535) {
-				CompactHull ch_fuzz;
-				compact_hull_from_hull(&ch_fuzz, h);
-				// Topology-only validation (no planes).
-				if (compact_hull_validate_roundtrip(&ch_fuzz) != 0) total_fails++;
-				// Attach planes, then validate bitwise identity.
-				compact_hull_attach_planes(&ch_fuzz, h);
-				if (compact_hull_validate_roundtrip(&ch_fuzz) != 0) total_fails++;
-				compact_hull_free(&ch_fuzz);
-			}
-
 			hull_free(h);
 			afree(pts);
 		}
@@ -11984,6 +11972,36 @@ static void bench_quickhull()
 	for (int i = 0; i < N_CYL; i++) afree(cyl_sets[i]);
 }
 
+static void bench_quickhull_10k()
+{
+	perf_init();
+	fuzz_rng_state = 99999;
+	enum { N = 10000 };
+	v3* sphere_pts = malloc(N * sizeof(v3));
+	v3* box_pts = malloc(N * sizeof(v3));
+	for (int i = 0; i < N; i++) sphere_pts[i] = fuzz_rand_dir();
+	for (int i = 0; i < N; i++) box_pts[i] = V3(fuzz_rand_range(-1, 1), fuzz_rand_range(-1, 1), fuzz_rand_range(-1, 1));
+
+	Hull* hw;
+	hw = quickhull(sphere_pts, N); if (hw) hull_free(hw);
+	hw = quickhull(box_pts, N); if (hw) hull_free(hw);
+
+	double t0 = perf_now();
+	Hull* hs = quickhull(sphere_pts, N);
+	double t1 = perf_now();
+	printf("quickhull_sphere_10k: %.3f ms  (%d verts, %d faces)\n", (t1 - t0) * 1000.0, hs ? hs->vert_count : 0, hs ? hs->face_count : 0);
+	if (hs) hull_free(hs);
+
+	t0 = perf_now();
+	Hull* hb = quickhull(box_pts, N);
+	t1 = perf_now();
+	printf("quickhull_box_10k:    %.3f ms  (%d verts, %d faces)\n", (t1 - t0) * 1000.0, hb ? hb->vert_count : 0, hb ? hb->face_count : 0);
+	if (hb) hull_free(hb);
+
+	free(sphere_pts);
+	free(box_pts);
+}
+
 static void run_tests()
 {
 	test_pass = 0;
@@ -12018,773 +12036,7 @@ static void run_tests()
 	test_tilted_cyl_on_floor();
 	test_quickhull();
 
-	// Compact hull converters -- thorough correctness tests.
-	{
-		// Helper: validate CSR adjacency against the full Hull half-edge topology.
-		// For each vertex v, collect its neighbors from the half-edge mesh,
-		// then check they match the CSR neighbors (order-independent).
-		#define VALIDATE_CSR32(label, ch, hull) do { \
-			TEST_BEGIN(label " CSR correctness"); \
-			for (int _v = 0; _v < (ch).vert_count; _v++) { \
-				/* Collect neighbors from half-edge mesh. */ \
-				int he_nbs[64], he_count = 0; \
-				for (int _e = 0; _e < (hull)->edge_count; _e++) { \
-					if ((hull)->edge_origin[_e] == _v) \
-						he_nbs[he_count++] = (hull)->edge_origin[(hull)->edge_twin[_e]]; \
-				} \
-				int csr_count = (ch).offsets[_v+1] - (ch).offsets[_v]; \
-				TEST_ASSERT(csr_count == he_count); \
-				/* Check each CSR neighbor exists in the half-edge set (order-independent). */ \
-				for (int _i = (ch).offsets[_v]; _i < (ch).offsets[_v+1]; _i++) { \
-					int nb = (ch).neighbors[_i]; \
-					TEST_ASSERT(nb < (ch).vert_count); \
-					int found = 0; \
-					for (int _j = 0; _j < he_count; _j++) if (he_nbs[_j] == nb) { found = 1; break; } \
-					TEST_ASSERT(found); \
-				} \
-			} \
-		} while(0)
-
-		#define VALIDATE_CSR16(label, ch, hull) do { \
-			TEST_BEGIN(label " CSR correctness"); \
-			for (int _v = 0; _v < (ch).vert_count; _v++) { \
-				int he_nbs[64], he_count = 0; \
-				for (int _e = 0; _e < (hull)->edge_count; _e++) { \
-					if ((hull)->edge_origin[_e] == _v) \
-						he_nbs[he_count++] = (hull)->edge_origin[(hull)->edge_twin[_e]]; \
-				} \
-				int csr_count = (ch).offsets[_v+1] - (ch).offsets[_v]; \
-				TEST_ASSERT(csr_count == he_count); \
-				for (int _i = (ch).offsets[_v]; _i < (ch).offsets[_v+1]; _i++) { \
-					int nb = (ch).neighbors[_i]; \
-					TEST_ASSERT(nb < (ch).vert_count); \
-					int found = 0; \
-					for (int _j = 0; _j < he_count; _j++) if (he_nbs[_j] == nb) { found = 1; break; } \
-					TEST_ASSERT(found); \
-				} \
-			} \
-		} while(0)
-
-		// Helper: verify CSR support function matches brute-force for random directions.
-		#define VALIDATE_SUPPORT(label, ch, hull, nv, get_x, get_y, get_z, off_t, nb_t) do { \
-			TEST_BEGIN(label " support correctness"); \
-			unsigned _rng = 54321; \
-			for (int _t = 0; _t < 200; _t++) { \
-				/* Random direction. */ \
-				_rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; \
-				float _rx = (float)(_rng & 0xFFFF) / 32768.0f - 1.0f; \
-				_rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; \
-				float _ry = (float)(_rng & 0xFFFF) / 32768.0f - 1.0f; \
-				_rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; \
-				float _rz = (float)(_rng & 0xFFFF) / 32768.0f - 1.0f; \
-				float _l = sqrtf(_rx*_rx + _ry*_ry + _rz*_rz); \
-				if (_l < 0.01f) continue; \
-				_rx /= _l; _ry /= _l; _rz /= _l; \
-				/* Brute-force support. */ \
-				float _best_bf = -1e18f; int _best_bf_i = 0; \
-				for (int _i = 0; _i < (nv); _i++) { \
-					float _d = get_x(_i)*_rx + get_y(_i)*_ry + get_z(_i)*_rz; \
-					if (_d > _best_bf) { _best_bf = _d; _best_bf_i = _i; } \
-				} \
-				/* CSR hill-climb support from vertex 0. */ \
-				int _best_hc = 0; float _best_hc_d = get_x(0)*_rx + get_y(0)*_ry + get_z(0)*_rz; \
-				for (;;) { \
-					int _imp = 0; \
-					for (int _i = ((off_t*)(ch).offsets)[_best_hc]; _i < ((off_t*)(ch).offsets)[_best_hc+1]; _i++) { \
-						int _nb = ((nb_t*)(ch).neighbors)[_i]; \
-						float _nd = get_x(_nb)*_rx + get_y(_nb)*_ry + get_z(_nb)*_rz; \
-						if (_nd > _best_hc_d) { _best_hc_d = _nd; _best_hc = _nb; _imp = 1; } \
-					} \
-					if (!_imp) break; \
-				} \
-				TEST_ASSERT_FLOAT(_best_hc_d, _best_bf, 1e-5f); \
-			} \
-		} while(0)
-
-		TEST_BEGIN("compact_hull32 box");
-		v3 box_pts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-		Hull* h = quickhull(box_pts, 8);
-		CompactHull32 ch32;
-		TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == 0);
-		TEST_ASSERT(ch32.vert_count == h->vert_count);
-		TEST_ASSERT(ch32.neighbor_total > 0);
-		for (int v = 0; v < ch32.vert_count; v++) {
-			int deg = ch32.offsets[v+1] - ch32.offsets[v];
-			TEST_ASSERT(deg == 3);
-		}
-		for (int v = 0; v < ch32.vert_count; v++) {
-			TEST_ASSERT_FLOAT(ch32.verts_x[v], h->verts[v].x, 1e-6f);
-			TEST_ASSERT_FLOAT(ch32.verts_y[v], h->verts[v].y, 1e-6f);
-			TEST_ASSERT_FLOAT(ch32.verts_z[v], h->verts[v].z, 1e-6f);
-		}
-		VALIDATE_CSR32("compact_hull32 box", ch32, h);
-		#define CH32_X(i) ch32.verts_x[i]
-		#define CH32_Y(i) ch32.verts_y[i]
-		#define CH32_Z(i) ch32.verts_z[i]
-		VALIDATE_SUPPORT("compact_hull32 box", ch32, h, ch32.vert_count, CH32_X, CH32_Y, CH32_Z, uint8_t, uint8_t);
-
-		TEST_BEGIN("compact_hull box");
-		CompactHull ch16;
-		TEST_ASSERT(compact_hull_from_hull(&ch16, h) == 0);
-		TEST_ASSERT(ch16.vert_count == h->vert_count);
-		for (int v = 0; v < ch16.vert_count; v++) {
-			int deg = ch16.offsets[v+1] - ch16.offsets[v];
-			TEST_ASSERT(deg == 3);
-		}
-		VALIDATE_CSR16("compact_hull box", ch16, h);
-		#define CH16_X(i) ch16.verts_x[i]
-		#define CH16_Y(i) ch16.verts_y[i]
-		#define CH16_Z(i) ch16.verts_z[i]
-		VALIDATE_SUPPORT("compact_hull box", ch16, h, ch16.vert_count, CH16_X, CH16_Y, CH16_Z, uint16_t, uint16_t);
-		compact_hull_free(&ch16);
-		hull_free(h);
-
-		TEST_BEGIN("compact_hull32 tetrahedron");
-		v3 tet_pts[] = { {0,1,0},{-1,-1,1},{1,-1,1},{0,-1,-1} };
-		h = quickhull(tet_pts, 4);
-		TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == 0);
-		TEST_ASSERT(ch32.vert_count == 4);
-		for (int v = 0; v < ch32.vert_count; v++) TEST_ASSERT(ch32.offsets[v+1] - ch32.offsets[v] == 3);
-		VALIDATE_CSR32("compact_hull32 tet", ch32, h);
-		VALIDATE_SUPPORT("compact_hull32 tet", ch32, h, ch32.vert_count, CH32_X, CH32_Y, CH32_Z, uint8_t, uint8_t);
-		hull_free(h);
-
-		TEST_BEGIN("compact_hull32 icosahedron");
-		static const v3 ico_pts[] = {
-			{-1,1.618f,0},{1,1.618f,0},{-1,-1.618f,0},{1,-1.618f,0},
-			{0,-1,1.618f},{0,1,1.618f},{0,-1,-1.618f},{0,1,-1.618f},
-			{1.618f,0,-1},{1.618f,0,1},{-1.618f,0,1},{-1.618f,0,-1},
-		};
-		h = quickhull(ico_pts, 12);
-		TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == 0);
-		TEST_ASSERT(ch32.vert_count == 12);
-		for (int v = 0; v < ch32.vert_count; v++) TEST_ASSERT(ch32.offsets[v+1] - ch32.offsets[v] == 5);
-		VALIDATE_CSR32("compact_hull32 ico", ch32, h);
-		VALIDATE_SUPPORT("compact_hull32 ico", ch32, h, ch32.vert_count, CH32_X, CH32_Y, CH32_Z, uint8_t, uint8_t);
-		hull_free(h);
-
-		// Symmetry: if v has neighbor u, then u must have neighbor v.
-		TEST_BEGIN("compact_hull32 symmetry");
-		h = quickhull(ico_pts, 12);
-		compact_hull32_from_hull(&ch32, h);
-		for (int v = 0; v < ch32.vert_count; v++) {
-			for (int i = ch32.offsets[v]; i < ch32.offsets[v+1]; i++) {
-				int nb = ch32.neighbors[i];
-				int found_reverse = 0;
-				for (int j = ch32.offsets[nb]; j < ch32.offsets[nb+1]; j++)
-					if (ch32.neighbors[j] == v) { found_reverse = 1; break; }
-				TEST_ASSERT(found_reverse);
-			}
-		}
-		hull_free(h);
-
-		// No self-loops: no vertex should list itself as a neighbor.
-		TEST_BEGIN("compact_hull32 no self-loops");
-		h = quickhull(box_pts, 8);
-		compact_hull32_from_hull(&ch32, h);
-		for (int v = 0; v < ch32.vert_count; v++)
-			for (int i = ch32.offsets[v]; i < ch32.offsets[v+1]; i++)
-				TEST_ASSERT(ch32.neighbors[i] != v);
-		hull_free(h);
-
-		// No duplicate neighbors.
-		TEST_BEGIN("compact_hull32 no duplicates");
-		h = quickhull(ico_pts, 12);
-		compact_hull32_from_hull(&ch32, h);
-		for (int v = 0; v < ch32.vert_count; v++) {
-			for (int i = ch32.offsets[v]; i < ch32.offsets[v+1]; i++)
-				for (int j = i+1; j < ch32.offsets[v+1]; j++)
-					TEST_ASSERT(ch32.neighbors[i] != ch32.neighbors[j]);
-		}
-		hull_free(h);
-
-		// Euler formula: E = neighbor_total / 2, V - E + F = 2.
-		TEST_BEGIN("compact_hull32 Euler");
-		h = quickhull(ico_pts, 12);
-		compact_hull32_from_hull(&ch32, h);
-		int euler_V = ch32.vert_count;
-		int euler_E = ch32.neighbor_total / 2;
-		int euler_F = h->face_count;
-		TEST_ASSERT(euler_V - euler_E + euler_F == 2);
-		hull_free(h);
-
-		// Cylinder: merged faces produce non-trivial topology.
-		TEST_BEGIN("compact_hull32 cylinder");
-		{
-			CK_DYNA v3* cyl = NULL;
-			for (int i = 0; i < 16; i++) {
-				float a = 2.0f * 3.14159265f * (float)i / 16.0f;
-				apush(cyl, V3(cosf(a), 1.0f, sinf(a)));
-				apush(cyl, V3(cosf(a), -1.0f, sinf(a)));
-			}
-			h = quickhull(cyl, asize(cyl));
-			TEST_ASSERT(h != NULL);
-			TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == 0);
-			VALIDATE_CSR32("compact_hull32 cyl", ch32, h);
-			VALIDATE_SUPPORT("compact_hull32 cyl", ch32, h, ch32.vert_count, CH32_X, CH32_Y, CH32_Z, uint8_t, uint8_t);
-			// Verify Euler for cylinder.
-			euler_V = ch32.vert_count;
-			euler_E = ch32.neighbor_total / 2;
-			euler_F = h->face_count;
-			TEST_ASSERT(euler_V - euler_E + euler_F == 2);
-			hull_free(h);
-			afree(cyl);
-		}
-
-		// Fuzz: random hulls, validate CSR + support for each.
-		TEST_BEGIN("compact_hull32 fuzz");
-		{
-			unsigned frng = 99999;
-			int fuzz_fails = 0;
-			for (int iter = 0; iter < 100; iter++) {
-				int n = 8 + (frng % 25); frng ^= frng << 13; frng ^= frng >> 17; frng ^= frng << 5;
-				CK_DYNA v3* pts = NULL;
-				for (int i = 0; i < n; i++) {
-					frng ^= frng << 13; frng ^= frng >> 17; frng ^= frng << 5;
-					float x = (float)(frng & 0xFFFF) / 32768.0f - 1.0f;
-					frng ^= frng << 13; frng ^= frng >> 17; frng ^= frng << 5;
-					float y = (float)(frng & 0xFFFF) / 32768.0f - 1.0f;
-					frng ^= frng << 13; frng ^= frng >> 17; frng ^= frng << 5;
-					float z = (float)(frng & 0xFFFF) / 32768.0f - 1.0f;
-					apush(pts, V3(x, y, z));
-				}
-				h = quickhull(pts, asize(pts));
-				if (h && h->vert_count <= 32) {
-					int ok = compact_hull32_from_hull(&ch32, h) == 0;
-					if (!ok) fuzz_fails++;
-					if (ok) {
-						// Spot-check: symmetry + support.
-						for (int v = 0; v < ch32.vert_count && ok; v++) {
-							for (int i = ch32.offsets[v]; i < ch32.offsets[v+1] && ok; i++) {
-								int nb = ch32.neighbors[i];
-								if (nb >= ch32.vert_count) { ok = 0; break; }
-								int rev = 0;
-								for (int j = ch32.offsets[nb]; j < ch32.offsets[nb+1]; j++)
-									if (ch32.neighbors[j] == v) { rev = 1; break; }
-								if (!rev) ok = 0;
-							}
-						}
-						if (!ok) fuzz_fails++;
-					}
-				}
-				if (h) hull_free(h);
-				afree(pts);
-			}
-			TEST_ASSERT(fuzz_fails == 0);
-		}
-
-		TEST_BEGIN("compact_hull32 reject >32 verts");
-		{
-			CK_DYNA v3* many_pts = NULL;
-			for (int i = 0; i < 100; i++) {
-				float theta = 2.0f * 3.14159f * (float)i / 100.0f;
-				float phi = 3.14159f * (float)(i % 50) / 50.0f;
-				apush(many_pts, V3(sinf(phi)*cosf(theta), sinf(phi)*sinf(theta), cosf(phi)));
-			}
-			h = quickhull(many_pts, asize(many_pts));
-			if (h && h->vert_count > 32) {
-				TEST_ASSERT(compact_hull32_from_hull(&ch32, h) == -1);
-			}
-			if (h) {
-				TEST_ASSERT(compact_hull_from_hull(&ch16, h) == 0);
-				TEST_ASSERT(ch16.vert_count == h->vert_count);
-				VALIDATE_CSR16("compact_hull large", ch16, h);
-				VALIDATE_SUPPORT("compact_hull large", ch16, h, ch16.vert_count, CH16_X, CH16_Y, CH16_Z, uint16_t, uint16_t);
-				compact_hull_free(&ch16);
-				hull_free(h);
-			}
-			afree(many_pts);
-		}
-
-		#undef VALIDATE_CSR32
-		#undef VALIDATE_CSR16
-		#undef VALIDATE_SUPPORT
-		#undef CH32_X
-		#undef CH32_Y
-		#undef CH32_Z
-		#undef CH16_X
-		#undef CH16_Y
-		#undef CH16_Z
-
-		// Face extension tests: verify reconstructed face planes match quickhull output.
-		TEST_BEGIN("face extension box topology");
-		{
-			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-			Hull* fh = quickhull(bpts, 8);
-			CompactHull fc;
-			compact_hull_from_hull(&fc, fh);
-			compact_hull_attach_planes(&fc, fh);
-			HullFaceExtension ext;
-			TEST_ASSERT(hull_face_extension_build(&ext, &fc) == 0);
-			TEST_ASSERT(ext.face_count == fh->face_count);
-			TEST_ASSERT(ext.edge_count == fh->edge_count);
-
-			// Euler: V - E/2 + F = 2.
-			TEST_ASSERT(fc.vert_count - ext.edge_count / 2 + ext.face_count == 2);
-
-			// Twin reciprocity.
-			for (int e = 0; e < ext.edge_count; e++)
-				TEST_ASSERT(ext.edge_twin[ext.edge_twin[e]] == e);
-
-			// Each face loop closes.
-			for (int f = 0; f < ext.face_count; f++) {
-				int e = ext.faces[f].edge, start = e, n = 0;
-				do { n++; e = ext.edge_next[e]; TEST_ASSERT(n < 100); } while (e != start);
-				TEST_ASSERT(n >= 3);
-			}
-
-			// Face planes: each plane normal should be unit length.
-			for (int f = 0; f < ext.face_count; f++) {
-				float l = len(ext.planes[f].normal);
-				TEST_ASSERT_FLOAT(l, 1.0f, 1e-4f);
-			}
-
-			// Face planes should match quickhull output (same normals, same offsets).
-			// Since face ordering may differ, match by closest normal.
-			for (int f = 0; f < ext.face_count; f++) {
-				int found = 0;
-				for (int g = 0; g < fh->face_count; g++) {
-					float d = dot(ext.planes[f].normal, fh->planes[g].normal);
-					if (d > 0.99f && fabsf(ext.planes[f].offset - fh->planes[g].offset) < 0.1f) {
-						found = 1; break;
-					}
-				}
-				TEST_ASSERT(found);
-			}
-
-			// Bitwise plane comparison: each extension plane must match a quickhull plane exactly.
-			{
-				int bitwise_ok = 1;
-				for (int f = 0; f < ext.face_count; f++) {
-					int found = 0;
-					for (int g = 0; g < fh->face_count; g++) {
-						if (memcmp(&ext.planes[f], &fh->planes[g], sizeof(HullPlane)) == 0) { found = 1; break; }
-					}
-					if (!found) {
-						printf("  FACE %d: ext=(%g,%g,%g d=%g) no bitwise match\n", f, ext.planes[f].normal.x, ext.planes[f].normal.y, ext.planes[f].normal.z, ext.planes[f].offset);
-						bitwise_ok = 0;
-					}
-				}
-				TEST_BEGIN("face extension box bitwise planes");
-				TEST_ASSERT(bitwise_ok);
-			}
-
-			hull_face_extension_free(&ext);
-			compact_hull_free(&fc);
-			hull_free(fh);
-		}
-
-		TEST_BEGIN("face extension icosahedron");
-		{
-			static const v3 ico[] = {
-				{-1,1.618f,0},{1,1.618f,0},{-1,-1.618f,0},{1,-1.618f,0},
-				{0,-1,1.618f},{0,1,1.618f},{0,-1,-1.618f},{0,1,-1.618f},
-				{1.618f,0,-1},{1.618f,0,1},{-1.618f,0,1},{-1.618f,0,-1},
-			};
-			Hull* fh = quickhull(ico, 12);
-			CompactHull fc;
-			compact_hull_from_hull(&fc, fh);
-			compact_hull_attach_planes(&fc, fh);
-			HullFaceExtension ext;
-			TEST_ASSERT(hull_face_extension_build(&ext, &fc) == 0);
-			TEST_ASSERT(ext.face_count == 20); // icosahedron has 20 faces
-			TEST_ASSERT(fc.vert_count - ext.edge_count / 2 + ext.face_count == 2);
-
-			// All faces should be triangles.
-			for (int f = 0; f < ext.face_count; f++) {
-				int e = ext.faces[f].edge, n = 0;
-				do { n++; e = ext.edge_next[e]; } while (e != ext.faces[f].edge);
-				TEST_ASSERT(n == 3);
-			}
-
-			// Plane normals match quickhull output.
-			for (int f = 0; f < ext.face_count; f++) {
-				int found = 0;
-				for (int g = 0; g < fh->face_count; g++) {
-					if (dot(ext.planes[f].normal, fh->planes[g].normal) > 0.99f) { found = 1; break; }
-				}
-				TEST_ASSERT(found);
-			}
-
-			// Bitwise plane comparison for icosahedron.
-			{
-				int bitwise_ok = 1;
-				for (int f = 0; f < ext.face_count; f++) {
-					int found = 0;
-					for (int g = 0; g < fh->face_count; g++) {
-						if (memcmp(&ext.planes[f], &fh->planes[g], sizeof(HullPlane)) == 0) { found = 1; break; }
-					}
-					// Also check flipped normal (same plane, opposite orientation).
-					if (!found) {
-						HullPlane flipped = { neg(ext.planes[f].normal), -ext.planes[f].offset };
-						for (int g = 0; g < fh->face_count; g++)
-							if (memcmp(&flipped, &fh->planes[g], sizeof(HullPlane)) == 0) { found = 1; break; }
-					}
-					if (!found) bitwise_ok = 0;
-				}
-				TEST_BEGIN("face extension ico bitwise planes");
-				TEST_ASSERT(bitwise_ok);
-			}
-
-			hull_face_extension_free(&ext);
-			compact_hull_free(&fc);
-			hull_free(fh);
-		}
-
-		TEST_BEGIN("face extension cylinder (merged faces)");
-		{
-			CK_DYNA v3* cpts = NULL;
-			for (int i = 0; i < 12; i++) {
-				float a = 2.0f * 3.14159265f * (float)i / 12.0f;
-				apush(cpts, V3(cosf(a), 1.0f, sinf(a)));
-				apush(cpts, V3(cosf(a), -1.0f, sinf(a)));
-			}
-			Hull* fh = quickhull(cpts, asize(cpts));
-			CompactHull fc;
-			compact_hull_from_hull(&fc, fh);
-			compact_hull_attach_planes(&fc, fh);
-			HullFaceExtension ext;
-			TEST_ASSERT(hull_face_extension_build(&ext, &fc) == 0);
-			TEST_ASSERT(fc.vert_count - ext.edge_count / 2 + ext.face_count == 2);
-
-			// Twin reciprocity.
-			for (int e = 0; e < ext.edge_count; e++)
-				TEST_ASSERT(ext.edge_twin[ext.edge_twin[e]] == e);
-
-			// Plane normals match quickhull (order-independent).
-			for (int f = 0; f < ext.face_count; f++) {
-				int found = 0;
-				for (int g = 0; g < fh->face_count; g++) {
-					if (dot(ext.planes[f].normal, fh->planes[g].normal) > 0.99f &&
-					    fabsf(ext.planes[f].offset - fh->planes[g].offset) < 0.1f) { found = 1; break; }
-				}
-				TEST_ASSERT(found);
-			}
-
-			hull_face_extension_free(&ext);
-			compact_hull_free(&fc);
-			hull_free(fh);
-			afree(cpts);
-		}
-
-		TEST_BEGIN("hull_from_compact roundtrip");
-		{
-			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-			Hull* fh = quickhull(bpts, 8);
-			CompactHull fc;
-			compact_hull_from_hull(&fc, fh);
-			compact_hull_attach_planes(&fc, fh);
-			HullFaceExtension ext;
-			hull_face_extension_build(&ext, &fc);
-			Hull reassembled = hull_from_compact(&fc, &ext);
-			TEST_ASSERT(reassembled.vert_count == fh->vert_count);
-			TEST_ASSERT(reassembled.edge_count == fh->edge_count);
-			TEST_ASSERT(reassembled.face_count == fh->face_count);
-			TEST_ASSERT(reassembled.soa_verts != NULL);
-			TEST_ASSERT(reassembled.planes != NULL);
-			hull_face_extension_free(&ext);
-			compact_hull_free(&fc);
-			hull_free(fh);
-		}
-
-		// GJK compact hull support: verify both compact types match full hull support.
-		TEST_BEGIN("gjk compact_hull32 support vs full hull");
-		{
-			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-			Hull* fh = quickhull(bpts, 8);
-			CompactHull32 c32;
-			compact_hull32_from_hull(&c32, fh);
-			v3 pos = V3(5, 3, -2);
-			quat rot = norm(((quat){0.1f, 0.3f, -0.2f, 0.9f}));
-			v3 sc = V3(1.5f, 0.8f, 1.2f);
-			GJK_Shape c32_shape = gjk_compact_hull32(pos, rot, sc, &c32);
-			unsigned rng = 77777;
-			for (int t = 0; t < 500; t++) {
-				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-				float dx = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
-				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-				float dy = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
-				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-				float dz = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
-				v3 dir = V3(dx, dy, dz);
-				int f2; v3 p2;
-				gjk_support(&c32_shape, dir, &f2, p2);
-				// Brute-force: transform all verts and find true max.
-				float bf_max = -1e18f;
-				for (int vi = 0; vi < fh->vert_count; vi++) {
-					v3 lv = hmul(fh->verts[vi], sc);
-					v3 wv = add(pos, rotate(rot, lv));
-					float d = dot(dir, wv);
-					if (d > bf_max) bf_max = d;
-				}
-				float dp2 = dot(dir, p2);
-				TEST_ASSERT(bf_max - dp2 < 0.001f);
-			}
-			hull_free(fh);
-		}
-
-		TEST_BEGIN("gjk compact_hull support vs full hull (icosahedron)");
-		{
-			static const v3 ico[] = {
-				{-1,1.618f,0},{1,1.618f,0},{-1,-1.618f,0},{1,-1.618f,0},
-				{0,-1,1.618f},{0,1,1.618f},{0,-1,-1.618f},{0,1,-1.618f},
-				{1.618f,0,-1},{1.618f,0,1},{-1.618f,0,1},{-1.618f,0,-1},
-			};
-			Hull* fh = quickhull(ico, 12);
-			CompactHull fc;
-			compact_hull_from_hull(&fc, fh);
-			v3 pos = V3(-1, 4, 2);
-			quat rot = norm(((quat){0.5f, -0.1f, 0.3f, 0.8f}));
-			v3 sc = V3(2.0f, 2.0f, 2.0f);
-			GJK_Shape comp_shape = gjk_compact_hull_shape(pos, rot, sc, &fc);
-			unsigned rng = 12345;
-			for (int t = 0; t < 500; t++) {
-				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-				float dx = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
-				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-				float dy = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
-				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-				float dz = (float)(rng & 0xFFFF)/32768.0f - 1.0f;
-				v3 dir = V3(dx, dy, dz);
-				int f2; v3 p2;
-				gjk_support(&comp_shape, dir, &f2, p2);
-				float bf_max = -1e18f;
-				for (int vi = 0; vi < fh->vert_count; vi++) {
-					v3 lv = hmul(fh->verts[vi], sc);
-					v3 wv = add(pos, rotate(rot, lv));
-					float d = dot(dir, wv);
-					if (d > bf_max) bf_max = d;
-				}
-				float dp2 = dot(dir, p2);
-				TEST_ASSERT(bf_max - dp2 < 0.001f);
-			}
-			compact_hull_free(&fc);
-			hull_free(fh);
-		}
-
-		// GJK distance: compact hull vs full hull should give same distance.
-		// GJK: isolated repro of t=0 failure from the fuzz.
-		TEST_BEGIN("gjk compact_hull32 distance repro");
-		{
-			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-			Hull* fh = quickhull(bpts, 8);
-			CompactHull32 c32;
-			compact_hull32_from_hull(&c32, fh);
-			// Use the exact config from t=0 failure.
-			v3 posA = V3(-3.333f,-3.333f,-3.333f), posB = V3(3.784f,3.784f,3.784f);
-			v3 scA = V3(1.985f,1.985f,1.985f), scB = V3(0.863f,0.863f,0.863f);
-			quat rotA = quat_identity(), rotB = quat_identity();
-			GJK_Shape sa = gjk_hull_scaled(fh, posA, rotA, scA, NULL, NULL);
-			GJK_Shape sb = gjk_hull_scaled(fh, posB, rotB, scB, NULL, NULL);
-			GJK_Result r1 = gjk_distance_v(sa, sb, NULL);
-			GJK_Shape ca = gjk_compact_hull32(posA, rotA, scA, &c32);
-			GJK_Shape cb = gjk_compact_hull32(posB, rotB, scB, &c32);
-			GJK_Result r2 = gjk_distance_v(ca, cb, NULL);
-			// The true distance between two axis-aligned boxes:
-			// A: center (-3.333), half-extents 1.985. Range: [-5.318, -1.348]
-			// B: center (3.784), half-extents 0.863. Range: [2.921, 4.647]
-			// Gap along each axis: 2.921 - (-1.348) = 4.269
-			// Distance = sqrt(3) * 4.269 = 7.394 (diagonal)
-			// Wait no -- for boxes, distance = max(0, gap_x)^2 + ... then sqrt.
-			// Actually GJK on convex hulls gives the Minkowski difference distance.
-			// For separated axis-aligned boxes the gap is 4.269 per axis, distance = 4.269 * sqrt(3) = 7.394.
-			// Hmm, actually distance is the closest point distance, which for axis-aligned identical-gap is diagonal.
-			// Let me just check both are close to each other.
-			TEST_ASSERT_FLOAT(r1.distance, r2.distance, 0.01f);
-			hull_free(fh);
-		}
-
-		// GJK distance: basic separated case.
-		TEST_BEGIN("gjk compact_hull32 distance basic");
-		{
-			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-			Hull* fh = quickhull(bpts, 8);
-			CompactHull32 c32;
-			compact_hull32_from_hull(&c32, fh);
-			// Simple axis-aligned separation, identity rotation, unit scale.
-			GJK_Shape sa = gjk_hull_scaled(fh, V3(0,0,0), quat_identity(), V3(1,1,1), NULL, NULL);
-			GJK_Shape sb = gjk_hull_scaled(fh, V3(5,0,0), quat_identity(), V3(1,1,1), NULL, NULL);
-			GJK_Result r1 = gjk_distance_v(sa, sb, NULL);
-			GJK_Shape ca = gjk_compact_hull32(V3(0,0,0), quat_identity(), V3(1,1,1), &c32);
-			GJK_Shape cb = gjk_compact_hull32(V3(5,0,0), quat_identity(), V3(1,1,1), &c32);
-			GJK_Result r2 = gjk_distance_v(ca, cb, NULL);
-			TEST_ASSERT_FLOAT(r1.distance, r2.distance, 0.01f);
-			hull_free(fh);
-		}
-
-		// GJK distance: compact32 vs full hull -- random configs.
-		TEST_BEGIN("gjk compact_hull32 distance fuzz");
-		{
-			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-			Hull* fh = quickhull(bpts, 8);
-			CompactHull32 c32;
-			compact_hull32_from_hull(&c32, fh);
-			unsigned rng = 55555;
-			int dist_fails = 0;
-			for (int t = 0; t < 200; t++) {
-				#define RFLOAT(lo,hi) (lo + (float)(rng ^= rng<<13, rng ^= rng>>17, rng ^= rng<<5, rng & 0xFFFF) / 65535.0f * (hi-lo))
-				v3 posA = V3(RFLOAT(-5,5), RFLOAT(-5,5), RFLOAT(-5,5));
-				v3 posB = V3(RFLOAT(-5,5), RFLOAT(-5,5), RFLOAT(-5,5));
-				quat qra = {RFLOAT(-1,1), RFLOAT(-1,1), RFLOAT(-1,1), RFLOAT(0.1f,1)};
-				quat qrb = {RFLOAT(-1,1), RFLOAT(-1,1), RFLOAT(-1,1), RFLOAT(0.1f,1)};
-				quat rotA = quat_norm(qra), rotB = quat_norm(qrb);
-				v3 scA = V3(RFLOAT(0.5f,2), RFLOAT(0.5f,2), RFLOAT(0.5f,2));
-				v3 scB = V3(RFLOAT(0.5f,2), RFLOAT(0.5f,2), RFLOAT(0.5f,2));
-				GJK_Shape sa = gjk_hull_scaled(fh, posA, rotA, scA, NULL, NULL);
-				GJK_Shape sb = gjk_hull_scaled(fh, posB, rotB, scB, NULL, NULL);
-				GJK_Result r1 = gjk_distance_v(sa, sb, NULL);
-				GJK_Shape ca = gjk_compact_hull32(posA, rotA, scA, &c32);
-				GJK_Shape cb = gjk_compact_hull32(posB, rotB, scB, &c32);
-				GJK_Result r2 = gjk_distance_v(ca, cb, NULL);
-					// Compact hull uses exhaustive SIMD scan (correct).
-				if (fabsf(r1.distance - r2.distance) > 0.01f) dist_fails++;
-			}
-			TEST_ASSERT(dist_fails == 0);
-			hull_free(fh);
-		}
-
-		// GJK distance: CompactHull (icosahedron) vs full hull.
-		TEST_BEGIN("gjk compact_hull distance fuzz (ico)");
-		{
-			static const v3 ico[] = {
-				{-1,1.618f,0},{1,1.618f,0},{-1,-1.618f,0},{1,-1.618f,0},
-				{0,-1,1.618f},{0,1,1.618f},{0,-1,-1.618f},{0,1,-1.618f},
-				{1.618f,0,-1},{1.618f,0,1},{-1.618f,0,1},{-1.618f,0,-1},
-			};
-			Hull* fh = quickhull(ico, 12);
-			CompactHull fc;
-			compact_hull_from_hull(&fc, fh);
-			unsigned rng = 33333;
-			int dist_fails = 0;
-			for (int t = 0; t < 200; t++) {
-				v3 posA = V3(RFLOAT(-5,5), RFLOAT(-5,5), RFLOAT(-5,5));
-				v3 posB = V3(RFLOAT(-5,5), RFLOAT(-5,5), RFLOAT(-5,5));
-				quat qra = {RFLOAT(-1,1), RFLOAT(-1,1), RFLOAT(-1,1), RFLOAT(0.1f,1)};
-				quat qrb = {RFLOAT(-1,1), RFLOAT(-1,1), RFLOAT(-1,1), RFLOAT(0.1f,1)};
-				quat rotA = quat_norm(qra), rotB = quat_norm(qrb);
-				v3 scA = V3(RFLOAT(0.5f,2), RFLOAT(0.5f,2), RFLOAT(0.5f,2));
-				v3 scB = V3(RFLOAT(0.5f,2), RFLOAT(0.5f,2), RFLOAT(0.5f,2));
-				GJK_Shape sa = gjk_hull_scaled(fh, posA, rotA, scA, NULL, NULL);
-				GJK_Shape sb = gjk_hull_scaled(fh, posB, rotB, scB, NULL, NULL);
-				GJK_Result r1 = gjk_distance_v(sa, sb, NULL);
-				GJK_Shape ca = gjk_compact_hull_shape(posA, rotA, scA, &fc);
-				GJK_Shape cb = gjk_compact_hull_shape(posB, rotB, scB, &fc);
-				GJK_Result r2 = gjk_distance_v(ca, cb, NULL);
-				if (r2.distance < -0.01f) dist_fails++;
-			}
-			TEST_ASSERT(dist_fails == 0);
-			compact_hull_free(&fc);
-			hull_free(fh);
-		}
-
-		// GJK: compact hull vs sphere.
-		TEST_BEGIN("gjk compact_hull32 vs sphere");
-		{
-			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-			Hull* fh = quickhull(bpts, 8);
-			CompactHull32 c32;
-			compact_hull32_from_hull(&c32, fh);
-			// Separated.
-			GJK_Shape ch_shape = gjk_compact_hull32(V3(0,0,0), quat_identity(), V3(1,1,1), &c32);
-			GJK_Shape sp_shape = gjk_sphere(V3(5,0,0), 0.5f);
-			GJK_Result r = gjk_distance_v(ch_shape, sp_shape, NULL);
-			TEST_ASSERT(r.distance > 2.0f);
-			// Near contact.
-			sp_shape = gjk_sphere(V3(1.6f,0,0), 0.5f);
-			r = gjk_distance_v(ch_shape, sp_shape, NULL);
-			TEST_ASSERT(r.distance < 0.2f);
-			TEST_ASSERT(r.distance >= 0.0f);
-			// Overlapping (distance should be 0 or negative for GJK).
-			sp_shape = gjk_sphere(V3(0.5f,0,0), 0.5f);
-			r = gjk_distance_v(ch_shape, sp_shape, NULL);
-			TEST_ASSERT(r.distance <= 0.01f);
-			hull_free(fh);
-		}
-
-		// GJK: compact hull vs capsule.
-		TEST_BEGIN("gjk compact_hull32 vs capsule");
-		{
-			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-			Hull* fh = quickhull(bpts, 8);
-			CompactHull32 c32;
-			compact_hull32_from_hull(&c32, fh);
-			GJK_Shape ch_shape = gjk_compact_hull32(V3(0,0,0), quat_identity(), V3(1,1,1), &c32);
-			GJK_Shape cap_shape = gjk_capsule(V3(5,-1,0), V3(5,1,0), 0.3f);
-			GJK_Result r = gjk_distance_v(ch_shape, cap_shape, NULL);
-			TEST_ASSERT(r.distance > 2.0f);
-			// Near contact.
-			cap_shape = gjk_capsule(V3(1.4f,-1,0), V3(1.4f,1,0), 0.3f);
-			r = gjk_distance_v(ch_shape, cap_shape, NULL);
-			TEST_ASSERT(r.distance < 0.2f);
-			hull_free(fh);
-		}
-
-		// GJK: compact hull vs box.
-		TEST_BEGIN("gjk compact_hull32 vs box");
-		{
-			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-			Hull* fh = quickhull(bpts, 8);
-			CompactHull32 c32;
-			compact_hull32_from_hull(&c32, fh);
-			GJK_Shape ch_shape = gjk_compact_hull32(V3(0,0,0), quat_identity(), V3(1,1,1), &c32);
-			GJK_Shape box_shape = gjk_box(V3(4,0,0), quat_identity(), V3(1,1,1));
-			GJK_Result r = gjk_distance_v(ch_shape, box_shape, NULL);
-			TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.1f);
-			// Touching.
-			box_shape = gjk_box(V3(2,0,0), quat_identity(), V3(1,1,1));
-			r = gjk_distance_v(ch_shape, box_shape, NULL);
-			TEST_ASSERT(r.distance < 0.01f);
-			hull_free(fh);
-		}
-
-		// GJK: compact hull vs compact hull (different shapes).
-		TEST_BEGIN("gjk compact32 vs compact (mixed)");
-		{
-			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-			static const v3 ico[] = {
-				{-1,1.618f,0},{1,1.618f,0},{-1,-1.618f,0},{1,-1.618f,0},
-				{0,-1,1.618f},{0,1,1.618f},{0,-1,-1.618f},{0,1,-1.618f},
-				{1.618f,0,-1},{1.618f,0,1},{-1.618f,0,1},{-1.618f,0,-1},
-			};
-			Hull* hb = quickhull(bpts, 8);
-			Hull* hi = quickhull(ico, 12);
-			CompactHull32 c32;
-			compact_hull32_from_hull(&c32, hb);
-			CompactHull fc;
-			compact_hull_from_hull(&fc, hi);
-			// Separated.
-			GJK_Shape sa = gjk_compact_hull32(V3(0,0,0), quat_identity(), V3(1,1,1), &c32);
-			GJK_Shape sb = gjk_compact_hull_shape(V3(5,0,0), quat_identity(), V3(1,1,1), &fc);
-			GJK_Result r = gjk_distance_v(sa, sb, NULL);
-			TEST_ASSERT(r.distance > 1.0f);
-			// Overlapping.
-			sb = gjk_compact_hull_shape(V3(0.5f,0,0), quat_identity(), V3(1,1,1), &fc);
-			r = gjk_distance_v(sa, sb, NULL);
-			TEST_ASSERT(r.distance <= 0.01f);
-			compact_hull_free(&fc);
-			hull_free(hb);
-			hull_free(hi);
-		}
-
-		// GJK closest points: verify points lie on hull surfaces.
-		TEST_BEGIN("gjk compact_hull32 closest points");
-		{
-			v3 bpts[] = { {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
-			Hull* fh = quickhull(bpts, 8);
-			CompactHull32 c32;
-			compact_hull32_from_hull(&c32, fh);
-			GJK_Shape sa = gjk_compact_hull32(V3(0,0,0), quat_identity(), V3(1,1,1), &c32);
-			GJK_Shape sb = gjk_compact_hull32(V3(4,0,0), quat_identity(), V3(1,1,1), &c32);
-			GJK_Result r = gjk_distance_v(sa, sb, NULL);
-			TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.1f);
-			// Closest point on A should be near x=1.
-			TEST_ASSERT(r.point1.x > 0.9f && r.point1.x < 1.1f);
-			// Closest point on B should be near x=3.
-			TEST_ASSERT(r.point2.x > 2.9f && r.point2.x < 3.1f);
-			hull_free(fh);
-		}
-		#undef RFLOAT
-	}
+	// (Compact hull tests removed.)
 
 	test_quickhull_case783();
 	test_quickhull_ico7037();
@@ -13424,6 +12676,89 @@ static void bench_ldl_joints(int n_chains, int chain_len, int frames, WorldParam
 	destroy_world(w);
 }
 
+// Bench: mixed contacts + joints. Box pile with hinge chains hanging from ceiling.
+// This is the scenario where SIMD batch4 is currently disabled due to joints.
+static void bench_mixed_contacts_joints(int pile_grid, int pile_height, int n_chains, int chain_len, int frames, WorldParams wp)
+{
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	// Floor
+	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50) });
+
+	// Box pile
+	int box_count = 0;
+	for (int y = 0; y < pile_height; y++) {
+		for (int x = 0; x < pile_grid; x++) {
+			for (int z = 0; z < pile_grid; z++) {
+				v3 pos = V3((float)(x - pile_grid/2) * 1.05f, 0.5f + (float)y * 1.05f, (float)(z - pile_grid/2) * 1.05f);
+				Body b = create_body(w, (BodyParams){ .position = pos, .rotation = quat_identity(), .mass = 1.0f });
+				body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+				box_count++;
+			}
+		}
+	}
+
+	// Hinge chains hanging from ceiling anchors
+	int joint_count = 0;
+	float ceiling_y = 0.5f + (float)pile_height * 1.05f + 5.0f;
+	for (int c = 0; c < n_chains; c++) {
+		float x0 = (float)(c - n_chains / 2) * 2.0f;
+		Body anchor = create_body(w, (BodyParams){ .position = V3(x0, ceiling_y, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+		Body prev = anchor;
+		for (int i = 0; i < chain_len; i++) {
+			float y = ceiling_y - (float)(i + 1) * 0.8f;
+			Body b = create_body(w, (BodyParams){ .position = V3(x0, y, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 0.3f, 0.2f) });
+			create_hinge(w, (HingeParams){ .body_a = prev, .body_b = b, .local_offset_a = V3(0, -0.4f, 0), .local_offset_b = V3(0, 0.4f, 0), .local_axis_a = V3(0, 0, 1), .local_axis_b = V3(0, 0, 1) });
+			joint_count++;
+			prev = b;
+		}
+	}
+
+	printf("bench_mixed: %d boxes + %d chains x %d links = %d joints, %d frames\n", box_count, n_chains, chain_len, joint_count, frames);
+	printf("  sizeof(SolverJoint) = %d bytes\n", (int)sizeof(SolverJoint));
+
+	extern void narrowphase_reset_timers();
+	extern void narrowphase_end_frame();
+	narrowphase_reset_timers();
+
+	PerfTimers acc = {0};
+	PGSTimers pacc = {0};
+	float dt = 1.0f / 60.0f;
+	for (int frame = 0; frame < frames; frame++) {
+		world_step(w, dt);
+		narrowphase_end_frame();
+		PerfTimers p = world_get_perf(w);
+		acc.total += p.total; acc.broadphase += p.broadphase; acc.pre_solve += p.pre_solve;
+		acc.pgs_solve += p.pgs_solve; acc.position_correct += p.position_correct;
+		acc.integrate += p.integrate;
+		PGSTimers pg = p.pgs;
+		pacc.pre_solve += pg.pre_solve; pacc.warm_start += pg.warm_start; pacc.graph_color += pg.graph_color;
+		pacc.iterations += pg.iterations; pacc.joint_limits += pg.joint_limits; pacc.ldl += pg.ldl;
+		pacc.relax += pg.relax; pacc.post_solve += pg.post_solve; pacc.pos_joints += pg.pos_joints;
+	}
+
+	double n = (double)frames;
+	printf("  avg total:         %8.3f ms\n", acc.total / n * 1000.0);
+	printf("  broadphase:        %8.3f ms\n", acc.broadphase / n * 1000.0);
+	printf("  pre_solve:         %8.3f ms\n", acc.pre_solve / n * 1000.0);
+	printf("  pgs_solve:         %8.3f ms\n", acc.pgs_solve / n * 1000.0);
+	printf("  pgs.iterations:    %8.3f ms\n", pacc.iterations / n * 1000.0);
+	printf("  pgs.joint_limits:  %8.3f ms\n", pacc.joint_limits / n * 1000.0);
+	printf("  pgs.warm_start:    %8.3f ms\n", pacc.warm_start / n * 1000.0);
+	printf("  pgs.relax:         %8.3f ms\n", pacc.relax / n * 1000.0);
+	printf("  pgs.post_solve:    %8.3f ms\n", pacc.post_solve / n * 1000.0);
+	printf("  position_correct:  %8.3f ms\n", acc.position_correct / n * 1000.0);
+	printf("METRIC: mixed_total_ms=%.6f\n", acc.total / n * 1000.0);
+	printf("METRIC: mixed_pgs_iter_ms=%.6f\n", pacc.iterations / n * 1000.0);
+
+	destroy_world(w);
+}
+
 // Soak test: infinite-loop fuzz with crash logging to file.
 static void test_quickhull_soak()
 {
@@ -13902,4 +13237,230 @@ static void test_capsule_box_tilted_direct()
 		printf("  Q.y=%.3f, expected GJK dist ~ Q.y = %.3f\n", cap2.q.y, cap2.q.y);
 		TEST_ASSERT(r2.distance < cap2.q.y + 0.01f); // GJK should find Q, not midpoint
 	}
+}
+
+// -----------------------------------------------------------------------------
+// Plane computation benchmark: stored vs Newell on-the-fly.
+// Measures cost of eliminating stored face planes from compact hull format.
+
+// Variant of sat_query_faces brute-force loop that computes planes on-the-fly
+// via full Newell method (all polygon vertices contribute to normal).
+static FaceQuery sat_query_faces_newell(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
+{
+	FaceQuery best = { .index = -1, .separation = -1e18f };
+	quat inv2 = inv(rot2);
+	int padded = (hull1->vert_count + 3) & ~3;
+	const float* vx = hull1->soa_verts;
+	const float* vy = vx + padded;
+	const float* vz = vy + padded;
+	for (int i = 0; i < hull1->face_count; i++) {
+		HullPlane local = hull_newell_plane(hull1->edge_next, hull1->edge_origin, vx, vy, vz, hull1->faces[i].edge, hull1->centroid);
+		HullPlane pw = plane_transform(local, pos1, rot1, scale1);
+		v3 sup_dir_local = rotate(inv2, neg(pw.normal));
+		v3 sup_local = hull_support(hull2, sup_dir_local);
+		v3 sup_scaled = V3(sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z);
+		v3 sup_world = add(pos2, rotate(rot2, sup_scaled));
+		float sep = dot(pw.normal, sup_world) - pw.offset;
+		if (sep > best.separation) { best.separation = sep; best.index = i; }
+	}
+	return best;
+}
+
+// 3-vert cross product variant (cheaper but less robust for polygonal faces).
+static FaceQuery sat_query_faces_cross3(const Hull* hull1, v3 pos1, quat rot1, v3 scale1, const Hull* hull2, v3 pos2, quat rot2, v3 scale2)
+{
+	FaceQuery best = { .index = -1, .separation = -1e18f };
+	quat inv2 = inv(rot2);
+	for (int i = 0; i < hull1->face_count; i++) {
+		int e0 = hull1->faces[i].edge;
+		int e1 = hull1->edge_next[e0];
+		int e2 = hull1->edge_next[e1];
+		v3 v0 = hull1->verts[hull1->edge_origin[e0]];
+		v3 v1 = hull1->verts[hull1->edge_origin[e1]];
+		v3 v2 = hull1->verts[hull1->edge_origin[e2]];
+		v3 n = norm(cross(sub(v1, v0), sub(v2, v0)));
+		if (dot(n, sub(v0, hull1->centroid)) < 0) n = neg(n);
+		HullPlane local = { n, dot(n, v0) };
+		HullPlane pw = plane_transform(local, pos1, rot1, scale1);
+		v3 sup_dir_local = rotate(inv2, neg(pw.normal));
+		v3 sup_local = hull_support(hull2, sup_dir_local);
+		v3 sup_scaled = V3(sup_local.x * scale2.x, sup_local.y * scale2.y, sup_local.z * scale2.z);
+		v3 sup_world = add(pos2, rotate(rot2, sup_scaled));
+		float sep = dot(pw.normal, sup_world) - pw.offset;
+		if (sep > best.separation) { best.separation = sep; best.index = i; }
+	}
+	return best;
+}
+
+static void bench_plane_compute()
+{
+	printf("=== Plane Computation Benchmark: stored vs on-the-fly ===\n\n");
+	perf_init();
+	bench_rng_state = 777;
+
+	#define BPC_HULLS 32
+	#define BPC_PAIRS 2048
+	#define BPC_FACE_ITERS 200
+	#define BPC_NEWELL_ITERS 2000
+
+	Hull* bpc_hulls[BPC_HULLS];
+	int bpc_total_faces = 0, bpc_total_verts = 0, bpc_total_edges = 0;
+	for (int i = 0; i < BPC_HULLS; i++) {
+		bpc_hulls[i] = bench_make_random_hull(0.5f + bench_randf() * 0.5f, 8 + (int)(bench_randf() * 12));
+		bpc_total_faces += bpc_hulls[i]->face_count;
+		bpc_total_verts += bpc_hulls[i]->vert_count;
+		bpc_total_edges += bpc_hulls[i]->edge_count / 2;
+	}
+	printf("  Hull pool: %d hulls, avg %.1f verts, %.1f faces, %.1f edges\n\n",
+		BPC_HULLS, (float)bpc_total_verts / BPC_HULLS, (float)bpc_total_faces / BPC_HULLS, (float)bpc_total_edges / BPC_HULLS);
+
+	// Random hull pairs with transforms.
+	typedef struct { int a, b; v3 pa, pb; quat ra, rb; v3 sa, sb; } BPC_Pair;
+	BPC_Pair* bpc_pairs = (BPC_Pair*)CK_ALLOC(BPC_PAIRS * sizeof(BPC_Pair));
+	for (int i = 0; i < BPC_PAIRS; i++) {
+		bpc_pairs[i].a = (int)(bench_randf() * BPC_HULLS) % BPC_HULLS;
+		bpc_pairs[i].b = (int)(bench_randf() * BPC_HULLS) % BPC_HULLS;
+		bpc_pairs[i].pa = V3((bench_randf() - 0.5f) * 4, (bench_randf() - 0.5f) * 4, (bench_randf() - 0.5f) * 4);
+		bpc_pairs[i].pb = add(bpc_pairs[i].pa, V3((bench_randf() - 0.5f) * 2, (bench_randf() - 0.5f) * 2, (bench_randf() - 0.5f) * 2));
+		bpc_pairs[i].ra = bench_random_quat();
+		bpc_pairs[i].rb = bench_random_quat();
+		float sa = 0.5f + bench_randf(), sb = 0.5f + bench_randf();
+		bpc_pairs[i].sa = V3(sa, sa, sa);
+		bpc_pairs[i].sb = V3(sb, sb, sb);
+	}
+
+	volatile float bpc_sink = 0;
+
+	// --- 1. Isolated Newell plane cost per face ---
+	int newell_face_count = 0;
+	double t0 = perf_now();
+	for (int iter = 0; iter < BPC_NEWELL_ITERS; iter++) {
+		for (int h = 0; h < BPC_HULLS; h++) {
+			const Hull* hull = bpc_hulls[h];
+			int hp = (hull->vert_count + 3) & ~3;
+			const float* vx = hull->soa_verts, *vy = vx + hp, *vz = vy + hp;
+			for (int f = 0; f < hull->face_count; f++) {
+				HullPlane p = hull_newell_plane(hull->edge_next, hull->edge_origin, vx, vy, vz, hull->faces[f].edge, hull->centroid);
+				bpc_sink += p.normal.x;
+			}
+			newell_face_count += hull->face_count;
+		}
+	}
+	double t_newell_iso = perf_now() - t0;
+	printf("  1) Newell plane (isolated):  %.1f ns/face  (%d faces total)\n", t_newell_iso * 1e9 / newell_face_count, newell_face_count);
+
+	// --- 2. sat_query_faces: stored planes (current code) ---
+	int face_calls = BPC_FACE_ITERS * BPC_PAIRS;
+	t0 = perf_now();
+	for (int iter = 0; iter < BPC_FACE_ITERS; iter++) {
+		for (int i = 0; i < BPC_PAIRS; i++) {
+			BPC_Pair* p = &bpc_pairs[i];
+			FaceQuery fq = sat_query_faces(bpc_hulls[p->a], p->pa, p->ra, p->sa, bpc_hulls[p->b], p->pb, p->rb, p->sb);
+			bpc_sink += fq.separation;
+		}
+	}
+	double t_stored = perf_now() - t0;
+	printf("  2) sat_query_faces (stored):  %7.1f ns/call  (%d calls)\n", t_stored * 1e9 / face_calls, face_calls);
+
+	// --- 3. sat_query_faces: Newell on-the-fly ---
+	t0 = perf_now();
+	for (int iter = 0; iter < BPC_FACE_ITERS; iter++) {
+		for (int i = 0; i < BPC_PAIRS; i++) {
+			BPC_Pair* p = &bpc_pairs[i];
+			FaceQuery fq = sat_query_faces_newell(bpc_hulls[p->a], p->pa, p->ra, p->sa, bpc_hulls[p->b], p->pb, p->rb, p->sb);
+			bpc_sink += fq.separation;
+		}
+	}
+	double t_newell = perf_now() - t0;
+	printf("  3) sat_query_faces (Newell):  %7.1f ns/call  (%d calls)\n", t_newell * 1e9 / face_calls, face_calls);
+
+	// --- 4. sat_query_faces: 3-vert cross product ---
+	t0 = perf_now();
+	for (int iter = 0; iter < BPC_FACE_ITERS; iter++) {
+		for (int i = 0; i < BPC_PAIRS; i++) {
+			BPC_Pair* p = &bpc_pairs[i];
+			FaceQuery fq = sat_query_faces_cross3(bpc_hulls[p->a], p->pa, p->ra, p->sa, bpc_hulls[p->b], p->pb, p->rb, p->sb);
+			bpc_sink += fq.separation;
+		}
+	}
+	double t_cross3 = perf_now() - t0;
+	printf("  4) sat_query_faces (cross3):  %7.1f ns/call  (%d calls)\n", t_cross3 * 1e9 / face_calls, face_calls);
+
+	// --- 5. Gauss map precompute cost: compute all face normals for both hulls ---
+	// In sat_query_edges, face normals are read per-edge via hull->planes[edge_face[i]].normal.
+	// On-the-fly: precompute all face normals once, then index into the precomputed array.
+	int gauss_precomp_calls = 0;
+	t0 = perf_now();
+	for (int iter = 0; iter < BPC_FACE_ITERS; iter++) {
+		for (int i = 0; i < BPC_PAIRS; i++) {
+			BPC_Pair* p = &bpc_pairs[i];
+			const Hull* ha = bpc_hulls[p->a];
+			const Hull* hb = bpc_hulls[p->b];
+			v3 fn[128];
+			int pa = (ha->vert_count + 3) & ~3;
+			const float* vx = ha->soa_verts, *vy = vx + pa, *vz = vy + pa;
+			for (int f = 0; f < ha->face_count; f++)
+				fn[f] = hull_newell_plane(ha->edge_next, ha->edge_origin, vx, vy, vz, ha->faces[f].edge, ha->centroid).normal;
+			int pb = (hb->vert_count + 3) & ~3;
+			vx = hb->soa_verts; vy = vx + pb; vz = vy + pb;
+			for (int f = 0; f < hb->face_count; f++)
+				fn[f] = hull_newell_plane(hb->edge_next, hb->edge_origin, vx, vy, vz, hb->faces[f].edge, hb->centroid).normal;
+			bpc_sink += fn[0].x;
+			gauss_precomp_calls++;
+		}
+	}
+	double t_gauss_precomp = perf_now() - t0;
+	printf("  5) Gauss normal precompute:   %7.1f ns/pair  (both hulls, %d pairs)\n", t_gauss_precomp * 1e9 / gauss_precomp_calls, gauss_precomp_calls);
+
+	// --- 6. Full sat_query_edges for reference ---
+	int edge_calls = 0;
+	t0 = perf_now();
+	for (int iter = 0; iter < BPC_FACE_ITERS; iter++) {
+		for (int i = 0; i < BPC_PAIRS; i++) {
+			BPC_Pair* p = &bpc_pairs[i];
+			EdgeQuery eq = sat_query_edges(bpc_hulls[p->a], p->pa, p->ra, p->sa, bpc_hulls[p->b], p->pb, p->rb, p->sb);
+			bpc_sink += eq.separation;
+			edge_calls++;
+		}
+	}
+	double t_edges = perf_now() - t0;
+	printf("  6) sat_query_edges (stored):  %7.1f ns/call  (%d calls)\n", t_edges * 1e9 / edge_calls, edge_calls);
+
+	// --- Correctness check ---
+	printf("\n  --- Correctness ---\n");
+	int mismatch_newell = 0, mismatch_cross3 = 0;
+	float max_diff_newell = 0, max_diff_cross3 = 0;
+	for (int i = 0; i < BPC_PAIRS; i++) {
+		BPC_Pair* p = &bpc_pairs[i];
+		FaceQuery ref = sat_query_faces(bpc_hulls[p->a], p->pa, p->ra, p->sa, bpc_hulls[p->b], p->pb, p->rb, p->sb);
+		FaceQuery nw = sat_query_faces_newell(bpc_hulls[p->a], p->pa, p->ra, p->sa, bpc_hulls[p->b], p->pb, p->rb, p->sb);
+		FaceQuery c3 = sat_query_faces_cross3(bpc_hulls[p->a], p->pa, p->ra, p->sa, bpc_hulls[p->b], p->pb, p->rb, p->sb);
+		if (ref.index != nw.index) mismatch_newell++;
+		if (ref.index != c3.index) mismatch_cross3++;
+		float dn = fabsf(ref.separation - nw.separation);
+		float dc = fabsf(ref.separation - c3.separation);
+		if (dn > max_diff_newell) max_diff_newell = dn;
+		if (dc > max_diff_cross3) max_diff_cross3 = dc;
+	}
+	printf("  Newell: %d/%d index mismatches, max sep diff = %.2e\n", mismatch_newell, BPC_PAIRS, max_diff_newell);
+	printf("  Cross3: %d/%d index mismatches, max sep diff = %.2e\n", mismatch_cross3, BPC_PAIRS, max_diff_cross3);
+
+	// --- Summary ---
+	printf("\n  --- Summary ---\n");
+	printf("  Face query ratio (Newell/stored): %.2fx\n", t_newell / t_stored);
+	printf("  Face query ratio (cross3/stored): %.2fx\n", t_cross3 / t_stored);
+	printf("  Face query overhead (Newell):     %.1f ns/call\n", (t_newell - t_stored) * 1e9 / face_calls);
+	printf("  Gauss precompute overhead:        %.1f ns/pair (%.1f%% of edge query)\n", t_gauss_precomp * 1e9 / gauss_precomp_calls, t_gauss_precomp / t_edges * 100.0);
+	float avg_faces = (float)bpc_total_faces / BPC_HULLS;
+	printf("\n  Estimated full SAT overhead per hull pair:\n");
+	printf("    Face queries (2x):  +%.0f ns  (Newell computes %.0f faces x2 hulls)\n", (t_newell - t_stored) * 1e9 / face_calls * 2, avg_faces);
+	printf("    Gauss precompute:   +%.0f ns\n", t_gauss_precomp * 1e9 / gauss_precomp_calls);
+	printf("    Total SAT overhead: +%.0f ns/pair\n", (t_newell - t_stored) * 1e9 / face_calls * 2 + t_gauss_precomp * 1e9 / gauss_precomp_calls);
+	printf("\n  Memory saved: %d bytes/hull (planes[60] at 16 bytes each)\n", 60 * (int)sizeof(HullPlane));
+
+	// Prevent sink from being optimized out.
+	if (bpc_sink == 1234567.0f) printf("sink\n");
+
+	CK_FREE(bpc_pairs);
+	for (int i = 0; i < BPC_HULLS; i++) hull_free(bpc_hulls[i]);
 }

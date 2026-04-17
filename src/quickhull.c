@@ -1047,8 +1047,8 @@ static void qh_add_point(QH_State* s, int eye, int eye_face)
 
 // Shared Newell plane computation: walks a half-edge face loop starting from `start_edge`,
 // reading vertex positions from SoA float arrays. Used by both quickhull output and
-// hull_face_extension_build for bitwise-deterministic planes.
-static HullPlane hull_newell_plane(const uint16_t* edge_next, const uint16_t* edge_origin, const float* vx, const float* vy, const float* vz, int start_edge, v3 hull_centroid)
+// quickhull output for bitwise-deterministic planes.
+static HullPlane hull_newell_plane(const int* edge_next, const int* edge_origin, const float* vx, const float* vy, const float* vz, int start_edge, v3 hull_centroid)
 {
 	float fnx = 0, fny = 0, fnz = 0, fcx = 0, fcy = 0, fcz = 0; int cnt = 0;
 	int e = start_edge;
@@ -1068,7 +1068,7 @@ static HullPlane hull_newell_plane(const uint16_t* edge_next, const uint16_t* ed
 }
 
 // -----------------------------------------------------------------------------
-// Convert internal state to output Hull with uint16_t-indexed arrays.
+// Convert internal state to output Hull.
 
 static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 {
@@ -1119,10 +1119,10 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	h->vert_count = vc; h->edge_count = ec; h->face_count = nlive;
 	h->epsilon = s->epsilon;
 	v3* vcp = CK_ALLOC(sizeof(v3) * vc); h->verts = vcp;
-	uint16_t* et = CK_ALLOC(sizeof(uint16_t) * ec); h->edge_twin = et;
-	uint16_t* en = CK_ALLOC(sizeof(uint16_t) * ec); h->edge_next = en;
-	uint16_t* eo = CK_ALLOC(sizeof(uint16_t) * ec); h->edge_origin = eo;
-	uint16_t* ef = CK_ALLOC(sizeof(uint16_t) * ec); h->edge_face = ef;
+	int* et = CK_ALLOC(sizeof(int) * ec); h->edge_twin = et;
+	int* en = CK_ALLOC(sizeof(int) * ec); h->edge_next = en;
+	int* eo = CK_ALLOC(sizeof(int) * ec); h->edge_origin = eo;
+	int* ef = CK_ALLOC(sizeof(int) * ec); h->edge_face = ef;
 	HullFace* fcp = CK_ALLOC(sizeof(HullFace) * nlive); h->faces = fcp;
 	HullPlane* pcp = CK_ALLOC(sizeof(HullPlane) * nlive); h->planes = pcp;
 
@@ -1153,13 +1153,13 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 		int e = s->faces[live[i]].edge, start = e;
 		do {
 			int o = eremap[e];
-			en[o] = (uint16_t)eremap[s->edges.enext[e]];
-			et[o] = (uint16_t)eremap[s->edges.etwin[e]];
-			eo[o] = (uint16_t)vremap[s->edges.eorigin[e]];
-			ef[o] = (uint16_t)i;
+			en[o] = eremap[s->edges.enext[e]];
+			et[o] = eremap[s->edges.etwin[e]];
+			eo[o] = vremap[s->edges.eorigin[e]];
+			ef[o] = i;
 			e = s->edges.enext[e];
 		} while (e != start);
-		fcp[i] = (HullFace){ .edge = (uint16_t)eremap[s->faces[live[i]].edge] };
+		fcp[i] = (HullFace){ .edge = eremap[s->faces[live[i]].edge] };
 		pcp[i] = s->faces[live[i]].plane;
 	}
 
@@ -1283,113 +1283,6 @@ Hull* quickhull(const v3* points, int count)
 	qh_verts_free(&state.verts); qh_edges_free(&state.edges); afree(state.faces); afree(state.conflict_faces);
 	return result;
 }
-// Build CSR vertex adjacency from half-edge SoA arrays.
-// For each vertex, collects all neighbor vertices reachable via edges.
-// vert_edge[v] = first edge originating from v (or -1).
-// Walk: twin of that edge gives neighbor, then edge_next[twin] gives next
-// edge around v, repeat until back to start.
-static int hull_build_csr(const Hull* hull, int max_verts, void* offsets_out, int offset_size, void* neighbors_out, int neighbor_size, int* out_neighbor_total)
-{
-	int nv = hull->vert_count;
-	if (nv > max_verts) return -1;
-
-	// Build vert_edge: first edge index for each vertex.
-	int vert_edge[1024];
-	assert(nv <= 1024);
-	for (int i = 0; i < nv; i++) vert_edge[i] = -1;
-	for (int i = 0; i < hull->edge_count; i++) {
-		if (vert_edge[hull->edge_origin[i]] < 0) vert_edge[hull->edge_origin[i]] = i;
-	}
-
-	// Count neighbors per vertex, then fill CSR.
-	int total = 0;
-	for (int v = 0; v < nv; v++) {
-		if (offset_size == 1) ((uint8_t*)offsets_out)[v] = (uint8_t)total;
-		else ((uint16_t*)offsets_out)[v] = (uint16_t)total;
-
-		int e = vert_edge[v];
-		if (e < 0) continue;
-		int start = e;
-		do {
-			int nb = hull->edge_origin[hull->edge_twin[e]];
-			if (neighbor_size == 1) ((uint8_t*)neighbors_out)[total] = (uint8_t)nb;
-			else ((uint16_t*)neighbors_out)[total] = (uint16_t)nb;
-			total++;
-			e = hull->edge_next[hull->edge_twin[e]];
-		} while (e != start);
-	}
-	if (offset_size == 1) ((uint8_t*)offsets_out)[nv] = (uint8_t)total;
-	else ((uint16_t*)offsets_out)[nv] = (uint16_t)total;
-	*out_neighbor_total = total;
-	return 0;
-}
-
-// -----------------------------------------------------------------------------
-// Compact hull converters.
-// CompactHull32: fixed-size (<=32 verts), suitable for stack/inline storage.
-// CompactHull: heap-allocated, supports arbitrary vert counts.
-
-// Convert a full Hull to a CompactHull32 (fixed-size, <=32 verts).
-int compact_hull32_from_hull(CompactHull32* out, const Hull* hull)
-{
-	if (hull->vert_count > COMPACT_HULL32_MAX_VERTS) return -1;
-	*out = (CompactHull32){0};
-	out->vert_count = (uint8_t)hull->vert_count;
-	out->centroid = hull->centroid;
-
-	// Copy vertex positions into SoA.
-	for (int i = 0; i < hull->vert_count; i++) {
-		out->verts_x[i] = hull->verts[i].x;
-		out->verts_y[i] = hull->verts[i].y;
-		out->verts_z[i] = hull->verts[i].z;
-	}
-
-	int total = 0;
-	if (hull_build_csr(hull, COMPACT_HULL32_MAX_VERTS, out->offsets, 1, out->neighbors, 1, &total) < 0) return -1;
-	if (total > COMPACT_HULL32_MAX_NEIGHBORS) return -1;
-	out->neighbor_total = (uint8_t)total;
-
-	// Copy face planes for bitwise-deterministic reconstruction.
-	if (hull->face_count > COMPACT_HULL32_MAX_FACES) return -1;
-	out->face_count = (uint8_t)hull->face_count;
-	memcpy(out->planes, hull->planes, hull->face_count * sizeof(HullPlane));
-	return 0;
-}
-
-// Convert a full Hull to a CompactHull (heap-allocated, arbitrary vert count).
-int compact_hull_from_hull(CompactHull* out, const Hull* hull)
-{
-	*out = (CompactHull){0};
-	int nv = hull->vert_count;
-	out->vert_count = (uint16_t)nv;
-	out->centroid = hull->centroid;
-
-	out->offsets = (uint16_t*)CK_ALLOC((nv + 1) * sizeof(uint16_t));
-	// Allocate neighbors conservatively (edge_count = total half-edges = 2 * undirected edges).
-	out->neighbors = (uint16_t*)CK_ALLOC(hull->edge_count * sizeof(uint16_t));
-
-	int padded = (nv + 3) & ~3;
-	out->verts_x = (float*)CK_ALLOC_ALIGNED(padded * sizeof(float), 16);
-	out->verts_y = (float*)CK_ALLOC_ALIGNED(padded * sizeof(float), 16);
-	out->verts_z = (float*)CK_ALLOC_ALIGNED(padded * sizeof(float), 16);
-	for (int i = 0; i < nv; i++) { out->verts_x[i] = hull->verts[i].x; out->verts_y[i] = hull->verts[i].y; out->verts_z[i] = hull->verts[i].z; }
-	for (int i = nv; i < padded; i++) { out->verts_x[i] = out->verts_x[0]; out->verts_y[i] = out->verts_y[0]; out->verts_z[i] = out->verts_z[0]; }
-
-	int total = 0;
-	hull_build_csr(hull, 65535, out->offsets, 2, out->neighbors, 2, &total);
-	out->neighbor_total = (uint16_t)total;
-	// Planes left NULL -- caller uses compact_hull_attach_planes() on demand.
-	return 0;
-}
-
-void compact_hull_attach_planes(CompactHull* ch, const Hull* hull)
-{
-	if (ch->planes) CK_FREE(ch->planes);
-	ch->face_count = (uint16_t)hull->face_count;
-	ch->planes = (HullPlane*)CK_ALLOC(hull->face_count * sizeof(HullPlane));
-	memcpy(ch->planes, hull->planes, hull->face_count * sizeof(HullPlane));
-}
-
 void hull_free(Hull* hull)
 {
 	if (!hull) return;
@@ -1402,212 +1295,4 @@ void hull_free(Hull* hull)
 	CK_FREE((void*)hull->faces);
 	CK_FREE((void*)hull->planes);
 	CK_FREE(hull);
-}
-
-void compact_hull_free(CompactHull* ch)
-{
-	if (!ch) return;
-	CK_FREE(ch->offsets);
-	CK_FREE(ch->neighbors);
-	if (ch->planes) CK_FREE(ch->planes);
-	CK_FREE_ALIGNED(ch->verts_x);
-	CK_FREE_ALIGNED(ch->verts_y);
-	CK_FREE_ALIGNED(ch->verts_z);
-	*ch = (CompactHull){0};
-}
-
-// Validate compact hull round-trip: build face extension, check Euler formula,
-// twin reciprocity, plane identity, and face loop closure.
-int compact_hull_validate_roundtrip(const CompactHull* ch)
-{
-	HullFaceExtension ext;
-	if (hull_face_extension_build(&ext, ch) != 0) {
-		fprintf(stderr, "compact_hull_validate: extension build failed\n");
-		return -1;
-	}
-	int ok = 1;
-
-	// Euler: V - E/2 + F = 2.
-	if (ch->vert_count - ext.edge_count / 2 + ext.face_count != 2) {
-		fprintf(stderr, "compact_hull_validate: Euler FAIL V=%d E=%d F=%d\n", ch->vert_count, ext.edge_count, ext.face_count);
-		ok = 0;
-	}
-
-	// Twin reciprocity.
-	for (int e = 0; e < ext.edge_count && ok; e++) {
-		if (ext.edge_twin[ext.edge_twin[e]] != e) {
-			fprintf(stderr, "compact_hull_validate: twin reciprocity FAIL at edge %d\n", e);
-			ok = 0;
-		}
-	}
-
-	// If planes are attached, check bitwise identity.
-	if (ch->planes && ch->face_count > 0) {
-		if (ext.face_count != ch->face_count) {
-			fprintf(stderr, "compact_hull_validate: face count mismatch ext=%d stored=%d\n", ext.face_count, ch->face_count);
-			ok = 0;
-		}
-		for (int f = 0; f < ext.face_count && ok; f++) {
-			int found = 0;
-			for (int g = 0; g < ch->face_count; g++) {
-				if (memcmp(&ext.planes[f], &ch->planes[g], sizeof(HullPlane)) == 0) { found = 1; break; }
-			}
-			if (!found) {
-				fprintf(stderr, "compact_hull_validate: plane %d has no bitwise match\n", f);
-				ok = 0;
-			}
-		}
-	}
-
-	// Face loops close.
-	for (int f = 0; f < ext.face_count && ok; f++) {
-		int e = ext.faces[f].edge, n = 0;
-		do { n++; e = ext.edge_next[e]; if (n > 1000) break; } while (e != ext.faces[f].edge);
-		if (n > 1000 || n < 3) {
-			fprintf(stderr, "compact_hull_validate: face %d loop FAIL (%d edges)\n", f, n);
-			ok = 0;
-		}
-	}
-
-	hull_face_extension_free(&ext);
-	return ok ? 0 : -1;
-}
-
-// -----------------------------------------------------------------------------
-// Face extension: reconstruct half-edge mesh from CompactHull CSR adjacency.
-//
-// Algorithm: each directed edge (u,v) in the CSR becomes a half-edge.
-// The "next" half-edge around a face is found by: for edge (u,v), the next
-// edge on the same face starts at v and goes to the neighbor of v that comes
-// AFTER u in v's neighbor list (cyclically). This reconstructs the face loops.
-//
-// Uses hull_newell_plane() (defined in quickhull.c) for plane recomputation.
-int hull_face_extension_build(HullFaceExtension* out, const CompactHull* ch)
-{
-	*out = (HullFaceExtension){0};
-	int nv = ch->vert_count;
-	int ne = ch->neighbor_total; // total half-edges
-
-	out->edge_count = (uint16_t)ne;
-	out->edge_twin = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
-	out->edge_next = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
-	out->edge_origin = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
-	out->edge_face = (uint16_t*)CK_ALLOC(ne * sizeof(uint16_t));
-
-	// Each CSR entry neighbors[i] at offset i is half-edge i: origin = v where offsets[v] <= i < offsets[v+1].
-	// Set edge origins.
-	for (int v = 0; v < nv; v++) {
-		for (int i = ch->offsets[v]; i < ch->offsets[v+1]; i++) {
-			out->edge_origin[i] = (uint16_t)v;
-		}
-	}
-
-	// Build twin map: edge i goes from origin[i] to neighbors[i].
-	// Its twin goes from neighbors[i] back to origin[i].
-	// Find twin by scanning the neighbor list of neighbors[i] for origin[i].
-	for (int i = 0; i < ne; i++) {
-		int u = out->edge_origin[i];
-		int v = ch->neighbors[i];
-		int twin = -1;
-		for (int j = ch->offsets[v]; j < ch->offsets[v+1]; j++) {
-			if (ch->neighbors[j] == u) { twin = j; break; }
-		}
-		assert(twin >= 0);
-		out->edge_twin[i] = (uint16_t)twin;
-	}
-
-	// Build next: for edge (u,v), next edge is (v, w) where w is the neighbor
-	// of v that comes BEFORE u in v's cyclic neighbor list.
-	// This gives the CCW face traversal matching quickhull's winding.
-	for (int i = 0; i < ne; i++) {
-		int v = ch->neighbors[i]; // head of this edge
-		int u = out->edge_origin[i]; // tail of this edge
-		// Find u in v's neighbor list, take the PREVIOUS entry cyclically.
-		int deg = ch->offsets[v+1] - ch->offsets[v];
-		int base = ch->offsets[v];
-		for (int k = 0; k < deg; k++) {
-			if (ch->neighbors[base + k] == u) {
-				int next_k = (k + 1 < deg) ? k + 1 : 0;
-				// next edge goes from v to w: find that edge index.
-				out->edge_next[i] = (uint16_t)(base + next_k);
-				(void)next_k;
-				break;
-			}
-		}
-	}
-
-	// Extract faces: walk edge loops, assign face indices.
-	// Each unvisited edge starts a new face.
-	for (int i = 0; i < ne; i++) out->edge_face[i] = 0xFFFF;
-	int face_count = 0;
-	CK_DYNA HullFace* faces_arr = NULL;
-	CK_DYNA HullPlane* planes_arr = NULL;
-	for (int i = 0; i < ne; i++) {
-		if (out->edge_face[i] != 0xFFFF) continue;
-		int fi = face_count++;
-
-		// First pass: assign face index and find lowest-origin vertex for normalized start.
-		int best_start = i;
-		uint16_t best_origin = out->edge_origin[i];
-		int e = i;
-		do {
-			out->edge_face[e] = (uint16_t)fi;
-			if (out->edge_origin[e] < best_origin) { best_origin = out->edge_origin[e]; best_start = e; }
-			e = out->edge_next[e];
-		} while (e != i);
-		apush(faces_arr, ((HullFace){ .edge = (uint16_t)best_start }));
-
-		if (ch->planes && ch->face_count > 0) {
-			// Planes attached: match by Newell normal direction for bitwise determinism.
-			HullPlane recomputed = hull_newell_plane(out->edge_next, out->edge_origin, ch->verts_x, ch->verts_y, ch->verts_z, best_start, ch->centroid);
-			float best_dot = -2; int best_match = fi;
-			for (int g = 0; g < ch->face_count; g++) {
-				float d = dot(recomputed.normal, ch->planes[g].normal);
-				if (d > best_dot) { best_dot = d; best_match = g; }
-			}
-			apush(planes_arr, ch->planes[best_match]);
-		} else {
-			// No planes attached: recompute from Newell method.
-			apush(planes_arr, hull_newell_plane(out->edge_next, out->edge_origin, ch->verts_x, ch->verts_y, ch->verts_z, best_start, ch->centroid));
-		}
-	}
-
-	out->face_count = (uint16_t)face_count;
-	out->faces = faces_arr;
-	out->planes = planes_arr;
-	return 0;
-}
-
-void hull_face_extension_free(HullFaceExtension* ext)
-{
-	if (!ext) return;
-	CK_FREE(ext->edge_twin);
-	CK_FREE(ext->edge_next);
-	CK_FREE(ext->edge_origin);
-	CK_FREE(ext->edge_face);
-	afree(ext->faces);
-	afree(ext->planes);
-	*ext = (HullFaceExtension){0};
-}
-
-// Build a (non-owning) Hull view from a CompactHull + its face extension.
-Hull hull_from_compact(const CompactHull* ch, const HullFaceExtension* ext)
-{
-	int padded = (ch->vert_count + 3) & ~3;
-	Hull h = {0};
-	h.centroid = ch->centroid;
-	// Build AoS verts from SoA (stack or temp alloc -- caller must manage lifetime).
-	// For now, return a Hull that points to NULL verts (caller fills or uses SoA directly).
-	h.verts = NULL; // caller should set this if AoS access is needed
-	h.soa_verts = ch->verts_x; // contiguous x,y,z (padded layout matches)
-	h.edge_twin = ext->edge_twin;
-	h.edge_next = ext->edge_next;
-	h.edge_origin = ext->edge_origin;
-	h.edge_face = ext->edge_face;
-	h.faces = ext->faces;
-	h.planes = ext->planes;
-	h.vert_count = ch->vert_count;
-	h.edge_count = ext->edge_count;
-	h.face_count = ext->face_count;
-	return h;
 }
