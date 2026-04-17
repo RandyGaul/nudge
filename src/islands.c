@@ -308,15 +308,18 @@ static void islands_update_contacts(WorldInternal* w, InternalManifold* manifold
 	w->prev_touching = curr_touching;
 }
 
-// Return the island that owns a body pair. Both dynamic bodies share an island
-// after islands_update_contacts / link_joint_to_island have run; one body may
-// be static (island_id == -1), in which case the other body's island owns the
-// pair. Both-static pairs return -1.
+// Return the island that owns a body pair. Under normal operation (sleep
+// enabled), both dynamic bodies share an island after islands_update_contacts /
+// link_joint_to_island; one body may be static (island_id == -1), in which
+// case the other body's island owns the pair. When sleep is disabled, contact
+// pairs don't link islands, so two dynamic bodies can briefly be in different
+// islands -- pick the lower id so bucket placement stays deterministic.
+// Both-static pairs return -1.
 static int pair_owning_island(WorldInternal* w, int a, int b)
 {
 	int isl_a = body_inv_mass(w, a) == 0.0f ? -1 : w->body_cold[a].island_id;
 	int isl_b = body_inv_mass(w, b) == 0.0f ? -1 : w->body_cold[b].island_id;
-	assert(isl_a < 0 || isl_b < 0 || isl_a == isl_b);
+	if (isl_a >= 0 && isl_b >= 0) return isl_a < isl_b ? isl_a : isl_b;
 	if (isl_a >= 0) return isl_a;
 	if (isl_b >= 0) return isl_b;
 	return -1;
@@ -343,6 +346,15 @@ static int islands_bucket_manifolds(WorldInternal* w, InternalManifold* manifold
 {
 	int n_islands = asize(w->islands);
 
+	// No islands to bucket into. Return NULLs; callers check island_manifold_perm
+	// before using it. Without this guard the zero-length stretchy-buffer path
+	// below hits asetlen(NULL, 0), which dereferences a NULL header.
+	if (n_islands == 0) {
+		*out_offsets = NULL;
+		*out_perm = NULL;
+		return 0;
+	}
+
 	int* offsets = NULL;
 	arena_fit(arena, offsets, n_islands + 1);
 	asetlen(offsets, n_islands + 1);
@@ -359,8 +371,10 @@ static int islands_bucket_manifolds(WorldInternal* w, InternalManifold* manifold
 	int total = offsets[n_islands];
 
 	int* perm = NULL;
-	arena_fit(arena, perm, total);
-	asetlen(perm, total);
+	if (total > 0) {
+		arena_fit(arena, perm, total);
+		asetlen(perm, total);
+	}
 
 	// Running cursor per island, initialized from offsets[]. A copy avoids
 	// clobbering the exclusive-prefix offsets we return to the caller.
@@ -387,6 +401,12 @@ static int islands_bucket_sol_joints(WorldInternal* w, SolverJoint* sol_joints, 
 {
 	int n_islands = asize(w->islands);
 
+	if (n_islands == 0) {
+		*out_offsets = NULL;
+		*out_perm = NULL;
+		return 0;
+	}
+
 	int* offsets = NULL;
 	arena_fit(arena, offsets, n_islands + 1);
 	asetlen(offsets, n_islands + 1);
@@ -401,8 +421,10 @@ static int islands_bucket_sol_joints(WorldInternal* w, SolverJoint* sol_joints, 
 	int total = offsets[n_islands];
 
 	int* perm = NULL;
-	arena_fit(arena, perm, total);
-	asetlen(perm, total);
+	if (total > 0) {
+		arena_fit(arena, perm, total);
+		asetlen(perm, total);
+	}
 
 	int* cursor = NULL;
 	arena_fit(arena, cursor, n_islands);

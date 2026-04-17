@@ -24,9 +24,12 @@
 #include "tests_pgs_vs_ldl.c"
 #include "tests_gjk_perf.c"
 #include "tests_arena_unit.c"
+#include "tests_epa_debug.c"
 
 int main(int argc, char* argv[])
 {
+	setvbuf(stdout, NULL, _IONBF, 0);
+	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--debug-epa") == 0) { debug_epa(); return 0; }
 	int fuzz_iters = 0;
 	int soak = 0;
 	int bench_stack = 0;

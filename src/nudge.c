@@ -8,6 +8,7 @@
 #include "quickhull.c"
 #include "bvh.c"
 #include "collision.c"
+#include "epa.c"
 #include "broadphase.c"
 #include "inertia.c"
 #include "solver_pgs.c"
@@ -24,6 +25,7 @@ World create_world(WorldParams params)
 	memset(w, 0, sizeof(*w));
 	w->gravity = params.gravity;
 	w->broadphase_type = params.broadphase;
+	w->narrowphase_backend = (int)params.narrowphase_backend;
 	w->solver_type = params.solver_type;
 	w->sleep_enabled = 1;
 	w->sat_hint_enabled = 1;
@@ -55,6 +57,7 @@ void destroy_world(World world)
 	afree(w->debug_contacts);
 	afree(w->body_state);
 	map_free(w->warm_cache);
+	map_free(w->epa_cache);
 	bvh_free(w->bvh_static); CK_FREE(w->bvh_static);
 	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
 	bvh_free(w->bvh_sleeping); CK_FREE(w->bvh_sleeping);
@@ -623,19 +626,27 @@ void world_step(World world, float dt)
 	int sm_count = asize(sm);
 	int sj_count = asize(sol_joints);
 	int n_islands = asize(w->islands);
-	// Walk islands, emitting manifold-refs then joint-refs per island. crefs
-	// ends up fully island-grouped: each island's refs are a contiguous slice,
-	// which sets up per-island coloring and per-island solve dispatch.
+
+	// Per-island solver state for this step. One entry per non-empty island
+	// slice, plus optionally a trailing entry for orphan refs (manifolds/joints
+	// whose bodies are outside any island). Drives per-island coloring, SIMD
+	// batch building, and the per-island PGS iter loop. Arena-owned.
+	CK_DYNA SolveIsland* solve_islands = NULL;
+	Arena* main_arena = &w->worker_arenas[0];
+
+	// Walk islands, emitting manifold-refs then joint-refs per island. Each
+	// SolveIsland records its absolute slice into the flat crefs array.
 	// Greedy coloring output remains bit-identical because islands have
 	// disjoint bodies -- processing order across islands cannot affect
 	// per-ref colors. Within an island, manifolds appear in ascending index
-	// (stable partition) and joints follow in sol_joints order, same as the
+	// (stable partition) and joints follow in sol_joints order, matching the
 	// prior flat ordering restricted to that island.
 	//
 	// PGS eligibility for joints: LDL is a direct solver for rigid equality
 	// constraints only, so joints with any bounded DOF (limits / motors) are
 	// shunted to PGS via joint_internal_has_limits.
 	for (int isl = 0; isl < n_islands; isl++) {
+		int slice_start = asize(crefs);
 		if (island_manifold_perm) {
 			int ms = island_manifold_offsets[isl];
 			int me = island_manifold_offsets[isl + 1];
@@ -658,47 +669,76 @@ void world_step(World world, float dt)
 				apush(crefs, r);
 			}
 		}
-	}
-	// Manifolds that no island claims (no bucketing available, e.g. when
-	// manifolds is empty) -- fall back to the linear scan. This branch only
-	// hits when the early bucketing was skipped.
-	if (!island_manifold_perm) {
-		for (int i = 0; i < sm_count; i++) {
-			if (sm[i].contact_count == 0) continue;
-			ConstraintRef r = { .type = CTYPE_CONTACT, .index = i,
-				.body_a = sm[i].body_a, .body_b = sm[i].body_b };
-			apush(crefs, r);
+		int slice_count = asize(crefs) - slice_start;
+		if (slice_count > 0) {
+			SolveIsland si = {0};
+			si.island_id = isl;
+			si.crefs_start = slice_start;
+			si.crefs_count = slice_count;
+			apush(solve_islands, si);
 		}
 	}
-	// Orphan joints (both bodies static, or a dynamic body without an
-	// island yet) -- emit in sol_joints order to match prior behavior.
-	for (int i = 0; i < sj_count; i++) {
-		int isl = pair_owning_island(w, sol_joints[i].body_a, sol_joints[i].body_b);
-		if (isl >= 0) continue;
-		if (w->ldl_enabled && !joint_internal_has_limits(&w->joints[sol_joints[i].joint_idx])) continue;
-		ConstraintRef r = { .type = CTYPE_JOINT, .index = i,
-			.body_a = sol_joints[i].body_a, .body_b = sol_joints[i].body_b };
-		apush(crefs, r);
+	// Orphan manifolds + joints (bodies outside any island) emit into a single
+	// trailing slice. Matches prior behavior: manifolds first (linear scan
+	// fallback when bucketing was skipped), then orphan joints in sol_joints
+	// order.
+	{
+		int slice_start = asize(crefs);
+		if (!island_manifold_perm) {
+			for (int i = 0; i < sm_count; i++) {
+				if (sm[i].contact_count == 0) continue;
+				ConstraintRef r = { .type = CTYPE_CONTACT, .index = i,
+					.body_a = sm[i].body_a, .body_b = sm[i].body_b };
+				apush(crefs, r);
+			}
+		}
+		for (int i = 0; i < sj_count; i++) {
+			int isl = pair_owning_island(w, sol_joints[i].body_a, sol_joints[i].body_b);
+			if (isl >= 0) continue;
+			if (w->ldl_enabled && !joint_internal_has_limits(&w->joints[sol_joints[i].joint_idx])) continue;
+			ConstraintRef r = { .type = CTYPE_JOINT, .index = i,
+				.body_a = sol_joints[i].body_a, .body_b = sol_joints[i].body_b };
+			apush(crefs, r);
+		}
+		int slice_count = asize(crefs) - slice_start;
+		if (slice_count > 0) {
+			SolveIsland si = {0};
+			si.island_id = -1;
+			si.crefs_start = slice_start;
+			si.crefs_count = slice_count;
+			apush(solve_islands, si);
+		}
 	}
 
 	int cref_count = asize(crefs);
-	int batch_starts[65] = {0};
-	int contact_end[65] = {0}; // per-color split: contacts in [batch_starts[c], contact_end[c]), joints in [contact_end[c], batch_starts[c+1])
-	int color_count = 0;
-	if (cref_count > 0)
-		color_constraints(crefs, cref_count, count, &w->worker_arenas[0], batch_starts, &color_count);
-	// Partition each color's crefs so contacts precede joints. This lets SIMD
-	// batch-build iterate only the contact portion while joint solves run
-	// scalar within the same color. Swap preserves color validity (graph
-	// coloring is per-body-pair, not per-type).
-	for (int c = 0; c < color_count; c++) {
-		int i = batch_starts[c], j = batch_starts[c + 1] - 1;
-		while (i <= j) {
-			if (crefs[i].type == CTYPE_CONTACT) { i++; }
-			else if (crefs[j].type == CTYPE_JOINT) { j--; }
-			else { ConstraintRef tmp = crefs[i]; crefs[i] = crefs[j]; crefs[j] = tmp; i++; j--; }
+	int solve_island_count = asize(solve_islands);
+
+	// Per-island coloring with a SHARED body_colors bitmap. Islands have
+	// disjoint bodies so bits set by one island's coloring are never read by
+	// another; bit-identical to isolated per-island coloring or the prior
+	// flat coloring over the same ref order.
+	uint64_t* body_colors = (uint64_t*)arena_alloc(main_arena, (size_t)count * sizeof(uint64_t), 16);
+	memset(body_colors, 0, count * sizeof(uint64_t));
+	for (int sii = 0; sii < solve_island_count; sii++) {
+		SolveIsland* island = &solve_islands[sii];
+		int rel_batch_starts[SOLVE_ISLAND_MAX_COLORS + 1];
+		int island_color_count = 0;
+		color_constraints_island(crefs + island->crefs_start, island->crefs_count, body_colors, main_arena, rel_batch_starts, &island_color_count);
+		island->color_count = island_color_count;
+		for (int c = 0; c <= island_color_count; c++) island->batch_starts[c] = island->crefs_start + rel_batch_starts[c];
+
+		// Partition each color's refs so contacts precede joints within this
+		// island. Swap preserves color validity (coloring is per-body-pair,
+		// not per-type).
+		for (int c = 0; c < island_color_count; c++) {
+			int i = island->batch_starts[c], j = island->batch_starts[c + 1] - 1;
+			while (i <= j) {
+				if (crefs[i].type == CTYPE_CONTACT) { i++; }
+				else if (crefs[j].type == CTYPE_JOINT) { j--; }
+				else { ConstraintRef tmp = crefs[i]; crefs[i] = crefs[j]; crefs[j] = tmp; i++; j--; }
+			}
+			island->contact_end[c] = i;
 		}
-		contact_end[c] = i;
 	}
 	w->perf.pgs.graph_color = perf_now() - t_gc;
 
@@ -712,9 +752,9 @@ void world_step(World world, float dt)
 	double t_jlim = 0, t_ldl = 0, t_relax = 0, t_posJ = 0;
 #if SIMD_SSE
 	// SIMD path handles mixed contacts + joints via per-color partition:
-	// contacts batch4, joints scalar within the same color.
+	// contacts batch4, joints scalar within the same color. Layout is
+	// (solve_island, color, batch-in-color); offsets live on each SolveIsland.
 	CK_DYNA PGS_Batch4* simd_batches = NULL;
-	CK_DYNA int* simd_color_batch_starts = NULL;
 	int simd_batch_count = 0;
 #endif
 	for (int sub = 0; sub < n_sub; sub++) {
@@ -759,33 +799,43 @@ void world_step(World world, float dt)
 		// as old SolverBodyVel), so no sync needed.
 
 		// Build SIMD batches on first substep; refresh only bias/lambda on substep 2+.
+		// Layout: batches are grouped by (solve_island, color, batch-in-color).
+		// Each SolveIsland records simd_batch_start (absolute offset into the
+		// flat simd_batches array) and simd_color_batch_starts[c] (relative
+		// offsets within its own batch range).
 #if SIMD_SSE
 		if (sub == 0 && cref_count > 0) {
-			// Pre-compute batch layout: only contacts go into SIMD batches.
-			// Joints in [contact_end[c], batch_starts[c+1]) are solved scalar.
 			int total_batches = 0;
-			apush(simd_color_batch_starts, 0);
-			for (int c = 0; c < color_count; c++) {
-				int contact_count = contact_end[c] - batch_starts[c];
-				total_batches += (contact_count + 3) / 4;
-				apush(simd_color_batch_starts, total_batches);
+			for (int sii = 0; sii < solve_island_count; sii++) {
+				SolveIsland* island = &solve_islands[sii];
+				island->simd_batch_start = total_batches;
+				island->simd_color_batch_starts[0] = 0;
+				for (int c = 0; c < island->color_count; c++) {
+					int contact_n = island->contact_end[c] - island->batch_starts[c];
+					int batches_in_color = (contact_n + 3) / 4;
+					total_batches += batches_in_color;
+					island->simd_color_batch_starts[c + 1] = island->simd_color_batch_starts[c] + batches_in_color;
+				}
+				island->simd_batch_count = island->simd_color_batch_starts[island->color_count];
 			}
 			if (total_batches > 0) {
 				afit(simd_batches, total_batches); asetlen(simd_batches, total_batches);
-				// Fill batches (each batch writes to a unique pre-allocated slot).
-				for (int c = 0; c < color_count; c++) {
-					int start = batch_starts[c], end = contact_end[c];
-					int bi_out = simd_color_batch_starts[c];
-					for (int i = start; i + 3 < end; i += 4) {
-						int idx[4] = { crefs[i].index, crefs[i+1].index, crefs[i+2].index, crefs[i+3].index };
-						pgs_batch4_prepare(&simd_batches[bi_out++], sm, idx, 4, sc);
-					}
-					int rem_start = start + ((end - start) / 4) * 4;
-					if (rem_start < end) {
-						int idx[4] = {0};
-						int rem_count = end - rem_start;
-						for (int j = 0; j < rem_count; j++) idx[j] = crefs[rem_start + j].index;
-						pgs_batch4_prepare(&simd_batches[bi_out++], sm, idx, rem_count, sc);
+				for (int sii = 0; sii < solve_island_count; sii++) {
+					SolveIsland* island = &solve_islands[sii];
+					for (int c = 0; c < island->color_count; c++) {
+						int start = island->batch_starts[c], end = island->contact_end[c];
+						int bi_out = island->simd_batch_start + island->simd_color_batch_starts[c];
+						for (int i = start; i + 3 < end; i += 4) {
+							int idx[4] = { crefs[i].index, crefs[i+1].index, crefs[i+2].index, crefs[i+3].index };
+							pgs_batch4_prepare(&simd_batches[bi_out++], sm, idx, 4, sc);
+						}
+						int rem_start = start + ((end - start) / 4) * 4;
+						if (rem_start < end) {
+							int idx[4] = {0};
+							int rem_count = end - rem_start;
+							for (int j = 0; j < rem_count; j++) idx[j] = crefs[rem_start + j].index;
+							pgs_batch4_prepare(&simd_batches[bi_out++], sm, idx, rem_count, sc);
+						}
 					}
 				}
 				simd_batch_count = asize(simd_batches);
@@ -795,7 +845,9 @@ void world_step(World world, float dt)
 
 		double tp = perf_now();
 #if SIMD_SSE
-		// On substep 2+, only refresh changing fields (bias + lambda).
+		// Refresh on substep 2+. Batches are all addressed into sm/sc by
+		// their stored indices, so a flat refresh pass works regardless of
+		// island layout.
 		if (sub > 0 && simd_batch_count > 0) {
 #ifdef _WIN32
 			if (n_workers > 1 && simd_batch_count >= n_workers * 2) {
@@ -808,43 +860,51 @@ void world_step(World world, float dt)
 			}
 		}
 
-		// Iteration loop: dispatch per color within each iteration.
-		// SIMD batch4 for contacts + scalar solve for joints within each color.
-		// Graph coloring ensures no body conflicts within a color.
+		// PGS iter loop: outer iter, then per-island, then per-color.
+		// Islands have disjoint bodies, so order across islands within an
+		// iteration doesn't affect physics (body state reads/writes for
+		// island A are never touched by island B's color-c update). Within
+		// an island, color order is preserved (color 0 updates propagate to
+		// color 1 via body state, etc.), which is what PGS depends on.
+		//
 		// Last iteration fuses lambda scatter (batch -> sm/sc) into solve.
 		int last_iter = w->velocity_iters - 1;
 		for (int iter = 0; iter <= last_iter; iter++) {
 			int do_scatter = (iter == last_iter);
-			for (int c = 0; c < color_count; c++) {
-				int bs = simd_color_batch_starts[c], be = simd_color_batch_starts[c + 1];
-				int n_color_batches = be - bs;
+			for (int sii = 0; sii < solve_island_count; sii++) {
+				SolveIsland* island = &solve_islands[sii];
+				for (int c = 0; c < island->color_count; c++) {
+					int bs = island->simd_batch_start + island->simd_color_batch_starts[c];
+					int be = island->simd_batch_start + island->simd_color_batch_starts[c + 1];
+					int n_color_batches = be - bs;
 #ifdef _WIN32
-				if (n_workers > 1 && n_color_batches >= n_workers * 2) {
-					PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs, .sm = sm, .sc = sc, .scatter = do_scatter };
-					pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
-				} else
+					if (n_workers > 1 && n_color_batches >= n_workers * 2) {
+						PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs, .sm = sm, .sc = sc, .scatter = do_scatter };
+						pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
+					} else
 #endif
-				{
-					for (int bi = bs; bi < be; bi++) {
-						solve_contact_batch4_sv(w->body_hot, &simd_batches[bi]);
-						if (do_scatter) {
-							PGS_Batch4* bt = &simd_batches[bi];
-							for (int j = 0; j < bt->lane_count; j++) {
-								int mi = bt->manifold_idx[j];
-								sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
-								sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
-								sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
-								for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
-									sc[sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
+					{
+						for (int bi = bs; bi < be; bi++) {
+							solve_contact_batch4_sv(w->body_hot, &simd_batches[bi]);
+							if (do_scatter) {
+								PGS_Batch4* bt = &simd_batches[bi];
+								for (int j = 0; j < bt->lane_count; j++) {
+									int mi = bt->manifold_idx[j];
+									sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
+									sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
+									sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
+									for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
+										sc[sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
+									}
 								}
 							}
 						}
 					}
-				}
-				// Scalar joint solves for this color (populated when LDL is off).
-				// Graph coloring guarantees no body conflicts with this color's contacts.
-				for (int i = contact_end[c]; i < batch_starts[c + 1]; i++) {
-					solve_joint(w, &sol_joints[crefs[i].index]);
+					// Scalar joint solves for this color in this island.
+					// Graph coloring guarantees no body conflicts with this color's contacts.
+					for (int i = island->contact_end[c]; i < island->batch_starts[c + 1]; i++) {
+						solve_joint(w, &sol_joints[crefs[i].index]);
+					}
 				}
 			}
 			// All joints are now either in crefs (solve_joint handles all DOFs
@@ -888,8 +948,8 @@ void world_step(World world, float dt)
 
 #if SIMD_SSE
 	afree(simd_batches);
-	afree(simd_color_batch_starts);
 #endif
+	afree(solve_islands);
 
 	w->perf.pgs_solve = t_pgs;
 	w->perf.integrate += t_int_sub;

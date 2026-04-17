@@ -957,16 +957,17 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 
 	double t_fill_start = perf_now();
 
-	// Lazy allocation of solve scratch buffers. Ensures direct callers (tests,
-	// ldl_island_solve standalone) have them ready since they pass through
-	// numeric_factor first.
-	if (!c->solve_rhs && c->n > 0) {
+	// Ensure solve scratch + L_factors have capacity for the current topology.
+	// Topology changes (joint add/destroy) grow c->n; afit/asetlen unconditionally
+	// so a stale buffer sized to an older (smaller) c->n gets resized instead of
+	// being silently overflowed by downstream vel_rhs[oi + d] writes.
+	if (c->n > 0) {
 		afit(c->solve_rhs, c->n);
 		asetlen(c->solve_rhs, c->n);
 		afit(c->solve_lambda, c->n);
 		asetlen(c->solve_lambda, c->n);
 	}
-	if (!c->L_factors && c->topo && c->topo->L_factors_size > 0) {
+	if (c->topo && c->topo->L_factors_size > 0) {
 		afit(c->L_factors, c->topo->L_factors_size);
 		asetlen(c->L_factors, c->topo->L_factors_size);
 	}
@@ -1717,12 +1718,14 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 		// Enable debug capture only for the inspected island
 		g_ldl_debug_enabled = (ii == g_ldl_debug_island);
 
-		// Re-allocate L_factors and solve scratch if freed by sleep cache
-		if (!c->L_factors && c->topo && c->topo->L_factors_size > 0) {
+		// Ensure solve scratch + L_factors match current topology. afit resizes
+		// if capacity is smaller than c->n / L_factors_size, so topology growth
+		// from added joints doesn't leave stale undersized buffers in place.
+		if (c->topo && c->topo->L_factors_size > 0) {
 			afit(c->L_factors, c->topo->L_factors_size);
 			asetlen(c->L_factors, c->topo->L_factors_size);
 		}
-		if (!c->solve_rhs && c->n > 0) {
+		if (c->n > 0) {
 			afit(c->solve_rhs, c->n);
 			asetlen(c->solve_rhs, c->n);
 			afit(c->solve_lambda, c->n);
