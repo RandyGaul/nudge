@@ -177,7 +177,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->softness = soft;
 
 		v3 ra = s->r_a, rb = s->r_b;
-		// J_a = [-I, -skew(r_a)], J_b = [I, skew(r_b)]
+		// J_a = [-I, skew(r_a)], J_b = [I, -skew(r_b)]
 		s->rows[0].J_a[0] = -1; s->rows[0].J_a[4] = -ra.z; s->rows[0].J_a[5] =  ra.y;
 		s->rows[0].J_b[0] =  1; s->rows[0].J_b[4] =  rb.z; s->rows[0].J_b[5] = -rb.y;
 		s->rows[1].J_a[1] = -1; s->rows[1].J_a[3] =  ra.z; s->rows[1].J_a[5] = -ra.x;
@@ -322,9 +322,10 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		v3 err = sub(anchor_b, anchor_a);
 		s->pos_error[0] = err.x; s->pos_error[1] = err.y; s->pos_error[2] = err.z;
 
-		// Angular error from relative quaternion
-		quat q_rel = mul(inv(sa->rotation), sb->rotation);
-		quat q_err = mul(inv(j->fixed.local_rel_quat), q_rel);
+		// Angular error: world-frame quaternion (Jolt RotationEulerConstraintPart).
+		// diff = R_b * R_b0^-1 * R_a0 * R_a^-1 = delta_b * delta_a^-1 (world frame).
+		// Matches identity Jacobian [I, -I] which operates on world-frame angular velocity.
+		quat q_err = mul(mul(sb->rotation, inv(j->fixed.local_rel_quat)), inv(sa->rotation));
 		float sign_w = q_err.w >= 0.0f ? 1.0f : -1.0f;
 		s->pos_error[3] = 2.0f * q_err.x * sign_w;
 		s->pos_error[4] = 2.0f * q_err.y * sign_w;
@@ -367,9 +368,8 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		s->pos_error[0] = dot(delta, t1);
 		s->pos_error[1] = dot(delta, t2);
 
-		// Angular error from relative quaternion
-		quat q_rel = mul(inv(sa->rotation), sb->rotation);
-		quat q_err = mul(inv(j->prismatic.local_rel_quat), q_rel);
+		// Angular error: world-frame quaternion (matches identity Jacobian rows 2-4).
+		quat q_err = mul(mul(sb->rotation, inv(j->prismatic.local_rel_quat)), inv(sa->rotation));
 		float sign_w = q_err.w >= 0.0f ? 1.0f : -1.0f;
 		s->pos_error[2] = 2.0f * q_err.x * sign_w;
 		s->pos_error[3] = 2.0f * q_err.y * sign_w;
@@ -412,8 +412,8 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 				v3 ref_a_w = rotate(sa->rotation, j->hinge.local_ref_a);
 				v3 ref_b_w = rotate(sb->rotation, j->hinge.local_ref_b);
 				float angle = atan2f(dot(cross(ref_a_w, ref_b_w), axis_a_w), dot(ref_a_w, ref_b_w));
-				if (hmax != 0.0f) { float max_speed = (hmax - angle) / dt; if (speed > max_speed) speed = fmaxf(max_speed, 0.0f); }
-				if (hmin != 0.0f) { float min_speed = (hmin - angle) / dt; if (speed < min_speed) speed = fminf(min_speed, 0.0f); }
+				if (hmax != 0.0f) { float max_speed = fmaxf((hmax - angle) / dt, 0.0f); if (speed > max_speed) speed = max_speed; }
+				if (hmin != 0.0f) { float min_speed = fminf((hmin - angle) / dt, 0.0f); if (speed < min_speed) speed = min_speed; }
 			}
 			s->bias[5] = speed;
 		} else if (s->pos_error[5] != 0.0f) {

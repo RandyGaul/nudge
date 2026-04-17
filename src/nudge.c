@@ -777,9 +777,14 @@ void world_step(World world, float dt)
 						solve_constraint(w, &crefs[i], sm, sc, sol_joints);
 					}
 				}
-				double tjl = perf_now();
-				joints_solve_limits(w, sol_joints, asize(sol_joints));
-				t_jlim += perf_now() - tjl;
+				// When LDL is off, joints are in crefs and solve_joint already
+				// handles limit DOFs. Only call joints_solve_limits when LDL
+				// handles bilateral DOFs (joints not in crefs).
+				if (w->ldl_enabled) {
+					double tjl = perf_now();
+					joints_solve_limits(w, sol_joints, asize(sol_joints));
+					t_jlim += perf_now() - tjl;
+				}
 			}
 		}
 		t_pgs += perf_now() - tp;
