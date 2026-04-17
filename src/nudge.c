@@ -914,29 +914,93 @@ void world_step(World world, float dt)
 			}
 		}
 
-		// PGS: dispatch islands across workers. Each worker runs the full
-		// velocity_iters x color_count x batch pipeline for its island(s)
-		// end-to-end. Islands have disjoint bodies / manifolds / joints, so
-		// per-body writes and per-manifold scatters don't overlap across
-		// workers; within a color, graph coloring guarantees disjoint body
-		// writes across batches.
+		// PGS dispatch: two strategies depending on island size.
 		//
-		// Per-body update sequence is identical to a serial outer-iter /
-		// inner-island / inner-color loop (and to the pre-phase-2 code) for
-		// bodies within a single island, because island-B's work never
-		// touches island-A's bodies. Bit-identical across worker counts.
+		// 1) Small islands -- whole-island parallel claim. Each worker owns an
+		//    island end-to-end through velocity_iters x color_count x batch.
+		//    Good when there are many islands (ragdolls, mixed scenes).
+		//
+		// 2) Big islands -- serial outer, per-color parallel dispatch. One
+		//    giant island (tall stack, dense pile) can't be parallelized
+		//    whole, but its color-c batches are disjoint-body so they split
+		//    cleanly across workers per color. Matches the pre-phase-2
+		//    perf profile for single-giant-island scenes.
+		//
+		// Partition swaps big islands to the tail. Small islands preserve
+		// their original order; big islands don't, but both phases produce
+		// bit-identical output because islands are disjoint (order across
+		// islands cannot affect per-body update sequence).
+		int first_big = solve_island_count;
+#ifdef _WIN32
+		if (n_workers > 1) {
+			int i = 0;
+			while (i < first_big) {
+				if (solve_islands[i].simd_batch_count >= n_workers * 2) {
+					first_big--;
+					SolveIsland tmp = solve_islands[i];
+					solve_islands[i] = solve_islands[first_big];
+					solve_islands[first_big] = tmp;
+				} else {
+					i++;
+				}
+			}
+		}
+#endif
+		int small_count = first_big;
+
+		// Small islands: dispatch across workers (whole-island claim).
 		IslandSolveCtx island_ctx = {
 			.w = w, .solve_islands = solve_islands, .crefs = crefs,
 			.sm = sm, .sc = sc, .sol_joints = sol_joints,
 			.simd_batches = simd_batches, .velocity_iters = w->velocity_iters,
 		};
 #ifdef _WIN32
-		if (n_workers > 1 && solve_island_count >= 2) {
-			pool_dispatch(island_solve_work_fn, &island_ctx, solve_island_count, 1, n_workers);
+		if (n_workers > 1 && small_count >= 2) {
+			pool_dispatch(island_solve_work_fn, &island_ctx, small_count, 1, n_workers);
 		} else
 #endif
-		if (solve_island_count > 0) {
-			island_solve_work_fn(&island_ctx, 0, solve_island_count);
+		if (small_count > 0) {
+			island_solve_work_fn(&island_ctx, 0, small_count);
+		}
+
+		// Big islands: serial outer, per-color parallel dispatch.
+		int last_iter = w->velocity_iters - 1;
+		for (int bi = first_big; bi < solve_island_count; bi++) {
+			SolveIsland* island = &solve_islands[bi];
+			for (int iter = 0; iter <= last_iter; iter++) {
+				int do_scatter = (iter == last_iter);
+				for (int c = 0; c < island->color_count; c++) {
+					int bs = island->simd_batch_start + island->simd_color_batch_starts[c];
+					int be = island->simd_batch_start + island->simd_color_batch_starts[c + 1];
+					int n_color_batches = be - bs;
+#ifdef _WIN32
+					if (n_workers > 1 && n_color_batches >= n_workers * 2) {
+						PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs, .sm = sm, .sc = sc, .scatter = do_scatter };
+						pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
+					} else
+#endif
+					{
+						for (int bi2 = bs; bi2 < be; bi2++) {
+							solve_contact_batch4_sv(w->body_hot, &simd_batches[bi2]);
+							if (do_scatter) {
+								PGS_Batch4* bt = &simd_batches[bi2];
+								for (int j = 0; j < bt->lane_count; j++) {
+									int mi = bt->manifold_idx[j];
+									sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
+									sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
+									sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
+									for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
+										sc[sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
+									}
+								}
+							}
+						}
+					}
+					for (int i = island->contact_end[c]; i < island->batch_starts[c + 1]; i++) {
+						solve_joint(w, &sol_joints[crefs[i].index]);
+					}
+				}
+			}
 		}
 #else
 #error "SIMD_SSE required: non-SSE solver path removed; add a SIMD_NEON backend if needed"
