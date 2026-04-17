@@ -1692,12 +1692,18 @@ static void ldl_factor_island_work_fn(void* ctx, int start, int count)
 			ldl_cache_rebuild_blocks(c, w, ii, lfc->sol_joints, lfc->joint_count);
 			ldl_apply_shattering(c, w);
 			ldl_build_bundles(c);
-			if (c->topo_version != w->ldl_topo_version)
+			// Build topology on graph change OR on first touch (c->topo NULL).
+			// Without the NULL check, an island whose c->topo_version happens
+			// to equal w->ldl_topo_version at first-ever build (both 0, or
+			// after slot recycling) would skip build_topology and leave
+			// c->topo NULL while c->n > 0 from rebuild_blocks -- then
+			// ldl_numeric_factor dereferences NULL.
+			if (c->topo_version != w->ldl_topo_version || !c->topo)
 				ldl_build_topology(c, w);
 			c->topo_version = w->ldl_topo_version;
 			ldl_topo_acc += perf_now() - t_topo_start;
 		}
-		if (c->n == 0) continue;
+		if (c->n == 0 || !c->topo) continue;
 
 		// Debug capture is gated to a single island by index; parallel path is
 		// only taken when g_ldl_debug_island < 0 (see ldl_factor dispatch).
