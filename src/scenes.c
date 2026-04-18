@@ -359,37 +359,6 @@ static void scene_heavy_chain_setup()
 	}
 }
 
-// --- Minimal Chain: static anchor + 2 dynamic bodies for debugging ---
-static Body g_mini_anchor;
-static Body g_mini_a, g_mini_b;
-
-static Body g_mini_c;
-
-static void scene_mini_chain_setup()
-{
-	float link_len = 0.8f;
-
-	g_mini_anchor = create_body(g_world, (BodyParams){ .position = V3(0, 8, 0), .rotation = quat_identity(), .mass = 0 });
-	body_add_shape(g_world, g_mini_anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
-
-	g_mini_a = create_body(g_world, (BodyParams){ .position = V3(link_len, 8, 0), .rotation = quat_identity(), .mass = 1.0f });
-	body_add_shape(g_world, g_mini_a, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
-
-	g_mini_b = create_body(g_world, (BodyParams){ .position = V3(link_len * 2, 8, 0), .rotation = quat_identity(), .mass = 1.0f });
-	body_add_shape(g_world, g_mini_b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
-
-	g_mini_c = create_body(g_world, (BodyParams){ .position = V3(link_len * 3, 8, 0), .rotation = quat_identity(), .mass = 100.0f });
-	body_add_shape(g_world, g_mini_c, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
-
-	create_distance(g_world, (DistanceParams){ .body_a = g_mini_anchor, .body_b = g_mini_a, .rest_length = link_len });
-	create_distance(g_world, (DistanceParams){ .body_a = g_mini_a, .body_b = g_mini_b, .rest_length = link_len });
-	create_distance(g_world, (DistanceParams){ .body_a = g_mini_b, .body_b = g_mini_c, .rest_length = link_len });
-
-	apush(g_draw_list, ((DrawEntry){ g_mini_a, MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.6f, 0.6f, 0.9f) }));
-	apush(g_draw_list, ((DrawEntry){ g_mini_b, MESH_SPHERE, V3(0.2f, 0.2f, 0.2f), V3(0.6f, 0.6f, 0.9f) }));
-	apush(g_draw_list, ((DrawEntry){ g_mini_c, MESH_SPHERE, V3(0.5f, 0.5f, 0.5f), V3(0.9f, 0.2f, 0.2f) }));
-}
-
 // --- Joint Demo: suspension bridge with hinged planks and hanging cables ---
 static void scene_joint_demo_setup()
 {
@@ -450,67 +419,6 @@ static void scene_joint_demo_setup()
 	Body ball = create_body(g_world, (BodyParams){ .position = V3(0, bridge_y + 1.5f, 0), .rotation = quat_identity(), .mass = 20.0f });
 	body_add_shape(g_world, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.6f });
 	apush(g_draw_list, ((DrawEntry){ ball, MESH_SPHERE, V3(0.6f, 0.6f, 0.6f), V3(0.9f, 0.2f, 0.2f) }));
-}
-
-// --- Hub Star: central body with 8 radial joints (exercises body shattering) ---
-#define HUB_STAR_ARMS 8
-static Body g_hub_center;
-static Body g_hub_arms[HUB_STAR_ARMS];
-
-static void scene_hub_star_setup()
-{
-	// Central hub body (dynamic, moderate mass)
-	g_hub_center = create_body(g_world, (BodyParams){
-		.position = V3(0, 8, 0),
-		.rotation = quat_identity(),
-		.mass = 5.0f,
-	});
-	body_add_shape(g_world, g_hub_center, (ShapeParams){
-		.type = SHAPE_SPHERE,
-		.sphere.radius = 0.4f,
-	});
-	apush(g_draw_list, ((DrawEntry){ g_hub_center, MESH_SPHERE, V3(0.4f, 0.4f, 0.4f), V3(1, 0.8f, 0.2f) }));
-
-	// Static anchor above hub
-	Body anchor = create_body(g_world, (BodyParams){
-		.position = V3(0, 10, 0),
-		.rotation = quat_identity(),
-		.mass = 0,
-	});
-	body_add_shape(g_world, anchor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
-	create_ball_socket(g_world, (BallSocketParams){
-		.body_a = anchor, .body_b = g_hub_center,
-		.local_offset_a = V3(0, -1, 0), .local_offset_b = V3(0, 1, 0),
-	});
-
-	// 8 radial arms
-	float arm_len = 1.5f;
-	for (int i = 0; i < HUB_STAR_ARMS; i++) {
-		float angle = (float)i * 2.0f * 3.14159265f / HUB_STAR_ARMS;
-		float cx = cosf(angle), cz = sinf(angle);
-		v3 dir = V3(cx, 0, cz);
-		v3 arm_pos = add(V3(0, 8, 0), scale(dir, arm_len));
-
-		float mass = (i == 0) ? 20.0f : 1.0f; // one heavy arm
-		float radius = (i == 0) ? 0.35f : 0.2f;
-		v3 color = (i == 0) ? V3(0.9f, 0.2f, 0.2f) : V3(0.4f, 0.7f, 0.9f);
-
-		g_hub_arms[i] = create_body(g_world, (BodyParams){
-			.position = arm_pos,
-			.rotation = quat_identity(),
-			.mass = mass,
-		});
-		body_add_shape(g_world, g_hub_arms[i], (ShapeParams){
-			.type = SHAPE_SPHERE,
-			.sphere.radius = radius,
-		});
-		create_ball_socket(g_world, (BallSocketParams){
-			.body_a = g_hub_center, .body_b = g_hub_arms[i],
-			.local_offset_a = scale(dir, 0.5f),
-			.local_offset_b = scale(dir, -arm_len + 0.5f),
-		});
-		apush(g_draw_list, ((DrawEntry){ g_hub_arms[i], MESH_SPHERE, V3(radius, radius, radius), color }));
-	}
 }
 
 // Scene: Mass Ratio -- tiny box at bottom, each box above is larger and heavier.
