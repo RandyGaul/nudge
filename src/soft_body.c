@@ -312,17 +312,18 @@ int world_get_soft_bodies(World world, SoftBody* out, int max)
 // unit diagonal implicit), D separate. Then forward/diagonal/back substitute
 // against sb->rhs into sb->lambda_sol.
 
-// Modified-Cholesky factorization: LDL with pivot floor. Pivots below
-// `min_pivot` are raised to that floor; this prevents 1/D amplification of
-// null-space RHS components in over-constrained / rank-deficient systems.
-// Returns 0 on success, -1 only if a pivot is non-finite.
-static int sb_ldl_factor(double* K, double* D, int n, double min_pivot)
+// Standard LDL factorization. Asserts hard on non-positive pivots -- if a
+// pivot goes zero or negative, K was numerically rank-deficient: the caller
+// is responsible for regularizing K upfront (Tikhonov / compliance) so this
+// doesn't happen. We don't silently repair it here because that masks the
+// real problem (under-regularized K amplifies null-space lambdas by 1/eps).
+static int sb_ldl_factor(double* K, double* D, int n)
 {
 	for (int k = 0; k < n; k++) {
 		double d = K[k * n + k];
 		for (int j = 0; j < k; j++) d -= K[k * n + j] * K[k * n + j] * D[j];
-		if (!(d == d)) return -1; // NaN guard
-		if (d < min_pivot) d = min_pivot;
+		assert(d > 0.0 && "sb_ldl_factor: non-positive pivot -- K is rank-deficient, regularize via compliance");
+		if (d <= 0.0) return -1;
 		D[k] = d;
 		for (int i = k + 1; i < n; i++) {
 			double s = K[i * n + k];
@@ -511,11 +512,8 @@ static int sb_prepare_frame(SoftBodyInternal* sb, float sub_dt)
 		lk->pos_to_vel = rigid_default ? rigid_ptv : soft_ptv;
 	}
 
-	// Pivot floor for modified-Cholesky: keeps null-space pivots from
-	// collapsing to ~compliance, which would amplify lambdas by 1/compliance.
-	// Scaling by diag_avg keeps the floor mass-adaptive.
-	double min_pivot = 0.1 * diag_avg;
-	return sb_ldl_factor(K, sb->D, L, min_pivot);
+	(void)diag_avg;
+	return sb_ldl_factor(K, sb->D, L);
 }
 
 // Per-substep: integrate velocity, refresh axes from current positions,

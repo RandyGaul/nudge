@@ -30,13 +30,21 @@ if(MSVC)
 	target_compile_options(nudge_tests PRIVATE /std:clatest /experimental:c11atomics /Ob3 /fp:precise)
 	target_link_options(nudge_tests PRIVATE /STACK:8388608)
 else()
-	# -ffp-contract=off disables FMA fusion so `a*b+c` never contracts to one
-	# rounded op. Do NOT pair with -ffp-model=precise -- that flag implies
-	# -ffp-contract=on and silently re-enables within-statement fusion, which
-	# AppleClang at -O3 then uses to emit vfmaq_f32 on aarch64. The command-
-	# line flag plus `#pragma STDC FP_CONTRACT OFF` in vmath.h cover both the
-	# global build and the TU-wide parse state.
-	target_compile_options(nudge_tests PRIVATE -ffp-contract=off)
+	# Disable every FMA-fusion / reassociation / fast-math transformation we
+	# can name so `a*b+c` stays as two separately rounded ops on every target.
+	# -ffp-contract=off alone isn't enough: AppleClang at -O3 still emits
+	# vfmaq_f32 on aarch64 for simple scalar patterns. The combined sledgehammer
+	# plus #pragma clang fp contract(off) in vmath.h is what gets us bit-
+	# identical sim across x86, aarch64, and wasm32.
+	target_compile_options(nudge_tests PRIVATE
+		-ffp-contract=off
+		-fno-fast-math
+		-fno-unsafe-math-optimizations
+		-fno-associative-math
+		-fno-reciprocal-math
+		-fno-finite-math-only
+		-fsigned-zeros
+	)
 endif()
 
 if(NUDGE_BUILD_APP)
