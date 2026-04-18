@@ -930,6 +930,30 @@ static void test_rolling_friction_sphere_on_plane()
 	}
 }
 
+static void test_rolling_friction_capsule_on_end()
+{
+	// Capsule standing upright on its hemispherical end cap is an inverted-
+	// pendulum equilibrium. With no rolling friction, small FP perturbations
+	// tip it and it rocks forever (or falls over and slides). With rolling
+	// friction on the contact ring, the rocking decays.
+	TEST_BEGIN("rolling friction: capsule on end cap stops rocking");
+	World w = create_world((WorldParams){ .gravity = V3(0, -10, 0) });
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .rolling_friction = 1.0f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+	// Capsule vertical, given a small rocking angular velocity about Z.
+	Body cap = create_body(w, (BodyParams){ .position = V3(0, 0.65f, 0), .rotation = quat_identity(), .mass = 1.0f, .friction = 0.6f, .rolling_friction = 1.0f, .angular_damping = 0.0f });
+	body_add_shape(w, cap, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.4f, .radius = 0.25f } });
+	((WorldInternal*)w.id)->body_hot[handle_index(cap)].angular_velocity = V3(0, 0, 2.0f); // rocking
+	for (int i = 0; i < 600; i++) world_step(w, 1.0f / 60.0f);
+	v3 av = body_get_angular_velocity(w, cap);
+	v3 v  = body_get_velocity(w, cap);
+	v3 p  = body_get_position(w, cap);
+	printf("  capsule on end mu_roll=1.0: |av|=%.3f |v|=%.3f pos=(%.2f,%.2f,%.2f) after 10s\n", len(av), len(v), p.x, p.y, p.z);
+	TEST_ASSERT(len(av) < 1.0f);
+	TEST_ASSERT(len(v)  < 1.0f);
+	destroy_world(w);
+}
+
 static void test_rolling_friction_cylinder_on_side()
 {
 	// Cylinder lying on side, rolling about its own axis. Single rolling DOF
@@ -12273,31 +12297,18 @@ static void test_snapshot_roundtrip()
 	int count = world_query_aabb(w2, V3(-100,-100,-100), V3(100,100,100), results, 64);
 	TEST_ASSERT(count == N);
 
-	// Positions/velocities byte-identical after load (body creation order
-	// matches save iteration order, so internal indices align).
-	TEST_BEGIN("snapshot: body state preserved");
-	// We don't have handles to the new bodies yet — rebuild by walking indices.
-	// Use internal WorldInternal pointer to compare.
-	// (A public iterator would be cleaner; for now, we check via handle 0..18.)
-	// The Body handle's internal index lines up with creation order.
-	int mismatches = 0;
-	for (int i = 0; i < N; i++) {
-		Body h = results[0]; // placeholder — actually we need index-based access
-		(void)h;
-		// Since we don't have a guaranteed handle list, reconstruct via index.
-		// Handles returned by world_query_aabb include all bodies; compare by
-		// searching for matching position.
-	}
-	(void)mismatches;
-
-	// Simpler check: total of body positions should equal pre-save total.
+	// Sum-of-positions as a cheap correctness check: loaded world's total
+	// position must match the saved total to within float epsilon. Catches
+	// dropped bodies, mis-serialized floats, per-body drift.
+	TEST_BEGIN("snapshot: body position sum matches");
 	v3 sum_before = V3(0,0,0), sum_after = V3(0,0,0);
 	for (int i = 0; i < N; i++) sum_before = add(sum_before, pos_before[i]);
 	for (int i = 0; i < count; i++) sum_after = add(sum_after, body_get_position(w2, results[i]));
 	v3 diff = sub(sum_before, sum_after);
 	TEST_ASSERT(len(diff) < 1e-4f);
 
-	// Stepping the loaded world should not crash and should produce sensible motion.
+	// Stepping the loaded world should not crash; exercises that joints +
+	// shapes + bodies were all rewired correctly on load.
 	TEST_BEGIN("snapshot: loaded world steps cleanly");
 	for (int i = 0; i < 5; i++) world_step(w2, dt);
 	TEST_ASSERT(1);
@@ -13582,6 +13593,7 @@ static void run_tests()
 	test_cylinder_on_quad_mesh_floor();
 	test_capsule_on_quad_mesh_floor();
 	test_rolling_friction_sphere_on_plane();
+	test_rolling_friction_capsule_on_end();
 	test_rolling_friction_cylinder_on_side();
 	test_raycast_quad_mesh();
 	test_box_in_vgroove_mesh();
