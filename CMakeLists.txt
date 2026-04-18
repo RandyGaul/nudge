@@ -45,6 +45,16 @@ else()
 		-fno-finite-math-only
 		-fsigned-zeros
 	)
+	# Also turn off Clang's auto-vectorizers. Explicit -fno-associative-math
+	# should already prevent reassociation, but on aarch64 we still see a
+	# bit-drift vs x86 that disappears when auto-vec is disabled. Accept the
+	# perf hit in exchange for bit-identical cross-arch output.
+	if(CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
+		target_compile_options(nudge_tests PRIVATE
+			-fno-vectorize
+			-fno-slp-vectorize
+		)
+	endif()
 endif()
 
 if(NUDGE_BUILD_APP)
