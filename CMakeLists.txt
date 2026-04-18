@@ -31,15 +31,12 @@ if(MSVC)
 	target_link_options(nudge_tests PRIVATE /STACK:8388608)
 else()
 	# -ffp-contract=off disables FMA fusion so `a*b+c` never contracts to one
-	# rounded op. Critical for cross-platform bit-identical results: Clang/GCC
-	# on ARM will happily emit vfmaq_f32 if this isn't off. MSVC doesn't contract
-	# by default. -ffp-model=precise on Clang pins rounding/NaN behavior that
-	# fast-math would otherwise relax; GCC's flag name differs so we skip it
-	# and trust the default (precise) plus -ffp-contract=off.
+	# rounded op. Do NOT pair with -ffp-model=precise -- that flag implies
+	# -ffp-contract=on and silently re-enables within-statement fusion, which
+	# AppleClang at -O3 then uses to emit vfmaq_f32 on aarch64. The command-
+	# line flag plus `#pragma STDC FP_CONTRACT OFF` in vmath.h cover both the
+	# global build and the TU-wide parse state.
 	target_compile_options(nudge_tests PRIVATE -ffp-contract=off)
-	if(CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
-		target_compile_options(nudge_tests PRIVATE -ffp-model=precise)
-	endif()
 endif()
 
 if(NUDGE_BUILD_APP)
@@ -72,7 +69,6 @@ if(NUDGE_BUILD_APP)
 			-msimd128
 			-O3
 			-ffp-contract=off
-			-ffp-model=precise
 		)
 		target_link_options(nudge PRIVATE
 			-sUSE_SDL=3
@@ -115,9 +111,6 @@ if(NUDGE_BUILD_APP)
 			target_compile_options(nudge PRIVATE /std:clatest /experimental:c11atomics /Ob3 /fp:precise)
 		else()
 			target_compile_options(nudge PRIVATE -ffp-contract=off)
-			if(CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
-				target_compile_options(nudge PRIVATE -ffp-model=precise)
-			endif()
 		endif()
 
 		# Remote debug viewer is Win32-only (uses ReadProcessMemory).
