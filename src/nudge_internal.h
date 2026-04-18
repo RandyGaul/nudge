@@ -518,6 +518,10 @@ typedef struct WorldInternal
 	int np_debug_filter_body_a;  // -1 = any
 	int np_debug_filter_body_b;  // -1 = any (ignores ordering: (A,B) also matches filter set for (B,A))
 	NP_DebugSnapshot np_debug;
+
+	// Rewind ring buffer (NULL until world_rewind_init). Defined in rewind.c.
+	// Topology-mutating API calls (create/destroy body+joint+shape) flush it.
+	struct RewindBuffer* rewind;
 } WorldInternal;
 
 // -----------------------------------------------------------------------------

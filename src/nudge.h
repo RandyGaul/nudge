@@ -376,6 +376,86 @@ int world_query_aabb(World world, v3 lo, v3 hi, Body* results, int max_results);
 int world_raycast(World world, v3 origin, v3 direction, float max_distance, RayHit* hit);
 
 // -----------------------------------------------------------------------------
+// Rewind -- ring buffer of deterministic world snapshots.
+//
+// Captures everything the simulation reads: body hot/state/cold, joints,
+// islands, warm-cache impulses, prev-touching + joint-pair maps, ldl topo
+// version. Restoring + stepping forward is bit-identical to the original
+// run from that point.
+//
+// Topology-change invalidation: any API call that creates or destroys a
+// body / joint / shape flushes the ring buffer. Mutation replay is a v2.
+//
+// Not supported by v1:
+//   - EPA backend (epa_cache is not captured; use the SAT backend).
+//   - Mutating the world between capture and restore (flushes the buffer).
+
+typedef struct RewindParams
+{
+	int max_frames;    // ring buffer depth (0 = disabled)
+	int auto_capture;  // 1 = world_step captures at start automatically
+} RewindParams;
+
+void world_rewind_init(World world, RewindParams params);
+void world_rewind_shutdown(World world);
+
+// Manual capture. Returns monotonic frame_id, or 0 if rewind is disabled.
+// Oldest frame is evicted when the buffer is full.
+uint64_t world_rewind_capture(World world);
+
+// Restore world to a frame_id previously returned from capture.
+// Returns 1 on success, 0 if the frame is no longer in the buffer.
+// All frames captured after frame_id remain available for re-step and
+// re-rewind; frames captured before are preserved as well.
+int world_rewind_to_frame(World world, uint64_t frame_id);
+
+// Convenience: restore to the snapshot `n` steps before the newest one.
+// n=0 restores the most recent snapshot. Returns 1 on success.
+int world_rewind_by_steps(World world, int n);
+
+int    world_rewind_frames_available(World world);
+size_t world_rewind_memory_used(World world);
+
+// -----------------------------------------------------------------------------
+// Sensors -- read-only world-query volumes.
+//
+// A sensor is a compound of convex shapes with a transform. It lives entirely
+// outside the physics engine: never in the broadphase, never in the solver,
+// never generates contacts. The only operation on a sensor is sensor_query,
+// which walks the world and reports which bodies overlap the sensor volume.
+//
+// Thread safety: sensor_query is read-only against the world. Concurrent
+// queries on different sensors (or the same sensor) are safe as long as no
+// thread is mutating the world. Do not call during world_step.
+//
+// Not supported: body shapes of type SHAPE_MESH are skipped during sensor
+// queries (triangle mesh vs. convex overlap is not yet wired up).
+
+typedef struct Sensor { uint64_t id; } Sensor;
+
+typedef struct SensorParams
+{
+	v3 position;
+	quat rotation;             // zero-quat = identity
+	uint32_t collision_group;  // 0 = 0xFFFFFFFF (overlap everything)
+	uint32_t collision_mask;   // 0 = 0xFFFFFFFF
+} SensorParams;
+
+Sensor create_sensor(SensorParams params);
+void destroy_sensor(Sensor sensor);
+
+// Attach a shape to the sensor. SHAPE_MESH is not allowed; asserts.
+void sensor_add_shape(Sensor sensor, ShapeParams params);
+
+// Move the sensor. No broadphase update (sensor is not in the broadphase).
+void sensor_set_transform(Sensor sensor, v3 position, quat rotation);
+
+// Query the world for bodies overlapping the sensor. Writes up to max_results
+// body handles into results[]; returns the total overlap count (may exceed
+// max_results -- use that to size a retry). Read-only against world.
+int sensor_query(World world, Sensor sensor, Body* results, int max_results);
+
+// -----------------------------------------------------------------------------
 // Joints.
 
 typedef struct Joint { uint64_t id; } Joint;

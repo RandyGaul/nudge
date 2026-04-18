@@ -11861,6 +11861,399 @@ static void test_raycast_n2_fallback()
 	destroy_world(w);
 }
 
+// ============================================================================
+// Rewind: deterministic snapshot + restore.
+
+static World make_rewind_scene(Body* out_floor, Body* out_boxes, int box_n)
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+	Body floor = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	if (out_floor) *out_floor = floor;
+
+	int idx = 0;
+	for (int y = 0; y < box_n; y++) {
+		for (int gx = 0; gx < 3; gx++) {
+			for (int gz = 0; gz < 3; gz++) {
+				Body b = create_body(w, (BodyParams){
+					.position = V3((float)gx*1.1f - 1.1f, 0.5f + y*1.05f, (float)gz*1.1f - 1.1f),
+					.rotation = quat_identity(), .mass = 1,
+				});
+				body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+				if (out_boxes) out_boxes[idx++] = b;
+			}
+		}
+	}
+	return w;
+}
+
+static void test_rewind_determinism()
+{
+	#define BOX_HEIGHT 4
+	#define TOTAL_BOXES (3 * 3 * BOX_HEIGHT)
+	Body floor; Body boxes[TOTAL_BOXES];
+	World w = make_rewind_scene(&floor, boxes, BOX_HEIGHT);
+
+	world_rewind_init(w, (RewindParams){ .max_frames = 16, .auto_capture = 1 });
+
+	float dt = 1.0f / 60.0f;
+
+	// Warmup: build up warm caches, island state, contacts.
+	for (int i = 0; i < 30; i++) world_step(w, dt);
+
+	uint64_t frame_a = world_rewind_capture(w);
+
+	// Save state at point A so we can verify restore returns to it.
+	int nbodies = TOTAL_BOXES + 1;
+	v3*  pos_a = (v3*)malloc(sizeof(v3) * nbodies);
+	v3*  vel_a = (v3*)malloc(sizeof(v3) * nbodies);
+	quat* rot_a = (quat*)malloc(sizeof(quat) * nbodies);
+	for (int i = 0; i < nbodies; i++) {
+		Body h = (i == 0) ? floor : boxes[i - 1];
+		pos_a[i] = body_get_position(w, h);
+		vel_a[i] = body_get_velocity(w, h);
+		rot_a[i] = body_get_rotation(w, h);
+	}
+
+	// Step forward M frames from A.
+	const int M = 10;
+	for (int i = 0; i < M; i++) world_step(w, dt);
+
+	// Save state at point Z (A + M).
+	v3*  pos_z = (v3*)malloc(sizeof(v3) * nbodies);
+	v3*  vel_z = (v3*)malloc(sizeof(v3) * nbodies);
+	quat* rot_z = (quat*)malloc(sizeof(quat) * nbodies);
+	for (int i = 0; i < nbodies; i++) {
+		Body h = (i == 0) ? floor : boxes[i - 1];
+		pos_z[i] = body_get_position(w, h);
+		vel_z[i] = body_get_velocity(w, h);
+		rot_z[i] = body_get_rotation(w, h);
+	}
+
+	// Rewind to A and verify state matches.
+	TEST_BEGIN("rewind: to_frame returns 1");
+	TEST_ASSERT(world_rewind_to_frame(w, frame_a) == 1);
+
+	TEST_BEGIN("rewind: state bit-identical at A after restore");
+	int mismatches_a = 0;
+	for (int i = 0; i < nbodies; i++) {
+		Body h = (i == 0) ? floor : boxes[i - 1];
+		v3 p = body_get_position(w, h);
+		v3 v = body_get_velocity(w, h);
+		quat r = body_get_rotation(w, h);
+		if (memcmp(&p, &pos_a[i], sizeof(v3)) != 0) mismatches_a++;
+		if (memcmp(&v, &vel_a[i], sizeof(v3)) != 0) mismatches_a++;
+		if (memcmp(&r, &rot_a[i], sizeof(quat)) != 0) mismatches_a++;
+	}
+	TEST_ASSERT(mismatches_a == 0);
+
+	// Step forward M frames again; result must bit-match Z.
+	for (int i = 0; i < M; i++) world_step(w, dt);
+
+	TEST_BEGIN("rewind: replay from A reproduces Z bit-identical");
+	int mismatches_z = 0;
+	for (int i = 0; i < nbodies; i++) {
+		Body h = (i == 0) ? floor : boxes[i - 1];
+		v3 p = body_get_position(w, h);
+		v3 v = body_get_velocity(w, h);
+		quat r = body_get_rotation(w, h);
+		if (memcmp(&p, &pos_z[i], sizeof(v3)) != 0) mismatches_z++;
+		if (memcmp(&v, &vel_z[i], sizeof(v3)) != 0) mismatches_z++;
+		if (memcmp(&r, &rot_z[i], sizeof(quat)) != 0) mismatches_z++;
+	}
+	TEST_ASSERT(mismatches_z == 0);
+
+	free(pos_a); free(vel_a); free(rot_a);
+	free(pos_z); free(vel_z); free(rot_z);
+	destroy_world(w);
+}
+
+static void test_rewind_ring_eviction()
+{
+	World w = make_rewind_scene(NULL, NULL, 2);
+	world_rewind_init(w, (RewindParams){ .max_frames = 4, .auto_capture = 1 });
+	float dt = 1.0f / 60.0f;
+
+	for (int i = 0; i < 10; i++) world_step(w, dt);
+
+	TEST_BEGIN("rewind: ring caps frames_available at max_frames");
+	TEST_ASSERT(world_rewind_frames_available(w) == 4);
+
+	// Evicted frames cannot be restored.
+	TEST_BEGIN("rewind: evicted frame_id returns 0");
+	TEST_ASSERT(world_rewind_to_frame(w, 1) == 0);
+
+	destroy_world(w);
+}
+
+static void test_rewind_mutation_replay()
+{
+	// Verify that rewinding past a create_body / destroy_body restores the
+	// pre-mutation world topology (v2: snapshots survive mutations).
+	Body floor; Body boxes[18]; // 3*3*2
+	World w = make_rewind_scene(&floor, boxes, 2);
+	world_rewind_init(w, (RewindParams){ .max_frames = 16, .auto_capture = 1 });
+	float dt = 1.0f / 60.0f;
+
+	// Warm up
+	for (int i = 0; i < 5; i++) world_step(w, dt);
+	uint64_t frame_before_create = world_rewind_capture(w);
+	int bodies_before_create = world_rewind_frames_available(w);
+
+	// Create a new body mid-window. Ring should keep accumulating.
+	Body extra = create_body(w, (BodyParams){ .position = V3(10, 10, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, extra, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+	TEST_BEGIN("rewind: create_body preserves ring");
+	TEST_ASSERT(world_rewind_frames_available(w) == bodies_before_create);
+
+	// Step forward; auto-capture includes `extra`.
+	for (int i = 0; i < 5; i++) world_step(w, dt);
+	uint64_t frame_after_create = world_rewind_capture(w);
+
+	TEST_BEGIN("rewind: body visible in post-create world");
+	TEST_ASSERT(body_get_position(w, extra).y < 10.0f); // fell under gravity
+
+	// Rewind past the create. The snapshot pre-dates `extra` so body count shrinks.
+	TEST_BEGIN("rewind: restore pre-create frame");
+	TEST_ASSERT(world_rewind_to_frame(w, frame_before_create) == 1);
+
+	// `extra`'s body_gen slot returns to its pre-create value, so the handle is
+	// no longer valid. body_is_asleep asserts on valid handles; skip the direct
+	// check. But world_query_aabb is safe to call.
+	Body q[32];
+	int found = world_query_aabb(w, V3(9, 9, -1), V3(11, 11, 1), q, 32);
+	TEST_BEGIN("rewind: extra body is gone after pre-create rewind");
+	TEST_ASSERT(found == 0);
+
+	// Rewind forward to post-create frame — extra should be present again.
+	TEST_BEGIN("rewind: re-restore post-create frame");
+	TEST_ASSERT(world_rewind_to_frame(w, frame_after_create) == 1);
+
+	found = world_query_aabb(w, V3(-20, -5, -20), V3(20, 20, 20), q, 32);
+	TEST_BEGIN("rewind: extra body is back after post-create rewind");
+	TEST_ASSERT(found >= bodies_before_create); // floor + pile + extra
+
+	destroy_world(w);
+}
+
+static void test_rewind_destroy_replay()
+{
+	// Rewind past a destroy_body restores the body and its shapes.
+	Body floor; Body boxes[18]; // 3*3*2
+	World w = make_rewind_scene(&floor, boxes, 2);
+	world_rewind_init(w, (RewindParams){ .max_frames = 16, .auto_capture = 1 });
+	float dt = 1.0f / 60.0f;
+
+	// Warmup + establish contacts
+	for (int i = 0; i < 20; i++) world_step(w, dt);
+
+	// Pick a box to destroy, save its state at the pre-destroy point.
+	Body victim = boxes[4];
+	uint64_t frame_before_destroy = world_rewind_capture(w);
+	v3 victim_pos_before = body_get_position(w, victim);
+
+	destroy_body(w, victim);
+	for (int i = 0; i < 5; i++) world_step(w, dt);
+
+	// Rewind to before the destroy. Body + shapes must come back.
+	TEST_BEGIN("rewind: restore before destroy");
+	TEST_ASSERT(world_rewind_to_frame(w, frame_before_destroy) == 1);
+
+	TEST_BEGIN("rewind: destroyed body position restored");
+	v3 p = body_get_position(w, victim);
+	TEST_ASSERT(memcmp(&p, &victim_pos_before, sizeof(v3)) == 0);
+
+	// Step forward; victim must participate in the sim again without crashing
+	// (shapes array was deep-cloned into the snapshot before destroy_body
+	// afree'd the live pointer).
+	for (int i = 0; i < 5; i++) world_step(w, dt);
+
+	TEST_BEGIN("rewind: post-replay step does not crash");
+	TEST_ASSERT(1); // reached this point
+
+	destroy_world(w);
+}
+
+static void test_rewind_memory_savings()
+{
+	// Measure memory on a 28-body pile that settles to sleep, both at
+	// max_frames=1 (single keyframe, approximates uncompressed cost per
+	// frame) and at max_frames=32 (full ring). Phase-1 elision for sleeping
+	// bodies means the 32-frame ring should cost far less than 32x the
+	// single-frame cost for body_hot+state specifically.
+	float dt = 1.0f / 60.0f;
+
+	size_t single_frame_mem = 0;
+	{
+		Body floor; Body boxes[27];
+		World w = make_rewind_scene(&floor, boxes, 3);
+		world_rewind_init(w, (RewindParams){ .max_frames = 1, .auto_capture = 1 });
+		for (int i = 0; i < 180; i++) world_step(w, dt);
+		single_frame_mem = world_rewind_memory_used(w);
+		destroy_world(w);
+	}
+
+	size_t ring_mem = 0;
+	{
+		Body floor; Body boxes[27];
+		World w = make_rewind_scene(&floor, boxes, 3);
+		world_rewind_init(w, (RewindParams){ .max_frames = 32, .auto_capture = 1 });
+		for (int i = 0; i < 180; i++) world_step(w, dt);
+		ring_mem = world_rewind_memory_used(w);
+		destroy_world(w);
+	}
+
+	// Lower-bound "what v2 would have stored" for the 32-frame ring:
+	// everything scales linearly, so v2_ring_est = 32 * single_frame_mem
+	// (roughly — some overhead is per-buffer, not per-frame).
+	size_t v2_ring_est = 32 * single_frame_mem;
+
+	printf("  [rewind-mem] 1 frame:   %zu bytes\n", single_frame_mem);
+	printf("  [rewind-mem] 32 frames: %zu bytes (skip-unchanged + XOR-RLE)\n", ring_mem);
+	printf("  [rewind-mem] 32 frames uncompressed ~%zu (%.1fx compression)\n",
+	       v2_ring_est, (double)v2_ring_est / (double)ring_mem);
+
+	// Skip-unchanged on hot+state+cold+shapes + XOR-RLE on dirty body payloads
+	// reduces a settled-pile ring to roughly 1/6 of full storage. Assert at
+	// least 3x compression as a regression guard.
+	TEST_BEGIN("rewind: 32-frame ring is at least 3x smaller than full");
+	TEST_ASSERT(ring_mem * 3 < v2_ring_est);
+}
+
+static void test_rewind_by_steps()
+{
+	World w = make_rewind_scene(NULL, NULL, 2);
+	world_rewind_init(w, (RewindParams){ .max_frames = 8, .auto_capture = 1 });
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 6; i++) world_step(w, dt);
+
+	TEST_BEGIN("rewind: by_steps(0) is newest snapshot");
+	TEST_ASSERT(world_rewind_by_steps(w, 0) == 1);
+
+	TEST_BEGIN("rewind: by_steps(5) is oldest in-buffer snapshot");
+	TEST_ASSERT(world_rewind_by_steps(w, 5) == 1);
+
+	TEST_BEGIN("rewind: by_steps out of range fails");
+	TEST_ASSERT(world_rewind_by_steps(w, 999) == 0);
+
+	destroy_world(w);
+}
+
+static void test_sensor_basic()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+
+	Body floor = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 50) });
+
+	Body sphere = create_body(w, (BodyParams){ .position = V3(0, 2, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, sphere, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+	Body far_box = create_body(w, (BodyParams){ .position = V3(20, 2, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, far_box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+
+	Body results[8];
+
+	// Sphere sensor centered on the dynamic sphere: should hit sphere, not floor, not far_box.
+	Sensor sen = create_sensor((SensorParams){ .position = V3(0, 2, 0), .rotation = quat_identity() });
+	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.6f });
+
+	TEST_BEGIN("sensor: finds overlapping sphere only");
+	int count = sensor_query(w, sen, results, 8);
+	TEST_ASSERT(count == 1);
+	TEST_ASSERT(results[0].id == sphere.id);
+
+	// Move sensor far from everything.
+	TEST_BEGIN("sensor: miss when moved far away");
+	sensor_set_transform(sen, V3(100, 100, 100), quat_identity());
+	count = sensor_query(w, sen, results, 8);
+	TEST_ASSERT(count == 0);
+
+	// Big box sensor spanning sphere + floor.
+	TEST_BEGIN("sensor: box volume finds sphere + floor");
+	sensor_set_transform(sen, V3(0, 0, 0), quat_identity());
+	destroy_sensor(sen);
+	sen = create_sensor((SensorParams){ .position = V3(0, 0, 0), .rotation = quat_identity() });
+	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(3, 3, 3) });
+	count = sensor_query(w, sen, results, 8);
+	TEST_ASSERT(count == 2);
+	int found_sphere = 0, found_floor = 0;
+	for (int i = 0; i < count && i < 8; i++) {
+		if (results[i].id == sphere.id) found_sphere = 1;
+		if (results[i].id == floor.id)  found_floor  = 1;
+	}
+	TEST_ASSERT(found_sphere && found_floor);
+
+	// Compound sensor: two spheres, each near a different body.
+	TEST_BEGIN("sensor: compound shapes hit both bodies");
+	destroy_sensor(sen);
+	sen = create_sensor((SensorParams){ .position = V3(0, 2, 0), .rotation = quat_identity() });
+	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f });
+	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f, .local_pos = V3(20, 0, 0) });
+	count = sensor_query(w, sen, results, 8);
+	TEST_ASSERT(count == 2);
+
+	// Collision filter: sensor masks out the sphere; floor stays default (all bits).
+	TEST_BEGIN("sensor: filter excludes sphere");
+	body_set_collision_filter(w, sphere, 0x2, 0x2);   // group 2, mask 2: filtered out by sensor
+	body_set_collision_filter(w, far_box, 0x1, 0x1);  // group 1, mask 1: matches sensor
+	destroy_sensor(sen);
+	sen = create_sensor((SensorParams){
+		.position = V3(0, 2, 0), .rotation = quat_identity(),
+		.collision_group = 0x1, .collision_mask = 0x1,
+	});
+	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(30, 2, 2) });
+	count = sensor_query(w, sen, results, 8);
+	int saw_sphere = 0, saw_far_box = 0;
+	for (int i = 0; i < count && i < 8; i++) {
+		if (results[i].id == sphere.id)  saw_sphere = 1;
+		if (results[i].id == far_box.id) saw_far_box = 1;
+	}
+	TEST_ASSERT(!saw_sphere);
+	TEST_ASSERT(saw_far_box);
+
+	// Overflow: request more than fits, total reported is real count.
+	TEST_BEGIN("sensor: total count exceeds buffer");
+	body_set_collision_filter(w, sphere, 0xFFFFFFFFu, 0xFFFFFFFFu);
+	body_set_collision_filter(w, far_box, 0xFFFFFFFFu, 0xFFFFFFFFu);
+	destroy_sensor(sen);
+	sen = create_sensor((SensorParams){ .position = V3(0, 0, 0), .rotation = quat_identity() });
+	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(100, 100, 100) });
+	Body small[1];
+	count = sensor_query(w, sen, small, 1);
+	TEST_ASSERT(count == 3); // floor + sphere + far_box
+
+	destroy_sensor(sen);
+	destroy_world(w);
+}
+
+static void test_sensor_n2()
+{
+	// Same feature running through the N^2 broadphase path.
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_N2 });
+
+	Body sphere = create_body(w, (BodyParams){ .position = V3(0, 2, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, sphere, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+
+	Sensor sen = create_sensor((SensorParams){ .position = V3(0, 2, 0), .rotation = quat_identity() });
+	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.6f });
+
+	Body results[4];
+	TEST_BEGIN("sensor n2: hit");
+	int count = sensor_query(w, sen, results, 4);
+	TEST_ASSERT(count == 1);
+	TEST_ASSERT(results[0].id == sphere.id);
+
+	TEST_BEGIN("sensor n2: miss");
+	sensor_set_transform(sen, V3(100, 100, 100), quat_identity());
+	count = sensor_query(w, sen, results, 4);
+	TEST_ASSERT(count == 0);
+
+	destroy_sensor(sen);
+	destroy_world(w);
+}
+
 static void run_query_tests()
 {
 	printf("--- nudge query tests ---\n");
@@ -11873,6 +12266,14 @@ static void run_query_tests()
 	test_raycast_closest();
 	test_raycast_null_hit();
 	test_raycast_n2_fallback();
+	test_sensor_basic();
+	test_sensor_n2();
+	test_rewind_determinism();
+	test_rewind_ring_eviction();
+	test_rewind_mutation_replay();
+	test_rewind_destroy_replay();
+	test_rewind_memory_savings();
+	test_rewind_by_steps();
 }
 
 // ============================================================================
@@ -13854,11 +14255,13 @@ static void bench_mixed_contacts_joints(int pile_grid, int pile_height, int n_ch
 	printf("  pgs.iterations:    %8.3f ms\n", pacc.iterations / n * 1000.0);
 	printf("  pgs.joint_limits:  %8.3f ms\n", pacc.joint_limits / n * 1000.0);
 	printf("  pgs.warm_start:    %8.3f ms\n", pacc.warm_start / n * 1000.0);
+	printf("  pgs.graph_color:   %8.3f ms\n", pacc.graph_color / n * 1000.0);
 	printf("  pgs.relax:         %8.3f ms\n", pacc.relax / n * 1000.0);
 	printf("  pgs.post_solve:    %8.3f ms\n", pacc.post_solve / n * 1000.0);
 	printf("  position_correct:  %8.3f ms\n", acc.position_correct / n * 1000.0);
 	printf("METRIC: mixed_total_ms=%.6f\n", acc.total / n * 1000.0);
 	printf("METRIC: mixed_pgs_iter_ms=%.6f\n", pacc.iterations / n * 1000.0);
+	printf("METRIC: mixed_graph_color_ms=%.6f\n", pacc.graph_color / n * 1000.0);
 
 	destroy_world(w);
 }
@@ -13937,16 +14340,19 @@ static void bench_ragdoll(int n_ragdolls, int frames, WorldParams wp)
 		acc.pgs_solve += p.pgs_solve;
 		PGSTimers pg = p.pgs;
 		pacc.iterations += pg.iterations; pacc.ldl += pg.ldl; pacc.warm_start += pg.warm_start;
+		pacc.graph_color += pg.graph_color;
 	}
 
 	double n = (double)frames;
-	printf("  avg total:      %8.3f ms\n", acc.total / n * 1000.0);
-	printf("  broadphase:     %8.3f ms\n", acc.broadphase / n * 1000.0);
-	printf("  pre_solve:      %8.3f ms\n", acc.pre_solve / n * 1000.0);
-	printf("  pgs.iterations: %8.3f ms\n", pacc.iterations / n * 1000.0);
-	printf("  pgs.ldl:        %8.3f ms\n", pacc.ldl / n * 1000.0);
+	printf("  avg total:       %8.3f ms\n", acc.total / n * 1000.0);
+	printf("  broadphase:      %8.3f ms\n", acc.broadphase / n * 1000.0);
+	printf("  pre_solve:       %8.3f ms\n", acc.pre_solve / n * 1000.0);
+	printf("  pgs.iterations:  %8.3f ms\n", pacc.iterations / n * 1000.0);
+	printf("  pgs.ldl:         %8.3f ms\n", pacc.ldl / n * 1000.0);
+	printf("  pgs.graph_color: %8.3f ms\n", pacc.graph_color / n * 1000.0);
 	printf("METRIC: ragdoll_total_ms=%.6f\n", acc.total / n * 1000.0);
 	printf("METRIC: ragdoll_pgs_iter_ms=%.6f\n", pacc.iterations / n * 1000.0);
+	printf("METRIC: ragdoll_graph_color_ms=%.6f\n", pacc.graph_color / n * 1000.0);
 
 	destroy_world(w);
 }

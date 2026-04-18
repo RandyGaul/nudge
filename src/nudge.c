@@ -16,6 +16,7 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 #include "quickhull.c"
 #include "bvh.c"
 #include "collision.c"
+#include "sensor.c"
 #include "trimesh.c"
 #include "broadphase.c"
 #include "epa.c"
@@ -24,6 +25,7 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 #include "joints.c"
 #include "solver_ldl.c"
 #include "islands.c"
+#include "rewind.c"
 
 // -----------------------------------------------------------------------------
 // World.
@@ -61,6 +63,7 @@ World create_world(WorldParams params)
 void destroy_world(World world)
 {
 	WorldInternal* w = (WorldInternal*)world.id;
+	if (w->rewind) world_rewind_shutdown(world);
 	for (int i = 0; i < asize(w->body_cold); i++) {
 		afree(w->body_cold[i].shapes);
 	}
@@ -194,9 +197,19 @@ static void pool_execute(ThreadPoolCtx* ctx, int prev_sync, int cur_sync)
 	if (completed > 0) _InterlockedExchangeAdd(&stage->completion_count, completed);
 }
 
+// Per-thread identity for TLS arena selection. Main thread stays 0; pool
+// workers set their slot at thread creation (1..N-1). Work fns index
+// w->worker_arenas[pool_worker_id] when they need scratch memory.
+static _Thread_local int pool_worker_id = 0;
+
+// Global pool context: one instance shared by main thread + all workers.
+// Declared here so pool_worker_thread can take its address.
+static ThreadPoolCtx pool_ctx;
+
 static DWORD WINAPI pool_worker_thread(LPVOID param)
 {
-	ThreadPoolCtx* ctx = (ThreadPoolCtx*)param;
+	pool_worker_id = (int)(intptr_t)param;
+	ThreadPoolCtx* ctx = &pool_ctx;
 	long last_sync = 0;
 	for (;;) {
 		long sync = ctx->sync_bits;
@@ -210,7 +223,6 @@ static DWORD WINAPI pool_worker_thread(LPVOID param)
 }
 
 static HANDLE pool_threads[SOLVER_MAX_THREADS];
-static ThreadPoolCtx pool_ctx;
 static int pool_thread_count;
 
 static void pool_ensure(int n_workers)
@@ -222,7 +234,9 @@ static void pool_ensure(int n_workers)
 	pool_ctx.worker_count = n_workers;
 	pool_ctx.sync_bits = 0;
 	for (int i = pool_thread_count; i < needed; i++) {
-		pool_threads[i] = CreateThread(NULL, 0, pool_worker_thread, &pool_ctx, 0, NULL);
+		// Worker slot index = i + 1 (main thread owns slot 0). Passed as the
+		// thread's LPVOID and latched into pool_worker_id on first instruction.
+		pool_threads[i] = CreateThread(NULL, 0, pool_worker_thread, (LPVOID)(intptr_t)(i + 1), 0, NULL);
 	}
 	pool_thread_count = needed;
 }
@@ -425,6 +439,46 @@ static void warm_start_island_work_fn(void* ctx, int start, int count)
 	}
 }
 
+// Per-island graph coloring + per-color contact/joint partition. Runs in
+// parallel across islands: each worker claims a slice of SolveIsland entries
+// and allocates its `sorted` scratch out of its own thread-local arena slot.
+// body_colors is a world-sized bitmap shared across all workers; because
+// islands have disjoint bodies, writes from different islands touch disjoint
+// slots, so no atomics/locks are needed and the output is bit-identical to
+// the serial path.
+typedef struct ColoringCtx
+{
+	WorldInternal* w;
+	SolveIsland* solve_islands;
+	ConstraintRef* crefs;
+	uint64_t* body_colors;
+} ColoringCtx;
+
+static void coloring_work_fn(void* ctx, int start, int count)
+{
+	ColoringCtx* cc = (ColoringCtx*)ctx;
+	Arena* arena = &cc->w->worker_arenas[pool_worker_id];
+	ConstraintRef* crefs = cc->crefs;
+	for (int sii = start; sii < start + count; sii++) {
+		SolveIsland* island = &cc->solve_islands[sii];
+		int rel_batch_starts[SOLVE_ISLAND_MAX_COLORS + 1];
+		int island_color_count = 0;
+		color_constraints_island(crefs + island->crefs_start, island->crefs_count, cc->body_colors, arena, rel_batch_starts, &island_color_count);
+		island->color_count = island_color_count;
+		for (int c = 0; c <= island_color_count; c++) island->batch_starts[c] = island->crefs_start + rel_batch_starts[c];
+
+		for (int c = 0; c < island_color_count; c++) {
+			int i = island->batch_starts[c], j = island->batch_starts[c + 1] - 1;
+			while (i <= j) {
+				if (crefs[i].type == CTYPE_CONTACT) { i++; }
+				else if (crefs[j].type == CTYPE_JOINT) { j--; }
+				else { ConstraintRef tmp = crefs[i]; crefs[i] = crefs[j]; crefs[j] = tmp; i++; j--; }
+			}
+			island->contact_end[c] = i;
+		}
+	}
+}
+
 // Parallel pre_solve: alloc fixed-stride -> dispatch pre-solve -> warm start.
 // Warm start runs per-island in parallel when bucketing is available (island
 // perm/offsets non-NULL) and thread_count > 1; otherwise falls back to the
@@ -504,6 +558,7 @@ void world_step(World world, float dt)
 	double t_total = perf_now();
 
 	WorldInternal* w = (WorldInternal*)world.id;
+	if (w->rewind && w->rewind->auto_capture) world_rewind_capture(world);
 	w->frame++;
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
@@ -827,27 +882,14 @@ void world_step(World world, float dt)
 	// flat coloring over the same ref order.
 	uint64_t* body_colors = (uint64_t*)arena_alloc(main_arena, (size_t)count * sizeof(uint64_t), 16);
 	memset(body_colors, 0, count * sizeof(uint64_t));
-	for (int sii = 0; sii < solve_island_count; sii++) {
-		SolveIsland* island = &solve_islands[sii];
-		int rel_batch_starts[SOLVE_ISLAND_MAX_COLORS + 1];
-		int island_color_count = 0;
-		color_constraints_island(crefs + island->crefs_start, island->crefs_count, body_colors, main_arena, rel_batch_starts, &island_color_count);
-		island->color_count = island_color_count;
-		for (int c = 0; c <= island_color_count; c++) island->batch_starts[c] = island->crefs_start + rel_batch_starts[c];
-
-		// Partition each color's refs so contacts precede joints within this
-		// island. Swap preserves color validity (coloring is per-body-pair,
-		// not per-type).
-		for (int c = 0; c < island_color_count; c++) {
-			int i = island->batch_starts[c], j = island->batch_starts[c + 1] - 1;
-			while (i <= j) {
-				if (crefs[i].type == CTYPE_CONTACT) { i++; }
-				else if (crefs[j].type == CTYPE_JOINT) { j--; }
-				else { ConstraintRef tmp = crefs[i]; crefs[i] = crefs[j]; crefs[j] = tmp; i++; j--; }
-			}
-			island->contact_end[c] = i;
-		}
-	}
+	// Coloring runs serially on the main thread. Parallel dispatch was
+	// evaluated and lost to pool_dispatch overhead (~5-10 us fixed cost)
+	// across the scenes measured; per-island coloring is too small (few us
+	// each) to amortize the handoff even at 100+ islands. The work fn and
+	// per-worker arena infrastructure remain in place so a future phase
+	// with heavier per-island work can parallelize without replumbing.
+	ColoringCtx cc = { .w = w, .solve_islands = solve_islands, .crefs = crefs, .body_colors = body_colors };
+	coloring_work_fn(&cc, 0, solve_island_count);
 	w->perf.pgs.graph_color = perf_now() - t_gc;
 
 	w->perf.pre_solve = perf_now() - t2;
