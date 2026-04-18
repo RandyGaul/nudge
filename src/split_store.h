@@ -2,6 +2,9 @@
 #ifndef SPLIT_STORE_H
 #define SPLIT_STORE_H
 
+#include <stdint.h>
+#include <string.h>
+
 // split_store.h -- Paired hot/cold storage with stable generational handles.
 //
 // PURPOSE: Cache-friendly data layout for tight iteration loops (solvers,

@@ -4,6 +4,7 @@
 
 #include <math.h>
 #include <float.h>
+#include <stdint.h>
 #include "simd.h"
 
 // -----------------------------------------------------------------------------
@@ -20,8 +21,20 @@ typedef struct quat { float x, y, z, w; } quat;
 typedef struct mat4 { float m[16]; } mat4; // column-major
 typedef struct Transform { v3 position; quat rotation; } Transform;
 
-// Constructors.
+// Constructors. C++ cannot parse C compound literals, so the C++ path uses
+// a static inline factory; the C path keeps the compound-literal form so
+// V3(...) remains usable inside designated initializers.
+#ifdef __cplusplus
+static inline v3 V3(float vx, float vy, float vz) { v3 r; r.m = simd_set(vx, vy, vz, 0); return r; }
+#else
 #define V3(vx, vy, vz) ((v3){ .m = simd_set(vx, vy, vz, 0) })
+#endif
+
+// The rest of vmath.h uses C compound literals, designated initializers,
+// and _Generic -- none of which are C++-portable. C++ consumers of nudge.h
+// only need the types above to pass values through the public API; skip the
+// implementation block when compiling as C++.
+#ifndef __cplusplus
 
 // -----------------------------------------------------------------------------
 // v3 implementation (SIMD-backed).
@@ -448,4 +461,6 @@ static inline void block_solve_f(const float* L, const float* D, const float* b,
 			x[i] -= L[BTRI(k,i)] * x[k];
 }
 
-#endif
+#endif // !__cplusplus
+
+#endif // VMATH_H

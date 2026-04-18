@@ -10,8 +10,46 @@
 #ifndef NUDGE_H
 #define NUDGE_H
 
+#include <stdint.h>
+#include <stddef.h>
+
 #include "vmath.h"
 #include "split_store.h"
+
+// -----------------------------------------------------------------------------
+// DLL export / import macro. Every public declaration below is prefixed with
+// NUDGE_API so the same header works for:
+//
+//   - static library / unity build (default): NUDGE_API expands to nothing.
+//   - Windows DLL build of nudge:    -DNUDGE_BUILD_DLL -> __declspec(dllexport)
+//   - Windows consumer of the DLL:   -DNUDGE_USE_DLL   -> __declspec(dllimport)
+//   - Unix shared library build:     -DNUDGE_BUILD_DLL -> default visibility
+//
+// Override by defining NUDGE_API before including this header. Example:
+//   #define NUDGE_API __attribute__((visibility("default")))
+//   #include "nudge.h"
+
+#ifndef NUDGE_API
+	#if defined(_WIN32)
+		#if defined(NUDGE_BUILD_DLL)
+			#define NUDGE_API __declspec(dllexport)
+		#elif defined(NUDGE_USE_DLL)
+			#define NUDGE_API __declspec(dllimport)
+		#else
+			#define NUDGE_API
+		#endif
+	#else
+		#if defined(NUDGE_BUILD_DLL)
+			#define NUDGE_API __attribute__((visibility("default")))
+		#else
+			#define NUDGE_API
+		#endif
+	#endif
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 // -----------------------------------------------------------------------------
 // Performance timers (seconds per phase from last world_step).
@@ -126,8 +164,8 @@ typedef struct Hull
 
 // Tag a hull with a name so it can appear in snapshot files. Interns the
 // string internally; pass the same name on load to resolve it back.
-void hull_set_name(Hull* hull, const char* name);
-const char* hull_get_name(const Hull* hull);
+NUDGE_API void hull_set_name(Hull* hull, const char* name);
+NUDGE_API const char* hull_get_name(const Hull* hull);
 
 // Compact hull variant -- uint8_t indices, single heap block, no SoA or HullFace.
 // Caps: vert_count, edge_count, face_count all <= 256.
@@ -172,17 +210,17 @@ typedef struct ConvexHull
 //   - indices[] has length 3 * tri_count.
 typedef struct TriMesh TriMesh;
 
-TriMesh* trimesh_create(const v3* verts, int vert_count, const uint32_t* indices, int tri_count);
-void trimesh_free(TriMesh* mesh);
+NUDGE_API TriMesh* trimesh_create(const v3* verts, int vert_count, const uint32_t* indices, int tri_count);
+NUDGE_API void trimesh_free(TriMesh* mesh);
 
 // Debug: number of triangles in the mesh.
-int trimesh_tri_count(const TriMesh* mesh);
+NUDGE_API int trimesh_tri_count(const TriMesh* mesh);
 
 // Tag the mesh with a name for snapshot identification. Same pattern as
 // hull_set_name: caller pre-registers the named mesh with both the saving
 // world and the loading world.
-void trimesh_set_name(TriMesh* mesh, const char* name);
-const char* trimesh_get_name(const TriMesh* mesh);
+NUDGE_API void trimesh_set_name(TriMesh* mesh, const char* name);
+NUDGE_API const char* trimesh_get_name(const TriMesh* mesh);
 
 // -----------------------------------------------------------------------------
 // Contact manifold.
@@ -220,26 +258,26 @@ typedef struct Manifold
 // Each returns nonzero on hit. Pass manifold=NULL for boolean-only test.
 // Normal convention: points from A toward B.
 
-int collide_sphere_sphere(Sphere a, Sphere b, Manifold* manifold);
-int collide_sphere_capsule(Sphere a, Capsule b, Manifold* manifold);
-int collide_sphere_box(Sphere a, Box b, Manifold* manifold);
-int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold);
-int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold);
-int collide_capsule_box(Capsule a, Box b, Manifold* manifold);
-int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold);
-int collide_box_box(Box a, Box b, Manifold* manifold);
-int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold);
+NUDGE_API int collide_sphere_sphere(Sphere a, Sphere b, Manifold* manifold);
+NUDGE_API int collide_sphere_capsule(Sphere a, Capsule b, Manifold* manifold);
+NUDGE_API int collide_sphere_box(Sphere a, Box b, Manifold* manifold);
+NUDGE_API int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold);
+NUDGE_API int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold);
+NUDGE_API int collide_capsule_box(Capsule a, Box b, Manifold* manifold);
+NUDGE_API int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold);
+NUDGE_API int collide_box_box(Box a, Box b, Manifold* manifold);
+NUDGE_API int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold);
 
 // Native cylinder collision. Cylinder is always shape A; for cyl-as-B callers
 // swap arguments and flip manifold normals after calling.
-int collide_cylinder_sphere(Cylinder a, Sphere b, Manifold* manifold);
-int collide_cylinder_capsule(Cylinder a, Capsule b, Manifold* manifold);
-int collide_cylinder_box(Cylinder a, Box b, Manifold* manifold);
-int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold);
-int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold);
+NUDGE_API int collide_cylinder_sphere(Cylinder a, Sphere b, Manifold* manifold);
+NUDGE_API int collide_cylinder_capsule(Cylinder a, Capsule b, Manifold* manifold);
+NUDGE_API int collide_cylinder_box(Cylinder a, Box b, Manifold* manifold);
+NUDGE_API int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold);
+NUDGE_API int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold);
 
 // Built-in unit box hull (half-extents 1,1,1). Use with ConvexHull + scale for boxes.
-const Hull* hull_unit_box();
+NUDGE_API const Hull* hull_unit_box();
 
 // -----------------------------------------------------------------------------
 // Quickhull -- build a convex hull from a point cloud.
@@ -247,14 +285,14 @@ const Hull* hull_unit_box();
 // Returns a heap-allocated Hull. Caller frees with hull_free().
 // The resulting hull has proper half-edge topology, face planes, and centroid.
 
-Hull* quickhull(const v3* points, int count);
-void hull_free(Hull* hull);
+NUDGE_API Hull* quickhull(const v3* points, int count);
+NUDGE_API void hull_free(Hull* hull);
 
 // Compact Hull8 converter. Returns NULL if src exceeds any uint8 cap
 // (V/E/F > 256) or if src has inconsistent twin topology. The resulting
 // Hull8 is a single heap block; free with hull8_free().
-Hull8* hull_to_hull8(const Hull* src);
-void hull8_free(Hull8* h);
+NUDGE_API Hull8* hull_to_hull8(const Hull* src);
+NUDGE_API void hull8_free(Hull8* h);
 
 // -----------------------------------------------------------------------------
 // Body params for world API.
@@ -335,33 +373,33 @@ typedef struct WorldParams
 // -----------------------------------------------------------------------------
 // World API.
 
-World create_world(WorldParams params);
-void destroy_world(World world);
-void world_step(World world, float dt);
-void world_set_solver_type(World world, SolverType type);
+NUDGE_API World create_world(WorldParams params);
+NUDGE_API void destroy_world(World world);
+NUDGE_API void world_step(World world, float dt);
+NUDGE_API void world_set_solver_type(World world, SolverType type);
 
-Body create_body(World world, BodyParams params);
-void destroy_body(World world, Body body);
-void body_add_shape(World world, Body body, ShapeParams params);
+NUDGE_API Body create_body(World world, BodyParams params);
+NUDGE_API void destroy_body(World world, Body body);
+NUDGE_API void body_add_shape(World world, Body body, ShapeParams params);
 
-v3 body_get_position(World world, Body body);
-void body_set_position(World world, Body body, v3 pos);
-quat body_get_rotation(World world, Body body);
-v3 body_get_velocity(World world, Body body);
-v3 body_get_angular_velocity(World world, Body body);
+NUDGE_API v3 body_get_position(World world, Body body);
+NUDGE_API void body_set_position(World world, Body body, v3 pos);
+NUDGE_API quat body_get_rotation(World world, Body body);
+NUDGE_API v3 body_get_velocity(World world, Body body);
+NUDGE_API v3 body_get_angular_velocity(World world, Body body);
 
-void body_wake(World world, Body body);
-void body_set_velocity(World world, Body body, v3 vel);
-void body_set_angular_velocity(World world, Body body, v3 avel);
-int body_is_asleep(World world, Body body);
+NUDGE_API void body_wake(World world, Body body);
+NUDGE_API void body_set_velocity(World world, Body body, v3 vel);
+NUDGE_API void body_set_angular_velocity(World world, Body body, v3 avel);
+NUDGE_API int body_is_asleep(World world, Body body);
 
 // Sleep control.
-void world_set_sleep_enabled(World world, int enabled);
-int world_get_sleep_enabled(World world);
-void body_set_sleep_allowed(World world, Body body, int allowed);  // per-body override: 0 = never sleep
+NUDGE_API void world_set_sleep_enabled(World world, int enabled);
+NUDGE_API int world_get_sleep_enabled(World world);
+NUDGE_API void body_set_sleep_allowed(World world, Body body, int allowed);  // per-body override: 0 = never sleep
 
 // Debug: contact points from last step. Returns count, *out valid until next step.
-int world_get_contacts(World world, const Contact** out);
+NUDGE_API int world_get_contacts(World world, const Contact** out);
 
 // -----------------------------------------------------------------------------
 // Contact summaries -- user-facing, one entry per colliding body pair.
@@ -394,7 +432,7 @@ typedef struct ContactSummary
 
 // Fetch the current frame's contact summaries. Returned pointer + count are
 // valid until the next world_step. Writes count into *out_count.
-const ContactSummary* world_contact_summaries(World world, int* out_count);
+NUDGE_API const ContactSummary* world_contact_summaries(World world, int* out_count);
 
 // -----------------------------------------------------------------------------
 // Material palette. 256 palette entries per world; bodies and trimesh triangles
@@ -414,21 +452,21 @@ typedef struct Material
 	uint32_t user_data;
 } Material;
 
-void world_set_material(World world, uint8_t id, Material m);
-Material world_get_material(World world, uint8_t id);
+NUDGE_API void world_set_material(World world, uint8_t id, Material m);
+NUDGE_API Material world_get_material(World world, uint8_t id);
 
 // Set the default material id carried by a body. Summary.material_a/b reports
 // this id for non-mesh sides and for mesh sides without per-tri material ids.
-void body_set_material_id(World world, Body body, uint8_t id);
-uint8_t body_get_material_id(World world, Body body);
+NUDGE_API void body_set_material_id(World world, Body body, uint8_t id);
+NUDGE_API uint8_t body_get_material_id(World world, Body body);
 
 // Attach a per-triangle material-id array to a trimesh. Array length must
 // match trimesh_tri_count(mesh). The trimesh copies the array internally;
 // caller may free after return. Pass ids=NULL to clear per-tri materials
 // (summary falls back to the body's default material_id).
-void trimesh_set_material_ids(TriMesh* mesh, const uint8_t* ids);
+NUDGE_API void trimesh_set_material_ids(TriMesh* mesh, const uint8_t* ids);
 // Read one triangle's material id. Returns 0 if no per-tri array is set.
-uint8_t trimesh_get_material_id(const TriMesh* mesh, int tri_index);
+NUDGE_API uint8_t trimesh_get_material_id(const TriMesh* mesh, int tri_index);
 
 // Per-body contact listener. Fired once per body per step (only when the
 // body has >= 1 contact that step). The pairs[] view is contiguous and
@@ -440,7 +478,7 @@ uint8_t trimesh_get_material_id(const TriMesh* mesh, int tri_index);
 //
 // Set fn=NULL to clear. Replacing overwrites the previous listener.
 typedef void (*BodyContactListener)(Body self, const ContactSummary* pairs, int count, void* ud);
-void body_set_contact_listener(World world, Body body, BodyContactListener fn, void* ud);
+NUDGE_API void body_set_contact_listener(World world, Body body, BodyContactListener fn, void* ud);
 
 // Per-frame EPA narrowphase stats. Reset at the top of each world_step.
 // Only populated when narrowphase_backend == NARROWPHASE_GJK_EPA.
@@ -453,7 +491,7 @@ typedef struct WorldEpaStats
 	int contacts_emitted;
 	int pair_count;
 } WorldEpaStats;
-WorldEpaStats world_get_epa_stats(World world);
+NUDGE_API WorldEpaStats world_get_epa_stats(World world);
 
 // -----------------------------------------------------------------------------
 // World queries.
@@ -469,11 +507,11 @@ typedef struct RayHit
 // Find all bodies whose AABB overlaps the query box.
 // Writes up to max_results body handles into results[]. Returns total hit count
 // (may exceed max_results -- use to size a retry).
-int world_query_aabb(World world, v3 lo, v3 hi, Body* results, int max_results);
+NUDGE_API int world_query_aabb(World world, v3 lo, v3 hi, Body* results, int max_results);
 
 // Cast a ray and find the closest body hit. Direction is normalized internally.
 // Returns nonzero on hit; fills *hit (may be NULL for boolean-only test).
-int world_raycast(World world, v3 origin, v3 direction, float max_distance, RayHit* hit);
+NUDGE_API int world_raycast(World world, v3 origin, v3 direction, float max_distance, RayHit* hit);
 
 // -----------------------------------------------------------------------------
 // Rewind -- ring buffer of deterministic world snapshots.
@@ -496,25 +534,25 @@ typedef struct RewindParams
 	int auto_capture;  // 1 = world_step captures at start automatically
 } RewindParams;
 
-void world_rewind_init(World world, RewindParams params);
-void world_rewind_shutdown(World world);
+NUDGE_API void world_rewind_init(World world, RewindParams params);
+NUDGE_API void world_rewind_shutdown(World world);
 
 // Manual capture. Returns monotonic frame_id, or 0 if rewind is disabled.
 // Oldest frame is evicted when the buffer is full.
-uint64_t world_rewind_capture(World world);
+NUDGE_API uint64_t world_rewind_capture(World world);
 
 // Restore world to a frame_id previously returned from capture.
 // Returns 1 on success, 0 if the frame is no longer in the buffer.
 // All frames captured after frame_id remain available for re-step and
 // re-rewind; frames captured before are preserved as well.
-int world_rewind_to_frame(World world, uint64_t frame_id);
+NUDGE_API int world_rewind_to_frame(World world, uint64_t frame_id);
 
 // Convenience: restore to the snapshot `n` steps before the newest one.
 // n=0 restores the most recent snapshot. Returns 1 on success.
-int world_rewind_by_steps(World world, int n);
+NUDGE_API int world_rewind_by_steps(World world, int n);
 
-int    world_rewind_frames_available(World world);
-size_t world_rewind_memory_used(World world);
+NUDGE_API int    world_rewind_frames_available(World world);
+NUDGE_API size_t world_rewind_memory_used(World world);
 
 // -----------------------------------------------------------------------------
 // Snapshot save/load -- binary versioned world persistence.
@@ -534,7 +572,7 @@ size_t world_rewind_memory_used(World world);
 // Save asserts if the world contains either shape type.
 //
 // Returns 1 on success, 0 on I/O failure.
-int   world_save_snapshot(World world, const char* path);
+NUDGE_API int   world_save_snapshot(World world, const char* path);
 // Returns a new World (like create_world) or (World){0} on failure.
 // After a successful load, live body/joint indices match saved order, so
 // world_get_bodies() + world_get_joints() return handles in the same order
@@ -544,32 +582,32 @@ int   world_save_snapshot(World world, const char* path);
 // This variant asserts if the snapshot contains SHAPE_HULL or SHAPE_MESH
 // bodies (no asset registry to resolve names). Use world_load_snapshot_into
 // when the file references named hulls or meshes.
-World world_load_snapshot(const char* path);
+NUDGE_API World world_load_snapshot(const char* path);
 
 // Load a snapshot into a pre-configured world. The world's registered hulls
 // and meshes (via world_register_hull / world_register_mesh) are used to
 // resolve SHAPE_HULL / SHAPE_MESH shape names in the file. The world should
 // be empty (no existing bodies/joints/sensors) -- asserts otherwise. The
 // file's WorldParams are ignored; the existing world's config is used.
-int world_load_snapshot_into(World world, const char* path);
+NUDGE_API int world_load_snapshot_into(World world, const char* path);
 
 // Asset registration. Attach a named hull/mesh to a world so snapshots can
 // reference it by name. The Hull* or TriMesh* must have a non-NULL name set
 // via hull_set_name / trimesh_set_name before registering.
-void world_register_hull(World world, const Hull* hull);
-void world_register_mesh(World world, const TriMesh* mesh);
+NUDGE_API void world_register_hull(World world, const Hull* hull);
+NUDGE_API void world_register_mesh(World world, const TriMesh* mesh);
 
 // Lookup by name (returns NULL if not registered). Lets callers keep their
 // own "asset id -> Hull*" maps out of sight.
-const Hull*    world_find_hull(World world, const char* name);
-const TriMesh* world_find_mesh(World world, const char* name);
+NUDGE_API const Hull*    world_find_hull(World world, const char* name);
+NUDGE_API const TriMesh* world_find_mesh(World world, const char* name);
 
 // Iterate all live bodies / joints in the world. Writes up to max handles
 // into out[], returns the total count (may exceed max -- use to size a retry).
 // Order is live-index ascending, which matches creation order in a fresh
 // world (e.g. immediately after world_load_snapshot).
-int world_get_body_count(World world);
-int world_get_bodies(World world, Body* out, int max);
+NUDGE_API int world_get_body_count(World world);
+NUDGE_API int world_get_bodies(World world, Body* out, int max);
 // (world_get_joint_count / world_get_joints declared below, after Joint.)
 
 // -----------------------------------------------------------------------------
@@ -601,22 +639,22 @@ typedef struct SensorParams
 	uint32_t collision_mask;   // 0 = 0xFFFFFFFF
 } SensorParams;
 
-Sensor create_sensor(World world, SensorParams params);
-void destroy_sensor(World world, Sensor sensor);
+NUDGE_API Sensor create_sensor(World world, SensorParams params);
+NUDGE_API void destroy_sensor(World world, Sensor sensor);
 
 // Attach a shape to the sensor. SHAPE_MESH is not allowed; asserts.
-void sensor_add_shape(World world, Sensor sensor, ShapeParams params);
+NUDGE_API void sensor_add_shape(World world, Sensor sensor, ShapeParams params);
 
 // Move the sensor. No broadphase update (sensor is not in the broadphase).
-void sensor_set_transform(World world, Sensor sensor, v3 position, quat rotation);
+NUDGE_API void sensor_set_transform(World world, Sensor sensor, v3 position, quat rotation);
 
 // Query the world for bodies overlapping the sensor. Writes up to max_results
 // body handles into results[]; returns the total overlap count (may exceed
 // max_results -- use that to size a retry). Read-only against world.
-int sensor_query(World world, Sensor sensor, Body* results, int max_results);
+NUDGE_API int sensor_query(World world, Sensor sensor, Body* results, int max_results);
 
-int world_get_sensor_count(World world);
-int world_get_sensors(World world, Sensor* out, int max);
+NUDGE_API int world_get_sensor_count(World world);
+NUDGE_API int world_get_sensors(World world, Sensor* out, int max);
 
 // -----------------------------------------------------------------------------
 // Handle revalidation.
@@ -629,8 +667,8 @@ int world_get_sensors(World world, Sensor* out, int max);
 // Use these predicates before dereferencing a held handle across a rewind or
 // load boundary. Use world_get_bodies / _joints / _sensors to enumerate what
 // the world currently contains.
-int body_is_valid(World world, Body body);
-int sensor_is_valid(World world, Sensor sensor);
+NUDGE_API int body_is_valid(World world, Body body);
+NUDGE_API int sensor_is_valid(World world, Sensor sensor);
 // joint_is_valid declared below, after Joint.
 
 // -----------------------------------------------------------------------------
@@ -638,9 +676,9 @@ int sensor_is_valid(World world, Sensor sensor);
 
 typedef struct Joint { uint64_t id; } Joint;
 
-int world_get_joint_count(World world);
-int world_get_joints(World world, Joint* out, int max);
-int joint_is_valid(World world, Joint joint);
+NUDGE_API int world_get_joint_count(World world);
+NUDGE_API int world_get_joints(World world, Joint* out, int max);
+NUDGE_API int joint_is_valid(World world, Joint joint);
 
 typedef struct SpringParams
 {
@@ -747,31 +785,31 @@ typedef struct SwingTwistParams
 	SpringParams spring;  // softness for anchor + limits
 } SwingTwistParams;
 
-Joint create_ball_socket(World world, BallSocketParams params);
-Joint create_distance(World world, DistanceParams params);
-Joint create_hinge(World world, HingeParams params);
-Joint create_fixed(World world, FixedParams params);
-Joint create_prismatic(World world, PrismaticParams params);
-void body_set_collision_filter(World world, Body body, uint32_t group, uint32_t mask);
-void body_set_compound_id(World world, Body body, uint32_t compound_id);
+NUDGE_API Joint create_ball_socket(World world, BallSocketParams params);
+NUDGE_API Joint create_distance(World world, DistanceParams params);
+NUDGE_API Joint create_hinge(World world, HingeParams params);
+NUDGE_API Joint create_fixed(World world, FixedParams params);
+NUDGE_API Joint create_prismatic(World world, PrismaticParams params);
+NUDGE_API void body_set_collision_filter(World world, Body body, uint32_t group, uint32_t mask);
+NUDGE_API void body_set_compound_id(World world, Body body, uint32_t compound_id);
 
-Joint create_angular_motor(World world, AngularMotorParams params);
-Joint create_twist_limit(World world, TwistLimitParams params);
-Joint create_cone_limit(World world, ConeLimitParams params);
-Joint create_swing_twist(World world, SwingTwistParams params);
-void destroy_joint(World world, Joint joint);
-void joint_set_hinge_limits(World world, Joint joint, float min_angle, float max_angle);
-void joint_set_distance_limits(World world, Joint joint, float min_distance, float max_distance);
-void joint_clear_limits(World world, Joint joint);
-void joint_set_hinge_motor(World world, Joint joint, float speed, float max_impulse);
-void joint_set_prismatic_motor(World world, Joint joint, float speed, float max_impulse);
+NUDGE_API Joint create_angular_motor(World world, AngularMotorParams params);
+NUDGE_API Joint create_twist_limit(World world, TwistLimitParams params);
+NUDGE_API Joint create_cone_limit(World world, ConeLimitParams params);
+NUDGE_API Joint create_swing_twist(World world, SwingTwistParams params);
+NUDGE_API void destroy_joint(World world, Joint joint);
+NUDGE_API void joint_set_hinge_limits(World world, Joint joint, float min_angle, float max_angle);
+NUDGE_API void joint_set_distance_limits(World world, Joint joint, float min_distance, float max_distance);
+NUDGE_API void joint_clear_limits(World world, Joint joint);
+NUDGE_API void joint_set_hinge_motor(World world, Joint joint, float speed, float max_impulse);
+NUDGE_API void joint_set_prismatic_motor(World world, Joint joint, float speed, float max_impulse);
 
 // Performance: phase timings from the last world_step call.
-PerfTimers world_get_perf(World world);
+NUDGE_API PerfTimers world_get_perf(World world);
 
 // Debug: iterate BVH nodes. Calls fn(min, max, depth, is_leaf, user) for each node child.
 typedef void (*BVHDebugFn)(v3 min, v3 max, int depth, int is_leaf, void* user);
-void world_debug_bvh(World world, BVHDebugFn fn, void* user);
+NUDGE_API void world_debug_bvh(World world, BVHDebugFn fn, void* user);
 
 // Debug: iterate all joints. Calls fn with world-space anchor points.
 typedef struct JointDebugInfo
@@ -788,6 +826,10 @@ typedef struct JointDebugInfo
 	v3 ref_a, ref_b;        // hinge reference directions (world space, for arc drawing)
 } JointDebugInfo;
 typedef void (*JointDebugFn)(JointDebugInfo info, void* user);
-void world_debug_joints(World world, JointDebugFn fn, void* user);
+NUDGE_API void world_debug_joints(World world, JointDebugFn fn, void* user);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
