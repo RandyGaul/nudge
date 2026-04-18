@@ -86,6 +86,15 @@ int ldl_frame_count;
 #define LDL_MIN_COMPLIANCE 5e-5 // min regularization floor: compliance * trace(K) / dim on K diagonal + compliance*lambda in RHS
 #define LDL_SYNTH_COMPLIANCE 1e-3 // synthetic weld compliance: absolute (not trace-scaled) to break circular chain singularity
 
+// Over-constrained islands (more joint DOFs than dynamic-body DOFs) have a
+// rank-deficient J; K = J M^-1 J^T then has a non-trivial null space that
+// regularization fills with compliance eigenvalues. Too-small compliance
+// pushes lambda past validate_lambda's 1e6 ceiling (LDL bails, no correction,
+// drift); too-large compliance makes joints soft. Scaling compliance by
+// redundant DOFs keeps K well-conditioned in the over-constrained regime at
+// modest stiffness cost.
+#define LDL_OVER_CONSTRAINT_SCALE 10.0  // compliance *= (1 + scale * redundant_dofs) when c->n > body_dofs
+
 // -----------------------------------------------------------------------------
 // Small block math helpers.
 // Diagonal blocks use packed lower-triangular storage: n*(n+1)/2 elements.
@@ -991,6 +1000,41 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 		ldl_fill_jacobian(con, sol_joints, &c->jacobians[con->jacobian_start]);
 	}
 
+	// Rank-deficiency detection for this island. Sum constraint DOFs from
+	// non-synthetic joints only; synthetic welds (shattering) have their own
+	// LDL_SYNTH_COMPLIANCE regularization and shouldn't trigger the over-
+	// constraint scale on the real joints in the island. Count unique dynamic
+	// bodies by real index; shattered hubs count as one body (they share
+	// real_body_a == real_body_b == hub across shards).
+	int real_constraint_dofs = 0;
+	int dynamic_body_count = 0;
+	{
+		int seen[LDL_MAX_NODES * 2];
+		int seen_count = 0;
+		int jc_loc = c->joint_count;
+		for (int i = 0; i < jc_loc; i++) {
+			LDL_Constraint* con = &c->constraints[i];
+			if (!con->is_synthetic) real_constraint_dofs += con->dof;
+			int bodies[2] = { con->real_body_a, con->real_body_b };
+			for (int side = 0; side < 2; side++) {
+				int bi2 = bodies[side];
+				if (comp_bodies[bi2].inv_mass == 0.0f) continue;
+				int already = 0;
+				for (int k = 0; k < seen_count; k++) if (seen[k] == bi2) { already = 1; break; }
+				if (!already && seen_count < (int)(sizeof(seen) / sizeof(seen[0]))) {
+					seen[seen_count++] = bi2;
+					dynamic_body_count++;
+				}
+			}
+		}
+	}
+	int body_dofs = dynamic_body_count * 6;
+	double compliance_scale = 1.0;
+	if (real_constraint_dofs > body_dofs && body_dofs > 0) {
+		int redundant = real_constraint_dofs - body_dofs;
+		compliance_scale = 1.0 + LDL_OVER_CONSTRAINT_SCALE * (double)redundant;
+	}
+
 	// Fill diagonal K blocks via generic K = J * M^{-1} * J^T.
 	int bc = c->bundle_count;
 	for (int bi = 0; bi < bc; bi++) {
@@ -1008,10 +1052,11 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 			ldl_K_body_contrib_comp(jac, dk, 1, off, cb2, con->weight_b, c->diag_data[bi]);
 
 			// Regularization: soft constraints add softness directly to K diagonal
-			// (matching PGS convention). Rigid/synthetic use trace-scaled minimum compliance.
-			// Synthetic welds MUST be regularized: a circular chain of S welds on S shards
-			// is structurally singular (rank-deficient). Without regularization, the null-space
-			// (uniform impulse vector) produces a zero pivot, violating SPD.
+			// (matching PGS convention). Rigid/synthetic use trace-scaled minimum compliance,
+			// scaled up for over-constrained islands. Synthetic welds MUST be regularized:
+			// a circular chain of S welds on S shards is structurally singular
+			// (rank-deficient). Without regularization, the null-space (uniform impulse
+			// vector) produces a zero pivot, violating SPD.
 			if (con->is_synthetic) {
 				// Synthetic welds: absolute compliance to break circular chain singularity.
 				for (int d = 0; d < dk; d++) c->diag_data[bi][LDL_TRI(off+d, off+d)] += LDL_SYNTH_COMPLIANCE;
@@ -1022,7 +1067,7 @@ static void ldl_numeric_factor(LDL_Cache* c, WorldInternal* w, SolverJoint* sol_
 				} else {
 					double trace = 0;
 					for (int d = 0; d < dk; d++) trace += c->diag_data[bi][LDL_TRI(off+d, off+d)];
-					double reg = LDL_MIN_COMPLIANCE * trace / dk;
+					double reg = LDL_MIN_COMPLIANCE * compliance_scale * trace / dk;
 					for (int d = 0; d < dk; d++) c->diag_data[bi][LDL_TRI(off+d, off+d)] += reg;
 				}
 			}
