@@ -13428,8 +13428,8 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 			float fz = ((float)z / (N - 1)) * 2.0f - 1.0f;
 			float px = fx * EXTENT;
 			float pz = fz * EXTENT;
-			float py = 0.4f * sinf(px * 0.6f) * cosf(pz * 0.6f)
-			         + 0.2f * sinf(px * 1.7f + pz * 1.3f);
+			float py = 0.0f; // DIAG flat
+			(void)px; (void)pz;
 			verts[z * N + x] = V3(px, py, pz);
 		}
 	}
@@ -13487,20 +13487,29 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 
 	// Measurement phase.
 	double acc_total = 0, acc_bp = 0;
+	float max_speed = 0.0f, max_abs_y = 0.0f;
+	int body_count = body_grid * body_grid;
 	for (int f = 0; f < frames; f++) {
 		world_step(w, dt);
 		PerfTimers t = world_get_perf(w);
 		acc_total += t.total;
 		acc_bp += t.broadphase;
+		for (int bi = 0; bi < asize(wi->body_hot); bi++) {
+			if (wi->body_hot[bi].inv_mass == 0.0f) continue;
+			float spd = len(wi->body_hot[bi].velocity);
+			if (spd > max_speed) max_speed = spd;
+			float ay = fabsf(wi->body_state[bi].position.y);
+			if (ay > max_abs_y) max_abs_y = ay;
+		}
 	}
 	double n = (double)frames;
-	int body_count = body_grid * body_grid;
 	int tri_count = (mesh_n - 1) * (mesh_n - 1) * 2;
-	printf("  %dx%d mesh (%d tris) x %d bodies  SIMD=%-3s   total=%7.3f ms   bp+NP=%7.3f ms\n",
+	printf("  %dx%d mesh (%d tris) x %d bodies  SIMD=%-3s   total=%7.3f ms   bp+NP=%7.3f ms  max_v=%.2f max|y|=%.2f\n",
 		mesh_n, mesh_n, tri_count, body_count,
 		simd_enabled ? "ON" : "OFF",
 		acc_total / n * 1000.0,
-		acc_bp / n * 1000.0);
+		acc_bp / n * 1000.0,
+		max_speed, max_abs_y);
 
 	destroy_world(w);
 	trimesh_free(mesh);
@@ -13512,8 +13521,8 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 static void bench_trimesh_stress()
 {
 	printf("=== Trimesh stress A/B (2 substeps, 300 frames each) ===\n");
-	int mesh_sizes[]  = {  25,  50, 100, 150 };
-	int body_grids[]  = {   7,  10,  15,  20 };
+	int mesh_sizes[]  = {  25, 25, 50, 50 };
+	int body_grids[]  = {   7, 10,  7, 10 };
 	int n_scales = sizeof(mesh_sizes) / sizeof(mesh_sizes[0]);
 	for (int s = 0; s < n_scales; s++) {
 		bench_trimesh_stress_run(0, mesh_sizes[s], body_grids[s], 300);
