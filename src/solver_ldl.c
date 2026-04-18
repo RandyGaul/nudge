@@ -1582,21 +1582,31 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 		// Soft (spring) joints: no position correction -- they're velocity-level only.
 		// Position-correcting a spring constraint fights the spring and injects energy.
 		if (sj->softness > 0.0f) continue;
+		// Fixed/prismatic angular rows use identity Jacobian (J_a=+I, J_b=-I)
+		// with pos_error from q_err = R_b * R_a^-1 (convention theta_b - theta_a).
+		// These conventions give dC_pos/dt = -Jv (opposite of linear rows, where
+		// pos_error = anchor_b - anchor_a and Jv = v_b - v_a give dC_pos/dt = +Jv).
+		// Baumgarte rhs must be +ptv*error on these angular rows, not -ptv*error.
+		// Hinge angular rows use geometric pos_error (t2 . axis_b) whose time
+		// derivative equals Jv, so they keep the linear-style -ptv*error sign.
+		// Ball_socket/distance have no angular rows.
+		int flip_start = con->dof;
+		if (sj->type == JOINT_FIXED) flip_start = 3;
+		else if (sj->type == JOINT_PRISMATIC) flip_start = 2;
 		for (int d = 0; d < con->dof; d++) {
-			pos_rhs[oi + d] = -ptv * sj->pos_error[d];
+			double sign = (d >= flip_start) ? +1.0 : -1.0;
+			pos_rhs[oi + d] = sign * ptv * sj->pos_error[d];
 		}
 	}
 
 	ldl_solve_topo(t, c->diag_data, c->diag_D, c->L_factors, pos_rhs, pos_lambda);
 
-	// Apply position corrections simultaneously: accumulate per-body deltas, then apply once.
-	// Sequential application would move shared bodies between constraint corrections,
-	// breaking the coupled solution the LDL solve computed.
+	// Accumulate per-body position/rotation deltas. The caller is responsible
+	// for zeroing pos_delta/ang_delta before island processing and applying the
+	// totals after. Splitting accumulation from apply lets ldl_position_solve
+	// run islands in parallel: each island's constraints touch only bodies in
+	// that island, so pos_delta writes across islands are disjoint.
 	if (ldl_validate_lambda(pos_lambda, n)) {
-		int body_count = asize(w->body_hot);
-		memset(pos_delta, 0, body_count * sizeof(dv3));
-		memset(ang_delta, 0, body_count * sizeof(dv3));
-
 		for (int i = 0; i < jc; i++) {
 			LDL_Constraint* con = &c->constraints[i];
 			if (con->is_synthetic) continue;
@@ -1619,13 +1629,6 @@ static void ldl_island_position_correct(LDL_Cache* c, WorldInternal* w, SolverJo
 				ang_delta[real_b] = dv3_add(ang_delta[real_b], dwb);
 			}
 		}
-
-		for (int bi = 0; bi < body_count; bi++) {
-			if (body_inv_mass(w, bi) == 0.0f) continue;
-			body_pos(w, bi) = add(body_pos(w, bi), dv3_to_v3(pos_delta[bi]));
-			apply_rotation_delta(&body_rot(w, bi), ang_delta[bi]);
-		}
-
 	}
 }
 
@@ -1894,6 +1897,27 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 // two-pass flow adapted to the current comp_bodies API. The velocity-stage K in
 // ldl_factor stays unchanged; overwriting it here is fine because the next
 // substep's ldl_factor rebuilds from scratch.
+static void ldl_position_solve_island_work_fn(void* ctx, int start, int count)
+{
+	LDL_IslandCtx* lc = (LDL_IslandCtx*)ctx;
+	WorldInternal* w = lc->w;
+	for (int ii = start; ii < start + count; ii++) {
+		if (!(w->island_gen[ii] & 1)) continue;
+		Island* isl = &w->islands[ii];
+		if (!isl->awake) continue;
+		if (isl->joint_count == 0) continue;
+		LDL_Cache* c = &isl->ldl;
+		if (c->n == 0 || !c->topo) continue;
+
+		// Refactorize every substep with post-integrate J + compressed masses.
+		// Overwrites velocity-stage factorization; next substep's ldl_factor
+		// rebuilds K from scratch so this is safe. Writes are per-island
+		// (LDL_Cache is island-local) -- disjoint across workers.
+		ldl_numeric_factor(c, w, lc->sol_joints, lc->comp_bodies);
+		ldl_island_position_correct(c, w, lc->sol_joints, lc->sub_dt, lc->pos_delta, lc->ang_delta, lc->comp_bodies);
+	}
+}
+
 static void ldl_position_solve(WorldInternal* w, SolverJoint* sol_joints, int joint_count, float sub_dt)
 {
 	double t_pos_start = perf_now();
@@ -1924,23 +1948,32 @@ static void ldl_position_solve(WorldInternal* w, SolverJoint* sol_joints, int jo
 		}
 	}
 
+	// Shared per-body delta buffers: zeroed once here, each island accumulates
+	// into the slots of its own bodies (disjoint across islands), then the
+	// final apply loop touches every dynamic body exactly once.
 	dv3* pos_delta = (dv3*)arena_alloc(arena, (size_t)body_count * sizeof(dv3), 16);
 	dv3* ang_delta = (dv3*)arena_alloc(arena, (size_t)body_count * sizeof(dv3), 16);
+	memset(pos_delta, 0, (size_t)body_count * sizeof(dv3));
+	memset(ang_delta, 0, (size_t)body_count * sizeof(dv3));
 
 	int island_count = asize(w->islands);
-	for (int ii = 0; ii < island_count; ii++) {
-		if (!(w->island_gen[ii] & 1)) continue;
-		Island* isl = &w->islands[ii];
-		if (!isl->awake) continue;
-		if (isl->joint_count == 0) continue;
-		LDL_Cache* c = &isl->ldl;
-		if (c->n == 0 || !c->topo) continue;
+	LDL_IslandCtx lc = { .w = w, .sol_joints = sol_joints, .joint_count = joint_count, .sub_dt = sub_dt, .comp_bodies = comp_bodies, .pos_delta = pos_delta, .ang_delta = ang_delta };
+#ifdef _WIN32
+	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
+	if (n_workers > 1 && island_count >= 2) {
+		pool_dispatch(ldl_position_solve_island_work_fn, &lc, island_count, 1, n_workers);
+	} else
+#endif
+	{
+		ldl_position_solve_island_work_fn(&lc, 0, island_count);
+	}
 
-		// Refactorize every substep with post-integrate J + compressed masses.
-		// Overwrites velocity-stage factorization; next substep's ldl_factor
-		// rebuilds K from scratch so this is safe.
-		ldl_numeric_factor(c, w, sol_joints, comp_bodies);
-		ldl_island_position_correct(c, w, sol_joints, sub_dt, pos_delta, ang_delta, comp_bodies);
+	// Apply accumulated deltas. Islands only wrote to their own dynamic bodies
+	// so slots for bodies in no island are still zero (no-op).
+	for (int bi = 0; bi < body_count; bi++) {
+		if (body_inv_mass(w, bi) == 0.0f) continue;
+		body_pos(w, bi) = add(body_pos(w, bi), dv3_to_v3(pos_delta[bi]));
+		apply_rotation_delta(&body_rot(w, bi), ang_delta[bi]);
 	}
 
 	ldl_pos_acc += perf_now() - t_pos_start;

@@ -392,8 +392,44 @@ static void pre_solve_work_fn(void* ctx, int start, int count)
 	}
 }
 
-// Parallel pre_solve: alloc fixed-stride → dispatch → sequential warm start.
-static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, float dt, WorkFn work_fn)
+// Apply warm-start impulses for manifold range [start, start+count). Bodies a/b
+// on each manifold are in the same island, so different workers operating on
+// disjoint island buckets never touch the same body.
+static inline void warm_start_apply_range(WorldInternal* w, SolverManifold* sm, SolverContact* sc, int start, int count)
+{
+	for (int i = start; i < start + count; i++) {
+		SolverManifold* m = &sm[i];
+		if (m->contact_count == 0) continue;
+		BodyHot* a = &w->body_hot[m->body_a]; BodyHot* b = &w->body_hot[m->body_b];
+		for (int ci = 0; ci < m->contact_count; ci++) { SolverContact* s = &sc[m->contact_start + ci]; if (s->lambda_n == 0.0f) continue; apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n)); }
+		if (m->lambda_t1 != 0.0f || m->lambda_t2 != 0.0f) apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, add(scale(m->tangent1, m->lambda_t1), scale(m->tangent2, m->lambda_t2)));
+		if (m->lambda_twist != 0.0f) { v3 tw = scale(m->normal, m->lambda_twist); BodyState* sa = &w->body_state[m->body_a]; BodyState* sb = &w->body_state[m->body_b]; a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, tw)); b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, tw)); }
+	}
+}
+
+// Per-island warm-start work function. Each worker claims a contiguous range
+// of island indices and applies warm-start impulses to every manifold bucketed
+// into those islands. Island-to-body ownership is disjoint, so workers never
+// race on body_hot writes.
+typedef struct WarmStartCtx { WorldInternal* w; SolverManifold* sm; SolverContact* sc; int* island_perm; int* island_offsets; } WarmStartCtx;
+static void warm_start_island_work_fn(void* ctx, int start, int count)
+{
+	WarmStartCtx* ws = (WarmStartCtx*)ctx;
+	for (int isl = start; isl < start + count; isl++) {
+		int ms = ws->island_offsets[isl];
+		int me = ws->island_offsets[isl + 1];
+		for (int k = ms; k < me; k++) {
+			int i = ws->island_perm[k];
+			warm_start_apply_range(ws->w, ws->sm, ws->sc, i, 1);
+		}
+	}
+}
+
+// Parallel pre_solve: alloc fixed-stride -> dispatch pre-solve -> warm start.
+// Warm start runs per-island in parallel when bucketing is available (island
+// perm/offsets non-NULL) and thread_count > 1; otherwise falls back to the
+// sequential path.
+static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, float dt, WorkFn work_fn, int* island_manifold_perm, int* island_manifold_offsets, int island_count)
 {
 	CK_DYNA SolverManifold* sm = NULL;
 	CK_DYNA SolverContact*  sc = NULL;
@@ -412,14 +448,13 @@ static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifo
 	}
 	PreSolveCtx ps_ctx = { .w = w, .manifolds = manifolds, .sm = sm, .sc = sc, .dt = dt, .soft_dd = soft_dd, .bias_dd = bias_dd, .soft_ds = soft_ds, .bias_ds = bias_ds };
 	pool_dispatch(work_fn, &ps_ctx, manifold_count, 32, w->thread_count);
-	// Warm start (sequential — modifies shared body velocities)
-	for (int i = 0; i < manifold_count; i++) {
-		SolverManifold* m = &sm[i];
-		if (m->contact_count == 0) continue;
-		BodyHot* a = &w->body_hot[m->body_a]; BodyHot* b = &w->body_hot[m->body_b];
-		for (int ci = 0; ci < m->contact_count; ci++) { SolverContact* s = &sc[m->contact_start + ci]; if (s->lambda_n == 0.0f) continue; apply_impulse(a, b, s->r_a, s->r_b, scale(s->normal, s->lambda_n)); }
-		if (m->lambda_t1 != 0.0f || m->lambda_t2 != 0.0f) apply_impulse(a, b, m->centroid_r_a, m->centroid_r_b, add(scale(m->tangent1, m->lambda_t1), scale(m->tangent2, m->lambda_t2)));
-		if (m->lambda_twist != 0.0f) { v3 tw = scale(m->normal, m->lambda_twist); BodyState* sa = &w->body_state[m->body_a]; BodyState* sb = &w->body_state[m->body_b]; a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, tw)); b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, tw)); }
+
+	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
+	if (n_workers > 1 && island_manifold_perm && island_manifold_offsets && island_count >= 2) {
+		WarmStartCtx ws = { .w = w, .sm = sm, .sc = sc, .island_perm = island_manifold_perm, .island_offsets = island_manifold_offsets };
+		pool_dispatch(warm_start_island_work_fn, &ws, island_count, 1, n_workers);
+	} else {
+		warm_start_apply_range(w, sm, sc, 0, manifold_count);
 	}
 	*out_sm = sm; *out_sc = sc;
 }
@@ -655,7 +690,7 @@ void world_step(World world, float dt)
 	// Pre-solve: parallel when threading enabled (each manifold writes to fixed-stride slots).
 #ifdef _WIN32
 	if (n_workers > 1 && manifold_count >= 64)
-		solver_pre_solve_dispatch(w, manifolds, manifold_count, &sm, &sc, sub_dt, pre_solve_work_fn);
+		solver_pre_solve_dispatch(w, manifolds, manifold_count, &sm, &sc, sub_dt, pre_solve_work_fn, island_manifold_perm, island_manifold_offsets, asize(w->islands));
 	else
 #endif
 		solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, sub_dt);

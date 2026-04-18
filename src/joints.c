@@ -711,9 +711,18 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		}
 	}
 
-	// Generic: compute eff_mass and bias from pos_error for all DOFs
+	// Generic: compute bias from pos_error for all DOFs.
+	// Solver converges to Jv = -bias. For linear rows and hinge/swing_twist
+	// angular rows, dC_pos/dt = +Jv, so bias = +ptv*error gives exp. decay.
+	// For fixed/prismatic angular rows the Jacobian is J_a=+I, J_b=-I (Jv =
+	// w_a - w_b) while pos_error comes from q_err = R_b * R_a^-1 (convention
+	// theta_b - theta_a), so dC_pos/dt = -Jv and bias must flip sign.
+	int flip_start = s->dof;
+	if (s->type == JOINT_FIXED) flip_start = 3;
+	else if (s->type == JOINT_PRISMATIC) flip_start = 2;
 	for (int d = 0; d < s->dof; d++) {
-		s->bias[d] = ptv * s->pos_error[d];
+		float sign = (d >= flip_start) ? -1.0f : 1.0f;
+		s->bias[d] = sign * ptv * s->pos_error[d];
 	}
 
 	// Motor/limit bias for DOF 5.
