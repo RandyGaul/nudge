@@ -515,7 +515,24 @@ void init()
 
 	setup_scene();
 
-#ifndef __EMSCRIPTEN__
+#ifdef __EMSCRIPTEN__
+	// Prime the canvas drawing-buffer size before the first frame so frame 0
+	// isn't drawn into the HTML-default 300x150 region.
+	{
+		double css_w = 0, css_h = 0;
+		emscripten_get_element_css_size("#canvas", &css_w, &css_h);
+		double dpr = emscripten_get_device_pixel_ratio();
+		int w = (int)(css_w * dpr + 0.5);
+		int h = (int)(css_h * dpr + 0.5);
+		if (w > 0 && h > 0) {
+			emscripten_set_canvas_element_size("#canvas", w, h);
+			SDL_SetWindowSize(g_window, w, h);
+			g_width = w;
+			g_height = h;
+			glViewport(0, 0, g_width, g_height);
+		}
+	}
+#else
 	debug_server_set_world(g_world);
 	debug_server_init();
 #endif

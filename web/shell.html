@@ -37,6 +37,19 @@
 		text-decoration: none;
 	}
 	header a:hover { text-decoration: underline; }
+	header .hint {
+		color: #888;
+		font-size: 12px;
+	}
+	kbd {
+		background: #1c1c26;
+		border: 1px solid #2c2c38;
+		border-radius: 3px;
+		padding: 1px 5px;
+		font-family: inherit;
+		font-size: 11px;
+		color: #c8c8d8;
+	}
 	#canvas {
 		flex: 1;
 		width: 100%;
@@ -75,6 +88,10 @@
 <div id="wrap">
 	<header>
 		<span><strong>nudge</strong> -- lightweight 3D rigid body physics, in your browser</span>
+		<span class="hint">
+			<kbd>WASD</kbd> pan &nbsp;&middot;&nbsp; <kbd>Q</kbd><kbd>E</kbd> up/down &nbsp;&middot;&nbsp;
+			<kbd>&larr;&rarr;&uarr;&darr;</kbd> orbit &nbsp;&middot;&nbsp; <kbd>=</kbd>/<kbd>-</kbd> zoom
+		</span>
 		<span><a href="https://github.com/RandyGaul/nudge" target="_blank" rel="noopener">source on GitHub</a></span>
 	</header>
 	<canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
@@ -86,18 +103,17 @@
 </div>
 
 <script>
-	// Eat right-click, middle-click, and the mouse side-buttons at the
-	// document level so the browser doesn't open the context menu or
-	// navigate back/forward while the user is interacting with the canvas.
+	// Stop the context menu and side-button back/forward navigation from
+	// stealing input, but do NOT preventDefault on raw mousedown -- that
+	// can interfere with SDL's pointer event delivery on some browsers.
 	document.addEventListener('contextmenu', function (e) { e.preventDefault(); }, { capture: true });
-	document.addEventListener('mousedown', function (e) {
-		if (e.button !== 0) e.preventDefault();
-	}, { capture: true });
 	document.addEventListener('auxclick', function (e) { e.preventDefault(); }, { capture: true });
 
 	var Module = {
 		canvas: (function () {
 			var c = document.getElementById('canvas');
+			// Grab focus on click so keyboard events (WASD, arrows) fire.
+			c.addEventListener('mousedown', function () { c.focus(); });
 			c.addEventListener('webglcontextlost', function (e) {
 				alert('WebGL context lost -- reload the page.');
 				e.preventDefault();
