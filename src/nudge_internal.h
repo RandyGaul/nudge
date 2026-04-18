@@ -404,6 +404,41 @@ typedef struct Island
 #define SLEEP_TIME_THRESHOLD  0.5f   // seconds of stillness before sleep
 #define LINEAR_SLOP           0.01f  // contact margin: keeps contacts alive near zero-penetration
 
+// Narrowphase debug snapshot: intermediate SAT state + final contact output
+// for one pair. Written by collision.c narrowphase routines when the world's
+// np_debug_enabled flag is set and the pair matches the configured filter.
+// The remote viewer reads this via RPM (`get np_debug`) so SAT intermediates
+// that would otherwise be function locals become inspectable without cdb.
+// Single slot -- stomped under parallel narrowphase; force threads=1 when
+// inspecting. Intended usage:
+//   WorldInternal* wi = ...;
+//   wi->np_debug_enabled = 1;
+//   wi->np_debug_filter_body_a = 42;   // or -1 for any
+//   wi->np_debug_filter_body_b = -1;
+//   // step or DBG_BREAK inside / after the narrowphase call
+//   // viewer: `get np_debug` -> full SAT + contact dump
+typedef struct NP_DebugSnapshot
+{
+	int valid;               // 1 after a successful capture, 0 otherwise
+	int frame;               // WorldInternal.frame at capture time
+	int body_a, body_b;      // real body indices in the pair
+	int shape_a_kind, shape_b_kind; // ShapeType enum values
+	// SAT (hull-hull) query results. For non-hull pairs these stay 0 / -1.
+	int face_a_index;
+	float face_a_sep;
+	int face_b_index;
+	float face_b_sep;
+	int edge_a_index;
+	int edge_b_index;
+	float edge_sep;
+	int winning_axis;        // 0=face_a, 1=face_b, 2=edge, -1=separated / no contact produced
+	// Contact output (shared by all narrowphase paths).
+	v3 contact_normal;
+	int contact_count;
+	v3 contact_points[4];
+	float contact_pens[4];
+} NP_DebugSnapshot;
+
 typedef struct WorldInternal
 {
 	int frame; // monotonically increasing frame counter
@@ -474,6 +509,15 @@ typedef struct WorldInternal
 	void *dbg_solver_manifolds; // CK_DYNA SolverManifold*
 	void *dbg_solver_contacts;  // CK_DYNA SolverContact*
 	void *dbg_solver_joints;    // CK_DYNA SolverJoint*
+
+	// Narrowphase debug snapshot (see NP_DebugSnapshot definition above
+	// WorldInternal). Written by collide_hull_hull_ex on the first pair
+	// that matches the filter after np_debug_enabled flips on. All writes
+	// gated by np_debug_enabled so this is zero-cost when off.
+	int np_debug_enabled;        // 1 = capture next matching pair
+	int np_debug_filter_body_a;  // -1 = any
+	int np_debug_filter_body_b;  // -1 = any (ignores ordering: (A,B) also matches filter set for (B,A))
+	NP_DebugSnapshot np_debug;
 } WorldInternal;
 
 // -----------------------------------------------------------------------------

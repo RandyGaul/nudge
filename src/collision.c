@@ -1153,7 +1153,14 @@ static SIMD_FORCEINLINE int generate_face_contact(const Hull* ref_hull, v3 ref_p
 // -----------------------------------------------------------------------------
 // Full SAT hull vs hull with Sutherland-Hodgman face clipping.
 
+int collide_hull_hull_ex_dbg(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair, NP_DebugSnapshot* dbg);
+
 int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair)
+{
+	return collide_hull_hull_ex_dbg(a, b, manifold, sat_hint, out_pair, NULL);
+}
+
+int collide_hull_hull_ex_dbg(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair, NP_DebugSnapshot* dbg)
 {
 	const Hull* hull_a = a.hull;
 	v3 pos_a = a.center; quat rot_a = a.rotation; v3 scale_a = a.scale;
@@ -1169,16 +1176,19 @@ int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sa
 	}
 
 	FaceQuery face_a = sat_query_faces_hint(hull_a, pos_a, rot_a, scale_a, hull_b, pos_b, rot_b, scale_b, face_hint_a);
-	if (face_a.separation > 0.0f) { if (sat_hint) *sat_hint = face_a.index; return 0; }
+	if (dbg) { dbg->face_a_index = face_a.index; dbg->face_a_sep = face_a.separation; }
+	if (face_a.separation > 0.0f) { if (sat_hint) *sat_hint = face_a.index; if (dbg) dbg->winning_axis = -1; return 0; }
 
 	FaceQuery face_b = sat_query_faces_hint(hull_b, pos_b, rot_b, scale_b, hull_a, pos_a, rot_a, scale_a, face_hint_b);
-	if (face_b.separation > 0.0f) { if (sat_hint) *sat_hint = hull_a->face_count + face_b.index; return 0; }
+	if (dbg) { dbg->face_b_index = face_b.index; dbg->face_b_sep = face_b.separation; }
+	if (face_b.separation > 0.0f) { if (sat_hint) *sat_hint = hull_a->face_count + face_b.index; if (dbg) dbg->winning_axis = -1; return 0; }
 
 	// NaN transforms cause face_index to stay -1 (NaN comparisons always false)
-	if (face_a.index < 0 || face_b.index < 0) return 0;
+	if (face_a.index < 0 || face_b.index < 0) { if (dbg) dbg->winning_axis = -1; return 0; }
 
 	EdgeQuery edge_q = sat_query_edges(hull_a, pos_a, rot_a, scale_a, hull_b, pos_b, rot_b, scale_b);
-	if (edge_q.separation > 0.0f) { if (sat_hint) *sat_hint = -1; return 0; }
+	if (dbg) { dbg->edge_a_index = edge_q.index1; dbg->edge_b_index = edge_q.index2; dbg->edge_sep = edge_q.separation; }
+	if (edge_q.separation > 0.0f) { if (sat_hint) *sat_hint = -1; if (dbg) dbg->winning_axis = -1; return 0; }
 
 	if (!manifold) return 1;
 
@@ -1207,6 +1217,13 @@ int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sa
 			.feature_id = FEATURE_EDGE_BIT | (uint32_t)edge_q.index1 | ((uint32_t)edge_q.index2 << 16),
 		};
 		if (out_pair) *out_pair = (CachedFeaturePair){.type = 2, .edge_a = (int16_t)edge_q.index1, .edge_b = (int16_t)edge_q.index2};
+		if (dbg) {
+			dbg->winning_axis = 2;
+			dbg->contact_normal = normal;
+			dbg->contact_count = 1;
+			dbg->contact_points[0] = manifold->contacts[0].point;
+			dbg->contact_pens[0] = manifold->contacts[0].penetration;
+		}
 		return 1;
 	}
 
@@ -1324,6 +1341,16 @@ int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sa
 	// Cache the winning axis for next-frame warm-start.
 	if (sat_hint) *sat_hint = flip ? hull_a->face_count + ref_face : ref_face;
 	if (out_pair) *out_pair = (CachedFeaturePair){.type = 1, .ref_body = (int16_t)flip, .face_a = (int16_t)(flip ? inc_face : ref_face), .face_b = (int16_t)(flip ? ref_face : inc_face)};
+	if (dbg) {
+		dbg->winning_axis = flip ? 1 : 0;
+		dbg->contact_normal = contact_n;
+		int out_cap = cp < 4 ? cp : 4;
+		dbg->contact_count = out_cap;
+		for (int i = 0; i < out_cap; i++) {
+			dbg->contact_points[i] = manifold->contacts[i].point;
+			dbg->contact_pens[i] = manifold->contacts[i].penetration;
+		}
+	}
 	return 1;
 }
 
@@ -2404,22 +2431,60 @@ static int np_capsule_hull(NarrowphaseCtx* c)
 {
 	return collide_capsule_hull(make_capsule(c->bs_a, c->shape_a), make_convex_hull(c->bs_b, c->shape_b), c->m_out);
 }
+// Pop the caller's np_debug slot if filters match this pair. Returns a pointer
+// to the world's NP_DebugSnapshot (pre-seeded with body/shape identity) or NULL
+// when capture is disabled or the pair doesn't match. The actual SAT/contact
+// fields are filled by collide_hull_hull_ex_dbg.
+static NP_DebugSnapshot* np_debug_begin(NarrowphaseCtx* c)
+{
+	WorldInternal* w = c->w;
+	if (!w->np_debug_enabled) return NULL;
+	int fa = w->np_debug_filter_body_a, fb = w->np_debug_filter_body_b;
+	int a = c->body_a, b = c->body_b;
+	// Match on either orientation so user doesn't need to know canonical ordering.
+	int match = (fa < 0 || fa == a || fa == b) && (fb < 0 || fb == a || fb == b);
+	if (!match) return NULL;
+	NP_DebugSnapshot* dbg = &w->np_debug;
+	*dbg = (NP_DebugSnapshot){
+		.frame = w->frame,
+		.body_a = a, .body_b = b,
+		.shape_a_kind = c->shape_a->type,
+		.shape_b_kind = c->shape_b->type,
+		.face_a_index = -1, .face_b_index = -1,
+		.edge_a_index = -1, .edge_b_index = -1,
+		.winning_axis = -1,
+	};
+	return dbg;
+}
+static void np_debug_end(NP_DebugSnapshot* dbg) { if (dbg) dbg->valid = 1; }
+
 static int np_box_box(NarrowphaseCtx* c)
 {
 	BodyState* ba = c->bs_a; BodyState* bb = c->bs_b;
 	ShapeInternal* sa = c->shape_a; ShapeInternal* sb = c->shape_b;
+	NP_DebugSnapshot* dbg = np_debug_begin(c);
+	int hit;
 	if (c->w->box_use_hull)
-		return collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, ba->position, ba->rotation, sa->box.half_extents }, (ConvexHull){ &s_unit_box_hull, bb->position, bb->rotation, sb->box.half_extents }, c->m_out, c->sat_hint, c->out_pair);
-	return collide_box_box_ex(make_box(ba, sa), make_box(bb, sb), c->m_out, c->sat_hint, c->out_pair);
+		hit = collide_hull_hull_ex_dbg((ConvexHull){ &s_unit_box_hull, ba->position, ba->rotation, sa->box.half_extents }, (ConvexHull){ &s_unit_box_hull, bb->position, bb->rotation, sb->box.half_extents }, c->m_out, c->sat_hint, c->out_pair, dbg);
+	else
+		hit = collide_box_box_ex(make_box(ba, sa), make_box(bb, sb), c->m_out, c->sat_hint, c->out_pair);
+	np_debug_end(dbg);
+	return hit;
 }
 static int np_box_hull(NarrowphaseCtx* c)
 {
 	BodyState* ba = c->bs_a; BodyState* bb = c->bs_b; ShapeInternal* sa = c->shape_a;
-	return collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, ba->position, ba->rotation, sa->box.half_extents }, make_convex_hull(bb, c->shape_b), c->m_out, c->sat_hint, c->out_pair);
+	NP_DebugSnapshot* dbg = np_debug_begin(c);
+	int hit = collide_hull_hull_ex_dbg((ConvexHull){ &s_unit_box_hull, ba->position, ba->rotation, sa->box.half_extents }, make_convex_hull(bb, c->shape_b), c->m_out, c->sat_hint, c->out_pair, dbg);
+	np_debug_end(dbg);
+	return hit;
 }
 static int np_hull_hull(NarrowphaseCtx* c)
 {
-	return collide_hull_hull_ex(make_convex_hull(c->bs_a, c->shape_a), make_convex_hull(c->bs_b, c->shape_b), c->m_out, c->sat_hint, c->out_pair);
+	NP_DebugSnapshot* dbg = np_debug_begin(c);
+	int hit = collide_hull_hull_ex_dbg(make_convex_hull(c->bs_a, c->shape_a), make_convex_hull(c->bs_b, c->shape_b), c->m_out, c->sat_hint, c->out_pair, dbg);
+	np_debug_end(dbg);
+	return hit;
 }
 
 // Cylinder pairs: native routines take cylinder as shape A. For pairs where

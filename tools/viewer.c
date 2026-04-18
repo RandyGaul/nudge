@@ -1080,7 +1080,7 @@ int main(int argc, char *argv[])
 		         strcmp(cmd, "unhighlight") == 0 || strcmp(cmd, "label") == 0 ||
 		         strcmp(cmd, "slow") == 0 ||
 		         strcmp(cmd, "continue") == 0 || strcmp(cmd, "where") == 0 ||
-		         strcmp(cmd, "break-filter") == 0) {
+		         strcmp(cmd, "break-filter") == 0 || strcmp(cmd, "np-debug") == 0) {
 			driver_cmd(line);
 			// After resuming or changing scene, the engine may create a new world.
 			// Refresh our cached pointer so subsequent RPM reads target it.

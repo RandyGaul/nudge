@@ -289,6 +289,36 @@ REFLECT(PerfTimers,
 	RF_STRUCT(PerfTimers, pgs, PGSTimers),
 );
 
+REFLECT(NP_DebugSnapshot,
+	RF_INT(NP_DebugSnapshot, valid),
+	RF_INT(NP_DebugSnapshot, frame),
+	RF_INT(NP_DebugSnapshot, body_a),
+	RF_INT(NP_DebugSnapshot, body_b),
+	RF_ENUM(NP_DebugSnapshot, shape_a_kind, ShapeType),
+	RF_ENUM(NP_DebugSnapshot, shape_b_kind, ShapeType),
+	RF_INT(NP_DebugSnapshot, face_a_index),
+	RF_FLOAT(NP_DebugSnapshot, face_a_sep),
+	RF_INT(NP_DebugSnapshot, face_b_index),
+	RF_FLOAT(NP_DebugSnapshot, face_b_sep),
+	RF_INT(NP_DebugSnapshot, edge_a_index),
+	RF_INT(NP_DebugSnapshot, edge_b_index),
+	RF_FLOAT(NP_DebugSnapshot, edge_sep),
+	RF_INT(NP_DebugSnapshot, winning_axis),
+	RF_V3(NP_DebugSnapshot, contact_normal),
+	RF_INT(NP_DebugSnapshot, contact_count),
+	// contact_points / contact_pens are fixed-size C arrays. The reflection
+	// system doesn't currently describe fixed arrays, so fall back to raw
+	// field offsets so the viewer can read them via `raw`.
+	{ "contact_points", RFK_V3, offsetof(NP_DebugSnapshot, contact_points[0]), 16, NULL, NULL },
+	{ "contact_points_1", RFK_V3, offsetof(NP_DebugSnapshot, contact_points[1]), 16, NULL, NULL },
+	{ "contact_points_2", RFK_V3, offsetof(NP_DebugSnapshot, contact_points[2]), 16, NULL, NULL },
+	{ "contact_points_3", RFK_V3, offsetof(NP_DebugSnapshot, contact_points[3]), 16, NULL, NULL },
+	{ "contact_pens_0", RFK_FLOAT, offsetof(NP_DebugSnapshot, contact_pens[0]), 4, NULL, NULL },
+	{ "contact_pens_1", RFK_FLOAT, offsetof(NP_DebugSnapshot, contact_pens[1]), 4, NULL, NULL },
+	{ "contact_pens_2", RFK_FLOAT, offsetof(NP_DebugSnapshot, contact_pens[2]), 4, NULL, NULL },
+	{ "contact_pens_3", RFK_FLOAT, offsetof(NP_DebugSnapshot, contact_pens[3]), 4, NULL, NULL },
+);
+
 REFLECT(WorldInternal,
 	RF_INT(WorldInternal, frame),
 	RF_V3(WorldInternal, gravity),
@@ -325,6 +355,10 @@ REFLECT(WorldInternal,
 	RF_ARRAY(WorldInternal, dbg_solver_manifolds, SolverManifold),
 	RF_ARRAY(WorldInternal, dbg_solver_contacts, SolverContact),
 	RF_ARRAY(WorldInternal, dbg_solver_joints, SolverJoint),
+	RF_INT(WorldInternal, np_debug_enabled),
+	RF_INT(WorldInternal, np_debug_filter_body_a),
+	RF_INT(WorldInternal, np_debug_filter_body_b),
+	RF_STRUCT(WorldInternal, np_debug, NP_DebugSnapshot),
 );
 
 // Forward declarations for send helpers (defined below).
@@ -339,7 +373,7 @@ static const R_TypeDesc *g_type_registry[] = {
 	&rtype_SolverContact, &rtype_SolverManifold, &rtype_SolverJoint,
 	&rtype_WarmManifold, &rtype_JointInternal, &rtype_Island,
 	&rtype_BVH_Child, &rtype_BVHNode, &rtype_BVHLeaf, &rtype_BVH_Tree,
-	&rtype_PerfTimers, &rtype_PGSTimers,
+	&rtype_PerfTimers, &rtype_PGSTimers, &rtype_NP_DebugSnapshot,
 };
 #define NUM_TYPES (int)(sizeof(g_type_registry)/sizeof(g_type_registry[0]))
 
@@ -451,6 +485,7 @@ static void dbg_dispatch(DbgClient *c, char *line)
 			"    continue | c                      resume from a break (no-op if not paused)\n"
 			"    where                             show current break name + file:line\n"
 			"    break-filter [pattern]            get/set runtime break filter (glob-ish)\n"
+			"    np-debug <0|1> [body_a] [body_b]  toggle narrowphase snapshot capture (body indices: -1 = any)\n"
 #ifdef NUDGE_HOST_APP
 			"\n"
 			"  App mode (nudge.exe):\n"
@@ -521,6 +556,22 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		}
 		CK_SDYNA char *s = NULL;
 		sfmt(s, "OK filter=\"%s\" enabled=%d\n", g_dbg_break_filter ? g_dbg_break_filter : "", g_dbg_break_enabled);
+		dbg_reply(c, s);
+	} else if (strcmp(cmd, "np-debug") == 0) {
+		// np-debug <0|1> [filter_body_a] [filter_body_b]
+		// Toggle narrowphase debug-snapshot capture on the current world.
+		// -1 for either filter body = match any (narrowphase pair order-insensitive).
+		if (!g_dbg_world.id) { dbg_send_str(c, "ERR no world\n"); return; }
+		int on = -1, fa = -1, fb = -1;
+		int nargs = sscanf(rest, "%d %d %d", &on, &fa, &fb);
+		WorldInternal* w = (WorldInternal*)g_dbg_world.id;
+		if (nargs >= 1) w->np_debug_enabled = on ? 1 : 0;
+		if (nargs >= 2) w->np_debug_filter_body_a = fa;
+		if (nargs >= 3) w->np_debug_filter_body_b = fb;
+		if (w->np_debug_enabled) w->np_debug.valid = 0; // clear so next step re-captures
+		CK_SDYNA char *s = NULL;
+		sfmt(s, "OK np_debug_enabled=%d filter=(%d,%d) last_valid=%d\n",
+			w->np_debug_enabled, w->np_debug_filter_body_a, w->np_debug_filter_body_b, w->np_debug.valid);
 		dbg_reply(c, s);
 #ifdef NUDGE_HOST_APP
 	} else if (strcmp(cmd, "pause") == 0) {
