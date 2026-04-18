@@ -158,13 +158,18 @@ static int run_determinism_test(int threads_hi)
 	const int steps = 240;
 	det_trace();
 	uint64_t h1 = det_run(steps, 1);
-	uint64_t hN = det_run(steps, threads_hi);
 	printf("det hash (threads=1): 0x%016llx\n", (unsigned long long)h1);
-	printf("det hash (threads=%d): 0x%016llx\n", threads_hi, (unsigned long long)hN);
 	int fail = 0;
-	if (h1 != hN) {
-		fprintf(stderr, "FAIL: threading determinism -- threads=1 and threads=%d produced different hashes.\n", threads_hi);
-		fail = 1;
+	// Threading determinism check only when threads_hi > 1 -- otherwise both
+	// calls would be the same code path and the comparison is meaningless.
+	// (On WASM we pass --threads 1 because pthreads aren't enabled there.)
+	if (threads_hi > 1) {
+		uint64_t hN = det_run(steps, threads_hi);
+		printf("det hash (threads=%d): 0x%016llx\n", threads_hi, (unsigned long long)hN);
+		if (h1 != hN) {
+			fprintf(stderr, "FAIL: threading determinism -- threads=1 and threads=%d produced different hashes.\n", threads_hi);
+			fail = 1;
+		}
 	}
 	if (DET_EXPECTED_HASH != 0 && h1 != DET_EXPECTED_HASH) {
 		fprintf(stderr, "FAIL: cross-platform determinism -- expected 0x%016llx, got 0x%016llx.\n",
