@@ -102,16 +102,21 @@ typedef struct R_EnumTable
 
 // --- Enum tables ---
 
-static const R_EnumEntry renum_ShapeType_entries[] = { {"sphere",0}, {"capsule",1}, {"box",2}, {"hull",3}, {"cylinder",4} };
+static const R_EnumEntry renum_ShapeType_entries[] = { {"sphere",0}, {"capsule",1}, {"box",2}, {"hull",3}, {"cylinder",4}, {"mesh",5} };
 static const R_EnumEntry renum_SolverType_entries[] = { {"soft_step",0}, {"si_soft",1}, {"si",2} };
 static const R_EnumEntry renum_BroadphaseType_entries[] = { {"n2",0}, {"bvh",1} };
-static const R_EnumEntry renum_JointType_entries[] = { {"ball_socket",0}, {"distance",1}, {"hinge",2}, {"fixed",3}, {"prismatic",4} };
+static const R_EnumEntry renum_JointType_entries[] = {
+	{"ball_socket",0}, {"distance",1}, {"hinge",2}, {"fixed",3}, {"prismatic",4},
+	{"angular_motor",5}, {"twist_limit",6}, {"cone_limit",7}, {"swing_twist",8}
+};
+static const R_EnumEntry renum_NarrowphaseBackend_entries[] = { {"sat",0}, {"gjk_epa",1} };
 
 static const R_EnumTable g_enum_tables[] = {
-	{ "ShapeType", 5, renum_ShapeType_entries },
+	{ "ShapeType", 6, renum_ShapeType_entries },
 	{ "SolverType", 3, renum_SolverType_entries },
 	{ "BroadphaseType", 2, renum_BroadphaseType_entries },
-	{ "JointType", 5, renum_JointType_entries },
+	{ "JointType", 9, renum_JointType_entries },
+	{ "NarrowphaseBackend", 2, renum_NarrowphaseBackend_entries },
 };
 #define NUM_ENUM_TABLES (int)(sizeof(g_enum_tables)/sizeof(g_enum_tables[0]))
 
@@ -134,6 +139,9 @@ REFLECT(BodyCold,
 	RF_INT(BodyCold, island_id),
 	RF_INT(BodyCold, island_prev),
 	RF_INT(BodyCold, island_next),
+	RF_UINT(BodyCold, collision_group),
+	RF_UINT(BodyCold, collision_mask),
+	RF_UINT(BodyCold, compound_id),
 );
 
 REFLECT(BodyHot,
@@ -201,13 +209,68 @@ REFLECT(SolverManifold,
 	RF_FLOAT(SolverManifold, patch_radius),
 );
 
+REFLECT(WarmContact,
+	RF_V3(WarmContact, r_a),
+	RF_FLOAT(WarmContact, lambda_n),
+	RF_UINT(WarmContact, feature_id),
+);
+
 REFLECT(WarmManifold,
 	RF_INT(WarmManifold, count),
 	RF_INT(WarmManifold, stale),
+	RF_INT(WarmManifold, body_a),
+	RF_INT(WarmManifold, body_b),
 	RF_FLOAT(WarmManifold, manifold_lambda_t1),
 	RF_FLOAT(WarmManifold, manifold_lambda_t2),
 	RF_FLOAT(WarmManifold, manifold_lambda_twist),
 	RF_INT(WarmManifold, sat_axis),
+	// contacts[] is a fixed-size array of WarmContact; reflection lacks
+	// fixed-array support so we expose each slot at its flat offset.
+	{ "contact0_r_a",      RFK_V3,    offsetof(WarmManifold, contacts[0].r_a),        16, NULL, NULL },
+	{ "contact0_lambda_n", RFK_FLOAT, offsetof(WarmManifold, contacts[0].lambda_n),    4, NULL, NULL },
+	{ "contact0_feature",  RFK_UINT,  offsetof(WarmManifold, contacts[0].feature_id),  4, NULL, NULL },
+	{ "contact1_r_a",      RFK_V3,    offsetof(WarmManifold, contacts[1].r_a),        16, NULL, NULL },
+	{ "contact1_lambda_n", RFK_FLOAT, offsetof(WarmManifold, contacts[1].lambda_n),    4, NULL, NULL },
+	{ "contact1_feature",  RFK_UINT,  offsetof(WarmManifold, contacts[1].feature_id),  4, NULL, NULL },
+	{ "contact2_r_a",      RFK_V3,    offsetof(WarmManifold, contacts[2].r_a),        16, NULL, NULL },
+	{ "contact2_lambda_n", RFK_FLOAT, offsetof(WarmManifold, contacts[2].lambda_n),    4, NULL, NULL },
+	{ "contact2_feature",  RFK_UINT,  offsetof(WarmManifold, contacts[2].feature_id),  4, NULL, NULL },
+	{ "contact3_r_a",      RFK_V3,    offsetof(WarmManifold, contacts[3].r_a),        16, NULL, NULL },
+	{ "contact3_lambda_n", RFK_FLOAT, offsetof(WarmManifold, contacts[3].lambda_n),    4, NULL, NULL },
+	{ "contact3_feature",  RFK_UINT,  offsetof(WarmManifold, contacts[3].feature_id),  4, NULL, NULL },
+);
+
+REFLECT(JointHot,
+	{ "warm_lambda0", RFK_FLOAT, offsetof(JointHot, warm_lambda[0]), 4, NULL, NULL },
+	{ "warm_lambda1", RFK_FLOAT, offsetof(JointHot, warm_lambda[1]), 4, NULL, NULL },
+	{ "warm_lambda2", RFK_FLOAT, offsetof(JointHot, warm_lambda[2]), 4, NULL, NULL },
+	{ "warm_lambda3", RFK_FLOAT, offsetof(JointHot, warm_lambda[3]), 4, NULL, NULL },
+	{ "warm_lambda4", RFK_FLOAT, offsetof(JointHot, warm_lambda[4]), 4, NULL, NULL },
+	{ "warm_lambda5", RFK_FLOAT, offsetof(JointHot, warm_lambda[5]), 4, NULL, NULL },
+);
+
+REFLECT(EpaContact,
+	RF_V3(EpaContact, point_a_local),
+	RF_V3(EpaContact, point_b_local),
+	RF_V3(EpaContact, normal_local_a),
+	RF_FLOAT(EpaContact, penetration),
+	RF_UINT(EpaContact, feature_id),
+	RF_INT(EpaContact, age),
+);
+
+REFLECT(EpaManifold,
+	RF_INT(EpaManifold, count),
+	RF_INT(EpaManifold, stale),
+	RF_INT(EpaManifold, warm_valid),
+);
+
+REFLECT(EpaStats,
+	RF_INT(EpaStats, queries),
+	RF_INT(EpaStats, iter_cap_hits),
+	RF_INT(EpaStats, total_iters),
+	RF_INT(EpaStats, warm_reseeds),
+	RF_INT(EpaStats, contacts_emitted),
+	RF_INT(EpaStats, pair_count),
 );
 
 REFLECT(JointInternal,
@@ -215,6 +278,8 @@ REFLECT(JointInternal,
 	RF_INT(JointInternal, body_a),
 	RF_INT(JointInternal, body_b),
 	RF_INT(JointInternal, island_id),
+	RF_INT(JointInternal, island_prev),
+	RF_INT(JointInternal, island_next),
 );
 
 REFLECT(Island,
@@ -224,6 +289,7 @@ REFLECT(Island,
 	RF_INT(Island, head_joint),
 	RF_INT(Island, tail_joint),
 	RF_INT(Island, joint_count),
+	RF_INT(Island, constraint_remove_count),
 	RF_INT(Island, awake),
 );
 
@@ -319,6 +385,62 @@ REFLECT(NP_DebugSnapshot,
 	{ "contact_pens_3", RFK_FLOAT, offsetof(NP_DebugSnapshot, contact_pens[3]), 4, NULL, NULL },
 );
 
+REFLECT(RewindIsland,
+	RF_INT(RewindIsland, head_body),
+	RF_INT(RewindIsland, tail_body),
+	RF_INT(RewindIsland, body_count),
+	RF_INT(RewindIsland, head_joint),
+	RF_INT(RewindIsland, tail_joint),
+	RF_INT(RewindIsland, joint_count),
+	RF_INT(RewindIsland, constraint_remove_count),
+	RF_INT(RewindIsland, awake),
+);
+
+REFLECT(RewindFrame,
+	RF_U64(RewindFrame, frame_id),
+	RF_INT(RewindFrame, sim_frame),
+	RF_INT(RewindFrame, n_bodies),
+	RF_INT(RewindFrame, is_keyframe),
+	RF_INT(RewindFrame, n_dirty),
+	RF_PTR_RAW(RewindFrame, dirty_indices),
+	RF_PTR_RAW(RewindFrame, dirty_payload),
+	RF_INT(RewindFrame, dirty_payload_size),
+	RF_PTR_RAW(RewindFrame, dirty_payload_offsets),
+	RF_PTR_RAW(RewindFrame, dirty_shapes),
+	RF_PTR_RAW(RewindFrame, body_gen),
+	RF_PTR_RAW(RewindFrame, body_free),
+	RF_INT(RewindFrame, n_joints),
+	RF_PTR_RAW(RewindFrame, joints),
+	RF_PTR_RAW(RewindFrame, joint_hot),
+	RF_PTR_RAW(RewindFrame, joint_gen),
+	RF_PTR_RAW(RewindFrame, joint_free),
+	RF_INT(RewindFrame, n_islands),
+	RF_PTR_RAW(RewindFrame, islands),
+	RF_PTR_RAW(RewindFrame, island_gen),
+	RF_PTR_RAW(RewindFrame, island_free),
+	RF_INT(RewindFrame, n_warm),
+	RF_PTR_RAW(RewindFrame, warm_keys),
+	RF_PTR_RAW(RewindFrame, warm_vals),
+	RF_INT(RewindFrame, n_prev_touching),
+	RF_INT(RewindFrame, n_joint_pairs),
+	RF_INT(RewindFrame, joint_pairs_version),
+	RF_INT(RewindFrame, ldl_topo_version),
+);
+
+REFLECT(RewindBuffer,
+	RF_INT(RewindBuffer, max_frames),
+	RF_INT(RewindBuffer, auto_capture),
+	RF_U64(RewindBuffer, next_frame_id),
+	RF_ARRAY(RewindBuffer, frames, RewindFrame),
+	RF_INT(RewindBuffer, head),
+	RF_INT(RewindBuffer, count),
+	RF_INT(RewindBuffer, baseline_n_bodies),
+	RF_PTR(RewindBuffer, baseline_hot, BodyHot),
+	RF_PTR(RewindBuffer, baseline_state, BodyState),
+	RF_PTR(RewindBuffer, baseline_cold, BodyCold),
+	RF_PTR_RAW(RewindBuffer, baseline_shapes),
+);
+
 REFLECT(WorldInternal,
 	RF_INT(WorldInternal, frame),
 	RF_V3(WorldInternal, gravity),
@@ -330,20 +452,36 @@ REFLECT(WorldInternal,
 	RF_ARRAY(WorldInternal, debug_contacts, Contact),
 	RF_MAP(WorldInternal, warm_cache, WarmManifold),
 	RF_ARRAY(WorldInternal, joints, JointInternal),
+	RF_ARRAY(WorldInternal, joint_hot, JointHot),
 	RF_ARRAY(WorldInternal, joint_gen, uint32_t),
+	RF_PTR_RAW(WorldInternal, joint_free),
 	RF_ENUM(WorldInternal, broadphase_type, BroadphaseType),
 	RF_PTR(WorldInternal, bvh_static, BVH_Tree),
 	RF_PTR(WorldInternal, bvh_dynamic, BVH_Tree),
 	RF_PTR(WorldInternal, bvh_sleeping, BVH_Tree),
 	RF_ARRAY(WorldInternal, islands, Island),
 	RF_ARRAY(WorldInternal, island_gen, uint32_t),
+	RF_PTR_RAW(WorldInternal, island_free),
+	RF_INT(WorldInternal, joint_pairs_version),
 	RF_INT(WorldInternal, sleep_enabled),
 	RF_INT(WorldInternal, sat_hint_enabled),
 	RF_INT(WorldInternal, sat_hillclimb_enabled),
+	RF_INT(WorldInternal, box_use_hull),
 	RF_INT(WorldInternal, incremental_np_enabled),
 	RF_INT(WorldInternal, warm_start_enabled),
+	RF_INT(WorldInternal, trimesh_simd_enabled),
+	RF_ENUM(WorldInternal, narrowphase_backend, NarrowphaseBackend),
+	RF_MAP(WorldInternal, epa_cache, EpaManifold),
+	RF_STRUCT(WorldInternal, epa_stats, EpaStats),
+	RF_INT(WorldInternal, cyl_native_sphere),
+	RF_INT(WorldInternal, cyl_native_capsule),
+	RF_INT(WorldInternal, cyl_native_box),
+	RF_INT(WorldInternal, cyl_native_hull),
+	RF_INT(WorldInternal, cyl_native_cyl),
+	RF_INT(WorldInternal, thread_count),
 	RF_INT(WorldInternal, ldl_enabled),
 	RF_INT(WorldInternal, ldl_topo_version),
+	RF_INT(WorldInternal, ldl_correction_iter),
 	RF_ENUM(WorldInternal, solver_type, SolverType),
 	RF_INT(WorldInternal, velocity_iters),
 	RF_INT(WorldInternal, position_iters),
@@ -352,13 +490,14 @@ REFLECT(WorldInternal,
 	RF_FLOAT(WorldInternal, max_push_velocity),
 	RF_INT(WorldInternal, sub_steps),
 	RF_STRUCT(WorldInternal, perf, PerfTimers),
-	RF_ARRAY(WorldInternal, dbg_solver_manifolds, SolverManifold),
-	RF_ARRAY(WorldInternal, dbg_solver_contacts, SolverContact),
-	RF_ARRAY(WorldInternal, dbg_solver_joints, SolverJoint),
+	RF_PTR_RAW(WorldInternal, dbg_solver_manifolds),
+	RF_PTR_RAW(WorldInternal, dbg_solver_contacts),
+	RF_PTR_RAW(WorldInternal, dbg_solver_joints),
 	RF_INT(WorldInternal, np_debug_enabled),
 	RF_INT(WorldInternal, np_debug_filter_body_a),
 	RF_INT(WorldInternal, np_debug_filter_body_b),
 	RF_STRUCT(WorldInternal, np_debug, NP_DebugSnapshot),
+	RF_PTR(WorldInternal, rewind, RewindBuffer),
 );
 
 // Forward declarations for send helpers (defined below).
@@ -371,9 +510,12 @@ static const R_TypeDesc *g_type_registry[] = {
 	&rtype_BodyCold, &rtype_BodyHot, &rtype_BodyState,
 	&rtype_ShapeInternal, &rtype_Contact,
 	&rtype_SolverContact, &rtype_SolverManifold, &rtype_SolverJoint,
-	&rtype_WarmManifold, &rtype_JointInternal, &rtype_Island,
+	&rtype_WarmContact, &rtype_WarmManifold,
+	&rtype_JointInternal, &rtype_JointHot, &rtype_Island,
 	&rtype_BVH_Child, &rtype_BVHNode, &rtype_BVHLeaf, &rtype_BVH_Tree,
 	&rtype_PerfTimers, &rtype_PGSTimers, &rtype_NP_DebugSnapshot,
+	&rtype_EpaContact, &rtype_EpaManifold, &rtype_EpaStats,
+	&rtype_RewindIsland, &rtype_RewindFrame, &rtype_RewindBuffer,
 };
 #define NUM_TYPES (int)(sizeof(g_type_registry)/sizeof(g_type_registry[0]))
 
