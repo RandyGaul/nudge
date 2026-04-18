@@ -81,7 +81,7 @@ double ldl_apply_acc;      // apply impulses to bodies
 double ldl_pos_acc;        // position correction (refactor + solve)
 int ldl_frame_count;
 
-#define SHATTER_THRESHOLD 6 // DOF threshold: bodies with more DOF than this get shattered into virtual shards
+#define SHATTER_THRESHOLD 16 // DOF threshold: bodies with more DOF than this get shattered into virtual shards
 #define SHARD_TARGET      6 // target DOF per shard
 #define LDL_MIN_COMPLIANCE 5e-5 // min regularization floor: compliance * trace(K) / dim on K diagonal + compliance*lambda in RHS
 #define LDL_SYNTH_COMPLIANCE 1e-3 // synthetic weld compliance: absolute (not trace-scaled) to break circular chain singularity

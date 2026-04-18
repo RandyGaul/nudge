@@ -262,6 +262,55 @@ static inline int joint_internal_has_limits(const JointInternal* j)
 	return 0;
 }
 
+// -----------------------------------------------------------------------------
+// Soft body internal types. Behavior lives in soft_body.c.
+// Every SoftBodyInternal owns its own dense LDL cache -- each soft body is
+// its own island by construction, so there's no cross-softbody K structure.
+
+typedef struct SoftLink
+{
+	int   node_i, node_j;    // indices into owner SoftBody's node arrays
+	float rest_length;
+	float compliance;        // XPBD alpha = softness (0 = rigid floor, set in build)
+	float pos_to_vel;        // Baumgarte gain = beta / dt (rebuilt per substep)
+	float lambda;            // warm cache: soft links accumulate, rigid links SET
+	v3    axis;              // current world axis (p_j - p_i) / length; per-substep
+} SoftLink;
+
+typedef struct SoftPin
+{
+	int node;
+	v3  world_pos;           // target; node's position snapped to this each substep
+} SoftPin;
+
+// One soft body = one LDL island. All node/link/pin storage is owned here.
+// CK_DYNA arrays survive moves of the outer SoftBodyInternal entry because
+// they live on the heap under the CK_DYNA header.
+typedef struct SoftBodyInternal
+{
+	SoftBodyParams params;
+
+	// Per-node arrays (indexed 0..node_count-1).
+	CK_DYNA v3*    node_pos;
+	CK_DYNA v3*    node_vel;
+	CK_DYNA v3*    node_ext_force;      // cleared each step after integration
+	CK_DYNA float* node_inv_mass;       // effective (0 if pinned)
+	CK_DYNA float* node_user_inv_mass;  // pre-pin copy, restored on unpin
+
+	// Per-link and per-pin arrays.
+	CK_DYNA SoftLink* links;
+	CK_DYNA SoftPin*  pins;
+
+	// LDL dense cache. Allocated in soft_body_build sized to link_count.
+	int     built;
+	int     link_count;   // snapshot at build time (== asize(links))
+	double* K;            // link_count*link_count symmetric, row-major
+	double* L;            // factored L (in lower triangle of K copy)
+	double* D;            // diagonal factor, length link_count
+	double* rhs;          // scratch, length link_count
+	double* lambda_sol;   // scratch, length link_count
+} SoftBodyInternal;
+
 typedef struct BVH_Tree BVH_Tree; // forward decl, defined in bvh.c
 
 // LDL direct solver types (used by solver_ldl.c).
@@ -484,6 +533,11 @@ typedef struct WorldInternal
 	CK_DYNA SensorInternal* sensors;
 	CK_DYNA uint32_t*       sensor_gen;
 	CK_DYNA int*            sensor_free;
+	// Soft bodies: native 3-DOF particle networks solved with direct LDL.
+	// Each soft body is its own island; see soft_body.c for behavior.
+	CK_DYNA SoftBodyInternal* soft_bodies;
+	CK_DYNA uint32_t*         soft_body_gen;
+	CK_DYNA int*              soft_body_free;
 
 	// Asset registries for snapshot save/load. Keys are sinterned names
 	// (cast to uint64), values are user-owned Hull* / TriMesh*.

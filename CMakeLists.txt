@@ -27,8 +27,19 @@ if(NOT WIN32)
 endif()
 
 if(MSVC)
-	target_compile_options(nudge_tests PRIVATE /std:clatest /experimental:c11atomics /Ob3)
+	target_compile_options(nudge_tests PRIVATE /std:clatest /experimental:c11atomics /Ob3 /fp:precise)
 	target_link_options(nudge_tests PRIVATE /STACK:8388608)
+else()
+	# -ffp-contract=off disables FMA fusion so `a*b+c` never contracts to one
+	# rounded op. Critical for cross-platform bit-identical results: Clang/GCC
+	# on ARM will happily emit vfmaq_f32 if this isn't off. MSVC doesn't contract
+	# by default. -ffp-model=precise on Clang pins rounding/NaN behavior that
+	# fast-math would otherwise relax; GCC's flag name differs so we skip it
+	# and trust the default (precise) plus -ffp-contract=off.
+	target_compile_options(nudge_tests PRIVATE -ffp-contract=off)
+	if(CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
+		target_compile_options(nudge_tests PRIVATE -ffp-model=precise)
+	endif()
 endif()
 
 if(NUDGE_BUILD_APP)
@@ -70,7 +81,12 @@ if(NUDGE_BUILD_APP)
 	endif()
 
 	if(MSVC)
-		target_compile_options(nudge PRIVATE /std:clatest /experimental:c11atomics /Ob3)
+		target_compile_options(nudge PRIVATE /std:clatest /experimental:c11atomics /Ob3 /fp:precise)
+	else()
+		target_compile_options(nudge PRIVATE -ffp-contract=off)
+		if(CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
+			target_compile_options(nudge PRIVATE -ffp-model=precise)
+		endif()
 	endif()
 
 	# Remote debug viewer is Win32-only (uses ReadProcessMemory).

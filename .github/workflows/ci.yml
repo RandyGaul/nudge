@@ -22,6 +22,8 @@ jobs:
         run: cmake --build build --config ${{ matrix.config }} --target nudge_tests
       - name: Run tests
         run: ./build/${{ matrix.config }}/nudge_tests.exe
+      - name: Determinism check
+        run: ./build/${{ matrix.config }}/nudge_tests.exe --determinism --threads 4
 
   linux-gcc:
     name: Linux GCC Release
@@ -34,6 +36,8 @@ jobs:
         run: cmake --build build --target nudge_tests
       - name: Run tests
         run: ./build/nudge_tests
+      - name: Determinism check
+        run: ./build/nudge_tests --determinism --threads 4
 
   linux-clang-asan:
     name: Linux Clang + ASan + UBSan
@@ -54,6 +58,11 @@ jobs:
           ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:detect_leaks=0
           UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_stacktrace=1
         run: ./build/nudge_tests
+      - name: Determinism check
+        env:
+          ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_stacktrace=1
+        run: ./build/nudge_tests --determinism --threads 4
 
   linux-clang-scalar:
     name: Linux Clang scalar SIMD
@@ -70,6 +79,8 @@ jobs:
         run: cmake --build build --target nudge_tests
       - name: Run tests
         run: ./build/nudge_tests
+      - name: Determinism check
+        run: ./build/nudge_tests --determinism --threads 4
 
   macos-neon:
     name: macOS Apple Silicon (NEON)
@@ -84,6 +95,8 @@ jobs:
         run: ./build/nudge_tests
       - name: Quick perf smoke (bench-stack 10)
         run: ./build/nudge_tests --bench-stack 10
+      - name: Determinism check
+        run: ./build/nudge_tests --determinism --threads 4
 
   emscripten-wasm:
     name: Emscripten WASM SIMD128
@@ -102,4 +115,6 @@ jobs:
         run: cmake --build build --target nudge_tests
       - name: Run tests under node
         run: node ./build/nudge_tests.js
+      - name: Determinism check
+        run: node ./build/nudge_tests.js --determinism --threads 4
 

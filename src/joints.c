@@ -445,7 +445,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 			if (has_limit) {
 				v3 ref_a_w = rotate(sa->rotation, j->hinge.local_ref_a);
 				v3 ref_b_w = rotate(sb->rotation, j->hinge.local_ref_b);
-				float angle = atan2f(dot(cross(ref_a_w, ref_b_w), axis_a), dot(ref_a_w, ref_b_w));
+				float angle = nudge_atan2f(dot(cross(ref_a_w, ref_b_w), axis_a), dot(ref_a_w, ref_b_w));
 				if (hmin != 0.0f && angle <= hmin) {
 					s->pos_error[5] = hmin - angle;
 					if (s->hi[5] > 0.0f) s->hi[5] = 0.0f;
@@ -577,7 +577,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		v3 axis_a_w = norm(rotate(sa->rotation, j->cone_limit.local_axis_a));
 		v3 axis_b_w = norm(rotate(sb->rotation, j->cone_limit.local_axis_b));
 		float cos_theta = dot(axis_a_w, axis_b_w);
-		float cos_limit = cosf(j->cone_limit.half_angle);
+		float cos_limit = nudge_cosf(j->cone_limit.half_angle);
 		if (cos_theta < cos_limit) {
 			// Violated: swing axis = axis_a x axis_b. Jv = (w_a - w_b) . swing =
 			// d(cos_theta)/dt. Positive lambda drives cos_theta up (angle down).
@@ -617,7 +617,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		if (tl > 1e-12f) { q_twist.x /= tl; q_twist.y /= tl; q_twist.z /= tl; q_twist.w /= tl; }
 		else q_twist = (quat){ 0, 0, 0, 1 };
 		float sign = q_twist.w >= 0 ? 1.0f : -1.0f;
-		float twist_angle = 2.0f * atan2f(sign * proj, sign * q_twist.w);
+		float twist_angle = 2.0f * nudge_atan2f(sign * proj, sign * q_twist.w);
 		float tmin = j->twist_limit.limit_min, tmax = j->twist_limit.limit_max;
 		// Jv = (w_a - w_b) . axis = -d(twist)/dt (same convention as hinge limit).
 		// twist > tmax: want d(twist)/dt<0, Jv>0, positive lambda -> lo=0.
@@ -663,7 +663,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		v3 axis_a_w = norm(rotate(sa->rotation, j->swing_twist.local_axis_a));
 		v3 axis_b_w = norm(rotate(sb->rotation, j->swing_twist.local_axis_b));
 		float cos_theta = dot(axis_a_w, axis_b_w);
-		float cos_limit = cosf(j->swing_twist.cone_half_angle);
+		float cos_limit = nudge_cosf(j->swing_twist.cone_half_angle);
 		if (cos_theta < cos_limit) {
 			v3 swing = cross(axis_a_w, axis_b_w);
 			float slen = len(swing);
@@ -693,7 +693,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 		if (tl > 1e-12f) { q_twist.x /= tl; q_twist.y /= tl; q_twist.z /= tl; q_twist.w /= tl; }
 		else q_twist = (quat){ 0, 0, 0, 1 };
 		float sign = q_twist.w >= 0 ? 1.0f : -1.0f;
-		float twist_angle = 2.0f * atan2f(sign * proj, sign * q_twist.w);
+		float twist_angle = 2.0f * nudge_atan2f(sign * proj, sign * q_twist.w);
 		float tmin = j->swing_twist.twist_min, tmax = j->swing_twist.twist_max;
 		int twist_active = 0;
 		if (twist_angle > tmax) { s->pos_error[4] = twist_angle - tmax; s->lo[4] = 0.0f; s->hi[4] = FLT_MAX; twist_active = 1; }
@@ -741,7 +741,7 @@ static void joint_fill_rows(SolverJoint* s, BodyHot* a, BodyHot* b, BodyState* s
 				v3 axis_a_w = norm(rotate(sa->rotation, j->hinge.local_axis_a));
 				v3 ref_a_w = rotate(sa->rotation, j->hinge.local_ref_a);
 				v3 ref_b_w = rotate(sb->rotation, j->hinge.local_ref_b);
-				float angle = atan2f(dot(cross(ref_a_w, ref_b_w), axis_a_w), dot(ref_a_w, ref_b_w));
+				float angle = nudge_atan2f(dot(cross(ref_a_w, ref_b_w), axis_a_w), dot(ref_a_w, ref_b_w));
 				if (hmax != 0.0f) { float max_speed = fmaxf((hmax - angle) / dt, 0.0f); if (speed > max_speed) speed = max_speed; }
 				if (hmin != 0.0f) { float min_speed = fminf((hmin - angle) / dt, 0.0f); if (speed < min_speed) speed = min_speed; }
 			}

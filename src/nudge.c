@@ -27,6 +27,7 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 #include "solver_ldl.c"
 #include "islands.c"
 #include "contacts.c"
+#include "soft_body.c"
 #include "rewind.c"
 #include "deflate.c"
 #include "serialize.c"
@@ -84,6 +85,7 @@ void destroy_world(World world)
 	afree(w->joints); afree(w->joint_gen); afree(w->joint_free);
 	for (int i = 0; i < asize(w->sensors); i++) afree(w->sensors[i].shapes);
 	afree(w->sensors); afree(w->sensor_gen); afree(w->sensor_free);
+	soft_body_free_all(w);
 	map_free(w->hull_registry);
 	map_free(w->mesh_registry);
 	map_free(w->heightfield_registry);
@@ -583,6 +585,12 @@ void world_step(World world, float dt)
 	w->frame++;
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
+
+	// Soft bodies advance independently of the rigid substep loop. Runs first
+	// so rigid fast-paths (all-asleep shortcut below) don't freeze soft bodies.
+	double t_sb = perf_now();
+	soft_body_step_world(w, dt);
+	w->perf.soft_body = perf_now() - t_sb;
 
 	// Reset per-frame EPA telemetry. Only meaningful when EPA backend is active,
 	// but clearing unconditionally keeps the counters honest after backend toggles.
@@ -1934,7 +1942,7 @@ void world_debug_joints(World world, JointDebugFn fn, void* user)
 			info.limit_max = j->hinge.limit_max;
 			info.ref_a = rotate(sa->rotation, j->hinge.local_ref_a);
 			info.ref_b = rotate(sb->rotation, j->hinge.local_ref_b);
-			float angle = atan2f(dot(cross(info.ref_a, info.ref_b), info.axis_a), dot(info.ref_a, info.ref_b));
+			float angle = nudge_atan2f(dot(cross(info.ref_a, info.ref_b), info.axis_a), dot(info.ref_a, info.ref_b));
 			info.current_angle = angle;
 			info.limit_active = (j->hinge.limit_min != 0 && angle <= j->hinge.limit_min) || (j->hinge.limit_max != 0 && angle >= j->hinge.limit_max);
 		} else if (j->type == JOINT_FIXED) {

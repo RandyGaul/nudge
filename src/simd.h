@@ -231,14 +231,18 @@ static inline float simd_get_x(simd4f a)
 }
 
 // Broadcast lane to all positions. Lane index must be a compile-time constant.
+// Avoid naming the macro parameter `v` on the scalar backend -- the
+// struct simd4f's lane-array field is `v`, and some compilers (MSVC 19.5x)
+// get confused when the caller already has a local named `v` (e.g. vmath's
+// mat3_*_v helpers take a v3 called `v`).
 #if SIMD_SSE
-	#define simd_splat(v, lane) _mm_shuffle_ps(v, v, _MM_SHUFFLE(lane, lane, lane, lane))
+	#define simd_splat(vec, lane) _mm_shuffle_ps(vec, vec, _MM_SHUFFLE(lane, lane, lane, lane))
 #elif SIMD_NEON
-	#define simd_splat(v, lane) vdupq_laneq_f32(v, lane)
+	#define simd_splat(vec, lane) vdupq_laneq_f32(vec, lane)
 #elif SIMD_WASM
-	#define simd_splat(v, lane) wasm_i32x4_shuffle((v), (v), (lane), (lane), (lane), (lane))
+	#define simd_splat(vec, lane) wasm_i32x4_shuffle((vec), (vec), (lane), (lane), (lane), (lane))
 #else
-	#define simd_splat(v, lane) simd_set1((v).v[lane])
+	#define simd_splat(vec, lane) simd_set1((vec).v[lane])
 #endif
 
 // Sqrt of first lane only (scalar sqrt in SIMD register).

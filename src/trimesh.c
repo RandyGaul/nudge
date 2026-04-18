@@ -780,7 +780,7 @@ static int collide_cylinder_triangle_local(Cylinder cyl, v3 v0, v3 v1, v3 v2, v3
 		v3 cap_center = add(cyl.center, scale(cyl_axis, cap_axials[cap]));
 		for (int i = 0; i < rim_dirs_n && sc < CYL_TRI_MAX_SAMPLES; i++) {
 			float theta = (float)i / (float)rim_dirs_n * 6.28318530718f;
-			v3 rim = add(cap_center, add(scale(perp1, cosf(theta) * r), scale(perp2, sinf(theta) * r)));
+			v3 rim = add(cap_center, add(scale(perp1, nudge_cosf(theta) * r), scale(perp2, nudge_sinf(theta) * r)));
 			float d_signed = dot(rim, tri_n) - plane_off;
 			if (on_plus_side && d_signed > 0.0f) continue;
 			if (!on_plus_side && d_signed < 0.0f) continue;
