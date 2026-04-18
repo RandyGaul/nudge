@@ -274,6 +274,11 @@ typedef struct BodyParams
 	quat rotation;
 	float mass;            // 0 = static/kinematic
 	float friction;        // Coulomb mu (default 0.5)
+	float rolling_friction;// rolling-resistance mu: 1 angular row per manifold,
+	                       // axis = snapshot of tangent-plane ang-vel, capped
+	                       // by (rolling_friction * lambda_n) (default 0.0 =
+	                       // off; try 0.02-0.1 for balls/cylinders that should
+	                       // decelerate while rolling)
 	float restitution;     // bounce coefficient (default 0.0)
 	float linear_damping;  // velocity decay coefficient (default 0.0)
 	float angular_damping; // angular velocity decay coefficient (default 0.03)
@@ -415,6 +420,28 @@ int world_rewind_by_steps(World world, int n);
 
 int    world_rewind_frames_available(World world);
 size_t world_rewind_memory_used(World world);
+
+// -----------------------------------------------------------------------------
+// Snapshot save/load -- binary versioned world persistence.
+//
+// Save writes the current world's public state (world params + bodies +
+// joints) to a file. Load reads the file, creates a new world, and
+// recreates every body + joint. Backwards-compatible across engine
+// versions via per-field version tags (see serialize.c "SV" framework).
+//
+// NOT captured by v1 snapshots (reconstructed on next world_step):
+//   warm cache, island state, BVH, LDL factorization, rewind ring,
+//   incremental narrowphase hints. Simulation after load may differ by a
+//   few frames of warm-cache rebuild from an equivalent rewind-restore.
+//
+// Restrictions: SHAPE_HULL and SHAPE_MESH bodies are not supported in v1
+// (their caller-owned Hull*/TriMesh* have no stable on-disk identity).
+// Save asserts if the world contains either shape type.
+//
+// Returns 1 on success, 0 on I/O failure.
+int   world_save_snapshot(World world, const char* path);
+// Returns a new World (like create_world) or (World){0} on failure.
+World world_load_snapshot(const char* path);
 
 // -----------------------------------------------------------------------------
 // Sensors -- read-only world-query volumes.

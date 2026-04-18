@@ -105,6 +105,13 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 			a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, twist_impulse));
 			b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, twist_impulse));
 		}
+		// Warm start rolling friction (pure angular impulse along snapshotted axis)
+		if (m->lambda_roll != 0.0f) {
+			v3 roll_impulse = scale(m->rolling_axis, m->lambda_roll);
+			BodyState* sa = &w->body_state[m->body_a]; BodyState* sb = &w->body_state[m->body_b];
+			a->angular_velocity = sub(a->angular_velocity, inv_inertia_mul(sa->rotation, sa->inv_inertia_local, roll_impulse));
+			b->angular_velocity = add(b->angular_velocity, inv_inertia_mul(sb->rotation, sb->inv_inertia_local, roll_impulse));
+		}
 	}
 
 	*out_sm = sm;
@@ -225,6 +232,8 @@ static void solver_post_solve(WorldInternal* w, SolverManifold* sm, int sm_count
 		wm->manifold_lambda_t1 = m->lambda_t1;
 		wm->manifold_lambda_t2 = m->lambda_t2;
 		wm->manifold_lambda_twist = m->lambda_twist;
+		wm->manifold_lambda_roll = m->lambda_roll;
+		wm->manifold_rolling_axis = m->rolling_axis;
 	}
 
 	// sm/sc NOT freed -- kept in WorldInternal.dbg_solver_* for remote viewer.
@@ -361,9 +370,10 @@ typedef struct PGS_Batch4
 	PGS_ContactLayer4 cp[MAX_CONTACTS];
 	v3w tangent1, tangent2, normal;
 	v3w centroid_r_a, centroid_r_b;
-	simd4f eff_mass_t1, eff_mass_t2, eff_mass_twist;
-	simd4f lambda_t1, lambda_t2, lambda_twist;
-	simd4f friction, patch_radius;
+	v3w rolling_axis;
+	simd4f eff_mass_t1, eff_mass_t2, eff_mass_twist, eff_mass_roll;
+	simd4f lambda_t1, lambda_t2, lambda_twist, lambda_roll;
+	simd4f friction, rolling_friction, patch_radius;
 	int manifold_idx[4];
 	int lane_count;
 } PGS_Batch4;
@@ -451,9 +461,9 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 	bt->lane_count = count;
 	for (int j = 0; j < 4; j++) { bt->manifold_idx[j] = (j < count) ? indices[j] : 0; bt->body_a[j] = (j < count) ? sm[indices[j]].body_a : 0; bt->body_b[j] = (j < count) ? sm[indices[j]].body_b : 0; }
 	GATHER1(bt->inv_mass_a, inv_mass_a); GATHER1(bt->inv_mass_b, inv_mass_b);
-	GATHER1(bt->friction, friction); GATHER1(bt->patch_radius, patch_radius);
-	GATHER1(bt->eff_mass_t1, eff_mass_t1); GATHER1(bt->eff_mass_t2, eff_mass_t2); GATHER1(bt->eff_mass_twist, eff_mass_twist);
-	GATHER1(bt->lambda_t1, lambda_t1); GATHER1(bt->lambda_t2, lambda_t2); GATHER1(bt->lambda_twist, lambda_twist);
+	GATHER1(bt->friction, friction); GATHER1(bt->rolling_friction, rolling_friction); GATHER1(bt->patch_radius, patch_radius);
+	GATHER1(bt->eff_mass_t1, eff_mass_t1); GATHER1(bt->eff_mass_t2, eff_mass_t2); GATHER1(bt->eff_mass_twist, eff_mass_twist); GATHER1(bt->eff_mass_roll, eff_mass_roll);
+	GATHER1(bt->lambda_t1, lambda_t1); GATHER1(bt->lambda_t2, lambda_t2); GATHER1(bt->lambda_twist, lambda_twist); GATHER1(bt->lambda_roll, lambda_roll);
 	#undef GATHER1
 	// Pack v3 manifold fields via hardware transpose (GATHER_V3 on SolverManifold array).
 	int mi0 = indices[0], mi1 = count > 1 ? indices[1] : mi0, mi2 = count > 2 ? indices[2] : mi0, mi3 = count > 3 ? indices[3] : mi0;
@@ -462,6 +472,7 @@ static void pgs_batch4_prepare(PGS_Batch4* bt, SolverManifold* sm, int* indices,
 	GATHER_V3(bt->tangent2, sm, mi0, mi1, mi2, mi3, tangent2);
 	GATHER_V3(bt->centroid_r_a, sm, mi0, mi1, mi2, mi3, centroid_r_a);
 	GATHER_V3(bt->centroid_r_b, sm, mi0, mi1, mi2, mi3, centroid_r_b);
+	GATHER_V3(bt->rolling_axis, sm, mi0, mi1, mi2, mi3, rolling_axis);
 
 	// Pack contact layers: raw r_a/r_b + scalar prestep from SolverContact.
 	// Inactive lanes (manifold has fewer contacts than this layer) get zeroed scalars
@@ -493,6 +504,7 @@ static void pgs_batch4_refresh(PGS_Batch4* bt, SolverManifold* sm, SolverContact
 	for (int j = 0; j < 4; j++) { buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_t1 : 0; } bt->lambda_t1 = simd_load(buf);
 	for (int j = 0; j < 4; j++) { buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_t2 : 0; } bt->lambda_t2 = simd_load(buf);
 	for (int j = 0; j < 4; j++) { buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_twist : 0; } bt->lambda_twist = simd_load(buf);
+	for (int j = 0; j < 4; j++) { buf[j] = (j < count) ? sm[bt->manifold_idx[j]].lambda_roll : 0; } bt->lambda_roll = simd_load(buf);
 	for (int cp_idx = 0; cp_idx < bt->max_contacts; cp_idx++) {
 		float bi[4]={0}, lam[4]={0};
 		for (int j = 0; j < count; j++) {
@@ -575,12 +587,20 @@ static void solve_contact_batch4_sv(BodyHot* bodies, PGS_Batch4* b)
 	simd4f ntw = simd_max(simd_neg(max_tw), simd_min(simd_add(b->lambda_twist, simd_mul(b->eff_mass_twist, simd_neg(wrel))), max_tw));
 	simd4f dtw = simd_sub(ntw, b->lambda_twist); b->lambda_twist = ntw;
 
+	// Rolling: recompute iw*rolling_axis inline. Axis was snapshotted at prestep
+	// along ω_tangent/|ω_tangent|, or zeroed if rolling_friction == 0.
+	v3w iw_roll_a = iw_mul(iw_d_a, iw_o_a, b->rolling_axis), iw_roll_b = iw_mul(iw_d_b, iw_o_b, b->rolling_axis);
+	simd4f max_roll = simd_mul(b->rolling_friction, total_lambda_n);
+	simd4f wrel_roll = v3w_dot(v3w_sub(wb_s, wa_s), b->rolling_axis);
+	simd4f nrl = simd_max(simd_neg(max_roll), simd_min(simd_add(b->lambda_roll, simd_mul(b->eff_mass_roll, simd_neg(wrel_roll))), max_roll));
+	simd4f drl = simd_sub(nrl, b->lambda_roll); b->lambda_roll = nrl;
+
 	// Single combined apply for all friction rows.
 	v3w lin = v3w_add(v3w_scale(b->tangent1, dt1), v3w_scale(b->tangent2, dt2));
 	va = v3w_sub(va, v3w_scale(lin, b->inv_mass_a));
 	vb = v3w_add(vb, v3w_scale(lin, b->inv_mass_b));
-	v3w ang_a = v3w_add(v3w_add(v3w_scale(wt1_a, dt1), v3w_scale(wt2_a, dt2)), v3w_scale(wtw_a, dtw));
-	v3w ang_b = v3w_add(v3w_add(v3w_scale(wt1_b, dt1), v3w_scale(wt2_b, dt2)), v3w_scale(wtw_b, dtw));
+	v3w ang_a = v3w_add(v3w_add(v3w_add(v3w_scale(wt1_a, dt1), v3w_scale(wt2_a, dt2)), v3w_scale(wtw_a, dtw)), v3w_scale(iw_roll_a, drl));
+	v3w ang_b = v3w_add(v3w_add(v3w_add(v3w_scale(wt1_b, dt1), v3w_scale(wt2_b, dt2)), v3w_scale(wtw_b, dtw)), v3w_scale(iw_roll_b, drl));
 	wa = v3w_sub(wa, ang_a);
 	wb = v3w_add(wb, ang_b);
 

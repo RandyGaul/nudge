@@ -75,6 +75,7 @@ typedef struct BodyState
 	quat rotation;
 	v3 inv_inertia_local; // diagonal of local-space inverse inertia tensor
 	float friction;
+	float rolling_friction;
 	float restitution;
 	float linear_damping;
 	float angular_damping;
@@ -563,16 +564,20 @@ typedef struct SolverManifold
 	int contact_start;
 	int contact_count;
 	float friction;
+	float rolling_friction;       // mu_roll: cap is rolling_friction * total_lambda_n
 	float inv_mass_a, inv_mass_b; // cached from body (avoids body array lookup during iteration)
 	// Manifold-level patch friction data (patch friction)
 	v3 centroid_r_a;
 	v3 centroid_r_b;
 	v3 tangent1, tangent2;
 	v3 normal;
+	v3 rolling_axis;              // snapshot of ω_tangent / |ω_tangent| at prestep, ⊥ normal
 	float eff_mass_t1, eff_mass_t2;
 	float eff_mass_twist;
+	float eff_mass_roll;          // 1 / (axis·(I_a_inv+I_b_inv)·axis); 0 if no rolling
 	float lambda_t1, lambda_t2;
 	float lambda_twist;
+	float lambda_roll;
 	float patch_area;
 	float patch_radius;
 } SolverManifold;
@@ -599,6 +604,8 @@ struct WarmManifold
 	float manifold_lambda_t1;
 	float manifold_lambda_t2;
 	float manifold_lambda_twist;
+	float manifold_lambda_roll;
+	v3 manifold_rolling_axis; // snapshot axis from last frame (used only for warm impulse re-application)
 	// Cached SAT axis for hill-climb warm-start (-1 = no cache).
 	int sat_axis;
 	// Cached feature pair for incremental narrowphase (skip full SAT when valid).

@@ -12,11 +12,12 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	if (inv_mass_sum == 0.0f) return; // sm[idx] stays zeroed (contact_count=0)
 
 	float mu = sqrtf(sa->friction * sb->friction);
+	float mu_roll = sqrtf(sa->rolling_friction * sb->rolling_friction);
 	float rest = sa->restitution > sb->restitution ? sa->restitution : sb->restitution;
 	WarmManifold* wm = im->warm; // cached from narrowphase (avoids duplicate hash lookup)
 	int contact_base = idx * MAX_CONTACTS;
 
-	SolverManifold smf = { .body_a = im->body_a, .body_b = im->body_b, .sub_id = im->sub_id, .contact_start = contact_base, .contact_count = im->m.count, .friction = mu, .inv_mass_a = a->inv_mass, .inv_mass_b = b->inv_mass };
+	SolverManifold smf = { .body_a = im->body_a, .body_b = im->body_b, .sub_id = im->sub_id, .contact_start = contact_base, .contact_count = im->m.count, .friction = mu, .rolling_friction = mu_roll, .inv_mass_a = a->inv_mass, .inv_mass_b = b->inv_mass };
 
 	// Skip per-contact restitution velocity when both bodies are slow (settled stacks).
 	float rest_thresh2 = SOLVER_RESTITUTION_THRESH * SOLVER_RESTITUTION_THRESH;
@@ -93,6 +94,29 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	float k_twist = dot(wtw_a, n) + dot(wtw_b, n);
 	smf.eff_mass_twist = k_twist > 1e-12f ? 1.0f / k_twist : 0.0f;
 
+	// Rolling friction: one scalar row opposing ω_tangent (angular velocity in
+	// the contact plane — the component that corresponds to rolling). Axis is
+	// snapshotted here and held for the whole step; PGS treats it as a fixed
+	// motor driving ω·axis toward 0, capped by mu_roll * lambda_n_total.
+	// Skip cheaply when mu_roll == 0 or ω_tangent is effectively zero.
+	smf.rolling_axis = V3(0, 0, 0);
+	smf.eff_mass_roll = 0.0f;
+	if (mu_roll > 0.0f) {
+		v3 omega_rel = sub(b->angular_velocity, a->angular_velocity);
+		v3 omega_tan = sub(omega_rel, scale(n, dot(omega_rel, n)));
+		float l2 = dot(omega_tan, omega_tan);
+		if (l2 > 1e-8f) {
+			v3 axis = scale(omega_tan, 1.0f / sqrtf(l2));
+			v3 iw_axis_a = inv_inertia_world_mul(a, axis);
+			v3 iw_axis_b = inv_inertia_world_mul(b, axis);
+			float k_roll = dot(iw_axis_a, axis) + dot(iw_axis_b, axis);
+			if (k_roll > 1e-12f) {
+				smf.rolling_axis = axis;
+				smf.eff_mass_roll = 1.0f / k_roll;
+			}
+		}
+	}
+
 	// Warm start matching
 	if (wm && w->warm_start_enabled) {
 		int old_matched[MAX_CONTACTS] = {0}, new_matched[MAX_CONTACTS] = {0};
@@ -101,6 +125,14 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		int new_unmatched = 0; for (int c = 0; c < smf.contact_count; c++) if (!new_matched[c]) new_unmatched++;
 		if (new_unmatched > 0) { float lo_n=0; for (int j=0;j<wm->count;j++) if (!old_matched[j]) lo_n+=wm->contacts[j].lambda_n; float share=1.0f/(float)new_unmatched; for (int c=0;c<smf.contact_count;c++) { if(new_matched[c])continue; sc[contact_base+c].lambda_n=lo_n*share; } }
 		smf.lambda_t1 = wm->manifold_lambda_t1; smf.lambda_t2 = wm->manifold_lambda_t2; smf.lambda_twist = wm->manifold_lambda_twist;
+		// Rolling lambda only survives warm-start if the cached axis still aligns
+		// with this frame's snapshot (ω_tangent direction hasn't flipped). A
+		// mostly-aligned axis preserves the impulse with a projection; near-flip
+		// zeroes it so we don't inject backwards energy.
+		if (smf.eff_mass_roll > 0.0f) {
+			float axis_dot = dot(wm->manifold_rolling_axis, smf.rolling_axis);
+			smf.lambda_roll = (axis_dot > 0.5f) ? wm->manifold_lambda_roll * axis_dot : 0.0f;
+		}
 	}
 
 	// Speculative/shallow contact lambda clamp: zero for negative penetration,

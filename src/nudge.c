@@ -26,6 +26,8 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 #include "solver_ldl.c"
 #include "islands.c"
 #include "rewind.c"
+#include "serialize.c"
+#include "snapshot.c"
 
 // -----------------------------------------------------------------------------
 // World.
@@ -280,6 +282,7 @@ static void pgs_work_fn(void* ctx, int start, int count)
 				p->sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
 				p->sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
 				p->sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
+				p->sm[mi].lambda_roll = SIMD_LANE(bt->lambda_roll, j);
 				for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < p->sm[mi].contact_count; cp2++) {
 					p->sc[p->sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
 				}
@@ -327,6 +330,7 @@ static void island_solve_work_fn(void* ctx, int start, int count)
 							ic->sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
 							ic->sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
 							ic->sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
+							ic->sm[mi].lambda_roll = SIMD_LANE(bt->lambda_roll, j);
 							for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < ic->sm[mi].contact_count; cp2++) {
 								ic->sc[ic->sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
 							}
@@ -1085,6 +1089,7 @@ void world_step(World world, float dt)
 									sm[mi].lambda_t1 = SIMD_LANE(bt->lambda_t1, j);
 									sm[mi].lambda_t2 = SIMD_LANE(bt->lambda_t2, j);
 									sm[mi].lambda_twist = SIMD_LANE(bt->lambda_twist, j);
+									sm[mi].lambda_roll = SIMD_LANE(bt->lambda_roll, j);
 									for (int cp2 = 0; cp2 < bt->max_contacts && cp2 < sm[mi].contact_count; cp2++) {
 										sc[sm[mi].contact_start + cp2].lambda_n = SIMD_LANE(bt->cp[cp2].lambda_n, j);
 									}
@@ -1235,6 +1240,7 @@ Body create_body(World world, BodyParams params)
 		.position = params.position,
 		.rotation = params.rotation,
 		.friction = fric,
+		.rolling_friction = params.rolling_friction,
 		.restitution = params.restitution,
 		.linear_damping = params.linear_damping,
 		.angular_damping = ang_damp,
