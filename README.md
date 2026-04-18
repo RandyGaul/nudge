@@ -269,9 +269,22 @@ contact_normal=(0.00, 1.00, 0.00)   # sane: mesh-up
 From that paused state the agent fires hypotheses as queries instead of
 rebuilds -- `contacts 85`, `get np_debug`, `table body_hot`, `warm 85` --
 and only reaches for cdb when it needs function locals or a callstack.
-The `physics-debug` skill documents the full methodology (deterministic
-repro, break one frame before the bug, impulse ledger vs. velocity delta,
-the usual bias guards).
+
+Two skills ship with the repo under `.claude/`:
+
+- **`remote-debug`** (`/remote-debug <bug>`) -- autonomous end-to-end
+  loop. Finds a deterministic repro, isolates one variable at a time,
+  measures against expectations, proposes a minimal fix, and re-verifies
+  across 15+ varied inputs. This is the default entry point when you
+  point Claude at a bug.
+- **`physics-debug`** (`/physics-debug <bug>`) -- deeper methodology
+  reference: five-phase breakdown, the "break one frame before the
+  anomaly" rule, cdb step-through recipes, the impulse-ledger-vs-velocity
+  check, and bias guards. `remote-debug` leans on it for the hard cases.
+
+Both assume the TCP debug server (`src/debug_server.c`) and the viewer
+(`tools/viewer.c`) -- the infrastructure is in-tree, so `git clone +
+cmake --build + /remote-debug` is the whole setup.
 
 
 ### Cross-engine testbed

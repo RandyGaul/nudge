@@ -1,4 +1,11 @@
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/commands/
+.claude/skills/*
+.claude/commands/*
+!.claude/skills/physics-debug/
+!.claude/commands/physics-debug.md
+!.claude/commands/remote-debug.md
 build/
 build2/
 build-web/
