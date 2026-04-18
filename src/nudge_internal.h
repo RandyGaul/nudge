@@ -32,6 +32,15 @@ typedef struct ShapeInternal
 } ShapeInternal;
 
 // Cold: persistent metadata, topology, rarely touched during solve.
+typedef struct SensorInternal
+{
+	v3 position;
+	quat rotation;
+	uint32_t collision_group;
+	uint32_t collision_mask;
+	CK_DYNA ShapeInternal* shapes;
+} SensorInternal;
+
 typedef struct BodyCold
 {
 	float mass;
@@ -457,6 +466,12 @@ typedef struct WorldInternal
 	CK_DYNA JointHot*      joint_hot;    // hot: warm-start lambdas (parallel array)
 	CK_DYNA uint32_t*      joint_gen;
 	CK_DYNA int*           joint_free;
+	// Sensors: read-only compound-shape query volumes. Owned by the world so
+	// snapshot + rewind can persist them. Never participate in broadphase or
+	// solver -- only sensor_query reads them.
+	CK_DYNA SensorInternal* sensors;
+	CK_DYNA uint32_t*       sensor_gen;
+	CK_DYNA int*            sensor_free;
 	// Broadphase
 	BroadphaseType broadphase_type;
 	BVH_Tree* bvh_static;

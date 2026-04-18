@@ -456,16 +456,20 @@ int world_get_bodies(World world, Body* out, int max);
 // (world_get_joint_count / world_get_joints declared below, after Joint.)
 
 // -----------------------------------------------------------------------------
-// Sensors -- read-only world-query volumes.
+// Sensors -- read-only world-query volumes, owned by the world.
 //
-// A sensor is a compound of convex shapes with a transform. It lives entirely
-// outside the physics engine: never in the broadphase, never in the solver,
-// never generates contacts. The only operation on a sensor is sensor_query,
-// which walks the world and reports which bodies overlap the sensor volume.
+// A sensor is a compound of convex shapes with a transform. It never touches
+// the solver, never enters the broadphase, never generates contacts. The
+// only operation on a sensor is sensor_query, which walks the world and
+// reports which bodies overlap the sensor volume.
+//
+// Sensors are world-owned so snapshot save/load and rewind persist them
+// alongside bodies and joints. Use world_get_sensors() to recover handles
+// after a rewind or load.
 //
 // Thread safety: sensor_query is read-only against the world. Concurrent
-// queries on different sensors (or the same sensor) are safe as long as no
-// thread is mutating the world. Do not call during world_step.
+// queries on different sensors are safe as long as no thread is mutating
+// the world. Do not call during world_step.
 //
 // Not supported: body shapes of type SHAPE_MESH are skipped during sensor
 // queries (triangle mesh vs. convex overlap is not yet wired up).
@@ -480,19 +484,37 @@ typedef struct SensorParams
 	uint32_t collision_mask;   // 0 = 0xFFFFFFFF
 } SensorParams;
 
-Sensor create_sensor(SensorParams params);
-void destroy_sensor(Sensor sensor);
+Sensor create_sensor(World world, SensorParams params);
+void destroy_sensor(World world, Sensor sensor);
 
 // Attach a shape to the sensor. SHAPE_MESH is not allowed; asserts.
-void sensor_add_shape(Sensor sensor, ShapeParams params);
+void sensor_add_shape(World world, Sensor sensor, ShapeParams params);
 
 // Move the sensor. No broadphase update (sensor is not in the broadphase).
-void sensor_set_transform(Sensor sensor, v3 position, quat rotation);
+void sensor_set_transform(World world, Sensor sensor, v3 position, quat rotation);
 
 // Query the world for bodies overlapping the sensor. Writes up to max_results
 // body handles into results[]; returns the total overlap count (may exceed
 // max_results -- use that to size a retry). Read-only against world.
 int sensor_query(World world, Sensor sensor, Body* results, int max_results);
+
+int world_get_sensor_count(World world);
+int world_get_sensors(World world, Sensor* out, int max);
+
+// -----------------------------------------------------------------------------
+// Handle revalidation.
+//
+// After a rewind or snapshot-load, any handle the caller held becomes either:
+//   - still valid  (the underlying object existed at the rewound-to frame and
+//                   its generation counter was restored to match)
+//   - stale        (the object was created after the snapshot, so the slot's
+//                   generation counter is now different from what the caller has)
+// Use these predicates before dereferencing a held handle across a rewind or
+// load boundary. Use world_get_bodies / _joints / _sensors to enumerate what
+// the world currently contains.
+int body_is_valid(World world, Body body);
+int sensor_is_valid(World world, Sensor sensor);
+// joint_is_valid declared below, after Joint.
 
 // -----------------------------------------------------------------------------
 // Joints.
@@ -501,6 +523,7 @@ typedef struct Joint { uint64_t id; } Joint;
 
 int world_get_joint_count(World world);
 int world_get_joints(World world, Joint* out, int max);
+int joint_is_valid(World world, Joint joint);
 
 typedef struct SpringParams
 {

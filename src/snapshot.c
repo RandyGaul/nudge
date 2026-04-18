@@ -285,6 +285,27 @@ int world_save_snapshot(World world, const char* path)
 		}
 	}
 
+	// Sensors: simple list. No index remapping needed -- sensor indices don't
+	// appear in body/joint data.
+	int sensor_live = asize(w->sensors);
+	int sensor_count = 0;
+	for (int i = 0; i < sensor_live; i++) if (split_alive(w->sensor_gen, i)) sensor_count++;
+	SV_ADD_LOCAL(SV_SENSORS_IN_SAVE, sensor_count);
+	for (int i = 0; i < sensor_live; i++) {
+		if (!split_alive(w->sensor_gen, i)) continue;
+		SensorInternal* ss = &w->sensors[i];
+		SavedSensor ssv = {0};
+		ssv.position = ss->position;
+		ssv.rotation = ss->rotation;
+		ssv.collision_group = ss->collision_group;
+		ssv.collision_mask  = ss->collision_mask;
+		int ns = asize(ss->shapes);
+		for (int k = 0; k < ns; k++)
+			apush(ssv.shapes, snapshot_shape_from_internal(&ss->shapes[k]));
+		SV_ADD_LOCAL(SV_SENSORS_IN_SAVE, ssv);
+		afree(ssv.shapes);
+	}
+
 	CK_FREE(body_saved_idx);
 	CK_FREE(joint_saved_idx);
 	SV_SAVE_END();
@@ -462,6 +483,21 @@ World world_load_snapshot(const char* path)
 		w->frame               = frame;
 		w->ldl_topo_version    = ldl_topo_version;
 		w->joint_pairs_version = joint_pairs_version;
+	}
+
+	// Sensors block (SV_SENSORS_IN_SAVE).
+	int sensor_count = 0;
+	SV_ADD_LOCAL(SV_SENSORS_IN_SAVE, sensor_count);
+	for (int i = 0; i < sensor_count; i++) {
+		SavedSensor ssv = {0};
+		SV_ADD_LOCAL(SV_SENSORS_IN_SAVE, ssv);
+		Sensor s = create_sensor(world, (SensorParams){
+			.position = ssv.position, .rotation = ssv.rotation,
+			.collision_group = ssv.collision_group, .collision_mask = ssv.collision_mask,
+		});
+		for (int k = 0; k < asize(ssv.shapes); k++)
+			sensor_add_shape(world, s, ssv.shapes[k]);
+		afree(ssv.shapes);
 	}
 
 	CK_FREE(body_table);

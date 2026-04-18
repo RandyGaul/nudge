@@ -12361,6 +12361,87 @@ static void test_snapshot_deterministic_replay()
 }
 #undef SNAPSHOT_N
 
+static void test_snapshot_with_sensors()
+{
+	// Save a scene with sensors, load, verify sensor handles are recoverable
+	// and queries still return the expected bodies.
+	Body floor; Body boxes[18];
+	World w = make_rewind_scene(&floor, boxes, 2);
+	Sensor s1 = create_sensor(w, (SensorParams){ .position = V3(0, 2, 0), .rotation = quat_identity() });
+	sensor_add_shape(w, s1, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.6f });
+	Sensor s2 = create_sensor(w, (SensorParams){ .position = V3(5, 5, 5), .rotation = quat_identity() });
+	sensor_add_shape(w, s2, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+	(void)s1; (void)s2;
+
+	const char* path = "test_snapshot_sensors.nudgesave";
+	TEST_BEGIN("snapshot+sensors: save ok");
+	TEST_ASSERT(world_save_snapshot(w, path) == 1);
+
+	destroy_world(w);
+	World w2 = world_load_snapshot(path);
+
+	TEST_BEGIN("snapshot+sensors: sensor count preserved");
+	TEST_ASSERT(world_get_sensor_count(w2) == 2);
+
+	Sensor sensors[4];
+	int got = world_get_sensors(w2, sensors, 4);
+	TEST_ASSERT(got == 2);
+
+	// Sensor 0 (at y=2) should overlap some boxes in the pile.
+	Body results[32];
+	TEST_BEGIN("snapshot+sensors: loaded sensor queries find overlaps");
+	int hits = sensor_query(w2, sensors[0], results, 32);
+	TEST_ASSERT(hits >= 1);
+
+	destroy_world(w2);
+	remove(path);
+}
+
+static void test_handle_validity_after_rewind()
+{
+	Body floor; Body boxes[18];
+	World w = make_rewind_scene(&floor, boxes, 2);
+	Sensor s1 = create_sensor(w, (SensorParams){ .position = V3(0, 2, 0), .rotation = quat_identity() });
+	sensor_add_shape(w, s1, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.6f });
+
+	world_rewind_init(w, (RewindParams){ .max_frames = 16, .auto_capture = 1 });
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 5; i++) world_step(w, dt);
+
+	uint64_t frame_a = world_rewind_capture(w);
+
+	// Create new bodies + sensor AFTER frame_a. These should become invalid
+	// once we rewind to frame_a.
+	Body extra_body = create_body(w, (BodyParams){ .position = V3(10, 10, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, extra_body, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+	Sensor extra_sensor = create_sensor(w, (SensorParams){ .position = V3(-5, 0, 0), .rotation = quat_identity() });
+	sensor_add_shape(w, extra_sensor, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 1 });
+	for (int i = 0; i < 3; i++) world_step(w, dt);
+
+	// Before rewind: all handles valid.
+	TEST_BEGIN("validity: pre-rewind, all handles valid");
+	TEST_ASSERT(body_is_valid(w, floor));
+	TEST_ASSERT(body_is_valid(w, boxes[0]));
+	TEST_ASSERT(body_is_valid(w, extra_body));
+	TEST_ASSERT(sensor_is_valid(w, s1));
+	TEST_ASSERT(sensor_is_valid(w, extra_sensor));
+
+	world_rewind_to_frame(w, frame_a);
+
+	// After rewind past the creations: pre-existing handles still valid,
+	// post-frame-a handles are stale.
+	TEST_BEGIN("validity: post-rewind, pre-existing bodies valid");
+	TEST_ASSERT(body_is_valid(w, floor));
+	TEST_ASSERT(body_is_valid(w, boxes[0]));
+	TEST_ASSERT(sensor_is_valid(w, s1));
+
+	TEST_BEGIN("validity: post-rewind, bodies created after snapshot are stale");
+	TEST_ASSERT(!body_is_valid(w, extra_body));
+	TEST_ASSERT(!sensor_is_valid(w, extra_sensor));
+
+	destroy_world(w);
+}
+
 static void test_rewind_by_steps()
 {
 	World w = make_rewind_scene(NULL, NULL, 2);
@@ -12396,8 +12477,8 @@ static void test_sensor_basic()
 	Body results[8];
 
 	// Sphere sensor centered on the dynamic sphere: should hit sphere, not floor, not far_box.
-	Sensor sen = create_sensor((SensorParams){ .position = V3(0, 2, 0), .rotation = quat_identity() });
-	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.6f });
+	Sensor sen = create_sensor(w, (SensorParams){ .position = V3(0, 2, 0), .rotation = quat_identity() });
+	sensor_add_shape(w, sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.6f });
 
 	TEST_BEGIN("sensor: finds overlapping sphere only");
 	int count = sensor_query(w, sen, results, 8);
@@ -12406,16 +12487,16 @@ static void test_sensor_basic()
 
 	// Move sensor far from everything.
 	TEST_BEGIN("sensor: miss when moved far away");
-	sensor_set_transform(sen, V3(100, 100, 100), quat_identity());
+	sensor_set_transform(w, sen, V3(100, 100, 100), quat_identity());
 	count = sensor_query(w, sen, results, 8);
 	TEST_ASSERT(count == 0);
 
 	// Big box sensor spanning sphere + floor.
 	TEST_BEGIN("sensor: box volume finds sphere + floor");
-	sensor_set_transform(sen, V3(0, 0, 0), quat_identity());
-	destroy_sensor(sen);
-	sen = create_sensor((SensorParams){ .position = V3(0, 0, 0), .rotation = quat_identity() });
-	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(3, 3, 3) });
+	sensor_set_transform(w, sen, V3(0, 0, 0), quat_identity());
+	destroy_sensor(w, sen);
+	sen = create_sensor(w, (SensorParams){ .position = V3(0, 0, 0), .rotation = quat_identity() });
+	sensor_add_shape(w, sen, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(3, 3, 3) });
 	count = sensor_query(w, sen, results, 8);
 	TEST_ASSERT(count == 2);
 	int found_sphere = 0, found_floor = 0;
@@ -12427,10 +12508,10 @@ static void test_sensor_basic()
 
 	// Compound sensor: two spheres, each near a different body.
 	TEST_BEGIN("sensor: compound shapes hit both bodies");
-	destroy_sensor(sen);
-	sen = create_sensor((SensorParams){ .position = V3(0, 2, 0), .rotation = quat_identity() });
-	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f });
-	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f, .local_pos = V3(20, 0, 0) });
+	destroy_sensor(w, sen);
+	sen = create_sensor(w, (SensorParams){ .position = V3(0, 2, 0), .rotation = quat_identity() });
+	sensor_add_shape(w, sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f });
+	sensor_add_shape(w, sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f, .local_pos = V3(20, 0, 0) });
 	count = sensor_query(w, sen, results, 8);
 	TEST_ASSERT(count == 2);
 
@@ -12438,12 +12519,12 @@ static void test_sensor_basic()
 	TEST_BEGIN("sensor: filter excludes sphere");
 	body_set_collision_filter(w, sphere, 0x2, 0x2);   // group 2, mask 2: filtered out by sensor
 	body_set_collision_filter(w, far_box, 0x1, 0x1);  // group 1, mask 1: matches sensor
-	destroy_sensor(sen);
-	sen = create_sensor((SensorParams){
+	destroy_sensor(w, sen);
+	sen = create_sensor(w, (SensorParams){
 		.position = V3(0, 2, 0), .rotation = quat_identity(),
 		.collision_group = 0x1, .collision_mask = 0x1,
 	});
-	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(30, 2, 2) });
+	sensor_add_shape(w, sen, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(30, 2, 2) });
 	count = sensor_query(w, sen, results, 8);
 	int saw_sphere = 0, saw_far_box = 0;
 	for (int i = 0; i < count && i < 8; i++) {
@@ -12457,14 +12538,14 @@ static void test_sensor_basic()
 	TEST_BEGIN("sensor: total count exceeds buffer");
 	body_set_collision_filter(w, sphere, 0xFFFFFFFFu, 0xFFFFFFFFu);
 	body_set_collision_filter(w, far_box, 0xFFFFFFFFu, 0xFFFFFFFFu);
-	destroy_sensor(sen);
-	sen = create_sensor((SensorParams){ .position = V3(0, 0, 0), .rotation = quat_identity() });
-	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(100, 100, 100) });
+	destroy_sensor(w, sen);
+	sen = create_sensor(w, (SensorParams){ .position = V3(0, 0, 0), .rotation = quat_identity() });
+	sensor_add_shape(w, sen, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(100, 100, 100) });
 	Body small[1];
 	count = sensor_query(w, sen, small, 1);
 	TEST_ASSERT(count == 3); // floor + sphere + far_box
 
-	destroy_sensor(sen);
+	destroy_sensor(w, sen);
 	destroy_world(w);
 }
 
@@ -12476,8 +12557,8 @@ static void test_sensor_n2()
 	Body sphere = create_body(w, (BodyParams){ .position = V3(0, 2, 0), .rotation = quat_identity(), .mass = 1 });
 	body_add_shape(w, sphere, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
 
-	Sensor sen = create_sensor((SensorParams){ .position = V3(0, 2, 0), .rotation = quat_identity() });
-	sensor_add_shape(sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.6f });
+	Sensor sen = create_sensor(w, (SensorParams){ .position = V3(0, 2, 0), .rotation = quat_identity() });
+	sensor_add_shape(w, sen, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.6f });
 
 	Body results[4];
 	TEST_BEGIN("sensor n2: hit");
@@ -12486,11 +12567,11 @@ static void test_sensor_n2()
 	TEST_ASSERT(results[0].id == sphere.id);
 
 	TEST_BEGIN("sensor n2: miss");
-	sensor_set_transform(sen, V3(100, 100, 100), quat_identity());
+	sensor_set_transform(w, sen, V3(100, 100, 100), quat_identity());
 	count = sensor_query(w, sen, results, 4);
 	TEST_ASSERT(count == 0);
 
-	destroy_sensor(sen);
+	destroy_sensor(w, sen);
 	destroy_world(w);
 }
 
@@ -12516,6 +12597,8 @@ static void run_query_tests()
 	test_rewind_by_steps();
 	test_snapshot_roundtrip();
 	test_snapshot_deterministic_replay();
+	test_snapshot_with_sensors();
+	test_handle_validity_after_rewind();
 }
 
 // ============================================================================

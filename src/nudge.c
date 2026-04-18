@@ -78,6 +78,8 @@ void destroy_world(World world)
 	bvh_free(w->bvh_sleeping); CK_FREE(w->bvh_sleeping);
 	split_free(w->body_cold, w->body_hot, w->body_gen, w->body_free);
 	afree(w->joints); afree(w->joint_gen); afree(w->joint_free);
+	for (int i = 0; i < asize(w->sensors); i++) afree(w->sensors[i].shapes);
+	afree(w->sensors); afree(w->sensor_gen); afree(w->sensor_free);
 	for (int i = 0; i < asize(w->islands); i++) ldl_cache_free(&w->islands[i].ldl);
 	afree(w->islands); afree(w->island_gen); afree(w->island_free);
 	map_free(w->prev_touching);
@@ -1995,6 +1997,30 @@ int world_get_joints(World world, Joint* out, int max)
 		total++;
 	}
 	return total;
+}
+
+int body_is_valid(World world, Body body)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(body);
+	if (idx < 0 || idx >= asize(w->body_gen)) return 0;
+	return w->body_gen[idx] == handle_gen(body);
+}
+
+int joint_is_valid(World world, Joint joint)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(joint);
+	if (idx < 0 || idx >= asize(w->joint_gen)) return 0;
+	return w->joint_gen[idx] == handle_gen(joint);
+}
+
+int sensor_is_valid(World world, Sensor sensor)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(sensor);
+	if (idx < 0 || idx >= asize(w->sensor_gen)) return 0;
+	return w->sensor_gen[idx] == handle_gen(sensor);
 }
 
 // -----------------------------------------------------------------------------

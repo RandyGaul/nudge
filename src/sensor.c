@@ -6,45 +6,62 @@
 // sensor_query walks the world's BVHs, filters by collision group/mask, and
 // runs shape-vs-shape narrowphase boolean tests against each candidate body.
 //
-// All state lives in a caller-owned heap allocation; the Sensor handle is a
-// raw pointer. Lifetime errors (query against a destroyed sensor) crash, per
-// the engine's non-defensive policy.
+// Sensors are owned by the world (via a split_store-style generational
+// handle) so snapshot save/load and rewind can capture them alongside
+// bodies and joints.
 
-typedef struct SensorInternal
+static int sensor_alloc_slot(WorldInternal* w)
 {
-	v3 position;
-	quat rotation;
-	uint32_t collision_group;
-	uint32_t collision_mask;
-	CK_DYNA ShapeInternal* shapes;
-} SensorInternal;
+	int idx;
+	if (asize(w->sensor_free) > 0) {
+		idx = apop(w->sensor_free);
+	} else {
+		idx = asize(w->sensors);
+		afit(w->sensors, idx + 1); asetlen(w->sensors, idx + 1);
+		afit(w->sensor_gen, idx + 1); asetlen(w->sensor_gen, idx + 1);
+		w->sensor_gen[idx] = 0;
+	}
+	memset(&w->sensors[idx], 0, sizeof(SensorInternal));
+	w->sensor_gen[idx]++;   // odd = alive
+	return idx;
+}
 
-Sensor create_sensor(SensorParams params)
+Sensor create_sensor(World world, SensorParams params)
 {
 	assert(is_valid(params.position) && "create_sensor: position is NaN/inf");
+	WorldInternal* w = (WorldInternal*)world.id;
 
-	SensorInternal* s = (SensorInternal*)calloc(1, sizeof(SensorInternal));
+	int idx = sensor_alloc_slot(w);
+	SensorInternal* s = &w->sensors[idx];
 	s->position = params.position;
 	float r_m2 = params.rotation.x*params.rotation.x + params.rotation.y*params.rotation.y + params.rotation.z*params.rotation.z + params.rotation.w*params.rotation.w;
 	s->rotation = (r_m2 < 0.5f) ? quat_identity() : params.rotation;
 	s->collision_group = params.collision_group ? params.collision_group : 0xFFFFFFFFu;
 	s->collision_mask  = params.collision_mask  ? params.collision_mask  : 0xFFFFFFFFu;
-	return (Sensor){ (uint64_t)(uintptr_t)s };
+	return split_handle(Sensor, w->sensor_gen, idx);
 }
 
-void destroy_sensor(Sensor sensor)
+void destroy_sensor(World world, Sensor sensor)
 {
-	SensorInternal* s = (SensorInternal*)(uintptr_t)sensor.id;
-	afree(s->shapes);
-	free(s);
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(sensor);
+	assert(split_valid(w->sensor_gen, sensor));
+	afree(w->sensors[idx].shapes);
+	memset(&w->sensors[idx], 0, sizeof(SensorInternal));
+	w->sensor_gen[idx]++;   // even = dead
+	apush(w->sensor_free, idx);
 }
 
-void sensor_add_shape(Sensor sensor, ShapeParams params)
+void sensor_add_shape(World world, Sensor sensor, ShapeParams params)
 {
 	assert(is_valid(params.local_pos) && "sensor_add_shape: local_pos is NaN/inf");
 	assert(params.type != SHAPE_MESH && "sensor_add_shape: SHAPE_MESH not supported on sensors");
 
-	SensorInternal* s = (SensorInternal*)(uintptr_t)sensor.id;
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(sensor);
+	assert(split_valid(w->sensor_gen, sensor));
+	SensorInternal* s = &w->sensors[idx];
+
 	ShapeInternal sh = {0};
 	sh.type = params.type;
 	sh.local_pos = params.local_pos;
@@ -59,26 +76,25 @@ void sensor_add_shape(Sensor sensor, ShapeParams params)
 	                     sh.hull.scale = params.hull.scale; break;
 	case SHAPE_CYLINDER: sh.cylinder.half_height = params.cylinder.half_height;
 	                     sh.cylinder.radius = params.cylinder.radius; break;
-	case SHAPE_MESH:     break; // unreachable, asserted above
+	case SHAPE_MESH:     break;
 	}
 	apush(s->shapes, sh);
 }
 
-void sensor_set_transform(Sensor sensor, v3 position, quat rotation)
+void sensor_set_transform(World world, Sensor sensor, v3 position, quat rotation)
 {
 	assert(is_valid(position) && "sensor_set_transform: position is NaN/inf");
-	SensorInternal* s = (SensorInternal*)(uintptr_t)sensor.id;
+	WorldInternal* w = (WorldInternal*)world.id;
+	int idx = handle_index(sensor);
+	assert(split_valid(w->sensor_gen, sensor));
+	SensorInternal* s = &w->sensors[idx];
 	s->position = position;
 	float r_m2 = rotation.x*rotation.x + rotation.y*rotation.y + rotation.z*rotation.z + rotation.w*rotation.w;
 	s->rotation = (r_m2 < 0.5f) ? quat_identity() : rotation;
 }
 
-// Boolean overlap test between two positioned shapes. Routes through the
-// public collide_* API so no engine-internal state (warm cache, sat hint,
-// world pointer) is touched.
 static int sensor_shape_overlap(BodyState* bs_a, ShapeInternal* sh_a, BodyState* bs_b, ShapeInternal* sh_b)
 {
-	// Canonicalise so sh_a->type <= sh_b->type (matches collide_* API).
 	if (sh_a->type > sh_b->type) {
 		ShapeInternal* ts = sh_a; sh_a = sh_b; sh_b = ts;
 		BodyState* tb = bs_a; bs_a = bs_b; bs_b = tb;
@@ -137,16 +153,16 @@ static int sensor_shape_overlap(BodyState* bs_a, ShapeInternal* sh_a, BodyState*
 int sensor_query(World world, Sensor sensor, Body* results, int max_results)
 {
 	WorldInternal* w = (WorldInternal*)world.id;
-	SensorInternal* s = (SensorInternal*)(uintptr_t)sensor.id;
+	int idx = handle_index(sensor);
+	assert(split_valid(w->sensor_gen, sensor));
+	SensorInternal* s = &w->sensors[idx];
 
 	if (asize(s->shapes) == 0) return 0;
 
-	// Build a transient BodyState so shape_aabb / make_* helpers work directly.
 	BodyState sen_state = {0};
 	sen_state.position = s->position;
 	sen_state.rotation = s->rotation;
 
-	// Union AABB of all sensor shapes.
 	AABB sen_box = shape_aabb(&sen_state, &s->shapes[0]);
 	for (int i = 1; i < asize(s->shapes); i++)
 		sen_box = aabb_merge(sen_box, shape_aabb(&sen_state, &s->shapes[i]));
@@ -168,15 +184,13 @@ int sensor_query(World world, Sensor sensor, Body* results, int max_results)
 	int total = 0;
 	int nshapes = asize(s->shapes);
 	for (int ci = 0; ci < asize(candidates); ci++) {
-		int idx = candidates[ci];
-		BodyCold* bc = &w->body_cold[idx];
-		BodyState* bs = &w->body_state[idx];
+		int bi = candidates[ci];
+		BodyCold* bc = &w->body_cold[bi];
+		BodyState* bs = &w->body_state[bi];
 
-		// Collision filter (both sides must opt in).
 		if (!((s->collision_group & bc->collision_mask) && (bc->collision_group & s->collision_mask)))
 			continue;
 
-		// Quick AABB reject (broadphase may be conservative, N^2 path never culls).
 		AABB body_box = body_aabb(bs, bc);
 		if (!aabb_overlaps(sen_box, body_box)) continue;
 
@@ -190,10 +204,32 @@ int sensor_query(World world, Sensor sensor, Body* results, int max_results)
 			}
 		}
 		if (hit) {
-			if (total < max_results) results[total] = split_handle(Body, w->body_gen, idx);
+			if (total < max_results) results[total] = split_handle(Body, w->body_gen, bi);
 			total++;
 		}
 	}
 	afree(candidates);
+	return total;
+}
+
+int world_get_sensor_count(World world)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int n = asize(w->sensors);
+	int alive = 0;
+	for (int i = 0; i < n; i++) if (split_alive(w->sensor_gen, i)) alive++;
+	return alive;
+}
+
+int world_get_sensors(World world, Sensor* out, int max)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int n = asize(w->sensors);
+	int total = 0;
+	for (int i = 0; i < n; i++) {
+		if (!split_alive(w->sensor_gen, i)) continue;
+		if (total < max) out[total] = split_handle(Sensor, w->sensor_gen, i);
+		total++;
+	}
 	return total;
 }

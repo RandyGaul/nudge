@@ -88,6 +88,14 @@ typedef struct RewindFrame
 
 	int joint_pairs_version;
 	int ldl_topo_version;
+
+	// Sensors: captured as a full list per frame (sensors are few and rarely
+	// change, so dirty compression doesn't buy much). Each entry owns a
+	// deep-cloned shapes array.
+	int n_sensors;
+	SensorInternal* sensors;   // [n_sensors]; .shapes is a CK_DYNA owned here
+	uint32_t*       sensor_gen;
+	CK_DYNA int*    sensor_free;
 } RewindFrame;
 
 typedef struct RewindBuffer
@@ -141,6 +149,15 @@ static void rewind_frame_free(RewindFrame* f)
 
 	CK_FREE(f->joint_pairs_keys);   f->joint_pairs_keys = NULL;
 	CK_FREE(f->joint_pairs_vals);   f->joint_pairs_vals = NULL;
+
+	if (f->sensors) {
+		for (int i = 0; i < f->n_sensors; i++) afree(f->sensors[i].shapes);
+		CK_FREE(f->sensors);
+		f->sensors = NULL;
+	}
+	CK_FREE(f->sensor_gen); f->sensor_gen = NULL;
+	afree(f->sensor_free);  f->sensor_free = NULL;
+	f->n_sensors = 0;
 }
 
 static void* rewind_clone_array(const void* src, size_t n, size_t elem_size)
@@ -398,6 +415,27 @@ static void rewind_capture_into(RewindBuffer* rb, RewindFrame* f, WorldInternal*
 
 	f->joint_pairs_version = w->joint_pairs_version;
 	f->ldl_topo_version    = w->ldl_topo_version;
+
+	// Sensors: full-copy per frame. Shapes are deep-cloned so destroy_sensor
+	// between captures doesn't invalidate prior snapshots.
+	int ns = asize(w->sensors);
+	f->n_sensors = ns;
+	if (ns > 0) {
+		f->sensors = (SensorInternal*)CK_ALLOC((size_t)ns * sizeof(SensorInternal));
+		for (int i = 0; i < ns; i++) {
+			f->sensors[i] = w->sensors[i];
+			f->sensors[i].shapes = NULL;
+			int nshapes = asize(w->sensors[i].shapes);
+			if (nshapes > 0) {
+				ShapeInternal* dst = NULL;
+				afit(dst, nshapes); asetlen(dst, nshapes);
+				memcpy(dst, w->sensors[i].shapes, (size_t)nshapes * sizeof(ShapeInternal));
+				f->sensors[i].shapes = dst;
+			}
+		}
+	}
+	f->sensor_gen  = rewind_clone_array(w->sensor_gen,  ns, sizeof(uint32_t));
+	f->sensor_free = rewind_clone_dyna_int(w->sensor_free);
 
 	// Update baseline to match current world state.
 	if (nb != rb->baseline_n_bodies) {
@@ -670,6 +708,29 @@ static void rewind_restore_from(WorldInternal* w, RewindBuffer* rb, int target_s
 	w->joint_pairs_version = tf->joint_pairs_version;
 	w->ldl_topo_version    = tf->ldl_topo_version;
 	w->frame               = tf->sim_frame;
+
+	// Sensors: free live sensor shape arrays, resize, reinstall deep-cloned
+	// shapes from the snapshot (so the snapshot remains reusable).
+	int ns_live = asize(w->sensors);
+	for (int i = 0; i < ns_live; i++) { afree(w->sensors[i].shapes); w->sensors[i].shapes = NULL; }
+	rewind_resize(w->sensors,    tf->n_sensors);
+	rewind_resize(w->sensor_gen, tf->n_sensors);
+	for (int i = 0; i < tf->n_sensors; i++) {
+		w->sensors[i] = tf->sensors[i];
+		w->sensors[i].shapes = NULL;
+		int nshapes = asize(tf->sensors[i].shapes);
+		if (nshapes > 0) {
+			ShapeInternal* dst = NULL;
+			afit(dst, nshapes); asetlen(dst, nshapes);
+			memcpy(dst, tf->sensors[i].shapes, (size_t)nshapes * sizeof(ShapeInternal));
+			w->sensors[i].shapes = dst;
+		}
+	}
+	if (tf->n_sensors > 0 && tf->sensor_gen)
+		memcpy(w->sensor_gen, tf->sensor_gen, (size_t)tf->n_sensors * sizeof(uint32_t));
+	if (w->sensor_free) aclear(w->sensor_free);
+	int nsf = asize(tf->sensor_free);
+	for (int i = 0; i < nsf; i++) apush(w->sensor_free, tf->sensor_free[i]);
 
 	if (w->broadphase_type == BROADPHASE_BVH) {
 		bvh_free(w->bvh_static);   bvh_init(w->bvh_static);

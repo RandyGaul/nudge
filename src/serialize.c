@@ -40,6 +40,8 @@ enum
 	// version / island-scalars / warm_cache / prev_touching / joint_pairs
 	// blocks so load+step reproduces the saved tick bit-for-bit.
 	SV_DETERMINISTIC_WORLD,
+	// Added sensors to snapshot save/load.
+	SV_SENSORS_IN_SAVE,
 	// --- insert new entries here ---
 	SV_LATEST_PLUS_ONE
 };
@@ -68,6 +70,7 @@ enum
 	X(WorldParams) \
 	X(SavedBody) \
 	X(SavedJoint) \
+	X(SavedSensor) \
 	X(CachedFeaturePair) \
 	X(WarmContact) \
 	X(WarmManifold) \
@@ -658,4 +661,23 @@ SV_SERIALIZABLE(Island)
 	SV_ADD(SV_DETERMINISTIC_WORLD, constraint_remove_count);
 	SV_ADD(SV_DETERMINISTIC_WORLD, awake);
 	// LDL_Cache ldl -- recomputed next ldl_factor; don't save.
+}
+
+// SavedSensor: one world-owned sensor's full state.
+struct SavedSensor
+{
+	v3 position;
+	quat rotation;
+	uint32_t collision_group;
+	uint32_t collision_mask;
+	CK_DYNA ShapeParams* shapes;
+};
+
+SV_SERIALIZABLE(SavedSensor)
+{
+	SV_ADD(SV_SENSORS_IN_SAVE, position);
+	SV_ADD(SV_SENSORS_IN_SAVE, rotation);
+	SV_ADD(SV_SENSORS_IN_SAVE, collision_group);
+	SV_ADD(SV_SENSORS_IN_SAVE, collision_mask);
+	SV_ADD_ARRAY(SV_SENSORS_IN_SAVE, shapes);
 }
