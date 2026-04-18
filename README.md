@@ -190,7 +190,7 @@ int count = sensor_query(world, zone, bodies_inside, 32);
 
 ### Persistence
 
-Snapshot save/load is versioned binary, DEFLATE-compressed. Hulls, triangle
+Snapshot save/load is versioned binary. Hulls, triangle
 meshes, and heightfields are referenced by name so your asset loader
 rebinds them on load. Rewind is a ring buffer of deterministic snapshots
 you can jump back to; delta-compressed, so resting piles cost almost
@@ -218,12 +218,60 @@ world_rewind_by_steps(world, 30);             // or: jump back 30 steps
 ```
 
 
-### Debugging
+### Debugging (LLM-first)
 
-A tiny TCP debug server is built into the engine and a remote viewer
-(`tools/viewer.c`) attaches to a running game and walks its memory directly
--- no engine changes needed to inspect bodies, manifolds, contacts,
-islands, BVH, or the warm cache.
+The workflow assumes an LLM agent is driving: a deterministic repro, a
+named pause point in the test, and a reflected view of engine memory
+the agent can query without recompiling.
+
+**DBG_BREAK pause points.** Drop one wherever the symptom first shows:
+
+```c
+if (wi->body_state[bi].position.y < -0.3f)
+    DBG_BREAK("tunnel:first", *(World*)&w);
+```
+
+Run with `--debug --break=tunnel:*` and the test thread parks itself
+in a sleep loop when the predicate trips. The agent attaches the viewer
+(`tools/viewer.c`), which reads engine memory via `ReadProcessMemory`
+against reflected type tables -- bodies, manifolds, contacts, islands,
+warm cache, BVH, solver LDL state, narrowphase SAT intermediates. Zero
+engine edits to inspect anything new; add a field to a struct and it
+shows up in `get` next run.
+
+What the agent sees on attach looks like this:
+
+```
+> summary
+frame: 54   bodies: 128 (127 awake)   contacts: 312   islands: 4 (4 awake)
+step: 1.83 ms   np: 0.41   solve: 1.02   integrate: 0.12
+
+> get body_state 85
+position: (-0.761,  -0.124,  4.541)
+rotation: ( 0.000,   0.000,  0.000,  1.000)
+
+> get body_hot 85
+velocity:         (-1.49, -8.17,  0.08)
+angular_velocity: ( 0.00,  0.00,  0.00)
+
+> contacts 85
+manifold 0: body_a=85 body_b=-1 (static mesh) contacts=2 normal=(0.00,1.00,0.00)
+  [0] point=(-0.76,0.02,4.54) pen=0.019 lambda_n=0.00 feature_id=0x4f12
+  [1] point=(-0.74,0.02,4.56) pen=0.017 lambda_n=0.00 feature_id=0x4f13
+
+> get np_debug
+body_a=85 body_b=-1 winning_axis=face_a face_a_sep=-0.019 edge_sep=+0.004
+contact_normal=(0.00, 1.00, 0.00)   # sane: mesh-up
+
+> continue
+```
+
+From that paused state the agent fires hypotheses as queries instead of
+rebuilds -- `contacts 85`, `get np_debug`, `table body_hot`, `warm 85` --
+and only reaches for cdb when it needs function locals or a callstack.
+The `physics-debug` skill documents the full methodology (deterministic
+repro, break one frame before the bug, impulse ledger vs. velocity delta,
+the usual bias guards).
 
 
 ### Cross-engine testbed
@@ -259,18 +307,6 @@ cmake --build testbed/native/build --config Release
 dotnet run -c Release --project testbed/src/Testbed          # benchmark tables
 dotnet run -c Release --project testbed/src/Testbed.Visual   # live viewer
 ```
-
-The C# side was chosen specifically so Bepu (managed) is first-class;
-Jolt and nudge get exposed as native DLLs via `testbed/native/jolt_dll.cpp`
-and `testbed/native/nudge_dll.c`. The engine itself stays C.
-
-
-### Debugging across engines
-
-Run a scenario in all three at once and compare: if nudge and Jolt agree
-but Bepu drifts, it's a Bepu config; if Bepu and Jolt agree and nudge
-drifts, you found a nudge bug. Much faster than chasing a suspected
-regression with only nudge's own output.
 
 
 ### Cross-platform FP determinism
@@ -316,10 +352,8 @@ wide `/fp:fast` doesn't silently break determinism).
   repackage engine sources into a larger build. `vmath.h` and
   `nudge_internal.h` set it already; the command-line flag alone isn't
   enough on AppleClang.
-- **Threading determinism is preserved by graph coloring in the PGS
-  solver** -- `world->thread_count = 8` produces the same hash as
-  single-threaded. A parallel loop that writes body state without that
-  coloring is the one way to break it.
+- **Threading is deterministic** -- `world->thread_count = 8` produces
+  the same hash as single-threaded.
 
 
 ### Language / packaging
@@ -366,8 +400,7 @@ cmake -B build
 cmake --build build
 ```
 
-C23 compiler required. The engine is a unity build rooted at `src/main.c`;
-tests live in `src/test_main.c` and build as `nudge_tests`.
+C23 compiler required. The engine is a unity build rooted at `src/main.c`.
 
 
 License
