@@ -183,7 +183,11 @@ static bool g_show_joints = true;
 static bool g_show_bvh = true;
 static bool g_show_proxies = false;
 static bool g_show_sleep = true;
+#ifdef __EMSCRIPTEN__
+static bool g_show_shadows = false;  // TEMP: debug black-scene issue
+#else
 static bool g_show_shadows = true;
+#endif
 static bool g_translucent_shapes = false;
 static bool g_sleep_enabled = true;
 static bool g_sat_hint = true;

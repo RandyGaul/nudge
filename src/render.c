@@ -127,7 +127,7 @@ static const char* s_frag_src =
 	"        }\n"
 	"    }\n"
 	"    vec3 lit = v_color.rgb * (u_ambient + (1.0 - u_ambient) * ndl * (1.0 - shadow));\n"
-	"    frag_color = vec4(lit * v_color.a, v_color.a);\n"
+	"    frag_color = vec4(0.0, 1.0, 0.0, 1.0);\n" // DEBUG: force green\n
 	"}\n";
 
 // Shadow depth shaders (render scene from light, depth only).
@@ -655,7 +655,7 @@ static const char* s_bg_frag_src =
 	"uniform vec3 u_top;\n"
 	"uniform vec3 u_bot;\n"
 	"void main() {\n"
-	"    frag_color = vec4(mix(u_bot, u_top, v_uv.y), 1.0);\n"
+	"    frag_color = vec4(1.0, 0.0, 0.0, 1.0);\n"  // DEBUG: solid red
 	"}\n";
 
 static GLuint r_bg_program;
@@ -983,12 +983,34 @@ void render_end()
 	}
 
 	if (r_no_depth_write) glDepthMask(GL_FALSE);
+#ifdef __EMSCRIPTEN__
+	static int r_reported_state = 0;
+	if (!r_reported_state) {
+		r_reported_state = 1;
+		SDL_Log("nudge: r_program=%u, gl_DrawElementsInstanced=%p, gl_VertexAttribDivisor=%p, r_mesh_count=%d",
+			r_program, (void*)gl_DrawElementsInstanced, (void*)gl_VertexAttribDivisor, r_mesh_count);
+		for (int i = 0; i < r_mesh_count; i++) {
+			Mesh* m = get_mesh(i);
+			SDL_Log("nudge: mesh[%d] vao=%u index_count=%d instances=%d", i, m->vao, m->index_count, asize(r_instances[i]));
+		}
+	}
+#endif
 	for (int i = 0; i < r_mesh_count; i++) {
 		int count = asize(r_instances[i]);
 		if (count == 0) continue;
 		Mesh* m = get_mesh(i);
 		gl_BindVertexArray(m->vao);
 		gl_DrawElementsInstanced(GL_TRIANGLES, m->index_count, GL_UNSIGNED_SHORT, NULL, count);
+#ifdef __EMSCRIPTEN__
+		GLenum err = glGetError();
+		if (err != GL_NO_ERROR) {
+			static int err_reported = 0;
+			if (!err_reported) {
+				err_reported = 1;
+				SDL_Log("nudge: glDrawElementsInstanced err=0x%x mesh=%d count=%d", err, i, count);
+			}
+		}
+#endif
 	}
 	if (r_no_depth_write) glDepthMask(GL_TRUE);
 

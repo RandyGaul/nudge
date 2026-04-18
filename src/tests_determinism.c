@@ -119,6 +119,64 @@ static void det_dump_fma_probe()
 	printf("det fma probe: a*b+c bits = 0x%08x (%.9g)\n", bits, (double)r);
 }
 
+// Exercise every simd.h op the engine uses with non-trivial inputs, hash
+// the outputs. If this diverges cross-arch, one of the simd.h backends
+// has subtly different semantics and we can bisect which op. Uses volatile
+// inputs so constant-folding doesn't collapse anything.
+static void det_dump_simd_probe()
+{
+	volatile float ax = 1.25f, ay = -2.5f, az = 0.75f, aw = 3.125f;
+	volatile float bx = 0.5f,  by = 4.0f,  bz = -1.5f, bw = 2.25f;
+	simd4f a = simd_set(ax, ay, az, aw);
+	simd4f b = simd_set(bx, by, bz, bw);
+
+	simd4f r_add = simd_add(a, b);
+	simd4f r_sub = simd_sub(a, b);
+	simd4f r_mul = simd_mul(a, b);
+	simd4f r_div = simd_div(a, b);
+	simd4f r_min = simd_min(a, b);
+	simd4f r_max = simd_max(a, b);
+	simd4f r_sqrt = simd_sqrt(simd_mul(a, a));  // all positive
+	simd4f r_abs_like = simd_sub(simd_zero(), a);
+	simd4f r_cmpgt = simd_cmpgt(a, b);
+	simd4f r_blend = simd_blendv(a, b, r_cmpgt);
+
+	// v3_dot-style horizontal reduction via shuffles.
+	simd4f m = simd_mul(a, b);
+	simd4f s = simd_add(m, simd_shuffle(m, m, SIMD_SHUFFLE(3, 0, 2, 1)));
+	simd4f r_dot = simd_add(s, simd_shuffle(m, m, SIMD_SHUFFLE(3, 1, 0, 2)));
+
+	// Transpose a 4x4 and hash the transposed lanes.
+	simd4f r0 = a, r1 = b, r2 = simd_mul(a, b), r3 = simd_add(a, b);
+	simd_transpose4(&r0, &r1, &r2, &r3);
+
+	// Collect everything and hash.
+	uint64_t h = 0xcbf29ce484222325ull;
+	simd4f bundle[] = { r_add, r_sub, r_mul, r_div, r_min, r_max, r_sqrt,
+	                    r_abs_like, r_cmpgt, r_blend, r_dot, r0, r1, r2, r3 };
+	h = det_fnv1a_update(h, bundle, sizeof(bundle));
+	printf("det simd probe: 0x%016llx\n", (unsigned long long)h);
+
+	// Dump individual op results too so we can bisect which op diverges.
+	float buf[4];
+	#define DUMP(name, v) do { simd_store(buf, v); uint32_t b0,b1,b2,b3; memcpy(&b0,&buf[0],4); memcpy(&b1,&buf[1],4); memcpy(&b2,&buf[2],4); memcpy(&b3,&buf[3],4); printf("  %-9s %08x %08x %08x %08x\n", name, b0, b1, b2, b3); } while(0)
+	DUMP("add",   r_add);
+	DUMP("sub",   r_sub);
+	DUMP("mul",   r_mul);
+	DUMP("div",   r_div);
+	DUMP("min",   r_min);
+	DUMP("max",   r_max);
+	DUMP("sqrt",  r_sqrt);
+	DUMP("cmpgt", r_cmpgt);
+	DUMP("blend", r_blend);
+	DUMP("dot",   r_dot);
+	DUMP("t_r0",  r0);
+	DUMP("t_r1",  r1);
+	DUMP("t_r2",  r2);
+	DUMP("t_r3",  r3);
+	#undef DUMP
+}
+
 // Run the scene single-threaded, printing the world hash at a handful of
 // checkpoints so CI logs show where divergence starts accumulating.
 static void det_trace()
@@ -172,6 +230,7 @@ static int run_determinism_test(int threads_hi)
 {
 	const int steps = 240;
 	det_dump_fma_probe();
+	det_dump_simd_probe();
 	det_trace();
 	uint64_t h1 = det_run(steps, 1);
 	printf("det hash (threads=1): 0x%016llx\n", (unsigned long long)h1);
