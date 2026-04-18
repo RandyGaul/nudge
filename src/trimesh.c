@@ -71,6 +71,11 @@ struct TriMesh
 	BVH_Tree bvh;
 
 	const char* name;  // sinterned name for snapshot identification; NULL = unnamed
+
+	// Per-triangle material ids; NULL when unset (callers get body default).
+	// Heap-allocated outside the main block so it remains optional without
+	// forcing a rebuild of the mesh. Length equals tri_count when present.
+	uint8_t* material_ids;
 };
 
 void trimesh_set_name(TriMesh* mesh, const char* name)
@@ -205,10 +210,28 @@ void trimesh_free(TriMesh* m)
 {
 	if (!m) return;
 	bvh_free(&m->bvh);
+	free(m->material_ids);
 	free(m);
 }
 
 int trimesh_tri_count(const TriMesh* m) { return m ? m->tri_count : 0; }
+
+void trimesh_set_material_ids(TriMesh* mesh, const uint8_t* ids)
+{
+	free(mesh->material_ids);
+	mesh->material_ids = NULL;
+	if (!ids) return;
+	size_t bytes = (size_t)mesh->tri_count * sizeof(uint8_t);
+	mesh->material_ids = (uint8_t*)malloc(bytes);
+	memcpy(mesh->material_ids, ids, bytes);
+}
+
+uint8_t trimesh_get_material_id(const TriMesh* mesh, int tri_index)
+{
+	if (!mesh->material_ids) return 0;
+	assert(tri_index >= 0 && tri_index < mesh->tri_count);
+	return mesh->material_ids[tri_index];
+}
 
 static AABB trimesh_local_aabb(const TriMesh* m) { return (AABB){ m->aabb_min, m->aabb_max }; }
 

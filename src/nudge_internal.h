@@ -70,6 +70,9 @@ typedef struct BodyCold
 	// same class still collide with each other and with the world. Default 0
 	// = no compound (collisions follow group/mask only).
 	uint32_t compound_id;
+	// Default material id for this body. Reported in ContactSummary.material_a/b
+	// for non-mesh sides. Mesh sides prefer per-triangle ids when set.
+	uint8_t material_id;
 } BodyCold;
 
 // Hot: solver working set, iterated every PGS step, packed for cache.
@@ -561,6 +564,9 @@ typedef struct WorldInternal
 	// Scratch buffer reused across listener fires each step (grown to the
 	// largest per-body contact count). Avoids per-listener malloc churn.
 	CK_DYNA ContactSummary* listener_scratch;
+	// Material palette. palette[0] defaults to {0.5, 0, 0} in create_world;
+	// the rest are zero-initialized. Reporting-only (see nudge.h).
+	Material materials[256];
 } WorldInternal;
 
 // -----------------------------------------------------------------------------

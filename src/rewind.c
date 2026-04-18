@@ -96,6 +96,13 @@ typedef struct RewindFrame
 	SensorInternal* sensors;   // [n_sensors]; .shapes is a CK_DYNA owned here
 	uint32_t*       sensor_gen;
 	CK_DYNA int*    sensor_free;
+
+	// Material palette (256 entries). Stored copy-on-write: keyframes always
+	// carry a full copy; delta frames only store when the palette changed vs
+	// the rolling baseline. Restore walks backward to the nearest frame with
+	// a non-NULL pointer. NULL = inherit from earlier frame. Per-body
+	// material_id rides in BodyCold and is already covered by the dirty path.
+	Material*      materials;
 } RewindFrame;
 
 typedef struct RewindBuffer
@@ -114,6 +121,9 @@ typedef struct RewindBuffer
 	BodyState* baseline_state;
 	BodyCold*  baseline_cold;
 	ShapeInternal** baseline_shapes; // [n_bodies] deep-owned
+	// Material palette baseline (last-captured snapshot). A frame stores a
+	// palette copy only when this differs from the world's current palette.
+	Material baseline_materials[256];
 } RewindBuffer;
 
 static void rewind_frame_free(RewindFrame* f)
@@ -158,6 +168,8 @@ static void rewind_frame_free(RewindFrame* f)
 	CK_FREE(f->sensor_gen); f->sensor_gen = NULL;
 	afree(f->sensor_free);  f->sensor_free = NULL;
 	f->n_sensors = 0;
+
+	CK_FREE(f->materials); f->materials = NULL;
 }
 
 static void* rewind_clone_array(const void* src, size_t n, size_t elem_size)
@@ -437,6 +449,16 @@ static void rewind_capture_into(RewindBuffer* rb, RewindFrame* f, WorldInternal*
 	f->sensor_gen  = rewind_clone_array(w->sensor_gen,  ns, sizeof(uint32_t));
 	f->sensor_free = rewind_clone_dyna_int(w->sensor_free);
 
+	// Material palette: keyframes always carry a copy so restore never has
+	// to walk past the ring's oldest frame. Delta frames only store when
+	// the palette changed since the last capture (detected against baseline).
+	int materials_changed = memcmp(w->materials, rb->baseline_materials, sizeof(w->materials)) != 0;
+	if (is_keyframe || materials_changed) {
+		f->materials = (Material*)CK_ALLOC(sizeof(w->materials));
+		memcpy(f->materials, w->materials, sizeof(w->materials));
+	}
+	if (materials_changed) memcpy(rb->baseline_materials, w->materials, sizeof(w->materials));
+
 	// Update baseline to match current world state.
 	if (nb != rb->baseline_n_bodies) {
 		CK_FREE(rb->baseline_hot);   rb->baseline_hot = NULL;
@@ -551,6 +573,13 @@ static void rewind_promote_to_keyframe(RewindFrame* L, const RewindFrame* K)
 		rewind_pack_body(L->dirty_payload + (size_t)i * REWIND_PAYLOAD_SIZE,
 		                 &full_hot[i], &full_state[i], &full_cold[i]);
 		L->dirty_shapes[i] = full_shapes[i];  // transfer ownership
+	}
+
+	// Keyframes must always carry a palette so restore never walks past them.
+	// Inherit from K when L didn't change materials on its own frame.
+	if (!L->materials && K->materials) {
+		L->materials = (Material*)CK_ALLOC(256 * sizeof(Material));
+		memcpy(L->materials, K->materials, 256 * sizeof(Material));
 	}
 
 	CK_FREE(full_hot);
@@ -731,6 +760,18 @@ static void rewind_restore_from(WorldInternal* w, RewindBuffer* rb, int target_s
 	if (w->sensor_free) aclear(w->sensor_free);
 	int nsf = asize(tf->sensor_free);
 	for (int i = 0; i < nsf; i++) apush(w->sensor_free, tf->sensor_free[i]);
+
+	// Material palette: walk backward from target to the nearest frame with
+	// a captured palette. Keyframes always carry one, so the scan is bounded
+	// by ring depth; in practice the target is usually the first non-NULL.
+	for (int i = 0; i < rb->count; i++) {
+		int step = (target_slot - i + rb->max_frames) % rb->max_frames;
+		if (rb->frames[step].materials) {
+			memcpy(w->materials, rb->frames[step].materials, sizeof(w->materials));
+			break;
+		}
+	}
+	memcpy(rb->baseline_materials, w->materials, sizeof(w->materials));
 
 	if (w->broadphase_type == BROADPHASE_BVH) {
 		bvh_free(w->bvh_static);   bvh_init(w->bvh_static);
@@ -926,6 +967,7 @@ size_t world_rewind_memory_used(World world)
 		total += (size_t)f->n_warm          * (sizeof(uint64_t) + sizeof(WarmManifold));
 		total += (size_t)f->n_prev_touching * (sizeof(uint64_t) + sizeof(uint8_t));
 		total += (size_t)f->n_joint_pairs   * (sizeof(uint64_t) + sizeof(uint8_t));
+		if (f->materials) total += 256 * sizeof(Material);
 	}
 	return total;
 }

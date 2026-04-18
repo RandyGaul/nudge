@@ -396,6 +396,40 @@ typedef struct ContactSummary
 // valid until the next world_step. Writes count into *out_count.
 const ContactSummary* world_contact_summaries(World world, int* out_count);
 
+// -----------------------------------------------------------------------------
+// Material palette. 256 palette entries per world; bodies and trimesh triangles
+// carry a uint8 material_id that indexes this palette. Engine does not read
+// friction/restitution from the palette -- per-body BodyParams.friction/
+// restitution still drives the solver. The palette is reporting-only: it lets
+// users pass opaque metadata (user_data) or simple tuning floats through the
+// ContactSummary API without maintaining a side-table keyed by body+tri.
+//
+// Defaults: palette[0] = {0.5, 0.0, 0}. Bodies default to material_id 0.
+// TriMesh triangles default to body's material_id until trimesh_set_material_ids.
+
+typedef struct Material
+{
+	float friction;
+	float restitution;
+	uint32_t user_data;
+} Material;
+
+void world_set_material(World world, uint8_t id, Material m);
+Material world_get_material(World world, uint8_t id);
+
+// Set the default material id carried by a body. Summary.material_a/b reports
+// this id for non-mesh sides and for mesh sides without per-tri material ids.
+void body_set_material_id(World world, Body body, uint8_t id);
+uint8_t body_get_material_id(World world, Body body);
+
+// Attach a per-triangle material-id array to a trimesh. Array length must
+// match trimesh_tri_count(mesh). The trimesh copies the array internally;
+// caller may free after return. Pass ids=NULL to clear per-tri materials
+// (summary falls back to the body's default material_id).
+void trimesh_set_material_ids(TriMesh* mesh, const uint8_t* ids);
+// Read one triangle's material id. Returns 0 if no per-tri array is set.
+uint8_t trimesh_get_material_id(const TriMesh* mesh, int tri_index);
+
 // Per-body contact listener. Fired once per body per step (only when the
 // body has >= 1 contact that step). The pairs[] view is contiguous and
 // normalized: `self` is always in the `a` slot -- when the underlying

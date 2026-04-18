@@ -143,6 +143,7 @@ int world_save_snapshot(World world, const char* path)
 		sb.island_id         = w->body_cold[i].island_id;
 		sb.island_prev       = w->body_cold[i].island_prev;
 		sb.island_next       = w->body_cold[i].island_next;
+		sb.material_id       = w->body_cold[i].material_id;
 		int ns = asize(w->body_cold[i].shapes);
 		for (int s = 0; s < ns; s++)
 			apush(sb.shapes, snapshot_shape_from_internal(&w->body_cold[i].shapes[s]));
@@ -328,6 +329,13 @@ int world_save_snapshot(World world, const char* path)
 			apush(ssv.shapes, snapshot_shape_from_internal(&ss->shapes[k]));
 		SV_ADD_LOCAL(SV_SENSORS_IN_SAVE, ssv);
 		afree(ssv.shapes);
+	}
+
+	// Material palette: 256 fixed entries, written verbatim. Older files
+	// simply don't have this block (SV_ADD_LOCAL skips when version < tag).
+	for (int i = 0; i < 256; i++) {
+		Material m = w->materials[i];
+		SV_ADD_LOCAL(SV_MATERIALS, m);
 	}
 
 	CK_FREE(body_saved_idx);
@@ -525,6 +533,21 @@ static World snapshot_load_impl(SV_Context* S, World target)
 			sensor_add_shape(world, s, ssv.shapes[k]);
 		}
 		afree(ssv.shapes);
+	}
+
+	// Material palette + per-body material_id. Older files skip this block
+	// entirely (SV_ADD_LOCAL is a no-op when version < tag); palette entries
+	// keep their create_world defaults and body material_ids stay 0.
+	if (S->version >= SV_MATERIALS) {
+		for (int i = 0; i < saved_count; i++) {
+			int bi = handle_index(body_table[i]);
+			w->body_cold[bi].material_id = saved_bodies[i].material_id;
+		}
+	}
+	for (int i = 0; i < 256; i++) {
+		Material m = {0};
+		SV_ADD_LOCAL(SV_MATERIALS, m);
+		if (S->version >= SV_MATERIALS) w->materials[i] = m;
 	}
 
 	CK_FREE(body_table);

@@ -45,6 +45,12 @@ enum
 	// SHAPE_HULL and SHAPE_MESH now serialize a name string (from
 	// hull_get_name / trimesh_get_name); loader resolves via world registry.
 	SV_HULL_MESH_NAMES,
+	// World material palette + per-body material_id. The palette (256 entries)
+	// ships in the deterministic-world block; the per-body id rides in
+	// SavedBody. Per-triangle material_ids on trimeshes are NOT captured --
+	// trimeshes are caller-owned and referenced by name, so per-tri state
+	// belongs to the user's mesh object.
+	SV_MATERIALS,
 	// --- insert new entries here ---
 	SV_LATEST_PLUS_ONE
 };
@@ -81,7 +87,8 @@ enum
 
 #define SV_MEMCPY_SAFE_TYPES(X) \
 	X(v3) \
-	X(quat)
+	X(quat) \
+	X(Material)
 
 // Forward typedefs for all serializable user types.
 #define SV_FORWARD(T) typedef struct T T;
@@ -170,8 +177,10 @@ static void sv_double(SV_Context* S, double*   v);
 static void sv_cstr  (SV_Context* S, const char** v);
 static void sv_v3    (SV_Context* S, v3*    v);
 static void sv_quat  (SV_Context* S, quat*  v);
-static void sv_v3_array  (SV_Context* S, v3**   a);
-static void sv_quat_array(SV_Context* S, quat** a);
+static void sv_Material      (SV_Context* S, Material* m);
+static void sv_v3_array      (SV_Context* S, v3**       a);
+static void sv_quat_array    (SV_Context* S, quat**     a);
+static void sv_Material_array(SV_Context* S, Material** a);
 
 // Primary dispatch. Uses address-of so that _Generic sees pointer-to-type,
 // which works for incomplete types (pointers are always complete).
@@ -336,6 +345,22 @@ static void sv_quat_array(SV_Context* S, quat** a)
 		quat* p = *a;
 		afit(p, n); asetlen(p, n);
 		if (n > 0) sv_raw_read(S, p, (size_t)n * sizeof(quat));
+		*a = p;
+	}
+}
+static void sv_Material(SV_Context* S, Material* m) { if (S->saving) sv_raw_write(S, m, sizeof(Material)); else sv_raw_read(S, m, sizeof(Material)); }
+static void sv_Material_array(SV_Context* S, Material** a)
+{
+	if (S->saving) {
+		int n = asize(*a);
+		sv_int32(S, &n);
+		if (n > 0) sv_raw_write(S, *a, (size_t)n * sizeof(Material));
+	} else {
+		int n = 0;
+		sv_int32(S, &n);
+		Material* p = *a;
+		afit(p, n); asetlen(p, n);
+		if (n > 0) sv_raw_read(S, p, (size_t)n * sizeof(Material));
 		*a = p;
 	}
 }
@@ -539,6 +564,8 @@ struct SavedBody
 	int island_id;
 	int island_prev;
 	int island_next;
+	// Default material palette index (see world_set_material); 0 in older files.
+	uint8_t material_id;
 };
 
 SV_SERIALIZABLE(SavedBody)
@@ -555,6 +582,7 @@ SV_SERIALIZABLE(SavedBody)
 	SV_ADD(SV_DETERMINISTIC_WORLD, island_id);
 	SV_ADD(SV_DETERMINISTIC_WORLD, island_prev);
 	SV_ADD(SV_DETERMINISTIC_WORLD, island_next);
+	SV_ADD(SV_MATERIALS, material_id);
 }
 
 // Joint params for each joint type. Each references bodies by saved-index

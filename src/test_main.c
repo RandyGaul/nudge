@@ -40,6 +40,7 @@
 #include "tests_threading_unit.c"
 #include "tests_weld_bridge_unit.c"
 #include "tests_multishape_unit.c"
+#include "tests_contacts_unit.c"
 #include "tests_epa_debug.c"
 #include "tests_epa_perf.c"
 
@@ -275,6 +276,7 @@ int main(int argc, char* argv[])
 		run_threading_unit_tests();
 		run_weld_bridge_unit_tests();
 		run_multishape_unit_tests();
+		run_contacts_unit_tests();
 		run_ldl_unit_tests();
 		run_inertia_unit_tests();
 		run_jacobian_unit_tests();
@@ -356,6 +358,7 @@ int main(int argc, char* argv[])
 		run_threading_unit_tests();
 		run_weld_bridge_unit_tests();
 		run_multishape_unit_tests();
+		run_contacts_unit_tests();
 		run_ldl_unit_tests();
 		run_inertia_unit_tests();
 		run_jacobian_unit_tests();

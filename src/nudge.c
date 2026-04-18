@@ -61,6 +61,7 @@ World create_world(WorldParams params)
 	bvh_init(w->bvh_static);
 	bvh_init(w->bvh_dynamic);
 	bvh_init(w->bvh_sleeping);
+	w->materials[0] = (Material){ .friction = 0.5f, .restitution = 0.0f, .user_data = 0 };
 	return (World){ (uint64_t)w };
 }
 
@@ -1479,6 +1480,32 @@ void body_set_sleep_allowed(World world, Body body, int allowed)
 		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake)
 			island_wake(w, isl);
 	}
+}
+
+void world_set_material(World world, uint8_t id, Material m)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	w->materials[id] = m;
+}
+
+Material world_get_material(World world, uint8_t id)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	return w->materials[id];
+}
+
+void body_set_material_id(World world, Body body, uint8_t id)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	assert(split_valid(w->body_gen, body));
+	w->body_cold[handle_index(body)].material_id = id;
+}
+
+uint8_t body_get_material_id(World world, Body body)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	assert(split_valid(w->body_gen, body));
+	return w->body_cold[handle_index(body)].material_id;
 }
 
 // -----------------------------------------------------------------------------
