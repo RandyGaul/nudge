@@ -2,11 +2,24 @@
 // test_main.c -- unity build root for test executable.
 // Includes only the physics engine + tests, no rendering/SDL/imgui.
 
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <stdbool.h>
+#pragma comment(lib, "ws2_32.lib")
+#undef small
+#undef near
+#undef far
+
 #define CKIT_IMPLEMENTATION
 #include "ckit.h"
 
 #include "nudge.h"
 #include "nudge.c"
+// debug_server.c provides a tiny TCP server + reflection + the DBG_BREAK macro.
+// In test mode (NUDGE_HOST_APP not defined) only inspection + break control are
+// available. Tests opt in via --debug; the DBG_BREAK macro is a no-op otherwise.
+#include "debug_server.c"
 #include "tests.c"
 #include "tests_ldl_unit.c"
 #include "tests_inertia_unit.c"
@@ -33,6 +46,28 @@
 int main(int argc, char* argv[])
 {
 	setvbuf(stdout, NULL, _IONBF, 0); // unbuffered so crashes don't hide output
+
+	// --debug starts the TCP debug server so a viewer can attach. --break=<pat>
+	// arms DBG_BREAK(name, world) sites whose names glob-match the pattern.
+	// Pattern syntax: "*" matches all, "ldl_*" prefix, "*cant*" contains, "foo" exact.
+	// Without --debug, DBG_BREAK is a no-op (predicate check only, ~free).
+	const char* break_pat = NULL;
+	int debug_enabled = 0;
+	int debug_port = 0;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--debug") == 0) debug_enabled = 1;
+		else if (strncmp(argv[i], "--break=", 8) == 0) { break_pat = argv[i] + 8; debug_enabled = 1; }
+		else if (strncmp(argv[i], "--debug-port=", 13) == 0) debug_port = atoi(argv[i] + 13);
+	}
+	if (debug_enabled) {
+		if (debug_port > 0) debug_server_set_port(debug_port);
+		debug_server_set_break_filter(break_pat ? break_pat : "*");
+		g_dbg_break_enabled = 1;
+		debug_server_init();
+		fprintf(stderr, "[dbg] test-mode debug server up. break filter=\"%s\". Connect with nudge_viewer.exe localhost %d.\n",
+			break_pat ? break_pat : "*", debug_port > 0 ? debug_port : 9999);
+	}
+
 	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--debug-epa") == 0) { debug_epa(); return 0; }
 	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--bench-epa") == 0) { bench_epa_vs_sat(); return 0; }
 	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--bench-epa-scenes") == 0) { bench_epa_scenes(); return 0; }
@@ -336,5 +371,6 @@ int main(int argc, char* argv[])
 		run_shattering_unit_tests();
 		run_pgs_vs_ldl_tests();
 	}
+	if (debug_enabled) debug_server_shutdown();
 	return test_fail > 0 ? 1 : 0;
 }

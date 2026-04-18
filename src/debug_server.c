@@ -5,15 +5,33 @@
 // Included from main.c (unity build).
 // Winsock headers included from main.c before SDL (ordering requirement).
 
-#define DBG_PORT 9999
+#define DBG_PORT_DEFAULT 9999
 #define DBG_MAX_CLIENTS 4
 #define DBG_RECV_BUF 4096
 
+// Host-provided state. In app mode (nudge.exe, NUDGE_HOST_APP defined) these
+// track the main scene. In test mode, tests publish the current World via
+// dbg_set_world() and the server exposes only inspection + break control.
+static World g_dbg_world;     // current world (paused or live)
+static int g_dbg_port = DBG_PORT_DEFAULT;
+
+// Breakpoint state -- shared by app + test mode. Host code calls DBG_BREAK()
+// which routes through dbg_break_wait_impl() when g_dbg_break_enabled is set.
+// Published so clients can see where the engine is paused.
+volatile int g_dbg_break_enabled;            // set to 1 by host when --debug active
+static const char* g_dbg_break_filter = "*"; // glob-ish pattern, "*" = all
+static const char* g_dbg_break_name;         // name of current (active) break, NULL if running
+static const char* g_dbg_break_file;
+static int g_dbg_break_line;
+static volatile int g_dbg_break_resume;      // set to 1 by "continue" command
+
+#ifdef NUDGE_HOST_APP
 // Remote drag state (mirrors the mouse constraint but driven via TCP).
 static Body g_drag_body;
 static Body g_drag_anchor;
 static Joint g_drag_joint;
 static v3 g_drag_local_hit;
+#endif
 
 // ============================================================================
 // Reflection: type descriptors built from real engine structs via offsetof.
@@ -424,53 +442,87 @@ static void dbg_dispatch(DbgClient *c, char *line)
 
 	if (strcmp(cmd, "help") == 0) {
 		dbg_send_str(c,
-			"OK engine driver commands (sent via TCP, processed by nudge.exe):\n"
+			"OK engine driver commands (sent via TCP):\n"
 			"\n"
-			"  Simulation control:\n"
+			"  Common (both app + test mode):\n"
 			"    help                              this help\n"
-			"    info                              PID, world pointer, scene, frame, body count\n"
+			"    info                              PID, world pointer, frame, break state\n"
+			"    types                             send type layout data for RPM viewer\n"
+			"    continue | c                      resume from a break (no-op if not paused)\n"
+			"    where                             show current break name + file:line\n"
+			"    break-filter [pattern]            get/set runtime break filter (glob-ish)\n"
+#ifdef NUDGE_HOST_APP
+			"\n"
+			"  App mode (nudge.exe):\n"
 			"    pause                             toggle pause\n"
 			"    step [n]                          advance n frames instantly (default 1)\n"
-			"    run [n]                           run n frames at render speed, auto-pause (default 60)\n"
+			"    run [n]                           run n frames at render speed, auto-pause\n"
 			"    scene <name>                      load scene by name (prefix match ok)\n"
 			"    scenes                            list all scene names\n"
 			"    restart                           restart current scene\n"
 			"    slow <factor>                     time scale: 0.1=slow-mo, 1=normal, 10=fast\n"
-			"    playrecording                     replay mouse_recording.bin (F5 recording)\n"
-			"\n"
-			"  Body interaction:\n"
+			"    playrecording                     replay mouse_recording.bin\n"
 			"    push <idx> <fx fy fz> [rx ry rz]  impulse at point (default top of body)\n"
 			"    drag <idx> <lx ly lz> <tx ty tz>  begin mouse-like drag (soft spring)\n"
-			"    dragto <tx ty tz>                  update drag target position\n"
-			"    release                            end drag\n"
+			"    dragto <tx ty tz>                 update drag target position\n"
+			"    release                           end drag\n"
+			"    highlight <idx> <color|r g b>     tint body\n"
+			"    unhighlight <idx|all>             remove tint\n"
+			"    label <text>                      show overlay text for 5 seconds\n"
+			"    npviz                             enter NP Viz mode\n"
+			"    npvset <A|B> <kind> ...           set shape in NP Viz\n"
+#else
 			"\n"
-			"  Visual:\n"
-			"    highlight <idx> <color|r g b>      tint body (red/green/yellow/cyan/orange or r g b)\n"
-			"    unhighlight <idx|all>              remove tint\n"
-			"    label <text>                       show overlay text for 5 seconds\n"
-			"\n"
-			"  NP Viz (narrowphase visualizer):\n"
-			"    npviz                              enter NP Viz mode\n"
-			"    npvset <A|B> <kind> <px py pz> <qx qy qz qw> <radius> <hh> <hex hey hez>\n"
-			"                                       set shape in NP Viz\n"
-			"                                       kinds: 0=sphere 1=capsule 2=box 3=cylinder 4+=hulls\n"
-			"\n"
-			"  Reflection:\n"
-			"    types                              send type layout data for RPM viewer\n"
+			"  Test mode: simulation control is driven by the test. Use `continue`\n"
+			"  to release a pause point; the test schedules the next step.\n"
+#endif
 		);
 	} else if (strcmp(cmd, "info") == 0) {
-		WorldInternal *w = (WorldInternal *)g_world.id;
+		WorldInternal *w = g_dbg_world.id ? (WorldInternal *)g_dbg_world.id : NULL;
 		CK_SDYNA char *s = NULL;
+#ifdef NUDGE_HOST_APP
 		sfmt(s, "OK pid=%lu world=0x%llX scene=\"%s\" frame=%d bodies=%d paused=%s\n",
 			(unsigned long)GetCurrentProcessId(),
-			(unsigned long long)g_world.id,
+			(unsigned long long)g_dbg_world.id,
 			g_scenes[g_scene_index].name,
-			w->frame,
+			w ? w->frame : 0,
 			asize(g_draw_list),
 			g_paused ? "true" : "false");
+#else
+		sfmt(s, "OK pid=%lu world=0x%llX host=test frame=%d break=%s%s%s\n",
+			(unsigned long)GetCurrentProcessId(),
+			(unsigned long long)g_dbg_world.id,
+			w ? w->frame : 0,
+			g_dbg_break_name ? g_dbg_break_name : "(none)",
+			g_dbg_break_name ? " at " : "",
+			g_dbg_break_name ? g_dbg_break_file : "");
+#endif
 		dbg_reply(c, s);
 	} else if (strcmp(cmd, "types") == 0) {
 		dbg_send_types(c);
+	} else if (strcmp(cmd, "continue") == 0 || strcmp(cmd, "c") == 0) {
+		if (!g_dbg_break_name) { dbg_send_str(c, "ERR not at a break\n"); return; }
+		g_dbg_break_resume = 1;
+		dbg_send_str(c, "OK resuming\n");
+	} else if (strcmp(cmd, "where") == 0) {
+		if (!g_dbg_break_name) { dbg_send_str(c, "OK running (no active break)\n"); return; }
+		CK_SDYNA char *s = NULL;
+		sfmt(s, "OK break=\"%s\" at %s:%d world=0x%llX\n",
+			g_dbg_break_name, g_dbg_break_file, g_dbg_break_line,
+			(unsigned long long)g_dbg_world.id);
+		dbg_reply(c, s);
+	} else if (strcmp(cmd, "break-filter") == 0) {
+		// Update the break filter at runtime. Empty => keep current.
+		if (*rest) {
+			static char filter_buf[128];
+			strncpy(filter_buf, rest, sizeof(filter_buf) - 1);
+			filter_buf[sizeof(filter_buf) - 1] = '\0';
+			g_dbg_break_filter = filter_buf;
+		}
+		CK_SDYNA char *s = NULL;
+		sfmt(s, "OK filter=\"%s\" enabled=%d\n", g_dbg_break_filter ? g_dbg_break_filter : "", g_dbg_break_enabled);
+		dbg_reply(c, s);
+#ifdef NUDGE_HOST_APP
 	} else if (strcmp(cmd, "pause") == 0) {
 		g_paused = !g_paused;
 		CK_SDYNA char *s = NULL;
@@ -479,8 +531,8 @@ static void dbg_dispatch(DbgClient *c, char *line)
 	} else if (strcmp(cmd, "step") == 0) {
 		int n = (*rest) ? atoi(rest) : 1;
 		if (n < 1) n = 1;
-		for (int i = 0; i < n; i++) world_step(g_world, 1.0f / 60.0f);
-		WorldInternal *w = (WorldInternal *)g_world.id;
+		for (int i = 0; i < n; i++) world_step(g_dbg_world, 1.0f / 60.0f);
+		WorldInternal *w = (WorldInternal *)g_dbg_world.id;
 		CK_SDYNA char *s = NULL;
 		sfmt(s, "OK frame=%d\n", w->frame);
 		dbg_reply(c, s);
@@ -498,9 +550,9 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		if (found >= 0) {
 			g_scene_index = found;
 			setup_scene();
-			WorldInternal *w = (WorldInternal *)g_world.id;
+			WorldInternal *w = (WorldInternal *)g_dbg_world.id;
 			CK_SDYNA char *s = NULL;
-			sfmt(s, "OK scene=\"%s\" world=0x%llX frame=%d\n", g_scenes[found].name, (unsigned long long)g_world.id, w->frame);
+			sfmt(s, "OK scene=\"%s\" world=0x%llX frame=%d\n", g_scenes[found].name, (unsigned long long)g_dbg_world.id, w->frame);
 			dbg_reply(c, s);
 		} else {
 			dbg_send_str(c, "ERR unknown scene\n");
@@ -514,9 +566,9 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		dbg_reply(c, s);
 	} else if (strcmp(cmd, "restart") == 0) {
 		setup_scene();
-		WorldInternal *w = (WorldInternal *)g_world.id;
+		WorldInternal *w = (WorldInternal *)g_dbg_world.id;
 		CK_SDYNA char *s = NULL;
-		sfmt(s, "OK world=0x%llX frame=%d\n", (unsigned long long)g_world.id, w->frame);
+		sfmt(s, "OK world=0x%llX frame=%d\n", (unsigned long long)g_dbg_world.id, w->frame);
 		dbg_reply(c, s);
 	} else if (strcmp(cmd, "push") == 0) {
 		// push <body_idx> <fx> <fy> <fz> [rx ry rz]
@@ -529,7 +581,7 @@ static void dbg_dispatch(DbgClient *c, char *line)
 			dbg_send_str(c, "ERR usage: push <body_idx> <fx> <fy> <fz> [rx ry rz]\n");
 			return;
 		}
-		WorldInternal *w = (WorldInternal *)g_world.id;
+		WorldInternal *w = (WorldInternal *)g_dbg_world.id;
 		if (idx < 0 || idx >= asize(w->body_hot) || !(w->body_gen[idx] & 1)) {
 			dbg_send_str(c, "ERR invalid body index\n");
 			return;
@@ -563,14 +615,14 @@ static void dbg_dispatch(DbgClient *c, char *line)
 			dbg_send_str(c, "ERR usage: drag <body_idx> <local_xyz> <target_xyz>\n");
 			return;
 		}
-		WorldInternal *w = (WorldInternal *)g_world.id;
+		WorldInternal *w = (WorldInternal *)g_dbg_world.id;
 		if (idx < 0 || idx >= asize(w->body_hot) || !(w->body_gen[idx] & 1)) {
 			dbg_send_str(c, "ERR invalid body index\n");
 			return;
 		}
 		if (g_drag_body.id) {
-			destroy_joint(g_world, g_drag_joint);
-			destroy_body(g_world, g_drag_anchor);
+			destroy_joint(g_dbg_world, g_drag_joint);
+			destroy_body(g_dbg_world, g_drag_anchor);
 			g_drag_body = (Body){0};
 		}
 		// Find the Body handle from index
@@ -581,10 +633,10 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		if (!target_body.id) { dbg_send_str(c, "ERR body not in draw list\n"); return; }
 		g_drag_body = target_body;
 		g_drag_local_hit = V3(lx, ly, lz);
-		g_drag_anchor = create_body(g_world, (BodyParams){ .position = V3(tx, ty, tz), .rotation = quat_identity(), .mass = 0 });
+		g_drag_anchor = create_body(g_dbg_world, (BodyParams){ .position = V3(tx, ty, tz), .rotation = quat_identity(), .mass = 0 });
 		// Softer spring than mouse constraint (2Hz vs 5Hz) because TCP
 		// commands move the target in discrete jumps, not smooth mouse motion.
-		g_drag_joint = create_ball_socket(g_world, (BallSocketParams){
+		g_drag_joint = create_ball_socket(g_dbg_world, (BallSocketParams){
 			.body_a = g_drag_anchor, .body_b = g_drag_body,
 			.local_offset_a = V3(0, 0, 0), .local_offset_b = g_drag_local_hit,
 			.spring = { .frequency = 2.0f, .damping_ratio = 1.0f },
@@ -603,7 +655,7 @@ static void dbg_dispatch(DbgClient *c, char *line)
 			return;
 		}
 		if (!g_drag_body.id) { dbg_send_str(c, "ERR not dragging\n"); return; }
-		WorldInternal *w = (WorldInternal *)g_world.id;
+		WorldInternal *w = (WorldInternal *)g_dbg_world.id;
 		int anchor_idx = handle_index(g_drag_anchor);
 		body_pos(w, anchor_idx) = V3(tx, ty, tz);
 		int joint_idx = handle_index(g_drag_joint);
@@ -612,8 +664,8 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		dbg_send_str(c, "OK\n");
 	} else if (strcmp(cmd, "release") == 0) {
 		if (!g_drag_body.id) { dbg_send_str(c, "ERR not dragging\n"); return; }
-		destroy_joint(g_world, g_drag_joint);
-		destroy_body(g_world, g_drag_anchor);
+		destroy_joint(g_dbg_world, g_drag_joint);
+		destroy_body(g_dbg_world, g_drag_anchor);
 		g_drag_body = (Body){0};
 		g_drag_anchor = (Body){0};
 		g_drag_joint = (Joint){0};
@@ -662,14 +714,14 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		g_rec_start_frame = rec_start;
 		g_scene_index = rec_scene;
 		setup_scene();
-		WorldInternal *pw = (WorldInternal *)g_world.id;
-		for (int i = pw->frame; i < rec_start; i++) world_step(g_world, 1.0f / 60.0f);
+		WorldInternal *pw = (WorldInternal *)g_dbg_world.id;
+		for (int i = pw->frame; i < rec_start; i++) world_step(g_dbg_world, 1.0f / 60.0f);
 		g_recording = 2;
 		g_rec_body_draw_idx = -1;
 		g_playback_frame = 0;
 		g_paused = false;
 		CK_SDYNA char *s = NULL;
-		sfmt(s, "OK playing %d frames (scene=%d start=%d) world=0x%llX\n", rec_n, rec_scene, rec_start, (unsigned long long)g_world.id);
+		sfmt(s, "OK playing %d frames (scene=%d start=%d) world=0x%llX\n", rec_n, rec_scene, rec_start, (unsigned long long)g_dbg_world.id);
 		dbg_reply(c, s);
 	} else if (strcmp(cmd, "run") == 0) {
 		int n = (*rest) ? atoi(rest) : 60;
@@ -717,6 +769,7 @@ static void dbg_dispatch(DbgClient *c, char *line)
 		float s = (float)atof(rest);
 		if (s > 0 && s <= 10.0f) { g_time_scale = s; CK_SDYNA char *r = NULL; sfmt(r, "OK time_scale=%.2f\n", s); dbg_reply(c, r); }
 		else dbg_send_str(c, "ERR expected 0 < factor <= 10\n");
+#endif // NUDGE_HOST_APP
 	} else {
 		dbg_send_str(c, "ERR unknown command, try 'help'\n");
 	}
@@ -743,7 +796,7 @@ static void debug_server_init()
 	struct sockaddr_in addr = {0};
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = INADDR_ANY;
-	addr.sin_port = htons(DBG_PORT);
+	addr.sin_port = htons((u_short)g_dbg_port);
 
 	if (bind(g_dbg.listen_sock, (struct sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR) {
 		closesocket(g_dbg.listen_sock); g_dbg.listen_sock = INVALID_SOCKET; return;
@@ -754,7 +807,7 @@ static void debug_server_init()
 
 	g_dbg.initialized = true;
 	printf("[dbg] listening on port %d (PID %lu, world=0x%llX)\n",
-		DBG_PORT, (unsigned long)GetCurrentProcessId(), (unsigned long long)g_world.id);
+		g_dbg_port, (unsigned long)GetCurrentProcessId(), (unsigned long long)g_dbg_world.id);
 }
 
 static void debug_server_poll()
@@ -772,7 +825,7 @@ static void debug_server_poll()
 		// Send banner + types automatically on connect
 		CK_SDYNA char *banner = NULL;
 		sfmt(banner, "nudge pid=%lu world=0x%llX\n",
-			(unsigned long)GetCurrentProcessId(), (unsigned long long)g_world.id);
+			(unsigned long)GetCurrentProcessId(), (unsigned long long)g_dbg_world.id);
 		dbg_send_str(c, banner);
 		sfree(banner);
 		dbg_send_types(c);
@@ -817,3 +870,79 @@ static void debug_server_shutdown()
 	WSACleanup();
 	g_dbg.initialized = false;
 }
+
+// ============================================================================
+// Host-facing setters / breakpoint API.
+// ============================================================================
+
+// Host publishes the World to inspect. In app mode, nudge.exe calls this once
+// with the active world. In test mode, the DBG_BREAK macro calls it right
+// before pausing so each test's World is surfaced to the viewer.
+static void debug_server_set_world(World w) { g_dbg_world = w; }
+static void debug_server_set_port(int port) { g_dbg_port = port > 0 ? port : DBG_PORT_DEFAULT; }
+static void debug_server_set_break_filter(const char* pattern) { g_dbg_break_filter = pattern ? pattern : "*"; }
+
+// Glob match with '*' wildcard (matches any run of characters, including empty).
+// Simple greedy backtrack -- patterns are short (a few chars) so recursion depth is fine.
+static int dbg_glob_match(const char* pat, const char* s)
+{
+	if (!pat) return 1;
+	if (*pat == '\0') return *s == '\0';
+	if (*pat == '*') {
+		// Skip consecutive stars.
+		while (*pat == '*') pat++;
+		if (*pat == '\0') return 1;
+		for (const char* p = s; *p; p++) if (dbg_glob_match(pat, p)) return 1;
+		return dbg_glob_match(pat, s + strlen(s));
+	}
+	if (*s == '\0') return 0;
+	if (*pat != *s) return 0;
+	return dbg_glob_match(pat + 1, s + 1);
+}
+
+// Returns 1 if `name` matches the current break filter. Host code can call this
+// before building expensive diagnostic state so breaks are truly zero-cost when
+// the filter excludes them.
+static int dbg_break_match(const char* name)
+{
+	if (!g_dbg_break_enabled) return 0;
+	return dbg_glob_match(g_dbg_break_filter ? g_dbg_break_filter : "*", name);
+}
+
+// Actual implementation of DBG_BREAK. Publishes the World and break metadata,
+// then polls the server until a `continue` command arrives. While paused, a
+// connected viewer can issue inspection commands (get/summary/table/etc.)
+// against the published World -- exactly like hitting a debugger breakpoint.
+static void dbg_break_wait_impl(const char* name, const char* file, int line, World w)
+{
+	if (!g_dbg.initialized) return; // not running server -> no-op
+
+	g_dbg_world = w;
+	g_dbg_break_name = name;
+	g_dbg_break_file = file;
+	g_dbg_break_line = line;
+	g_dbg_break_resume = 0;
+
+	// Log locally so a user running the test without an attached viewer can
+	// see exactly where it stopped. Async TCP pushes mix badly with the viewer's
+	// command/response model, so we leave break-state discovery to the `where`
+	// and `info` commands instead.
+	fprintf(stderr, "[dbg] break \"%s\" at %s:%d (world=0x%llX). Connect viewer and send `continue`.\n",
+		name, file, line, (unsigned long long)w.id);
+	fflush(stderr);
+
+	// Pump the TCP event loop until a viewer sends `continue`. Sleep briefly so
+	// we don't spin at 100% CPU while waiting.
+	while (!g_dbg_break_resume) {
+		debug_server_poll();
+		Sleep(5);
+	}
+
+	g_dbg_break_name = NULL;
+	g_dbg_break_file = NULL;
+	g_dbg_break_line = 0;
+}
+
+// Pause-point macro for use in tests or engine code. Compiles to a single
+// predicate check + function call; no-op when --debug is absent.
+#define DBG_BREAK(name, world) do { if (dbg_break_match(name)) dbg_break_wait_impl((name), __FILE__, __LINE__, (world)); } while (0)

@@ -65,6 +65,7 @@ void draw();
 static void debug_server_init();
 static void debug_server_poll();
 static void debug_server_shutdown();
+static void debug_server_set_world(World w);
 
 static void platform_shutdown()
 {
@@ -445,6 +446,7 @@ void init()
 
 	setup_scene();
 
+	debug_server_set_world(g_world);
 	debug_server_init();
 }
 
@@ -464,6 +466,7 @@ static void setup_scene()
 		.gravity = V3(0, -9.81f, 0),
 		.broadphase = BROADPHASE_BVH,
 	});
+	debug_server_set_world(g_world);
 
 	((WorldInternal*)g_world.id)->sleep_enabled = g_sleep_enabled;
 	((WorldInternal*)g_world.id)->ldl_enabled = g_ldl_enabled;
@@ -485,6 +488,7 @@ static void draw_aabb_wireframe(v3 lo, v3 hi, v3 color);
 
 static bool g_npv_mode = false;
 #include "np_viz.c"
+#define NUDGE_HOST_APP
 #include "debug_server.c"
 
 void update()
