@@ -21,9 +21,10 @@
 //
 // v1 scope: internal dynamics + static pins. No collision, no coupling.
 
-#define SB_COMPLIANCE_FLOOR 1e-8   // tiny regularization for rigid links to keep K SPD
-#define SB_BAUMGARTE_GAIN   0.2f   // beta for rigid links' position drift correction
-#define SB_POS_CLAMP        100.0f // sanity clamp on lambda solution
+#define SB_COMPLIANCE_FLOOR      5e-5  // regularization floor for rigid links, scaled by trace(K)/n
+#define SB_OVER_CONSTRAINT_SCALE 1.0   // compliance *= (1 + scale * redundant_dofs) for over-constrained islands
+#define SB_BAUMGARTE_GAIN        0.2f  // beta for rigid links' position drift correction
+#define SB_MAX_PUSH_VEL          3.0f  // per-substep clamp on Baumgarte bias magnitude (m/s)
 
 // -----------------------------------------------------------------------------
 // Handle <-> pointer resolution.
@@ -410,18 +411,20 @@ static void sb_collide_node_with_world(WorldInternal* w, SoftBodyInternal* sb, i
 	}
 }
 
-// Once-per-frame: refresh link axes from current positions, compute per-link
-// compliance/bias from sub_dt, build K, factor K. The axes and K are reused
-// across every substep this frame -- K changes only with node positions and
-// inverse masses, and per-substep position drift is small enough that stale
-// K + fresh RHS is a standard approximation. Returns 0 on success, -1 if K
-// is singular (caller then skips the solve but still integrates / collides).
+// Once-per-frame: refresh link axes, compute per-link compliance/bias, build K
+// from current state, factor K. The factored K is used for every substep this
+// frame -- factorization is still the dominant cost, so a future optimization
+// pass should avoid rebuilding/refactoring when K is approximately unchanged
+// (stiff body undergoing only rigid motion; see project_soft_bodies.md).
+//
+// Returns 0 on success, -1 if K is singular (caller skips solve but still
+// integrates + collides).
 static int sb_prepare_frame(SoftBodyInternal* sb, float sub_dt)
 {
 	int L = sb->link_count;
 	if (L == 0) return 0;
 
-	// Shared spring params from soft-body defaults, once per frame.
+	// Shared spring params for rigid vs soft default.
 	float soft_compliance = 0.0f, soft_ptv = 0.0f;
 	SpringParams sp = sb->params.default_spring;
 	if (sp.frequency > 0.0f) {
@@ -436,28 +439,27 @@ static int sb_prepare_frame(SoftBodyInternal* sb, float sub_dt)
 		}
 	}
 	int rigid_default = (soft_compliance == 0.0f);
-	float rigid_compliance = SB_COMPLIANCE_FLOOR;
 	float rigid_ptv = SB_BAUMGARTE_GAIN / sub_dt;
 
-	// Refresh axes + store per-link compliance / pos_to_vel for this sub_dt.
+	// Refresh axes.
 	for (int k = 0; k < L; k++) {
 		SoftLink* lk = &sb->links[k];
 		v3 d = sub(sb->node_pos[lk->node_j], sb->node_pos[lk->node_i]);
 		float l2 = len2(d);
 		float length = l2 > 1e-16f ? sqrtf(l2) : 1e-8f;
 		lk->axis = scale(d, 1.0f / length);
-		lk->compliance = rigid_default ? rigid_compliance : soft_compliance;
-		lk->pos_to_vel = rigid_default ? rigid_ptv : soft_ptv;
 	}
 
-	// Build dense K. Symmetric, stored full.
+	// Build K (symmetric, full storage). Diagonal first.
 	double* K = sb->K;
 	memset(K, 0, (size_t)L * (size_t)L * sizeof(double));
+	double trace = 0.0;
 	for (int k = 0; k < L; k++) {
 		SoftLink* lk = &sb->links[k];
 		double mi = (double)sb->node_inv_mass[lk->node_i];
 		double mj = (double)sb->node_inv_mass[lk->node_j];
-		K[k * L + k] = mi + mj + (double)lk->compliance;
+		K[k * L + k] = mi + mj;
+		trace += mi + mj;
 	}
 	for (int k = 0; k < L; k++) {
 		SoftLink* lk = &sb->links[k];
@@ -474,13 +476,46 @@ static int sb_prepare_frame(SoftBodyInternal* sb, float sub_dt)
 		}
 	}
 
+	// Regularization. Count dynamic DOFs vs constraint DOFs; if over-constrained,
+	// scale compliance by (1 + scale * redundant_dofs) -- K is rank-deficient in
+	// that case and the null space needs meaningful regularization to be SPD.
+	// Without this, tiny compliance leaves a near-singular K that produces
+	// garbage lambdas (ball explodes, tunnels through floor, etc.).
+	int dyn_dof = 0;
+	for (int n = 0; n < asize(sb->node_pos); n++) {
+		if (sb->node_inv_mass[n] > 0.0f) dyn_dof += 3;
+	}
+	int redundant = L - dyn_dof; // positive if over-constrained
+	double over_scale = redundant > 0 ? (1.0 + SB_OVER_CONSTRAINT_SCALE * (double)redundant) : 1.0;
+	double diag_avg = trace > 0.0 ? trace / (double)L : 1.0;
+	double rigid_compliance = SB_COMPLIANCE_FLOOR * diag_avg * over_scale;
+
+	// Apply compliance to K diagonal + store per-link params for RHS.
+	// K diagonal and RHS warm-start term use the SAME compliance value
+	// (standard XPBD: `K*lambda + alpha*lambda_warm = -Jv - alpha/dt * C`).
+	for (int k = 0; k < L; k++) {
+		SoftLink* lk = &sb->links[k];
+		double c = rigid_default ? rigid_compliance : (double)soft_compliance;
+		K[k * L + k] += c;
+		lk->compliance = (float)c;
+		lk->pos_to_vel = rigid_default ? rigid_ptv : soft_ptv;
+	}
+
 	return sb_ldl_factor(K, sb->D, L);
 }
 
-// Per-substep: integrate velocity, compute RHS (using axes frozen in
-// sb_prepare_frame), back-substitute against the factored K, apply impulses,
+// Per-substep: integrate velocity, refresh axes from current positions,
+// compute RHS + back-substitute against the factored K, apply impulses,
 // integrate positions, collide, snap pins. k_factored = result of
 // sb_prepare_frame (0 = usable, -1 = skip the solve).
+//
+// Axes are refreshed from current positions every substep (cheap: one sqrt +
+// scale per link) because the RHS projection jv = axis . (vb - va) is not
+// rotation-invariant -- using stale axes from frame start produces spurious
+// "velocity error" during rigid-body rotation of the soft body and fights the
+// rotation. K's off-diagonals ARE invariant under rigid rotation (dot
+// products preserved), so factoring once per frame stays valid even though
+// axes advance within the frame.
 static void soft_body_substep(WorldInternal* w, SoftBodyInternal* sb, v3 gravity, float dt, int k_factored)
 {
 	if (!sb->built) return;
@@ -498,23 +533,32 @@ static void soft_body_substep(WorldInternal* w, SoftBodyInternal* sb, v3 gravity
 	}
 
 	if (L > 0 && k_factored == 0) {
-		// 2) RHS using frozen axes + current velocities + current positions.
+		// 2) Refresh axes from CURRENT positions (not the frame-start cache).
+		//    Then compute RHS with those fresh axes. The Baumgarte position
+		//    bias `pos_to_vel * err` is clamped to +/-SB_MAX_PUSH_VEL per
+		//    substep so a large sudden position error (mouse drag teleport,
+		//    deep collision penetration) doesn't produce an impulse that
+		//    explodes the body.
 		for (int k = 0; k < L; k++) {
 			SoftLink* lk = &sb->links[k];
 			v3 d = sub(sb->node_pos[lk->node_j], sb->node_pos[lk->node_i]);
-			float length = sqrtf(len2(d));
+			float l2 = len2(d);
+			float length = l2 > 1e-16f ? sqrtf(l2) : 1e-8f;
+			lk->axis = scale(d, 1.0f / length);
 			float err = length - lk->rest_length;
 			v3 va = sb->node_vel[lk->node_i];
 			v3 vb = sb->node_vel[lk->node_j];
 			float jv = dot(sub(vb, va), lk->axis);
-			double bias = (double)lk->pos_to_vel * (double)err;
-			sb->rhs[k] = -(double)jv - bias - (double)lk->compliance * (double)lk->lambda;
+			float bias = lk->pos_to_vel * err;
+			if (bias >  SB_MAX_PUSH_VEL) bias =  SB_MAX_PUSH_VEL;
+			if (bias < -SB_MAX_PUSH_VEL) bias = -SB_MAX_PUSH_VEL;
+			sb->rhs[k] = -(double)jv - (double)bias - (double)lk->compliance * (double)lk->lambda;
 		}
 
-		// 3) Back-substitute (forward, diagonal, backward) -- no refactor.
+		// 3) Back-substitute against the factored K.
 		sb_ldl_solve(sb->K, sb->D, sb->rhs, sb->lambda_sol, L);
 
-		// 4) Apply impulses.
+		// 4) Apply impulses along CURRENT axes.
 		int rigid_default = (sb->params.default_spring.frequency <= 0.0f);
 		for (int k = 0; k < L; k++) {
 			SoftLink* lk = &sb->links[k];
@@ -560,28 +604,29 @@ static void soft_body_step_world(WorldInternal* w, float dt)
 	int n_sub = w->sub_steps > 0 ? w->sub_steps : 1;
 	float sub_dt = dt / (float)n_sub;
 
-	// Refactor K only when necessary: topology/pin change, sub_dt change, or
-	// the previous factorization failed. For a stiff soft body undergoing
-	// mostly rigid-body motion, K is rotation-invariant (rotation preserves
-	// axis dot products), so we reuse the factorization for many frames --
-	// this is the classic LDL amortization: factor once, back-sub many.
+	// TODO(perf): today we rebuild + factor K once per frame. That cost
+	// dominates for ~100+ link bodies. Optimization passes worth trying:
+	//   1. Skip factor when K is approximately unchanged (dirty flag for
+	//      topology/pin change; works well for stiff bodies with small
+	//      deformation, breaks for squishy jelly).
+	//   2. Sparse LDL reusing the helpers in solver_ldl.c -- K is highly
+	//      sparse for soft bodies (each link only adjacent to a few others).
+	//   3. Deferred refactor: reuse the factorization for N frames when the
+	//      soft body is not deforming much (detectable from lambda magnitudes).
+	// Keep correctness simple for now: factor every frame.
 	for (int i = 0; i < count; i++) {
 		if (!split_alive(w->soft_body_gen, i)) continue;
 		SoftBodyInternal* sb = &w->soft_bodies[i];
 		if (!sb->built) continue;
-		int need_refactor = sb->k_dirty || sb->k_sub_dt != sub_dt || sb->k_factor_ok == 0;
-		if (sb->link_count == 0) {
-			sb->k_factor_ok = 0;
-			sb->k_dirty = 0;
-		} else if (need_refactor) {
-			int rc = sb_prepare_frame(sb, sub_dt);
-			sb->k_factor_ok = (rc == 0);
-			sb->k_dirty = 0;
-			sb->k_sub_dt = sub_dt;
-		}
+		if (sb->link_count == 0) { sb->k_factor_ok = 0; continue; }
+		int rc = sb_prepare_frame(sb, sub_dt);
+		sb->k_factor_ok = (rc == 0);
+		sb->k_sub_dt = sub_dt;
+		sb->k_dirty = 0;
 	}
 
-	// Substeps just re-do back-sub + integrate + collide + pin. No factor.
+	// Substeps re-use the factored K; they refresh axes, compute RHS, back-sub,
+	// apply, integrate, collide, snap pins.
 	for (int s = 0; s < n_sub; s++) {
 		for (int i = 0; i < count; i++) {
 			if (!split_alive(w->soft_body_gen, i)) continue;

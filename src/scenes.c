@@ -1643,6 +1643,7 @@ static void scene_soft_bodies_setup()
 		SoftBody rope = create_soft_body(g_world, (SoftBodyParams){
 			.default_spring = { 0.0f, 0.0f },   // rigid (hard distance links)
 			.linear_damping = 0.05f,
+			.node_radius = 0.1f,
 		});
 		int N = 16;
 		v3 anchor = V3(-5.0f, 6.0f, 0.0f);
@@ -1663,6 +1664,7 @@ static void scene_soft_bodies_setup()
 		SoftBody cloth = create_soft_body(g_world, (SoftBodyParams){
 			.default_spring = { 0.0f, 0.0f },
 			.linear_damping = 0.05f,
+			.node_radius = 0.08f,
 		});
 		int W = 5;
 		float spacing = 0.35f;
@@ -1699,6 +1701,7 @@ static void scene_soft_bodies_setup()
 		SoftBody jelly = create_soft_body(g_world, (SoftBodyParams){
 			.default_spring = { 20.0f, 1.0f }, // 20 Hz, critically damped = wobbly but recovers
 			.linear_damping = 0.02f,
+			.node_radius = 0.1f,
 		});
 		int D = 4;
 		float spacing = 0.25f;
@@ -1820,7 +1823,7 @@ static void scene_soft_ball_setup()
 
 	float outer_radius = 0.55f;
 	float inner_radius = 0.28f;
-	v3 center_pos = V3(0.0f, 5.5f, 0.0f);
+	v3 center_pos = V3(2.0f, 5.5f, 0.0f); // directly above the first stair
 
 	SoftBody ball = create_soft_body(g_world, (SoftBodyParams){
 		.default_spring = { 0.0f, 0.0f }, // rigid distance links

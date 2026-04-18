@@ -109,6 +109,7 @@ int main(int argc, char* argv[])
 	int chaos_bodies = 500;
 	int chaos_frames = 30;
 	int chaos_churn = 10;
+	int bench_softbody = 0;
 	int bench_pyramid_base = 0;
 	int bench_pile_grid = 10;
 	int bench_pile_height = 5;
@@ -144,6 +145,8 @@ int main(int argc, char* argv[])
 			bench_incr_np = 1;
 		else if (strcmp(argv[i], "--bench-planes") == 0)
 			bench_planes = 1;
+		else if (strcmp(argv[i], "--bench-softbody") == 0)
+			bench_softbody = (i + 1 < argc && argv[i+1][0] != '-') ? atoi(argv[++i]) : 1;
 		else if (strcmp(argv[i], "--chaos-bodies") == 0 && i + 1 < argc)
 			chaos_bodies = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--chaos-frames") == 0 && i + 1 < argc)
@@ -225,6 +228,99 @@ int main(int argc, char* argv[])
 	if (bench_chaos) {
 		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
 		bench_hull_chaos(chaos_bodies, chaos_frames, chaos_churn, wp);
+		return 0;
+	}
+
+	if (bench_softbody) {
+		// Deterministic soft-body diagnostic. Prints per-frame positions,
+		// velocities, link lengths, and total kinetic energy so we can see
+		// exactly when collision fires, correction magnitudes, and whether
+		// constraints hold.
+		// bench_softbody=1 -> 3-node rigid chain (simplest case)
+		// bench_softbody=2 -> 13-node icosahedron ball (what the demo scene does)
+		World w = create_world((WorldParams){
+			.gravity = V3(0, -9.81f, 0),
+			.broadphase = BROADPHASE_BVH,
+			.sub_steps = 4,
+		});
+		Body floor = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, floor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(10, 1, 10) });
+
+		SoftBody sb = create_soft_body(w, (SoftBodyParams){
+			.default_spring = { 0.0f, 0.0f },
+			.node_radius = 0.1f,
+			.linear_damping = 0.02f,
+		});
+
+		if (bench_softbody == 1) {
+			// 3-node vertical chain, spacing 0.3, top at y=3.
+			int a = soft_body_add_node(w, sb, V3(0.0f, 3.0f, 0.0f), 1.0f);
+			int b = soft_body_add_node(w, sb, V3(0.0f, 2.7f, 0.0f), 1.0f);
+			int c = soft_body_add_node(w, sb, V3(0.0f, 2.4f, 0.0f), 1.0f);
+			soft_body_add_link(w, sb, a, b, -1.0f, (SpringParams){0});
+			soft_body_add_link(w, sb, b, c, -1.0f, (SpringParams){0});
+			(void)a; (void)c;
+		} else {
+			// 13-node icosahedron + center ball.
+			float phi_f = (1.0f + sqrtf(5.0f)) * 0.5f;
+			float nrm = 1.0f / sqrtf(1.0f + phi_f * phi_f);
+			float aa = phi_f * nrm, bb = nrm;
+			v3 ico[12] = {
+				V3(-bb,  aa, 0), V3( bb,  aa, 0), V3(-bb, -aa, 0), V3( bb, -aa, 0),
+				V3( 0, -bb,  aa), V3( 0,  bb,  aa), V3( 0, -bb, -aa), V3( 0,  bb, -aa),
+				V3( aa, 0, -bb), V3( aa, 0,  bb), V3(-aa, 0, -bb), V3(-aa, 0,  bb),
+			};
+			int tris[20][3] = {
+				{ 0,11, 5}, { 0, 5, 1}, { 0, 1, 7}, { 0, 7,10}, { 0,10,11},
+				{ 1, 5, 9}, { 5,11, 4}, {11,10, 2}, {10, 7, 6}, { 7, 1, 8},
+				{ 3, 9, 4}, { 3, 4, 2}, { 3, 2, 6}, { 3, 6, 8}, { 3, 8, 9},
+				{ 4, 9, 5}, { 2, 4,11}, { 6, 2,10}, { 8, 6, 7}, { 9, 8, 1},
+			};
+			v3 center = V3(0, 3, 0);
+			float R = 0.55f;
+			int surf[12];
+			for (int i = 0; i < 12; i++) surf[i] = soft_body_add_node(w, sb, add(center, scale(ico[i], R)), 0.1f);
+			int ctr = soft_body_add_node(w, sb, center, 0.4f);
+			int have[12][12] = {{0}};
+			for (int t = 0; t < 20; t++) {
+				int ti[3] = { tris[t][0], tris[t][1], tris[t][2] };
+				for (int k = 0; k < 3; k++) {
+					int u = ti[k], vv = ti[(k+1)%3];
+					int lo = u<vv?u:vv, hi = u<vv?vv:u;
+					if (have[lo][hi]) continue;
+					have[lo][hi] = 1;
+					soft_body_add_link(w, sb, surf[lo], surf[hi], -1.0f, (SpringParams){0});
+				}
+			}
+			for (int i = 0; i < 12; i++) soft_body_add_link(w, sb, ctr, surf[i], -1.0f, (SpringParams){0});
+		}
+
+		soft_body_build(w, sb);
+
+		int frames = 180;
+		int N = soft_body_node_count(w, sb);
+		int L = soft_body_link_count(w, sb);
+		printf("[softbody] N=%d L=%d\n", N, L);
+		printf("frame | min_y | max_y | max|v| | sum|v| | sb_dt(us)\n");
+		for (int f = 0; f < frames; f++) {
+			double t0 = perf_now();
+			world_step(w, 1.0f / 60.0f);
+			double dt_us = (perf_now() - t0) * 1e6;
+			const v3* pos = soft_body_node_positions(w, sb);
+			const v3* vel = soft_body_node_velocities(w, sb);
+			float min_y = 1e9f, max_y = -1e9f;
+			float max_v = 0, sum_v = 0;
+			for (int n = 0; n < N; n++) {
+				if (pos[n].y < min_y) min_y = pos[n].y;
+				if (pos[n].y > max_y) max_y = pos[n].y;
+				float vm = sqrtf(vel[n].x*vel[n].x + vel[n].y*vel[n].y + vel[n].z*vel[n].z);
+				if (vm > max_v) max_v = vm;
+				sum_v += vm;
+			}
+			printf("%5d | %6.3f | %6.3f | %6.2f | %6.2f | %7.1f\n",
+				f, min_y, max_y, max_v, sum_v, dt_us);
+		}
+		destroy_world(w);
 		return 0;
 	}
 

@@ -35,6 +35,34 @@ static uint64_t det_hash_world(World world)
 	return h;
 }
 
+// Print the raw bits of a float -- handy for cross-arch diff hunting.
+static void det_dump_f(const char* label, float x)
+{
+	uint32_t bits;
+	memcpy(&bits, &x, 4);
+	printf("  %s = 0x%08x (%g)\n", label, bits, (double)x);
+}
+
+// Print the intermediate values of the scene-setup math so cross-arch
+// divergence during setup can be narrowed to an exact operation.
+static void det_dump_math()
+{
+	printf("det math:\n");
+	// The six tilt quats built in det_build_scene -- print sin/cos for each.
+	for (int i = 0; i < 6; i++) {
+		float angle = 0.02f * (float)i;
+		float half = angle * 0.5f;
+		float s = nudge_sinf(half);
+		float c = nudge_cosf(half);
+		printf("  i=%d angle=%g half=%g\n", i, (double)angle, (double)half);
+		det_dump_f("  sinf(half)", s);
+		det_dump_f("  cosf(half)", c);
+	}
+	// Box inertia has 1/12 factor -- exercise the divide path.
+	float m = 1.0f, h = 0.5f;
+	det_dump_f("m*(h*h+h*h)/12", m * (h*h + h*h) / 12.0f);
+}
+
 // Build a canonical scene. Mixed shapes so we exercise several narrowphase
 // pairs; small stack to exercise contact manifold accumulation; a tilt on
 // the top boxes to give the PGS something to chew on.
@@ -144,6 +172,7 @@ static void det_trace()
 static int run_determinism_test(int threads_hi)
 {
 	const int steps = 240;
+	det_dump_math();
 	det_trace();
 	uint64_t h1 = det_run(steps, 1);
 	uint64_t hN = det_run(steps, threads_hi);

@@ -122,9 +122,10 @@ jobs:
           -DNUDGE_BUILD_APP=OFF
       - name: Build nudge_tests
         run: cmake --build build --target nudge_tests
-      # Same policy as macOS: determinism pins the per-arch hash, full-suite
-      # is deferred until tolerances are widened for non-x86.
+      # WASM pthread requires a special build (-pthread + SharedArrayBuffer)
+      # we don't enable here, so --threads 4 would race through non-atomic
+      # atomics. Single-threaded is enough to assert cross-arch FP identity.
       - name: Determinism check
         timeout-minutes: 2
-        run: node ./build/nudge_tests.js --determinism --threads 4
+        run: node ./build/nudge_tests.js --determinism --threads 1
 
