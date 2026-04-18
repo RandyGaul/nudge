@@ -4,6 +4,7 @@
 .claude/skills/*
 .claude/commands/*
 !.claude/skills/physics-debug/
+!.claude/skills/remote-debug/
 !.claude/commands/physics-debug.md
 !.claude/commands/remote-debug.md
 build/

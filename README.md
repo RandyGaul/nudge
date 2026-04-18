@@ -398,11 +398,13 @@ Known issues
   and less battle-tested than the hull-backed fallback; if you hit a
   regression, toggling the native-cyl flags in the debug panel is the
   fastest workaround.
-- **LDL solver** is equality-only -- any joint with active limits or a
-  motor falls back to PGS for that row, and mixed chains where equality
-  and inequality rows share bodies can converge slower than either pure
-  solver would alone. Tune `position_iters` / `velocity_iters` upward if
-  a specific articulated assembly drifts.
+- **LDL solver** is new and buggy. The underlying math isn't fully
+  sussed out yet, and it's only equality-constraint anyway -- any joint
+  with active limits or a motor falls back to PGS for that row. Expect
+  drift, stalls, or outright wrong behavior on non-trivial articulated
+  setups; PGS is the default for a reason. Tune `position_iters` /
+  `velocity_iters` upward as a workaround, or stay on PGS until the LDL
+  path matures.
 
 
 Building
