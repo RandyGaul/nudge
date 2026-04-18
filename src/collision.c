@@ -915,14 +915,6 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 		for (int k2 = n2_4; k2 < n2; k2++) {
 			v3 ne2 = ne2_arr[k2];
 			if (!gauss_map_prune(simd_set1(dot(nu2_arr[k2], b_x_a)), simd_set1(dot(nv2_arr[k2], b_x_a)), simd_set1(dot(u1, ne2)), simd_set1(dot(v1, ne2)))) continue;
-			if (degenerate_plane_axis) {
-				v3 axc = cross(e1, e2_arr[k2]);
-				float axc_l2 = len2(axc);
-				if (axc_l2 > 1e-20f) {
-					float align = fabsf(dot(axc, plane_n_local2)) / sqrtf(axc_l2);
-					if (align < min_out_of_plane) continue;
-				}
-			}
 			float sep = sat_edge_project_full(e1, e2_arr[k2], c1_local, hull1, rel_rot, scale1, hull2, scale2);
 			if (sep > best.separation) { best.index1 = k1*2; best.index2 = k2*2; best.separation = sep; }
 		}
@@ -1772,6 +1764,8 @@ static int refresh_hull_hull_face(ConvexHull a, ConvexHull b, Manifold* manifold
 // N^2 broadphase + narrowphase dispatch.
 
 // Build a Sphere/Capsule/Box from internal body+shape for broadphase dispatch.
+// Shape world pose: pos = body.pos + body.rot * shape.local_pos;
+//                   rot = body.rot * shape.local_rot.
 static Sphere make_sphere(BodyState* bs, ShapeInternal* s)
 {
 	return (Sphere){ add(bs->position, rotate(bs->rotation, s->local_pos)), s->sphere.radius };
@@ -1779,25 +1773,32 @@ static Sphere make_sphere(BodyState* bs, ShapeInternal* s)
 
 static Capsule make_capsule(BodyState* bs, ShapeInternal* s)
 {
-	v3 lp = add(s->local_pos, V3(0, -s->capsule.half_height, 0));
-	v3 lq = add(s->local_pos, V3(0,  s->capsule.half_height, 0));
-	return (Capsule){ add(bs->position, rotate(bs->rotation, lp)), add(bs->position, rotate(bs->rotation, lq)), s->capsule.radius };
+	v3 world_pos = add(bs->position, rotate(bs->rotation, s->local_pos));
+	quat world_rot = quat_mul(bs->rotation, s->local_rot);
+	v3 axis = rotate(world_rot, V3(0, s->capsule.half_height, 0));
+	return (Capsule){ sub(world_pos, axis), add(world_pos, axis), s->capsule.radius };
 }
 
 static Box make_box(BodyState* bs, ShapeInternal* s)
 {
-	return (Box){ bs->position, bs->rotation, s->box.half_extents };
+	v3 world_pos = add(bs->position, rotate(bs->rotation, s->local_pos));
+	quat world_rot = quat_mul(bs->rotation, s->local_rot);
+	return (Box){ world_pos, world_rot, s->box.half_extents };
 }
 
 static ConvexHull make_convex_hull(BodyState* bs, ShapeInternal* s)
 {
-	return (ConvexHull){ s->hull.hull, bs->position, bs->rotation, s->hull.scale };
+	v3 world_pos = add(bs->position, rotate(bs->rotation, s->local_pos));
+	quat world_rot = quat_mul(bs->rotation, s->local_rot);
+	return (ConvexHull){ s->hull.hull, world_pos, world_rot, s->hull.scale };
 }
 
 // Build a Cylinder from an internal body+shape (mirror of make_box/make_sphere).
 static Cylinder make_cylinder(BodyState* bs, ShapeInternal* s)
 {
-	return (Cylinder){ bs->position, bs->rotation, s->cylinder.half_height, s->cylinder.radius };
+	v3 world_pos = add(bs->position, rotate(bs->rotation, s->local_pos));
+	quat world_rot = quat_mul(bs->rotation, s->local_rot);
+	return (Cylinder){ world_pos, world_rot, s->cylinder.half_height, s->cylinder.radius };
 }
 
 // -----------------------------------------------------------------------------
@@ -2356,11 +2357,14 @@ static uint64_t warm_cache_key(int a, int b, uint32_t sub_id);
 
 // Forward-declared mesh emit routines (defined in trimesh.c). Each handles its
 // own BVH traversal, per-triangle warm-cache lookup, and manifold push.
-static void collide_sphere_mesh_emit(WorldInternal* w, int body_a, int body_b, Sphere sphere_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds);
-static void collide_capsule_mesh_emit(WorldInternal* w, int body_a, int body_b, Capsule capsule_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds);
-static void collide_box_mesh_emit(WorldInternal* w, int body_a, int body_b, Box box_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds);
-static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, ConvexHull hull_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds);
-static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds);
+// sub_id_base is OR-ed into the per-tri sub_id so multi-shape bodies can
+// disambiguate which convex child produced each contact. For single-shape
+// bodies pass 0 -- behaves as before (sub_id = tri_idx + 1).
+static void collide_sphere_mesh_emit(WorldInternal* w, int body_a, int body_b, Sphere sphere_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds);
+static void collide_capsule_mesh_emit(WorldInternal* w, int body_a, int body_b, Capsule capsule_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds);
+static void collide_box_mesh_emit(WorldInternal* w, int body_a, int body_b, Box box_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds);
+static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, ConvexHull hull_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds);
+static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds);
 static int ray_mesh(v3 ro, v3 rd, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, float max_t, float* t_out, v3* n_out);
 
 // Forward decls (defined in epa.c, included later in the unity build).
@@ -2472,117 +2476,136 @@ static const NarrowphaseAgent g_np_table[SHAPE_TYPE_COUNT][SHAPE_TYPE_COUNT] = {
 	[SHAPE_CYLINDER][SHAPE_CYLINDER] = np_cyl_cyl,
 };
 
+// Build a ConvexHull from a shape that is either SHAPE_BOX or SHAPE_HULL.
+// Used by the incremental fast path where both paths feed the same refresh.
+static ConvexHull hull_from_box_or_hull(BodyState* bs, ShapeInternal* s)
+{
+	v3 world_pos = add(bs->position, rotate(bs->rotation, s->local_pos));
+	quat world_rot = quat_mul(bs->rotation, s->local_rot);
+	if (s->type == SHAPE_BOX) return (ConvexHull){ &s_unit_box_hull, world_pos, world_rot, s->box.half_extents };
+	return (ConvexHull){ s->hull.hull, world_pos, world_rot, s->hull.scale };
+}
+
+// Narrowphase for a single body pair. Iterates every (shape_a, shape_b) cross-
+// pair across the two bodies; each pair runs through the dispatch table or the
+// mesh multi-emit path independently. sub_id encodes the shape indices so the
+// warm cache and emitted manifolds stay distinct across pairs:
+//   convex-convex: sub_id = ((sa+1) << 16) | (sb+1)
+//   convex-mesh:   sub_id = ((sa+1) << 16) | (tri_idx+1)  (mesh body has exactly one shape)
 static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** manifolds)
 {
 	g_sat_hillclimb_enabled = w->sat_hillclimb_enabled;
-	// Canonical ordering: lower type first for upper-triangle dispatch,
-	// lower body index first for same-type pairs (deterministic shape A).
-	if (w->body_cold[i].shapes[0].type > w->body_cold[j].shapes[0].type || (w->body_cold[i].shapes[0].type == w->body_cold[j].shapes[0].type && i > j)) {
-		int tmp = i; i = j; j = tmp;
-	}
+	int na = asize(w->body_cold[i].shapes);
+	int nb = asize(w->body_cold[j].shapes);
+	BodyState* bs_i = &w->body_state[i];
+	BodyState* bs_j = &w->body_state[j];
 
-	ShapeInternal* s0 = &w->body_cold[i].shapes[0];
-	ShapeInternal* s1 = &w->body_cold[j].shapes[0];
-	BodyState* bs0 = &w->body_state[i];
-	BodyState* bs1 = &w->body_state[j];
+	for (int sa = 0; sa < na; sa++) {
+	for (int sb = 0; sb < nb; sb++) {
+		ShapeInternal* shi = &w->body_cold[i].shapes[sa];
+		ShapeInternal* shj = &w->body_cold[j].shapes[sb];
 
-	// Mesh pairs emit one manifold per contacted triangle; they own the full
-	// narrowphase path including per-triangle warm lookup. Bypass the single-
-	// manifold dispatch below.
-	if (s1->type == SHAPE_MESH) {
-		np_call_acc[np_pair_idx(s0->type, s1->type)]++;
-		if (s0->type == SHAPE_SPHERE) {
-			collide_sphere_mesh_emit(w, i, j, make_sphere(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, manifolds);
-		} else if (s0->type == SHAPE_CAPSULE) {
-			collide_capsule_mesh_emit(w, i, j, make_capsule(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, manifolds);
-		} else if (s0->type == SHAPE_BOX) {
-			collide_box_mesh_emit(w, i, j, make_box(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, manifolds);
-		} else if (s0->type == SHAPE_HULL) {
-			collide_hull_mesh_emit(w, i, j, make_convex_hull(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, manifolds);
-		} else if (s0->type == SHAPE_CYLINDER) {
-			collide_cylinder_mesh_emit(w, i, j, make_cylinder(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, manifolds);
+		// Canonicalise pair: lower type first, then lower (body, shape) index
+		// for deterministic A among same-type pairs.
+		int body_a = i, body_b = j;
+		int sa_idx = sa, sb_idx = sb;
+		ShapeInternal *s0 = shi, *s1 = shj;
+		BodyState *bs0 = bs_i, *bs1 = bs_j;
+		int swap = 0;
+		if (s0->type > s1->type) swap = 1;
+		else if (s0->type == s1->type) {
+			if (body_a > body_b) swap = 1;
+			else if (body_a == body_b && sa_idx > sb_idx) swap = 1;
 		}
-		return;
-	}
+		if (swap) {
+			ShapeInternal* ts = s0; s0 = s1; s1 = ts;
+			BodyState* tbs = bs0; bs0 = bs1; bs1 = tbs;
+			int tb = body_a; body_a = body_b; body_b = tb;
+			int tsi = sa_idx; sa_idx = sb_idx; sb_idx = tsi;
+		}
 
-	InternalManifold im = { .body_a = i, .body_b = j };
-
-	// Warm cache lookup: used for SAT hints, geometry caching, and passed to pre_solve.
-	uint64_t pkey = warm_cache_key(i, j, 0);
-	WarmManifold* wm = w->warm_start_enabled ? map_get_ptr(w->warm_cache, pkey) : NULL;
-
-	// SAT hint from warm cache (skip for box-box — 15 axes is cheap).
-	int* hp = NULL;
-	int hint = -1;
-	int uses_sat = (s0->type >= SHAPE_BOX && s0->type != SHAPE_CYLINDER && s1->type >= SHAPE_BOX && s1->type != SHAPE_CYLINDER);
-	int uses_hint = uses_sat && !(s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull);
-	if (uses_hint && wm && w->sat_hint_enabled) { hint = wm->sat_axis; hp = &hint; }
-
-	// Incremental narrowphase fast path: validate cached feature pair, re-clip without SAT.
-	if (wm && wm->cached_pair.type == 1 && uses_sat && w->incremental_np_enabled) {
-		int refreshed = 0;
-		if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull)
-			refreshed = refresh_box_box_face(make_box(bs0, s0), make_box(bs1, s1), &im.m, &wm->cached_pair);
-		else
-			refreshed = refresh_hull_hull_face((ConvexHull){ s0->type == SHAPE_BOX ? &s_unit_box_hull : s0->hull.hull, bs0->position, bs0->rotation, s0->type == SHAPE_BOX ? s0->box.half_extents : s0->hull.scale }, (ConvexHull){ s1->type == SHAPE_BOX ? &s_unit_box_hull : s1->hull.hull, bs1->position, bs1->rotation, s1->type == SHAPE_BOX ? s1->box.half_extents : s1->hull.scale }, &im.m, &wm->cached_pair);
-		if (refreshed) {
-			im.warm = wm;
-			wm->stale = 0;
+		// Mesh pairs emit one manifold per contacted triangle. The mesh body
+		// carries a single mesh shape (enforced by body_add_shape); sub_id
+		// upper bits disambiguate which convex child on the other body produced
+		// the contact.
+		if (s1->type == SHAPE_MESH) {
 			np_call_acc[np_pair_idx(s0->type, s1->type)]++;
-			apush(*manifolds, im);
-			return;
+			uint32_t sub_id_base = (uint32_t)(sa_idx + 1) << 16;
+			if (s0->type == SHAPE_SPHERE)        collide_sphere_mesh_emit(w, body_a, body_b, make_sphere(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
+			else if (s0->type == SHAPE_CAPSULE)  collide_capsule_mesh_emit(w, body_a, body_b, make_capsule(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
+			else if (s0->type == SHAPE_BOX)      collide_box_mesh_emit(w, body_a, body_b, make_box(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
+			else if (s0->type == SHAPE_HULL)     collide_hull_mesh_emit(w, body_a, body_b, make_convex_hull(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
+			else if (s0->type == SHAPE_CYLINDER) collide_cylinder_mesh_emit(w, body_a, body_b, make_cylinder(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
+			continue;
 		}
-		wm->cached_pair.type = 0; // invalidated, fall through to full SAT
-	}
-	// Edge-edge cached pairs (type==2): always invalidate for V1
-	if (wm && wm->cached_pair.type == 2) wm->cached_pair.type = 0;
 
-	// Upper-triangle dispatch: simple pairs first, then SAT-based pairs.
-	int hit = 0;
-	CachedFeaturePair out_pair = {0};
+		uint32_t convex_sub_id = ((uint32_t)(sa_idx + 1) << 16) | (uint32_t)(sb_idx + 1);
+		InternalManifold im = { .body_a = body_a, .body_b = body_b, .sub_id = convex_sub_id };
 
-	// EPA backend: divert hull-involved pairs to incremental-manifold EPA path.
-	// Pairs covered: sphere-hull/box, capsule-hull/box, box-box, box-hull, hull-hull.
-	// Cylinder pairs continue to use native analytical routines.
-	int epa_backend = w->narrowphase_backend == NARROWPHASE_GJK_EPA;
-	int hull_involved_pair = (s0->type == SHAPE_BOX || s0->type == SHAPE_HULL || s1->type == SHAPE_BOX || s1->type == SHAPE_HULL)
-	                      && (s0->type != SHAPE_CYLINDER && s1->type != SHAPE_CYLINDER);
-	if (epa_backend && hull_involved_pair) {
-		hit = epa_narrowphase_pair(w, i, j, s0, s1, bs0, bs1, &im.m);
-		// Track timing + emit manifold.
-		int idx = np_pair_idx(s0->type, s1->type);
-		np_call_acc[idx]++;
+		uint64_t pkey = warm_cache_key(body_a, body_b, convex_sub_id);
+		WarmManifold* wm = w->warm_start_enabled ? map_get_ptr(w->warm_cache, pkey) : NULL;
+
+		int* hp = NULL;
+		int hint = -1;
+		int uses_sat = (s0->type >= SHAPE_BOX && s0->type != SHAPE_CYLINDER && s1->type >= SHAPE_BOX && s1->type != SHAPE_CYLINDER);
+		int uses_hint = uses_sat && !(s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull);
+		if (uses_hint && wm && w->sat_hint_enabled) { hint = wm->sat_axis; hp = &hint; }
+
+		if (wm && wm->cached_pair.type == 1 && uses_sat && w->incremental_np_enabled) {
+			int refreshed = 0;
+			if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull)
+				refreshed = refresh_box_box_face(make_box(bs0, s0), make_box(bs1, s1), &im.m, &wm->cached_pair);
+			else
+				refreshed = refresh_hull_hull_face(hull_from_box_or_hull(bs0, s0), hull_from_box_or_hull(bs1, s1), &im.m, &wm->cached_pair);
+			if (refreshed) {
+				im.warm = wm;
+				wm->stale = 0;
+				np_call_acc[np_pair_idx(s0->type, s1->type)]++;
+				apush(*manifolds, im);
+				continue;
+			}
+			wm->cached_pair.type = 0;
+		}
+		if (wm && wm->cached_pair.type == 2) wm->cached_pair.type = 0;
+
+		int hit = 0;
+		CachedFeaturePair out_pair = {0};
+
+		int epa_backend = w->narrowphase_backend == NARROWPHASE_GJK_EPA;
+		int hull_involved_pair = (s0->type == SHAPE_BOX || s0->type == SHAPE_HULL || s1->type == SHAPE_BOX || s1->type == SHAPE_HULL)
+		                      && (s0->type != SHAPE_CYLINDER && s1->type != SHAPE_CYLINDER);
+		if (epa_backend && hull_involved_pair) {
+			hit = epa_narrowphase_pair(w, body_a, body_b, s0, s1, bs0, bs1, &im.m);
+			np_call_acc[np_pair_idx(s0->type, s1->type)]++;
+			if (hit) {
+				im.warm = NULL;
+				apush(*manifolds, im);
+			}
+			continue;
+		}
+
+		NarrowphaseAgent agent = g_np_table[s0->type][s1->type];
+		if (agent) {
+			NarrowphaseCtx ctx = {
+				.w = w, .body_a = body_a, .body_b = body_b,
+				.shape_a = s0, .shape_b = s1,
+				.bs_a = bs0, .bs_b = bs1,
+				.sat_hint = hp,
+				.out_pair = &out_pair,
+				.m_out = &im.m,
+			};
+			hit = agent(&ctx);
+		}
+
+		if (hp && wm) wm->sat_axis = hint;
+		np_call_acc[np_pair_idx(s0->type, s1->type)]++;
 		if (hit) {
-			im.warm = NULL; // EPA uses its own cache; warm_start doesn't apply
+			if (!wm && w->warm_start_enabled) { wm = map_get_ptr(w->warm_cache, pkey); }
+			if (wm && out_pair.type) wm->cached_pair = out_pair;
+			im.warm = wm;
 			apush(*manifolds, im);
 		}
-		return;
 	}
-
-	NarrowphaseAgent agent = g_np_table[s0->type][s1->type];
-	if (agent) {
-		NarrowphaseCtx ctx = {
-			.w = w, .body_a = i, .body_b = j,
-			.shape_a = s0, .shape_b = s1,
-			.bs_a = bs0, .bs_b = bs1,
-			.sat_hint = hp,
-			.out_pair = &out_pair,
-			.m_out = &im.m,
-		};
-		hit = agent(&ctx);
-	}
-
-	// Store SAT hint back to warm cache
-	if (hp && wm) wm->sat_axis = hint;
-
-	int idx = np_pair_idx(s0->type, s1->type);
-	np_call_acc[idx]++;
-	// Cache geometry and feature pair for next frame reuse
-	if (hit) {
-		if (!wm && w->warm_start_enabled) { wm = map_get_ptr(w->warm_cache, pkey); }
-		if (wm && out_pair.type) wm->cached_pair = out_pair;
-		im.warm = wm;
-		apush(*manifolds, im);
 	}
 }
 

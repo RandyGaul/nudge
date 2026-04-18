@@ -159,7 +159,10 @@ static float shape_volume(ShapeInternal* s)
 }
 
 // Recompute body inertia from all shapes. Mass is distributed by volume ratio,
-// each shape's inertia is shifted to body origin via parallel axis theorem.
+// each shape's inertia is rotated by its local_rot into the body frame, then
+// shifted to the body origin via parallel axis theorem. Off-diagonal moments
+// are dropped (BodyState.inv_inertia_local is v3 diagonal) -- exact for 90/180
+// deg aligned children, an approximation for arbitrary rotations.
 static void recompute_body_inertia(WorldInternal* w, int idx)
 {
 	float mass = w->body_cold[idx].mass;
@@ -183,14 +186,25 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 	v3 total = V3(0, 0, 0);
 	for (int i = 0; i < n; i++) {
 		float sm = mass * shape_volume(&shapes[i]) / total_vol;
-		v3 li = shape_inertia(&shapes[i], sm);
+		v3 li = shape_inertia(&shapes[i], sm); // diagonal in child local frame
 
-		// Parallel axis theorem: I_body += I_local + m*(|d|^2*I - d*d^T)
-		// For diagonal tensor: I_x += m*(dy^2+dz^2), etc.
+		// Rotate child inertia into body frame: I_b = R * diag(li) * R^T.
+		// Only the diagonal of I_b is kept. For a rotation with basis vectors
+		// (ex, ey, ez), the i-th body-frame diagonal entry is
+		//   (I_b)_ii = li.x*ex_i^2 + li.y*ey_i^2 + li.z*ez_i^2
+		// which reduces to li when local_rot = identity.
+		v3 ex = rotate(shapes[i].local_rot, V3(1, 0, 0));
+		v3 ey = rotate(shapes[i].local_rot, V3(0, 1, 0));
+		v3 ez = rotate(shapes[i].local_rot, V3(0, 0, 1));
+		v3 body_diag = V3(li.x*ex.x*ex.x + li.y*ey.x*ey.x + li.z*ez.x*ez.x,
+		                  li.x*ex.y*ex.y + li.y*ey.y*ey.y + li.z*ez.y*ez.y,
+		                  li.x*ex.z*ex.z + li.y*ey.z*ey.z + li.z*ez.z*ez.z);
+
+		// Parallel axis theorem (diagonal of m*(|d|^2*I - d*d^T)).
 		v3 d = shapes[i].local_pos;
-		total.x += li.x + sm * (d.y*d.y + d.z*d.z);
-		total.y += li.y + sm * (d.x*d.x + d.z*d.z);
-		total.z += li.z + sm * (d.x*d.x + d.y*d.y);
+		total.x += body_diag.x + sm * (d.y*d.y + d.z*d.z);
+		total.y += body_diag.y + sm * (d.x*d.x + d.z*d.z);
+		total.z += body_diag.z + sm * (d.x*d.x + d.y*d.y);
 	}
 
 	body_inv_inertia_local(w, idx) = inertia_to_inv(total);

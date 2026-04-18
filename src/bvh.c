@@ -23,16 +23,18 @@ static float aabb_surface_area(AABB a) { v3 d = sub(a.max, a.min); return d.x*d.
 static int aabb_overlaps(AABB a, AABB b) { int no = simd_movemask(simd_or(simd_cmpgt(a.min.m, b.max.m), simd_cmpgt(b.min.m, a.max.m))); return (no & 0x7) == 0; }
 
 // Compute world-space AABB for a single shape on a body.
+// Shape world rotation = body.rotation * shape.local_rot.
 static AABB shape_aabb(BodyState* s, ShapeInternal* sh)
 {
 	v3 world_pos = add(s->position, rotate(s->rotation, sh->local_pos));
+	quat world_rot = quat_mul(s->rotation, sh->local_rot);
 	switch (sh->type) {
 	case SHAPE_SPHERE: {
 		v3 r = V3(sh->sphere.radius, sh->sphere.radius, sh->sphere.radius);
 		return (AABB){ sub(world_pos, r), add(world_pos, r) };
 	}
 	case SHAPE_CAPSULE: {
-		v3 up = rotate(s->rotation, V3(0, sh->capsule.half_height, 0));
+		v3 up = rotate(world_rot, V3(0, sh->capsule.half_height, 0));
 		v3 p = sub(world_pos, up), q = add(world_pos, up);
 		v3 r = V3(sh->capsule.radius, sh->capsule.radius, sh->capsule.radius);
 		return (AABB){ sub(v3_min(p, q), r), add(v3_max(p, q), r) };
@@ -40,18 +42,18 @@ static AABB shape_aabb(BodyState* s, ShapeInternal* sh)
 	case SHAPE_BOX: {
 		// OBB -> AABB: project rotated half-extents onto each world axis.
 		v3 e = sh->box.half_extents;
-		v3 ax = rotate(s->rotation, V3(e.x, 0, 0));
-		v3 ay = rotate(s->rotation, V3(0, e.y, 0));
-		v3 az = rotate(s->rotation, V3(0, 0, e.z));
+		v3 ax = rotate(world_rot, V3(e.x, 0, 0));
+		v3 ay = rotate(world_rot, V3(0, e.y, 0));
+		v3 az = rotate(world_rot, V3(0, 0, e.z));
 		v3 half = V3(fabsf(ax.x) + fabsf(ay.x) + fabsf(az.x), fabsf(ax.y) + fabsf(ay.y) + fabsf(az.y), fabsf(ax.z) + fabsf(ay.z) + fabsf(az.z));
 		return (AABB){ sub(world_pos, half), add(world_pos, half) };
 	}
 	case SHAPE_HULL: {
 		const Hull* hull = sh->hull.hull;
 		v3 sc = sh->hull.scale;
-		AABB box = aabb_from_point(add(world_pos, rotate(s->rotation, V3(hull->verts[0].x*sc.x, hull->verts[0].y*sc.y, hull->verts[0].z*sc.z))));
+		AABB box = aabb_from_point(add(world_pos, rotate(world_rot, V3(hull->verts[0].x*sc.x, hull->verts[0].y*sc.y, hull->verts[0].z*sc.z))));
 		for (int i = 1; i < hull->vert_count; i++) {
-			v3 v = add(world_pos, rotate(s->rotation, V3(hull->verts[i].x*sc.x, hull->verts[i].y*sc.y, hull->verts[i].z*sc.z)));
+			v3 v = add(world_pos, rotate(world_rot, V3(hull->verts[i].x*sc.x, hull->verts[i].y*sc.y, hull->verts[i].z*sc.z)));
 			box.min = v3_min(box.min, v);
 			box.max = v3_max(box.max, v);
 		}
@@ -60,7 +62,7 @@ static AABB shape_aabb(BodyState* s, ShapeInternal* sh)
 	case SHAPE_CYLINDER: {
 		// Tight AABB for cylinder along local Y: half_extent[k] = |ay.k|*hh + sqrt(1 - ay.k^2)*r
 		float hh = sh->cylinder.half_height, r = sh->cylinder.radius;
-		v3 ay = rotate(s->rotation, V3(0, 1, 0));
+		v3 ay = rotate(world_rot, V3(0, 1, 0));
 		float ex2 = 1.0f - ay.x*ay.x; if (ex2 < 0.0f) ex2 = 0.0f;
 		float ey2 = 1.0f - ay.y*ay.y; if (ey2 < 0.0f) ey2 = 0.0f;
 		float ez2 = 1.0f - ay.z*ay.z; if (ez2 < 0.0f) ez2 = 0.0f;
@@ -72,14 +74,14 @@ static AABB shape_aabb(BodyState* s, ShapeInternal* sh)
 		// 8 corners of the local box and bound them in world space.
 		AABB local = trimesh_local_aabb(sh->mesh.mesh);
 		v3 lo = local.min, hi = local.max;
-		AABB box = aabb_from_point(add(world_pos, rotate(s->rotation, lo)));
+		AABB box = aabb_from_point(add(world_pos, rotate(world_rot, lo)));
 		v3 corners[7] = {
 			V3(lo.x, lo.y, hi.z), V3(lo.x, hi.y, lo.z), V3(lo.x, hi.y, hi.z),
 			V3(hi.x, lo.y, lo.z), V3(hi.x, lo.y, hi.z), V3(hi.x, hi.y, lo.z),
 			V3(hi.x, hi.y, hi.z),
 		};
 		for (int i = 0; i < 7; i++) {
-			v3 p = add(world_pos, rotate(s->rotation, corners[i]));
+			v3 p = add(world_pos, rotate(world_rot, corners[i]));
 			box.min = v3_min(box.min, p);
 			box.max = v3_max(box.max, p);
 		}

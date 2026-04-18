@@ -11206,20 +11206,20 @@ static void test_bvh_shape_aabb()
 	BodyState h = { .position = V3(5, 5, 5), .rotation = quat_identity() };
 
 	TEST_BEGIN("shape_aabb sphere");
-	ShapeInternal s_sph = { .type = SHAPE_SPHERE, .local_pos = V3(0,0,0), .sphere.radius = 1.0f };
+	ShapeInternal s_sph = { .type = SHAPE_SPHERE, .local_pos = V3(0,0,0), .local_rot = quat_identity(), .sphere.radius = 1.0f };
 	AABB box = shape_aabb(&h, &s_sph);
 	TEST_ASSERT_FLOAT(box.min.x, 4.0f, 0.01f);
 	TEST_ASSERT_FLOAT(box.max.x, 6.0f, 0.01f);
 
 	TEST_BEGIN("shape_aabb box axis-aligned");
-	ShapeInternal s_box = { .type = SHAPE_BOX, .local_pos = V3(0,0,0), .box.half_extents = V3(1, 2, 3) };
+	ShapeInternal s_box = { .type = SHAPE_BOX, .local_pos = V3(0,0,0), .local_rot = quat_identity(), .box.half_extents = V3(1, 2, 3) };
 	box = shape_aabb(&h, &s_box);
 	TEST_ASSERT_FLOAT(box.min.x, 4.0f, 0.01f);
 	TEST_ASSERT_FLOAT(box.max.y, 7.0f, 0.01f);
 	TEST_ASSERT_FLOAT(box.max.z, 8.0f, 0.01f);
 
 	TEST_BEGIN("shape_aabb capsule");
-	ShapeInternal s_cap = { .type = SHAPE_CAPSULE, .local_pos = V3(0,0,0), .capsule = { .half_height = 1.0f, .radius = 0.5f } };
+	ShapeInternal s_cap = { .type = SHAPE_CAPSULE, .local_pos = V3(0,0,0), .local_rot = quat_identity(), .capsule = { .half_height = 1.0f, .radius = 0.5f } };
 	box = shape_aabb(&h, &s_cap);
 	TEST_ASSERT_FLOAT(box.min.y, 3.5f, 0.01f);
 	TEST_ASSERT_FLOAT(box.max.y, 6.5f, 0.01f);
@@ -11227,7 +11227,7 @@ static void test_bvh_shape_aabb()
 	TEST_BEGIN("shape_aabb hull");
 	v3 hull_pts[] = { V3(0,1,0), V3(1,0,0), V3(-1,0,0), V3(0,0,1), V3(0,0,-1), V3(0,-1,0) };
 	Hull* test_hull = quickhull(hull_pts, 6);
-	ShapeInternal s_hull = { .type = SHAPE_HULL, .local_pos = V3(0,0,0), .hull = { .hull = test_hull, .scale = V3(2,2,2) } };
+	ShapeInternal s_hull = { .type = SHAPE_HULL, .local_pos = V3(0,0,0), .local_rot = quat_identity(), .hull = { .hull = test_hull, .scale = V3(2,2,2) } };
 	box = shape_aabb(&h, &s_hull);
 	TEST_ASSERT(box.min.x < 4.0f);
 	TEST_ASSERT(box.max.x > 6.0f);

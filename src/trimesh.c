@@ -298,10 +298,10 @@ static void trimesh_query_aabb(const TriMesh* m, AABB q, CK_DYNA int** out)
 // collide_{sphere,capsule,hull,cylinder}_hull already returns Contact.normal
 // in A-toward-B convention (convex toward triangle-hull), which matches the
 // dispatch's expected A=convex, B=mesh orientation -- no normal flip needed.
-static inline void trimesh_push_mesh_manifold(WorldInternal* w, int body_a, int body_b, int tri_idx, Manifold m_local, v3 mesh_pos, quat mesh_rot, InternalManifold** manifolds)
+static inline void trimesh_push_mesh_manifold(WorldInternal* w, int body_a, int body_b, int tri_idx, Manifold m_local, v3 mesh_pos, quat mesh_rot, uint32_t sub_id_base, InternalManifold** manifolds)
 {
 	if (m_local.count == 0) return;
-	uint32_t sub_id = (uint32_t)(tri_idx + 1);
+	uint32_t sub_id = sub_id_base | (uint32_t)(tri_idx + 1);
 	InternalManifold im = { .body_a = body_a, .body_b = body_b, .sub_id = sub_id };
 	im.m = m_local;
 	for (int c = 0; c < im.m.count; c++) {
@@ -322,7 +322,7 @@ static inline ConvexHull trimesh_tri_as_hull_local(const TriMesh* mesh, int t)
 
 // -----------------------------------------------------------------------------
 // Sphere vs mesh.
-static void collide_sphere_mesh_emit(WorldInternal* w, int body_a, int body_b, Sphere sphere_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds)
+static void collide_sphere_mesh_emit(WorldInternal* w, int body_a, int body_b, Sphere sphere_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds)
 {
 	quat inv_rot = inv(mesh_rot);
 	v3 local_center = rotate(inv_rot, sub(sphere_world.center, mesh_pos));
@@ -338,14 +338,14 @@ static void collide_sphere_mesh_emit(WorldInternal* w, int body_a, int body_b, S
 		int t = cands[i];
 		Manifold m = {0};
 		if (!collide_sphere_hull(local, trimesh_tri_as_hull_local(mesh, t), &m)) continue;
-		trimesh_push_mesh_manifold(w, body_a, body_b, t, m, mesh_pos, mesh_rot, manifolds);
+		trimesh_push_mesh_manifold(w, body_a, body_b, t, m, mesh_pos, mesh_rot, sub_id_base, manifolds);
 	}
 	afree(cands);
 }
 
 // -----------------------------------------------------------------------------
 // Capsule vs mesh.
-static void collide_capsule_mesh_emit(WorldInternal* w, int body_a, int body_b, Capsule capsule_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds)
+static void collide_capsule_mesh_emit(WorldInternal* w, int body_a, int body_b, Capsule capsule_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds)
 {
 	quat inv_rot = inv(mesh_rot);
 	v3 lp = rotate(inv_rot, sub(capsule_world.p, mesh_pos));
@@ -362,14 +362,14 @@ static void collide_capsule_mesh_emit(WorldInternal* w, int body_a, int body_b, 
 		int t = cands[i];
 		Manifold m = {0};
 		if (!collide_capsule_hull(local, trimesh_tri_as_hull_local(mesh, t), &m)) continue;
-		trimesh_push_mesh_manifold(w, body_a, body_b, t, m, mesh_pos, mesh_rot, manifolds);
+		trimesh_push_mesh_manifold(w, body_a, body_b, t, m, mesh_pos, mesh_rot, sub_id_base, manifolds);
 	}
 	afree(cands);
 }
 
 // -----------------------------------------------------------------------------
 // Box vs mesh. Box is wrapped as a unit-box hull scaled by half_extents.
-static void collide_box_mesh_emit(WorldInternal* w, int body_a, int body_b, Box box_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds)
+static void collide_box_mesh_emit(WorldInternal* w, int body_a, int body_b, Box box_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds)
 {
 	quat inv_rot = inv(mesh_rot);
 	v3 local_center = rotate(inv_rot, sub(box_world.center, mesh_pos));
@@ -390,14 +390,14 @@ static void collide_box_mesh_emit(WorldInternal* w, int body_a, int body_b, Box 
 		int t = cands[i];
 		Manifold m = {0};
 		if (!collide_hull_hull(box_hull, trimesh_tri_as_hull_local(mesh, t), &m)) continue;
-		trimesh_push_mesh_manifold(w, body_a, body_b, t, m, mesh_pos, mesh_rot, manifolds);
+		trimesh_push_mesh_manifold(w, body_a, body_b, t, m, mesh_pos, mesh_rot, sub_id_base, manifolds);
 	}
 	afree(cands);
 }
 
 // -----------------------------------------------------------------------------
 // Hull vs mesh.
-static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, ConvexHull hull_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds)
+static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, ConvexHull hull_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds)
 {
 	quat inv_rot = inv(mesh_rot);
 	v3 local_center = rotate(inv_rot, sub(hull_world.center, mesh_pos));
@@ -421,14 +421,14 @@ static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, Con
 		int t = cands[i];
 		Manifold m = {0};
 		if (!collide_hull_hull(local_hull, trimesh_tri_as_hull_local(mesh, t), &m)) continue;
-		trimesh_push_mesh_manifold(w, body_a, body_b, t, m, mesh_pos, mesh_rot, manifolds);
+		trimesh_push_mesh_manifold(w, body_a, body_b, t, m, mesh_pos, mesh_rot, sub_id_base, manifolds);
 	}
 	afree(cands);
 }
 
 // -----------------------------------------------------------------------------
 // Cylinder vs mesh.
-static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, InternalManifold** manifolds)
+static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds)
 {
 	quat inv_rot = inv(mesh_rot);
 	v3 local_center = rotate(inv_rot, sub(cyl_world.center, mesh_pos));
@@ -448,7 +448,7 @@ static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b,
 		int t = cands[i];
 		Manifold m = {0};
 		if (!collide_cylinder_hull(local, trimesh_tri_as_hull_local(mesh, t), &m)) continue;
-		trimesh_push_mesh_manifold(w, body_a, body_b, t, m, mesh_pos, mesh_rot, manifolds);
+		trimesh_push_mesh_manifold(w, body_a, body_b, t, m, mesh_pos, mesh_rot, sub_id_base, manifolds);
 	}
 	afree(cands);
 }

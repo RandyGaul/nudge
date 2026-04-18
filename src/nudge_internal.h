@@ -20,6 +20,7 @@ typedef struct ShapeInternal
 {
 	ShapeType type;
 	v3 local_pos;
+	quat local_rot;   // rotation in body local frame (always valid; body_add_shape normalises)
 	union {
 		struct { float radius; } sphere;
 		struct { float half_height; float radius; } capsule;

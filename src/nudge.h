@@ -257,6 +257,7 @@ typedef struct ShapeParams
 {
 	ShapeType type;
 	v3 local_pos;   // offset from body origin
+	quat local_rot; // rotation in body local frame; zero-quat = identity (default)
 	union {
 		struct { float radius; } sphere;
 		struct { float half_height; float radius; } capsule; // segment along local Y

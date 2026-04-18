@@ -1211,6 +1211,9 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	ShapeInternal s = {0};
 	s.type = params.type;
 	s.local_pos = params.local_pos;
+	// Zero-quat (from designated initializers that omit local_rot) = identity.
+	float lr_m2 = params.local_rot.x*params.local_rot.x + params.local_rot.y*params.local_rot.y + params.local_rot.z*params.local_rot.z + params.local_rot.w*params.local_rot.w;
+	s.local_rot = (lr_m2 < 0.5f) ? quat_identity() : params.local_rot;
 	switch (params.type) {
 	case SHAPE_SPHERE:  s.sphere.radius = params.sphere.radius; break;
 	case SHAPE_CAPSULE: s.capsule.half_height = params.capsule.half_height;
