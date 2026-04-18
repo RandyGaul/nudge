@@ -104,6 +104,10 @@ typedef struct BodyState
 typedef struct BodyRef { BodyHot* hot; BodyState* state; } BodyRef;
 #define body_ref(w, i) ((BodyRef){ &(w)->body_hot[i], &(w)->body_state[i] })
 
+// Number of ShapeType enumerators. Keep in sync with ShapeType in nudge.h.
+// Used to size the narrowphase dispatch table.
+#define SHAPE_TYPE_COUNT 6
+
 // Cached narrowphase feature pair for incremental manifold refresh.
 // type=0: cold (no cache), type=1: face-face, type=2: edge-edge.
 typedef struct CachedFeaturePair
@@ -117,6 +121,24 @@ typedef struct CachedFeaturePair
 } CachedFeaturePair;
 
 typedef struct WarmManifold WarmManifold; // forward decl for warm cache
+
+// Narrowphase dispatch context. One ctx per pair, populated by narrowphase_pair
+// (body indices, canonicalised shape pointers, warm-cache hint slots). Agents
+// fill m_out on hit and may write sat_hint / out_pair (hull-involved pairs).
+typedef struct NarrowphaseCtx
+{
+	struct WorldInternal* w;
+	int body_a, body_b;        // canonical: shape_a->type <= shape_b->type
+	ShapeInternal* shape_a;
+	ShapeInternal* shape_b;
+	BodyState* bs_a;
+	BodyState* bs_b;
+	int* sat_hint;             // may be NULL; hill-climb warm start for SAT
+	CachedFeaturePair* out_pair; // may be NULL; agent writes cached feature pair
+	Manifold* m_out;           // hit: agent fills this
+} NarrowphaseCtx;
+
+typedef int (*NarrowphaseAgent)(NarrowphaseCtx*);
 
 // Incremental manifold for EPA-backed narrowphase. One contact is produced per
 // frame by EPA; the cache accumulates up to MAX_CONTACTS contacts over frames

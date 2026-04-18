@@ -915,6 +915,14 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 		for (int k2 = n2_4; k2 < n2; k2++) {
 			v3 ne2 = ne2_arr[k2];
 			if (!gauss_map_prune(simd_set1(dot(nu2_arr[k2], b_x_a)), simd_set1(dot(nv2_arr[k2], b_x_a)), simd_set1(dot(u1, ne2)), simd_set1(dot(v1, ne2)))) continue;
+			if (degenerate_plane_axis) {
+				v3 axc = cross(e1, e2_arr[k2]);
+				float axc_l2 = len2(axc);
+				if (axc_l2 > 1e-20f) {
+					float align = fabsf(dot(axc, plane_n_local2)) / sqrtf(axc_l2);
+					if (align < min_out_of_plane) continue;
+				}
+			}
 			float sep = sat_edge_project_full(e1, e2_arr[k2], c1_local, hull1, rel_rot, scale1, hull2, scale2);
 			if (sep > best.separation) { best.index1 = k1*2; best.index2 = k2*2; best.separation = sep; }
 		}
@@ -2358,6 +2366,112 @@ static int ray_mesh(v3 ro, v3 rd, v3 mesh_pos, quat mesh_rot, const TriMesh* mes
 // Forward decls (defined in epa.c, included later in the unity build).
 static int epa_narrowphase_pair(WorldInternal* w, int body_a_idx, int body_b_idx, ShapeInternal* s0, ShapeInternal* s1, BodyState* bs0, BodyState* bs1, Manifold* manifold);
 
+// -----------------------------------------------------------------------------
+// Narrowphase agent table. Each entry is the routine invoked for a specific
+// (shape_a, shape_b) pair after canonicalisation (shape_a->type <= shape_b->type).
+// Adding a shape type = one new row/column plus any cross-pair agents; the
+// dispatch site never grows.
+
+static int np_sphere_sphere(NarrowphaseCtx* c)
+{
+	return collide_sphere_sphere(make_sphere(c->bs_a, c->shape_a), make_sphere(c->bs_b, c->shape_b), c->m_out);
+}
+static int np_sphere_capsule(NarrowphaseCtx* c)
+{
+	return collide_sphere_capsule(make_sphere(c->bs_a, c->shape_a), make_capsule(c->bs_b, c->shape_b), c->m_out);
+}
+static int np_sphere_box(NarrowphaseCtx* c)
+{
+	return collide_sphere_box(make_sphere(c->bs_a, c->shape_a), make_box(c->bs_b, c->shape_b), c->m_out);
+}
+static int np_sphere_hull(NarrowphaseCtx* c)
+{
+	return collide_sphere_hull(make_sphere(c->bs_a, c->shape_a), make_convex_hull(c->bs_b, c->shape_b), c->m_out);
+}
+static int np_capsule_capsule(NarrowphaseCtx* c)
+{
+	return collide_capsule_capsule(make_capsule(c->bs_a, c->shape_a), make_capsule(c->bs_b, c->shape_b), c->m_out);
+}
+static int np_capsule_box(NarrowphaseCtx* c)
+{
+	return collide_capsule_box(make_capsule(c->bs_a, c->shape_a), make_box(c->bs_b, c->shape_b), c->m_out);
+}
+static int np_capsule_hull(NarrowphaseCtx* c)
+{
+	return collide_capsule_hull(make_capsule(c->bs_a, c->shape_a), make_convex_hull(c->bs_b, c->shape_b), c->m_out);
+}
+static int np_box_box(NarrowphaseCtx* c)
+{
+	BodyState* ba = c->bs_a; BodyState* bb = c->bs_b;
+	ShapeInternal* sa = c->shape_a; ShapeInternal* sb = c->shape_b;
+	if (c->w->box_use_hull)
+		return collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, ba->position, ba->rotation, sa->box.half_extents }, (ConvexHull){ &s_unit_box_hull, bb->position, bb->rotation, sb->box.half_extents }, c->m_out, c->sat_hint, c->out_pair);
+	return collide_box_box_ex(make_box(ba, sa), make_box(bb, sb), c->m_out, c->sat_hint, c->out_pair);
+}
+static int np_box_hull(NarrowphaseCtx* c)
+{
+	BodyState* ba = c->bs_a; BodyState* bb = c->bs_b; ShapeInternal* sa = c->shape_a;
+	return collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, ba->position, ba->rotation, sa->box.half_extents }, make_convex_hull(bb, c->shape_b), c->m_out, c->sat_hint, c->out_pair);
+}
+static int np_hull_hull(NarrowphaseCtx* c)
+{
+	return collide_hull_hull_ex(make_convex_hull(c->bs_a, c->shape_a), make_convex_hull(c->bs_b, c->shape_b), c->m_out, c->sat_hint, c->out_pair);
+}
+
+// Cylinder pairs: native routines take cylinder as shape A. For pairs where
+// the canonical ordering puts cylinder as B (all non-cyl types enum below
+// SHAPE_CYLINDER), call with cyl as first arg and flip the manifold normal.
+static int np_sphere_cyl(NarrowphaseCtx* c)
+{
+	int hit = collide_cylinder_sphere(make_cylinder(c->bs_b, c->shape_b), make_sphere(c->bs_a, c->shape_a), c->m_out);
+	for (int k = 0; k < c->m_out->count; k++) c->m_out->contacts[k].normal = neg(c->m_out->contacts[k].normal);
+	return hit;
+}
+static int np_capsule_cyl(NarrowphaseCtx* c)
+{
+	int hit = collide_cylinder_capsule(make_cylinder(c->bs_b, c->shape_b), make_capsule(c->bs_a, c->shape_a), c->m_out);
+	for (int k = 0; k < c->m_out->count; k++) c->m_out->contacts[k].normal = neg(c->m_out->contacts[k].normal);
+	return hit;
+}
+static int np_box_cyl(NarrowphaseCtx* c)
+{
+	int hit = collide_cylinder_box(make_cylinder(c->bs_b, c->shape_b), make_box(c->bs_a, c->shape_a), c->m_out);
+	for (int k = 0; k < c->m_out->count; k++) c->m_out->contacts[k].normal = neg(c->m_out->contacts[k].normal);
+	return hit;
+}
+static int np_hull_cyl(NarrowphaseCtx* c)
+{
+	int hit = collide_cylinder_hull(make_cylinder(c->bs_b, c->shape_b), make_convex_hull(c->bs_a, c->shape_a), c->m_out);
+	for (int k = 0; k < c->m_out->count; k++) c->m_out->contacts[k].normal = neg(c->m_out->contacts[k].normal);
+	return hit;
+}
+static int np_cyl_cyl(NarrowphaseCtx* c)
+{
+	return collide_cylinder_cylinder(make_cylinder(c->bs_a, c->shape_a), make_cylinder(c->bs_b, c->shape_b), c->m_out);
+}
+
+// Upper-triangle dispatch (shape_a->type <= shape_b->type). Lower-triangle
+// entries stay NULL; the canonicalisation in narrowphase_pair guarantees we
+// never index them. Mesh pairs are handled by a pre-dispatch branch in
+// narrowphase_pair (multi-manifold emit signature).
+static const NarrowphaseAgent g_np_table[SHAPE_TYPE_COUNT][SHAPE_TYPE_COUNT] = {
+	[SHAPE_SPHERE]  [SHAPE_SPHERE]   = np_sphere_sphere,
+	[SHAPE_SPHERE]  [SHAPE_CAPSULE]  = np_sphere_capsule,
+	[SHAPE_SPHERE]  [SHAPE_BOX]      = np_sphere_box,
+	[SHAPE_SPHERE]  [SHAPE_HULL]     = np_sphere_hull,
+	[SHAPE_SPHERE]  [SHAPE_CYLINDER] = np_sphere_cyl,
+	[SHAPE_CAPSULE] [SHAPE_CAPSULE]  = np_capsule_capsule,
+	[SHAPE_CAPSULE] [SHAPE_BOX]      = np_capsule_box,
+	[SHAPE_CAPSULE] [SHAPE_HULL]     = np_capsule_hull,
+	[SHAPE_CAPSULE] [SHAPE_CYLINDER] = np_capsule_cyl,
+	[SHAPE_BOX]     [SHAPE_BOX]      = np_box_box,
+	[SHAPE_BOX]     [SHAPE_HULL]     = np_box_hull,
+	[SHAPE_BOX]     [SHAPE_CYLINDER] = np_box_cyl,
+	[SHAPE_HULL]    [SHAPE_HULL]     = np_hull_hull,
+	[SHAPE_HULL]    [SHAPE_CYLINDER] = np_hull_cyl,
+	[SHAPE_CYLINDER][SHAPE_CYLINDER] = np_cyl_cyl,
+};
+
 static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** manifolds)
 {
 	g_sat_hillclimb_enabled = w->sat_hillclimb_enabled;
@@ -2445,49 +2559,17 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		return;
 	}
 
-	if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_SPHERE)
-		hit = collide_sphere_sphere(make_sphere(bs0, s0), make_sphere(bs1, s1), &im.m);
-	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CAPSULE)
-		hit = collide_sphere_capsule(make_sphere(bs0, s0), make_capsule(bs1, s1), &im.m);
-	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_BOX)
-		hit = collide_sphere_box(make_sphere(bs0, s0), make_box(bs1, s1), &im.m);
-	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CAPSULE)
-		hit = collide_capsule_capsule(make_capsule(bs0, s0), make_capsule(bs1, s1), &im.m);
-	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_BOX)
-		hit = collide_capsule_box(make_capsule(bs0, s0), make_box(bs1, s1), &im.m);
-	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX) {
-		if (w->box_use_hull) hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, bs0->position, bs0->rotation, s0->box.half_extents }, (ConvexHull){ &s_unit_box_hull, bs1->position, bs1->rotation, s1->box.half_extents }, &im.m, hp, &out_pair);
-		else hit = collide_box_box_ex(make_box(bs0, s0), make_box(bs1, s1), &im.m, hp, &out_pair);
-	}
-	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_HULL)
-		hit = collide_hull_hull_ex((ConvexHull){ &s_unit_box_hull, bs0->position, bs0->rotation, s0->box.half_extents }, make_convex_hull(bs1, s1), &im.m, hp, &out_pair);
-	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_HULL)
-		hit = collide_sphere_hull(make_sphere(bs0, s0), make_convex_hull(bs1, s1), &im.m);
-	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_HULL)
-		hit = collide_capsule_hull(make_capsule(bs0, s0), make_convex_hull(bs1, s1), &im.m);
-	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_HULL)
-		hit = collide_hull_hull_ex(make_convex_hull(bs0, s0), make_convex_hull(bs1, s1), &im.m, hp, &out_pair);
-
-	// Cylinder pairs: native narrowphase with cylinder as shape A.
-	// Dispatch puts cyl as s1 (higher enum). Call with cyl as first arg, flip normals.
-	else if (s0->type == SHAPE_SPHERE && s1->type == SHAPE_CYLINDER) {
-		hit = collide_cylinder_sphere(make_cylinder(bs1, s1), make_sphere(bs0, s0), &im.m);
-		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
-	}
-	else if (s0->type == SHAPE_CAPSULE && s1->type == SHAPE_CYLINDER) {
-		hit = collide_cylinder_capsule(make_cylinder(bs1, s1), make_capsule(bs0, s0), &im.m);
-		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
-	}
-	else if (s0->type == SHAPE_BOX && s1->type == SHAPE_CYLINDER) {
-		hit = collide_cylinder_box(make_cylinder(bs1, s1), make_box(bs0, s0), &im.m);
-		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
-	}
-	else if (s0->type == SHAPE_HULL && s1->type == SHAPE_CYLINDER) {
-		hit = collide_cylinder_hull(make_cylinder(bs1, s1), make_convex_hull(bs0, s0), &im.m);
-		for (int c = 0; c < im.m.count; c++) im.m.contacts[c].normal = neg(im.m.contacts[c].normal);
-	}
-	else if (s0->type == SHAPE_CYLINDER && s1->type == SHAPE_CYLINDER) {
-		hit = collide_cylinder_cylinder(make_cylinder(bs0, s0), make_cylinder(bs1, s1), &im.m);
+	NarrowphaseAgent agent = g_np_table[s0->type][s1->type];
+	if (agent) {
+		NarrowphaseCtx ctx = {
+			.w = w, .body_a = i, .body_b = j,
+			.shape_a = s0, .shape_b = s1,
+			.bs_a = bs0, .bs_b = bs1,
+			.sat_hint = hp,
+			.out_pair = &out_pair,
+			.m_out = &im.m,
+		};
+		hit = agent(&ctx);
 	}
 
 	// Store SAT hint back to warm cache
