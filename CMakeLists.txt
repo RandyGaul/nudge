@@ -1,8 +1,12 @@
 cmake_minimum_required(VERSION 3.21)
 project(nudge C CXX)
 
-set(CMAKE_C_STANDARD 23)
-set(CMAKE_C_STANDARD_REQUIRED ON)
+# CMake's CMAKE_C_STANDARD=23 isn't recognized for MSVC, so we pass the flag
+# directly. Non-MSVC compilers get C23 via CMAKE_C_STANDARD as usual.
+if(NOT MSVC)
+	set(CMAKE_C_STANDARD 23)
+	set(CMAKE_C_STANDARD_REQUIRED ON)
+endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -22,7 +26,7 @@ if(NOT WIN32)
 endif()
 
 if(MSVC)
-	target_compile_options(nudge_tests PRIVATE /experimental:c11atomics /Ob3)
+	target_compile_options(nudge_tests PRIVATE /std:clatest /experimental:c11atomics /Ob3)
 	target_link_options(nudge_tests PRIVATE /STACK:8388608)
 endif()
 
@@ -65,7 +69,7 @@ if(NUDGE_BUILD_APP)
 	endif()
 
 	if(MSVC)
-		target_compile_options(nudge PRIVATE /experimental:c11atomics /Ob3)
+		target_compile_options(nudge PRIVATE /std:clatest /experimental:c11atomics /Ob3)
 	endif()
 
 	# Remote debug viewer is Win32-only (uses ReadProcessMemory).

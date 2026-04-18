@@ -2,14 +2,16 @@
 // test_main.c -- unity build root for test executable.
 // Includes only the physics engine + tests, no rendering/SDL/imgui.
 
-#define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <stdbool.h>
-#pragma comment(lib, "ws2_32.lib")
-#undef small
-#undef near
-#undef far
+#ifdef _WIN32
+	#define WIN32_LEAN_AND_MEAN
+	#include <winsock2.h>
+	#include <ws2tcpip.h>
+	#pragma comment(lib, "ws2_32.lib")
+	#undef small
+	#undef near
+	#undef far
+#endif
 
 #define CKIT_IMPLEMENTATION
 #include "ckit.h"

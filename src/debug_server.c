@@ -500,6 +500,7 @@ REFLECT(WorldInternal,
 	RF_PTR(WorldInternal, rewind, RewindBuffer),
 );
 
+#ifdef _WIN32
 // Forward declarations for send helpers (defined below).
 typedef struct DbgClient DbgClient;
 static int dbg_send_str(DbgClient *c, const char *s);
@@ -1135,6 +1136,16 @@ static void dbg_break_wait_impl(const char* name, const char* file, int line, Wo
 	g_dbg_break_file = NULL;
 	g_dbg_break_line = 0;
 }
+
+#else  // !_WIN32 -- debug server + break system are Windows-only for now.
+static void debug_server_set_world(World w) { (void)w; g_dbg_world = w; }
+static void debug_server_set_port(int port) { g_dbg_port = port > 0 ? port : DBG_PORT_DEFAULT; }
+static void debug_server_set_break_filter(const char* p) { g_dbg_break_filter = p ? p : "*"; }
+static void debug_server_init() {}
+static void debug_server_shutdown() {}
+static int dbg_break_match(const char* name) { (void)name; return 0; }
+static void dbg_break_wait_impl(const char* name, const char* file, int line, World w) { (void)name; (void)file; (void)line; (void)w; }
+#endif
 
 // Pause-point macro for use in tests or engine code. Compiles to a single
 // predicate check + function call; no-op when --debug is absent.
