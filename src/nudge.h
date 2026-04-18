@@ -441,7 +441,19 @@ size_t world_rewind_memory_used(World world);
 // Returns 1 on success, 0 on I/O failure.
 int   world_save_snapshot(World world, const char* path);
 // Returns a new World (like create_world) or (World){0} on failure.
+// After a successful load, live body/joint indices match saved order, so
+// world_get_bodies() + world_get_joints() return handles in the same order
+// the caller supplied at save time. Use those to rebind gameplay-object
+// references to the new handles.
 World world_load_snapshot(const char* path);
+
+// Iterate all live bodies / joints in the world. Writes up to max handles
+// into out[], returns the total count (may exceed max -- use to size a retry).
+// Order is live-index ascending, which matches creation order in a fresh
+// world (e.g. immediately after world_load_snapshot).
+int world_get_body_count(World world);
+int world_get_bodies(World world, Body* out, int max);
+// (world_get_joint_count / world_get_joints declared below, after Joint.)
 
 // -----------------------------------------------------------------------------
 // Sensors -- read-only world-query volumes.
@@ -486,6 +498,9 @@ int sensor_query(World world, Sensor sensor, Body* results, int max_results);
 // Joints.
 
 typedef struct Joint { uint64_t id; } Joint;
+
+int world_get_joint_count(World world);
+int world_get_joints(World world, Joint* out, int max);
 
 typedef struct SpringParams
 {

@@ -1951,6 +1951,53 @@ WorldEpaStats world_get_epa_stats(World world)
 }
 
 // -----------------------------------------------------------------------------
+// Body / joint iteration.
+
+int world_get_body_count(World world)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int n = asize(w->body_hot);
+	int alive = 0;
+	for (int i = 0; i < n; i++) if (split_alive(w->body_gen, i)) alive++;
+	return alive;
+}
+
+int world_get_bodies(World world, Body* out, int max)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int n = asize(w->body_hot);
+	int total = 0;
+	for (int i = 0; i < n; i++) {
+		if (!split_alive(w->body_gen, i)) continue;
+		if (total < max) out[total] = split_handle(Body, w->body_gen, i);
+		total++;
+	}
+	return total;
+}
+
+int world_get_joint_count(World world)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int n = asize(w->joints);
+	int alive = 0;
+	for (int i = 0; i < n; i++) if (w->joint_gen[i] & 1) alive++;
+	return alive;
+}
+
+int world_get_joints(World world, Joint* out, int max)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	int n = asize(w->joints);
+	int total = 0;
+	for (int i = 0; i < n; i++) {
+		if (!(w->joint_gen[i] & 1)) continue;
+		if (total < max) out[total] = split_handle(Joint, w->joint_gen, i);
+		total++;
+	}
+	return total;
+}
+
+// -----------------------------------------------------------------------------
 // World queries.
 
 int world_query_aabb(World world, v3 lo, v3 hi, Body* results, int max_results)

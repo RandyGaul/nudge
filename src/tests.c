@@ -12251,72 +12251,115 @@ static void test_rewind_memory_savings()
 // ============================================================================
 // Snapshot save/load (serialize.c + snapshot.c).
 
+#define SNAPSHOT_N 19  // floor + 3*3*2 boxes
 static void test_snapshot_roundtrip()
 {
-	// Build a scene, run it for a bit, save, rebuild from file, compare.
-	Body floor; Body boxes[18]; // 3*3*2
+	Body floor; Body boxes[18];
 	World w = make_rewind_scene(&floor, boxes, 2);
-
-	// Add a joint across two boxes so we exercise that code path too.
-	Joint j = create_hinge(w, (HingeParams){
+	create_hinge(w, (HingeParams){
 		.body_a = boxes[0], .body_b = boxes[1],
 		.local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0.5f, 0),
 		.local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0),
 	});
-	(void)j;
-
-	// Step a handful of frames so bodies aren't all in their starting pose.
 	float dt = 1.0f / 60.0f;
 	for (int i = 0; i < 20; i++) world_step(w, dt);
 
-	// Record state we'll compare against.
-	const int N = 19; // floor + 18 boxes
-	v3*  pos_before = (v3*)malloc(sizeof(v3) * N);
-	v3*  vel_before = (v3*)malloc(sizeof(v3) * N);
-	quat* rot_before = (quat*)malloc(sizeof(quat) * N);
-	pos_before[0] = body_get_position(w, floor); vel_before[0] = body_get_velocity(w, floor); rot_before[0] = body_get_rotation(w, floor);
-	for (int i = 0; i < 18; i++) {
-		pos_before[i+1] = body_get_position(w, boxes[i]);
-		vel_before[i+1] = body_get_velocity(w, boxes[i]);
-		rot_before[i+1] = body_get_rotation(w, boxes[i]);
+	const int N = SNAPSHOT_N;
+	Body handles_pre[SNAPSHOT_N]; world_get_bodies(w, handles_pre, N);
+	v3 pos_pre[SNAPSHOT_N]; v3 vel_pre[SNAPSHOT_N]; quat rot_pre[SNAPSHOT_N];
+	for (int i = 0; i < N; i++) {
+		pos_pre[i] = body_get_position(w, handles_pre[i]);
+		vel_pre[i] = body_get_velocity(w, handles_pre[i]);
+		rot_pre[i] = body_get_rotation(w, handles_pre[i]);
 	}
 
 	const char* path = "test_snapshot.nudgesave";
 	TEST_BEGIN("snapshot: save succeeds");
 	TEST_ASSERT(world_save_snapshot(w, path) == 1);
-
 	destroy_world(w);
 
 	TEST_BEGIN("snapshot: load returns a valid world");
 	World w2 = world_load_snapshot(path);
 	TEST_ASSERT(w2.id != 0);
 
-	// Body/joint ordering is preserved — body 0 == floor, 1..18 == boxes.
 	TEST_BEGIN("snapshot: body count preserved");
-	Body results[64];
-	int count = world_query_aabb(w2, V3(-100,-100,-100), V3(100,100,100), results, 64);
-	TEST_ASSERT(count == N);
+	TEST_ASSERT(world_get_body_count(w2) == N);
 
-	// Sum-of-positions as a cheap correctness check: loaded world's total
-	// position must match the saved total to within float epsilon. Catches
-	// dropped bodies, mis-serialized floats, per-body drift.
-	TEST_BEGIN("snapshot: body position sum matches");
-	v3 sum_before = V3(0,0,0), sum_after = V3(0,0,0);
-	for (int i = 0; i < N; i++) sum_before = add(sum_before, pos_before[i]);
-	for (int i = 0; i < count; i++) sum_after = add(sum_after, body_get_position(w2, results[i]));
-	v3 diff = sub(sum_before, sum_after);
-	TEST_ASSERT(len(diff) < 1e-4f);
+	TEST_BEGIN("snapshot: joint count preserved");
+	TEST_ASSERT(world_get_joint_count(w2) == 1);
 
-	// Stepping the loaded world should not crash; exercises that joints +
-	// shapes + bodies were all rewired correctly on load.
+	Body handles_post[SNAPSHOT_N]; world_get_bodies(w2, handles_post, N);
+	TEST_BEGIN("snapshot: every body pose byte-identical after load");
+	int mismatches = 0;
+	for (int i = 0; i < N; i++) {
+		v3 p = body_get_position(w2, handles_post[i]);
+		v3 v = body_get_velocity(w2, handles_post[i]);
+		quat r = body_get_rotation(w2, handles_post[i]);
+		if (memcmp(&p, &pos_pre[i], sizeof(v3)) != 0) mismatches++;
+		if (memcmp(&v, &vel_pre[i], sizeof(v3)) != 0) mismatches++;
+		if (memcmp(&r, &rot_pre[i], sizeof(quat)) != 0) mismatches++;
+	}
+	TEST_ASSERT(mismatches == 0);
+
 	TEST_BEGIN("snapshot: loaded world steps cleanly");
 	for (int i = 0; i < 5; i++) world_step(w2, dt);
 	TEST_ASSERT(1);
 
-	free(pos_before); free(vel_before); free(rot_before);
 	destroy_world(w2);
 	remove(path);
 }
+
+static void test_snapshot_deterministic_replay()
+{
+	// Save after 20 frames, step original 10 more, load, step loaded 10 more,
+	// assert bit-identical poses. Validates that internal state (warm cache,
+	// islands, frame counter, versions) is captured well enough that the two
+	// simulations can't possibly diverge.
+	const int N = SNAPSHOT_N;
+	float dt = 1.0f / 60.0f;
+
+	Body floor_a; Body boxes_a[18];
+	World wa = make_rewind_scene(&floor_a, boxes_a, 2);
+	create_hinge(wa, (HingeParams){
+		.body_a = boxes_a[0], .body_b = boxes_a[1],
+		.local_offset_a = V3(0, 0, 0), .local_offset_b = V3(0, 0.5f, 0),
+		.local_axis_a = V3(0, 1, 0), .local_axis_b = V3(0, 1, 0),
+	});
+	for (int i = 0; i < 20; i++) world_step(wa, dt);
+
+	const char* path = "test_snapshot_det.nudgesave";
+	world_save_snapshot(wa, path);
+
+	for (int i = 0; i < 10; i++) world_step(wa, dt);
+	Body handles_a[SNAPSHOT_N]; world_get_bodies(wa, handles_a, N);
+	v3 pos_a[SNAPSHOT_N]; v3 vel_a[SNAPSHOT_N]; quat rot_a[SNAPSHOT_N];
+	for (int i = 0; i < N; i++) {
+		pos_a[i] = body_get_position(wa, handles_a[i]);
+		vel_a[i] = body_get_velocity(wa, handles_a[i]);
+		rot_a[i] = body_get_rotation(wa, handles_a[i]);
+	}
+
+	World wc = world_load_snapshot(path);
+	for (int i = 0; i < 10; i++) world_step(wc, dt);
+	Body handles_c[SNAPSHOT_N]; world_get_bodies(wc, handles_c, N);
+
+	TEST_BEGIN("snapshot: deterministic replay -- body byte-identical after 10 steps");
+	int mismatches = 0;
+	for (int i = 0; i < N; i++) {
+		v3 p = body_get_position(wc, handles_c[i]);
+		v3 v = body_get_velocity(wc, handles_c[i]);
+		quat r = body_get_rotation(wc, handles_c[i]);
+		if (memcmp(&p, &pos_a[i], sizeof(v3)) != 0) mismatches++;
+		if (memcmp(&v, &vel_a[i], sizeof(v3)) != 0) mismatches++;
+		if (memcmp(&r, &rot_a[i], sizeof(quat)) != 0) mismatches++;
+	}
+	TEST_ASSERT(mismatches == 0);
+
+	destroy_world(wa);
+	destroy_world(wc);
+	remove(path);
+}
+#undef SNAPSHOT_N
 
 static void test_rewind_by_steps()
 {
@@ -12472,6 +12515,7 @@ static void run_query_tests()
 	test_rewind_memory_savings();
 	test_rewind_by_steps();
 	test_snapshot_roundtrip();
+	test_snapshot_deterministic_replay();
 }
 
 // ============================================================================
