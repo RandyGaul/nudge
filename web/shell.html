@@ -109,6 +109,25 @@
 	document.addEventListener('contextmenu', function (e) { e.preventDefault(); }, { capture: true });
 	document.addEventListener('auxclick', function (e) { e.preventDefault(); }, { capture: true });
 
+	// Drive the canvas size from window.innerWidth / innerHeight instead of
+	// letting Emscripten/SDL guess. emscripten_get_element_css_size returns
+	// bogus values on some Chrome configurations, so we push an explicit
+	// size via setAttribute + CSS dimensions. Both attributes so drawing
+	// buffer matches visible box.
+	function sizeCanvas() {
+		var header = document.querySelector('header');
+		var headerH = header ? header.getBoundingClientRect().height : 0;
+		var w = window.innerWidth;
+		var h = window.innerHeight - headerH;
+		var c = document.getElementById('canvas');
+		c.style.width  = w + 'px';
+		c.style.height = h + 'px';
+		c.width  = w;
+		c.height = h;
+	}
+	sizeCanvas();
+	window.addEventListener('resize', sizeCanvas);
+
 	var Module = {
 		canvas: (function () {
 			var c = document.getElementById('canvas');

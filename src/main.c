@@ -96,20 +96,14 @@ static void platform_shutdown()
 static void frame_step()
 {
 #ifdef __EMSCRIPTEN__
-	// The HTML canvas has two sizes: CSS-visible size (what the user sees)
-	// and drawing-buffer size (what GL renders into). Our CSS stretches the
-	// canvas with flex:1 but doesn't touch the drawing buffer, which stays
-	// at its default (300x150). Query the CSS size each frame, push it into
-	// the drawing buffer + SDL window, and re-apply glViewport when it
-	// changes. Accounts for window resize, devicePixelRatio changes, and
-	// the initial post-load reflow.
+	// Canvas size is driven from JS in shell.html (sets both the drawing-
+	// buffer attributes and the CSS dimensions from window.innerWidth/
+	// innerHeight). Read it back via emscripten_get_canvas_element_size,
+	// which asks for the drawing-buffer size directly -- no CSS indirection.
 	{
-		double css_w = 0, css_h = 0;
-		emscripten_get_element_css_size("#canvas", &css_w, &css_h);
-		int w = (int)(css_w + 0.5);
-		int h = (int)(css_h + 0.5);
+		int w = 0, h = 0;
+		emscripten_get_canvas_element_size("#canvas", &w, &h);
 		if (w > 0 && h > 0 && (w != g_width || h != g_height)) {
-			emscripten_set_canvas_element_size("#canvas", w, h);
 			SDL_SetWindowSize(g_window, w, h);
 			g_width = w;
 			g_height = h;
@@ -183,11 +177,7 @@ static bool g_show_joints = true;
 static bool g_show_bvh = true;
 static bool g_show_proxies = false;
 static bool g_show_sleep = true;
-#ifdef __EMSCRIPTEN__
-static bool g_show_shadows = false;  // TEMP: debug black-scene issue
-#else
 static bool g_show_shadows = true;
-#endif
 static bool g_translucent_shapes = false;
 static bool g_sleep_enabled = true;
 static bool g_sat_hint = true;
@@ -519,15 +509,13 @@ void init()
 	setup_scene();
 
 #ifdef __EMSCRIPTEN__
-	// Prime the canvas drawing-buffer size before the first frame so frame 0
-	// isn't drawn into the HTML-default 300x150 region.
+	// Prime the canvas drawing-buffer size before the first frame. shell.html's
+	// sizeCanvas() has already set the width/height attributes; just mirror into
+	// SDL + GL state.
 	{
-		double css_w = 0, css_h = 0;
-		emscripten_get_element_css_size("#canvas", &css_w, &css_h);
-		int w = (int)(css_w + 0.5);
-		int h = (int)(css_h + 0.5);
+		int w = 0, h = 0;
+		emscripten_get_canvas_element_size("#canvas", &w, &h);
 		if (w > 0 && h > 0) {
-			emscripten_set_canvas_element_size("#canvas", w, h);
 			SDL_SetWindowSize(g_window, w, h);
 			g_width = w;
 			g_height = h;

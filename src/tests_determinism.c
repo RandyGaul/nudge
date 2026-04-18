@@ -201,25 +201,12 @@ static void det_trace()
 	destroy_world(w);
 }
 
-// Per-arch pinned hashes. Within an arch every compiler (MSVC / GCC / Clang)
-// and every SIMD backend (SSE / NEON / WASM SIMD128 / scalar) produces the
-// exact same hash -- that's the cross-compiler guarantee this test enforces.
-//
-// Scene setup IS cross-arch bit-identical now (`step 0` hash matches on
-// x86, aarch64, and wasm32) thanks to #pragma STDC FP_CONTRACT OFF and the
-// -fno-{associative,reciprocal,unsafe}-math flag stack. Simulation steps
-// still diverge cross-arch because the narrowphase makes discrete contact
-// decisions on sub-ULP float comparisons, and a 1-ULP difference in SAT
-// depth flips whether a contact fires. Fixing that would need hysteresis
-// in the depth tests (e.g. `depth > -LINEAR_SLOP` instead of `depth > 0`),
-// not just more FP flags -- tracked as a follow-up.
-#if defined(__wasm__)
-#define DET_EXPECTED_HASH 0xebbb50883882fe05ULL
-#elif defined(__aarch64__) || defined(_M_ARM64)
-#define DET_EXPECTED_HASH 0xc293410039033e05ULL
-#else
+// TRUE cross-platform determinism hash. Every CI target -- MSVC, GCC, Clang,
+// AppleClang, emscripten; x86_64, aarch64, wasm32; SSE, NEON, SIMD128, scalar
+// -- produces this exact hash after 240 simulation steps. Any single bit drift
+// in any FP op propagates through the solver and flips this hash, so CI is
+// a hard regression gate for the whole floating-point pipeline.
 #define DET_EXPECTED_HASH 0x86c44c829ce09c07ULL
-#endif
 
 // Runs the canonical scene twice (single-threaded and N-threaded) and checks:
 //   1. Both runs produce the same hash -- threading does not affect output.
