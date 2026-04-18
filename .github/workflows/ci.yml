@@ -91,12 +91,22 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNUDGE_BUILD_APP=OFF
       - name: Build nudge_tests
         run: cmake --build build --target nudge_tests
-      - name: Run tests
-        run: ./build/nudge_tests
-      - name: Quick perf smoke (bench-stack 10)
-        run: ./build/nudge_tests --bench-stack 10
+      # Determinism check first -- it's fast, exercises the core solver path,
+      # and verifies NEON produces the same hash as SSE. The full suite is
+      # known to hang somewhere on Apple Silicon (tracking separately); wrap
+      # each step in a timeout so we fail fast instead of eating a CI hour.
       - name: Determinism check
+        timeout-minutes: 2
         run: ./build/nudge_tests --determinism --threads 4
+      - name: Quick perf smoke (bench-stack 10)
+        timeout-minutes: 2
+        run: ./build/nudge_tests --bench-stack 10
+      - name: Run unit tests
+        timeout-minutes: 5
+        run: ./build/nudge_tests --unit
+      - name: Run full tests
+        timeout-minutes: 8
+        run: ./build/nudge_tests
 
   emscripten-wasm:
     name: Emscripten WASM SIMD128
@@ -107,14 +117,20 @@ jobs:
         with:
           version: 3.1.74
       - name: Configure
+        # 8MB stack + allow memory growth: the default 64KB WASM stack blows
+        # up in recursive quickhull / GJK paths, and nudge allocates large
+        # dynamic arrays during stress tests. Matches MSVC's /STACK:8388608.
         run: >
           emcmake cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_FLAGS="-msimd128"
+          -DCMAKE_EXE_LINKER_FLAGS="-sSTACK_SIZE=8388608 -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=67108864"
           -DNUDGE_BUILD_APP=OFF
       - name: Build nudge_tests
         run: cmake --build build --target nudge_tests
-      - name: Run tests under node
-        run: node ./build/nudge_tests.js
       - name: Determinism check
+        timeout-minutes: 2
         run: node ./build/nudge_tests.js --determinism --threads 4
+      - name: Run tests under node
+        timeout-minutes: 8
+        run: node ./build/nudge_tests.js
 
