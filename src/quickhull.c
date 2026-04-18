@@ -11,6 +11,14 @@
 // Edge convention: each half-edge stores its ORIGIN vertex (= tail).
 // The head of edge e is edges[edges[e].next].origin.
 
+#ifdef _MSC_VER
+	#include <malloc.h>
+	#define NUDGE_ALLOCA(n) _alloca(n)
+#else
+	#include <alloca.h>
+	#define NUDGE_ALLOCA(n) alloca(n)
+#endif
+
 #define QH_INVALID    (~0)
 #define QH_VISIBLE    1
 #define QH_NON_CONVEX 2
@@ -1185,7 +1193,7 @@ static Hull* qh_build_output(QH_State* s, const v3* all_points, int all_count)
 	h->maxoutside = 0;
 	int fc = h->face_count;
 	int soa_bytes = fc * 4 * sizeof(float);
-	float* nx = (soa_bytes <= 4096) ? (float*)_alloca(soa_bytes) : (float*)CK_ALLOC(soa_bytes);
+	float* nx = (soa_bytes <= 4096) ? (float*)NUDGE_ALLOCA(soa_bytes) : (float*)CK_ALLOC(soa_bytes);
 	float* ny = nx + fc, *nz = ny + fc, *max_ds = nz + fc;
 	for (int i = 0; i < fc; i++) { nx[i] = pcp[i].normal.x; ny[i] = pcp[i].normal.y; nz[i] = pcp[i].normal.z; max_ds[i] = pcp[i].offset; }
 	int fc4 = fc & ~3;

@@ -285,6 +285,7 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 	while (atomic_load(&pool_stage.completion_count) < n_blocks) simd_pause();
 }
 
+#if SIMD_SSE
 // --- PGS solver work function (per-color) ---
 typedef struct PGS_WorkCtx { BodyHot* bodies; PGS_Batch4* batches; SolverManifold* sm; SolverContact* sc; int scatter; } PGS_WorkCtx;
 static void pgs_work_fn(void* ctx, int start, int count)
@@ -370,6 +371,7 @@ static void refresh_work_fn(void* ctx, int start, int count)
 	RefreshCtx* r = (RefreshCtx*)ctx;
 	for (int i = start; i < start + count; i++) pgs_batch4_refresh(&r->batches[i], r->sm, r->sc);
 }
+#endif // SIMD_SSE
 
 // --- Integrate work function (parallel body integration) ---
 typedef struct IntegrateCtx { WorldInternal* w; float dt; int* body_indices; int mode; } IntegrateCtx;
@@ -1500,6 +1502,8 @@ uint8_t body_get_material_id(World world, Body body)
 
 // -----------------------------------------------------------------------------
 // Joints.
+
+static int joint_alloc_slot(WorldInternal* w);
 
 Joint create_ball_socket(World world, BallSocketParams params)
 {

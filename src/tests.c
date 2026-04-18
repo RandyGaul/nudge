@@ -13765,13 +13765,14 @@ static void bench_quickhull_10k()
 	free(box_pts);
 }
 
+static void test_capsule_box_tilted_direct();
+
 static void run_tests()
 {
 	test_pass = 0;
 	test_fail = 0;
 
 	printf("--- nudge narrowphase tests ---\n");
-	void test_capsule_box_tilted_direct();
 
 	test_sphere_sphere();
 	test_sphere_capsule();
