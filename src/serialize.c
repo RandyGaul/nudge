@@ -51,6 +51,10 @@ enum
 	// trimeshes are caller-owned and referenced by name, so per-tri state
 	// belongs to the user's mesh object.
 	SV_MATERIALS,
+	// SHAPE_HEIGHTFIELD serializes as a name string (heightfield_set_name)
+	// + resolver lookup via world_register_heightfield; same pattern as
+	// SHAPE_HULL / SHAPE_MESH.
+	SV_HEIGHTFIELD_SHAPE,
 	// --- insert new entries here ---
 	SV_LATEST_PLUS_ONE
 };
@@ -520,6 +524,17 @@ SV_SERIALIZABLE(ShapeParams)
 		}
 		SV_ADD_LOCAL(SV_HULL_MESH_NAMES, name);
 		if (S->loading) o->mesh.mesh = (const TriMesh*)(uintptr_t)name;
+		break;
+	}
+	case SHAPE_HEIGHTFIELD: {
+		const char* name = NULL;
+		if (S->saving) {
+			assert(o->heightfield.hf && "SV: SHAPE_HEIGHTFIELD missing hf pointer");
+			name = heightfield_get_name(o->heightfield.hf);
+			assert(name && "SV: SHAPE_HEIGHTFIELD must be named via heightfield_set_name before save");
+		}
+		SV_ADD_LOCAL(SV_HEIGHTFIELD_SHAPE, name);
+		if (S->loading) o->heightfield.hf = (const Heightfield*)(uintptr_t)name;
 		break;
 	}
 	}

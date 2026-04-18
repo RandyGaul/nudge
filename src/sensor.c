@@ -56,6 +56,7 @@ void sensor_add_shape(World world, Sensor sensor, ShapeParams params)
 {
 	assert(is_valid(params.local_pos) && "sensor_add_shape: local_pos is NaN/inf");
 	assert(params.type != SHAPE_MESH && "sensor_add_shape: SHAPE_MESH not supported on sensors");
+	assert(params.type != SHAPE_HEIGHTFIELD && "sensor_add_shape: SHAPE_HEIGHTFIELD not supported on sensors");
 
 	WorldInternal* w = (WorldInternal*)world.id;
 	int idx = handle_index(sensor);
@@ -77,6 +78,7 @@ void sensor_add_shape(World world, Sensor sensor, ShapeParams params)
 	case SHAPE_CYLINDER: sh.cylinder.half_height = params.cylinder.half_height;
 	                     sh.cylinder.radius = params.cylinder.radius; break;
 	case SHAPE_MESH:     break;
+	case SHAPE_HEIGHTFIELD: break;
 	}
 	apush(s->shapes, sh);
 }
@@ -199,6 +201,7 @@ int sensor_query(World world, Sensor sensor, Body* results, int max_results)
 		for (int sa = 0; sa < nshapes && !hit; sa++) {
 			for (int sb = 0; sb < body_nshapes && !hit; sb++) {
 				if (bc->shapes[sb].type == SHAPE_MESH) continue;
+				if (bc->shapes[sb].type == SHAPE_HEIGHTFIELD) continue;
 				if (sensor_shape_overlap(&sen_state, &s->shapes[sa], bs, &bc->shapes[sb]))
 					hit = 1;
 			}

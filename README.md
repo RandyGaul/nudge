@@ -28,10 +28,10 @@ What you get
 
 ### Shapes
 
-Sphere, capsule, box, convex hull, cylinder, and static triangle mesh. Build
-convex hulls from arbitrary point clouds with `quickhull`, or use the built-in
-unit box. One body can hold several child shapes with local offsets and
-rotations -- compound colliders come for free.
+Sphere, capsule, box, convex hull, cylinder, static triangle mesh, and
+heightfield. Build convex hulls from arbitrary point clouds with `quickhull`,
+or use the built-in unit box. One body can hold several child shapes with
+local offsets and rotations -- compound colliders come for free.
 
 ```c
 // Compound: three shapes on one body.
@@ -62,6 +62,12 @@ body_add_shape(world, rock, (ShapeParams){
 TriMesh* terrain = trimesh_create(verts, vert_count, indices, tri_count);
 Body ground = create_body(world, (BodyParams){ .mass = 0 });
 body_add_shape(world, ground, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = terrain });
+
+// Heightfield (compact grid terrain): N*N float heights on a uniform grid.
+float heights[64 * 64] = { /* sampled from a heightmap image, etc. */ };
+Heightfield* hf = heightfield_create(heights, 64, 1.0f);   // 64x64, 1m cells
+Body terrain_b = create_body(world, (BodyParams){ .mass = 0 });
+body_add_shape(world, terrain_b, (ShapeParams){ .type = SHAPE_HEIGHTFIELD, .heightfield.hf = hf });
 ```
 
 
@@ -181,10 +187,11 @@ int count = sensor_query(world, zone, bodies_inside, 32);
 
 ### Persistence
 
-Snapshot save/load is versioned binary, DEFLATE-compressed. Hulls and
-triangle meshes are referenced by name so your asset loader rebinds them on
-load. Rewind is a ring buffer of deterministic snapshots you can jump back
-to; delta-compressed, so resting piles cost almost nothing.
+Snapshot save/load is versioned binary, DEFLATE-compressed. Hulls, triangle
+meshes, and heightfields are referenced by name so your asset loader
+rebinds them on load. Rewind is a ring buffer of deterministic snapshots
+you can jump back to; delta-compressed, so resting piles cost almost
+nothing.
 
 ```c
 // Save / load.
@@ -236,7 +243,6 @@ What's missing
 - Continuous collision (CCD) / swept shape casts.
 - Shape-cast and overlap-shape world queries (raycast and AABB query
   work today).
-- Heightfield (use triangle mesh for now).
 - Character controller, vehicles, soft bodies.
 
 

@@ -13,25 +13,36 @@
 // and the merge step reduces them.
 
 // Decode the triangle index (0-based) from the internal InternalManifold.sub_id,
-// which packs ((sa+1) << 16) | (tri_idx + 1) for convex-vs-mesh pairs. Returns
-// 0 if the body is not a mesh side.
-static inline uint32_t decode_tri_index_plus_one(const InternalManifold* im, int body_is_mesh_side)
+// which packs ((sa+1) << 16) | (tri_idx + 1) for convex-vs-mesh/heightfield
+// pairs. Returns 0 if the body is not a surface side.
+static inline uint32_t decode_tri_index_plus_one(const InternalManifold* im, int body_is_surface_side)
 {
-	if (!body_is_mesh_side) return 0;
+	if (!body_is_surface_side) return 0;
 	return im->sub_id & 0xFFFFu;
 }
 
-// Resolve the material id for the mesh side of a pair. tri_plus_one is the
-// triangle index + 1 as encoded in the sub_id low half (0 means no mesh).
-static uint8_t resolve_mesh_material(WorldInternal* w, int body_idx, uint32_t tri_plus_one)
+// Resolve the material id for the surface (mesh / heightfield) side of a pair.
+// tri_plus_one is the triangle index + 1 (mesh) or cell-triangle index + 1
+// (heightfield; cell = (tri_idx) / 2). 0 = not a surface side, fall back to
+// the body's default material id.
+static uint8_t resolve_surface_material(WorldInternal* w, int body_idx, uint32_t tri_plus_one)
 {
 	uint8_t default_id = w->body_cold[body_idx].material_id;
 	if (tri_plus_one == 0) return default_id;
 	ShapeInternal* shapes = w->body_cold[body_idx].shapes;
-	if (!shapes || shapes[0].type != SHAPE_MESH) return default_id;
-	const TriMesh* mesh = shapes[0].mesh.mesh;
-	if (!mesh->material_ids) return default_id;
-	return mesh->material_ids[tri_plus_one - 1];
+	if (!shapes) return default_id;
+	if (shapes[0].type == SHAPE_MESH) {
+		const TriMesh* mesh = shapes[0].mesh.mesh;
+		if (!mesh->material_ids) return default_id;
+		return mesh->material_ids[tri_plus_one - 1];
+	}
+	if (shapes[0].type == SHAPE_HEIGHTFIELD) {
+		const Heightfield* hf = shapes[0].heightfield.hf;
+		if (!hf->material_ids) return default_id;
+		int cell = (int)(tri_plus_one - 1) / 2;
+		return hf->material_ids[cell];
+	}
+	return default_id;
 }
 
 // Reduce a Manifold to a single ContactSummary row. Canonicalises a.id < b.id.
@@ -57,15 +68,15 @@ static void contact_row_from_manifold(WorldInternal* w, const InternalManifold* 
 	Body ha = split_handle(Body, w->body_gen, im->body_a);
 	Body hb = split_handle(Body, w->body_gen, im->body_b);
 	v3 normal = m->contacts[deepest].normal;
-	// Mesh is always B in the internal manifold (narrowphase canonicalises
-	// mesh-to-B before emit). sub_b carries the triangle index + 1 in its
-	// low 16 bits; sub_a is 0 for non-mesh sides.
-	int b_is_mesh = im->sub_id != 0 && w->body_cold[im->body_b].shapes
-	              && w->body_cold[im->body_b].shapes[0].type == SHAPE_MESH;
+	// Surface shapes (mesh / heightfield) are always B in the internal
+	// manifold (narrowphase canonicalises before emit). sub_b carries the
+	// triangle index + 1 in its low 16 bits; sub_a is 0 for non-surface sides.
+	ShapeType b_type = (w->body_cold[im->body_b].shapes) ? w->body_cold[im->body_b].shapes[0].type : SHAPE_SPHERE;
+	int b_is_surface = im->sub_id != 0 && (b_type == SHAPE_MESH || b_type == SHAPE_HEIGHTFIELD);
 	uint32_t sub_a = 0;
-	uint32_t sub_b = decode_tri_index_plus_one(im, b_is_mesh);
+	uint32_t sub_b = decode_tri_index_plus_one(im, b_is_surface);
 	uint8_t mat_a = w->body_cold[im->body_a].material_id;
-	uint8_t mat_b = resolve_mesh_material(w, im->body_b, sub_b);
+	uint8_t mat_b = resolve_surface_material(w, im->body_b, sub_b);
 	if (ha.id > hb.id) {
 		Body t = ha; ha = hb; hb = t;
 		normal = neg(normal);

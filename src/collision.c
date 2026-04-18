@@ -2401,6 +2401,14 @@ static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, Con
 static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds);
 static int ray_mesh(v3 ro, v3 rd, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, float max_t, float* t_out, v3* n_out);
 
+// Forward decls for the heightfield emit routines (defined in heightfield.c).
+static void collide_sphere_heightfield_emit(WorldInternal* w, int body_a, int body_b, Sphere sphere_world, v3 hf_pos, quat hf_rot, const Heightfield* hf, uint32_t sub_id_base, InternalManifold** manifolds);
+static void collide_capsule_heightfield_emit(WorldInternal* w, int body_a, int body_b, Capsule capsule_world, v3 hf_pos, quat hf_rot, const Heightfield* hf, uint32_t sub_id_base, InternalManifold** manifolds);
+static void collide_box_heightfield_emit(WorldInternal* w, int body_a, int body_b, Box box_world, v3 hf_pos, quat hf_rot, const Heightfield* hf, uint32_t sub_id_base, InternalManifold** manifolds);
+static void collide_hull_heightfield_emit(WorldInternal* w, int body_a, int body_b, ConvexHull hull_world, v3 hf_pos, quat hf_rot, const Heightfield* hf, uint32_t sub_id_base, InternalManifold** manifolds);
+static void collide_cylinder_heightfield_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 hf_pos, quat hf_rot, const Heightfield* hf, uint32_t sub_id_base, InternalManifold** manifolds);
+static int ray_heightfield(v3 ro, v3 rd, v3 hf_pos, quat hf_rot, const Heightfield* hf, float max_t, float* t_out, v3* n_out);
+
 // Forward decls (defined in epa.c, included later in the unity build).
 static int epa_narrowphase_pair(WorldInternal* w, int body_a_idx, int body_b_idx, ShapeInternal* s0, ShapeInternal* s1, BodyState* bs0, BodyState* bs1, Manifold* manifold);
 
@@ -2608,6 +2616,19 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 			else if (s0->type == SHAPE_BOX)      collide_box_mesh_emit(w, body_a, body_b, make_box(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
 			else if (s0->type == SHAPE_HULL)     collide_hull_mesh_emit(w, body_a, body_b, make_convex_hull(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
 			else if (s0->type == SHAPE_CYLINDER) collide_cylinder_mesh_emit(w, body_a, body_b, make_cylinder(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
+			continue;
+		}
+
+		// Heightfield pairs mirror the mesh branch: one manifold per contacted
+		// cell-triangle, sub_id low 16 bits = tri index + 1.
+		if (s1->type == SHAPE_HEIGHTFIELD) {
+			np_call_acc[np_pair_idx(s0->type, s1->type)]++;
+			uint32_t sub_id_base = (uint32_t)(sa_idx + 1) << 16;
+			if (s0->type == SHAPE_SPHERE)        collide_sphere_heightfield_emit(w, body_a, body_b, make_sphere(bs0, s0), bs1->position, bs1->rotation, s1->heightfield.hf, sub_id_base, manifolds);
+			else if (s0->type == SHAPE_CAPSULE)  collide_capsule_heightfield_emit(w, body_a, body_b, make_capsule(bs0, s0), bs1->position, bs1->rotation, s1->heightfield.hf, sub_id_base, manifolds);
+			else if (s0->type == SHAPE_BOX)      collide_box_heightfield_emit(w, body_a, body_b, make_box(bs0, s0), bs1->position, bs1->rotation, s1->heightfield.hf, sub_id_base, manifolds);
+			else if (s0->type == SHAPE_HULL)     collide_hull_heightfield_emit(w, body_a, body_b, make_convex_hull(bs0, s0), bs1->position, bs1->rotation, s1->heightfield.hf, sub_id_base, manifolds);
+			else if (s0->type == SHAPE_CYLINDER) collide_cylinder_heightfield_emit(w, body_a, body_b, make_cylinder(bs0, s0), bs1->position, bs1->rotation, s1->heightfield.hf, sub_id_base, manifolds);
 			continue;
 		}
 
@@ -2895,6 +2916,7 @@ static int ray_body(WorldInternal* w, int body_idx, v3 origin, v3 dir, float max
 		case SHAPE_HULL:     hit = ray_hull(origin, dir, make_convex_hull(bs, s), best_t, &t, &n); break;
 		case SHAPE_CYLINDER: hit = ray_cylinder(origin, dir, make_cylinder(bs, s), best_t, &t, &n); break;
 		case SHAPE_MESH:     hit = ray_mesh(origin, dir, bs->position, bs->rotation, s->mesh.mesh, best_t, &t, &n); break;
+		case SHAPE_HEIGHTFIELD: hit = ray_heightfield(origin, dir, bs->position, bs->rotation, s->heightfield.hf, best_t, &t, &n); break;
 		}
 		if (hit && t < best_t) { best_t = t; best_n = n; found = 1; }
 	}

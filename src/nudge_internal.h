@@ -36,6 +36,7 @@ typedef struct ShapeInternal
 		struct { const Hull* hull; v3 scale; } hull;
 		struct { float half_height; float radius; } cylinder;
 		struct { const TriMesh* mesh; } mesh;
+		struct { const Heightfield* hf; } heightfield;
 	};
 } ShapeInternal;
 
@@ -486,8 +487,9 @@ typedef struct WorldInternal
 
 	// Asset registries for snapshot save/load. Keys are sinterned names
 	// (cast to uint64), values are user-owned Hull* / TriMesh*.
-	CK_MAP(const Hull*)    hull_registry;
-	CK_MAP(const TriMesh*) mesh_registry;
+	CK_MAP(const Hull*)         hull_registry;
+	CK_MAP(const TriMesh*)      mesh_registry;
+	CK_MAP(const Heightfield*)  heightfield_registry;
 	// Broadphase
 	BroadphaseType broadphase_type;
 	BVH_Tree* bvh_static;

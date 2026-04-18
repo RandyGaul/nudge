@@ -67,6 +67,9 @@ static ShapeParams snapshot_shape_from_internal(const ShapeInternal* sh)
 	case SHAPE_MESH:
 		sp.mesh.mesh = sh->mesh.mesh;
 		break;
+	case SHAPE_HEIGHTFIELD:
+		sp.heightfield.hf = sh->heightfield.hf;
+		break;
 	}
 	return sp;
 }
@@ -89,6 +92,12 @@ static void snapshot_resolve_shape_name(WorldInternal* w, ShapeParams* sp)
 		const TriMesh** slot = map_get_ptr(w->mesh_registry, (uint64_t)(uintptr_t)name);
 		assert(slot && "world_load_snapshot: SHAPE_MESH name not registered (use world_register_mesh)");
 		sp->mesh.mesh = *slot;
+	} else if (sp->type == SHAPE_HEIGHTFIELD) {
+		const char* name = (const char*)(uintptr_t)sp->heightfield.hf;
+		if (!name) return;
+		const Heightfield** slot = map_get_ptr(w->heightfield_registry, (uint64_t)(uintptr_t)name);
+		assert(slot && "world_load_snapshot: SHAPE_HEIGHTFIELD name not registered (use world_register_heightfield)");
+		sp->heightfield.hf = *slot;
 	}
 }
 

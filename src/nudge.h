@@ -223,6 +223,48 @@ NUDGE_API void trimesh_set_name(TriMesh* mesh, const char* name);
 NUDGE_API const char* trimesh_get_name(const TriMesh* mesh);
 
 // -----------------------------------------------------------------------------
+// Heightfield -- static regular-grid collision surface. Cheaper than trimesh
+// for terrain because the topology is implicit: N*N vertices on an N-by-N
+// grid with uniform cell_size spacing, two triangles per cell with a fixed
+// diagonal.
+//
+// Local frame: grid sits in the local X-Z plane with Y as height. Vertex
+// (i, j) lives at world_local (i*cell_size, heights[j*N + i], j*cell_size),
+// with i ranging over [0, N) along X and j over [0, N) along Z. The grid
+// covers [0, (N-1)*cell_size] on both X and Z. Place the body's position
+// to translate the whole field.
+//
+// Each cell (i, j) for i in [0, N-1), j in [0, N-1) produces two triangles:
+// a diagonal from (i, j) to (i+1, j+1) splits each cell in half. Both
+// triangles wind CCW when viewed from +Y so face normals point up.
+//
+// Static only: attach to a mass=0 body. Per-cell material ids are optional
+// (heightfield_set_material_ids) and feed ContactSummary.material_* through
+// the same palette body shapes use.
+//
+// v1 limits: plain float storage (quantization is a future optimization),
+// fixed diagonal, no holes / no-collision sentinel. N must satisfy
+// (N-1)*(N-1)*2 <= 65535 (i.e. N <= 182); the manifold sub-id reserves 16
+// bits for the triangle index.
+typedef struct Heightfield Heightfield;
+
+NUDGE_API Heightfield* heightfield_create(const float* heights, int N, float cell_size);
+NUDGE_API void heightfield_free(Heightfield* hf);
+
+// Debug: number of triangles (= 2 * (N-1) * (N-1)).
+NUDGE_API int heightfield_tri_count(const Heightfield* hf);
+
+// Optional per-cell material ids; ids[] length must equal (N-1)*(N-1).
+// Pass ids=NULL to clear. Summaries on a heightfield side read from this
+// table when present; otherwise fall back to the body default material_id.
+NUDGE_API void heightfield_set_material_ids(Heightfield* hf, const uint8_t* ids);
+NUDGE_API uint8_t heightfield_get_material_id(const Heightfield* hf, int cell_index);
+
+// Name tagging for snapshot identification (same pattern as hulls/meshes).
+NUDGE_API void heightfield_set_name(Heightfield* hf, const char* name);
+NUDGE_API const char* heightfield_get_name(const Heightfield* hf);
+
+// -----------------------------------------------------------------------------
 // Contact manifold.
 
 // Contact feature ID for warm starting.
@@ -304,7 +346,8 @@ typedef enum ShapeType
 	SHAPE_BOX,
 	SHAPE_HULL,
 	SHAPE_CYLINDER,
-	SHAPE_MESH,    // static triangle mesh; allowed only on mass=0 bodies
+	SHAPE_MESH,        // static triangle mesh; allowed only on mass=0 bodies
+	SHAPE_HEIGHTFIELD, // static regular-grid heightfield; mass=0 only
 } ShapeType;
 
 typedef struct ShapeParams
@@ -319,6 +362,7 @@ typedef struct ShapeParams
 		struct { const Hull* hull; v3 scale; } hull;
 		struct { float half_height; float radius; } cylinder; // segment along local Y, flat caps
 		struct { const TriMesh* mesh; } mesh;                 // static only
+		struct { const Heightfield* hf; } heightfield;        // static only
 	};
 } ShapeParams;
 
@@ -596,11 +640,13 @@ NUDGE_API int world_load_snapshot_into(World world, const char* path);
 // via hull_set_name / trimesh_set_name before registering.
 NUDGE_API void world_register_hull(World world, const Hull* hull);
 NUDGE_API void world_register_mesh(World world, const TriMesh* mesh);
+NUDGE_API void world_register_heightfield(World world, const Heightfield* hf);
 
 // Lookup by name (returns NULL if not registered). Lets callers keep their
 // own "asset id -> Hull*" maps out of sight.
-NUDGE_API const Hull*    world_find_hull(World world, const char* name);
-NUDGE_API const TriMesh* world_find_mesh(World world, const char* name);
+NUDGE_API const Hull*         world_find_hull(World world, const char* name);
+NUDGE_API const TriMesh*      world_find_mesh(World world, const char* name);
+NUDGE_API const Heightfield*  world_find_heightfield(World world, const char* name);
 
 // Iterate all live bodies / joints in the world. Writes up to max handles
 // into out[], returns the total count (may exceed max -- use to size a retry).
