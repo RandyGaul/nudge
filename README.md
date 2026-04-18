@@ -228,6 +228,65 @@ runs the same scene in nudge, Bepu, and Jolt side-by-side so you can diff
 behavior or compare perf.
 
 
+### Cross-platform FP determinism
+
+Simulation is bit-identical across every target the CI matrix covers:
+x86_64 (MSVC / GCC / Clang), aarch64 (AppleClang), and wasm32 (emscripten),
+with both SIMD and scalar backends. Run the canonical 240-step scene
+anywhere and you get the same FNV-1a hash `0x86c44c829ce09c07`; CI asserts
+this on every push.
+
+If you're dropping nudge into another project and want to keep that
+guarantee, the build has to match these flags.
+
+**Compiler flags** (GCC / Clang / AppleClang / emcc):
+
+```
+-ffp-contract=off
+-fno-fast-math
+-fno-unsafe-math-optimizations
+-fno-associative-math
+-fno-reciprocal-math
+-fno-finite-math-only
+-fsigned-zeros
+```
+
+Clang-family also needs the two auto-vectorizer disables:
+
+```
+-fno-vectorize
+-fno-slp-vectorize
+```
+
+MSVC: `/fp:precise` (it's default, but be explicit so a future project-
+wide `/fp:fast` doesn't silently break determinism).
+
+**Gotchas:**
+
+- **Do not pair `-ffp-contract=off` with `-ffp-model=precise`.** The
+  `precise` model implies `-ffp-contract=on` and silently re-enables
+  FMA fusion on ARM — AppleClang at `-O3` will emit `vfmaq_f32` for any
+  `a*b+c` pattern and you'll diverge from x86. Use one or the other.
+- **Standard libm `sinf/cosf/atan2f` differ across libcs.** nudge ships
+  `nudge_sinf` / `nudge_cosf` / `nudge_sincosf` / `nudge_atan2f` in
+  `vmath.h` and uses them internally. If you compute initial body poses
+  with your own transcendentals, use the `nudge_*` versions (or your own
+  deterministic ones) for any value that feeds into the simulation.
+- **The engine sets `#pragma STDC FP_CONTRACT OFF` at file scope in
+  `vmath.h` and `nudge_internal.h`** -- if you pull individual engine
+  sources into a larger TU, keep those pragmas at the top of the TU.
+  Command-line `-ffp-contract=off` alone is not enough on AppleClang.
+- **Threading is deterministic regardless of worker count** (disjoint-body
+  graph coloring in the PGS solver). You can run `world->thread_count = 8`
+  and still hash-match a single-threaded run. Don't add a parallel loop
+  that shares body writes without coloring -- that's the only way to
+  break this.
+
+Same-machine, same-binary determinism (snapshot save/load, rewind ring)
+works out of the box; cross-platform determinism is the stricter guarantee
+the flags above buy you.
+
+
 ### Language / packaging
 
 - Plain C API, easy to bind from other languages.
