@@ -94,6 +94,21 @@ static void platform_shutdown()
 
 static void frame_step()
 {
+	// Sync window size every frame. The Emscripten SDL3 port doesn't reliably
+	// fire WINDOW_RESIZED when the canvas is reflowed via CSS, so the
+	// WINDOW_RESIZED path alone leaves g_width/g_height stuck at the initial
+	// 1280x720 and the projection aspect goes wrong. Native SDL3 keeps
+	// SDL_GetWindowSize consistent regardless so this is a cheap no-op
+	// everywhere else.
+	{
+		int w, h;
+		SDL_GetWindowSize(g_window, &w, &h);
+		if (w > 0 && h > 0 && (w != g_width || h != g_height)) {
+			g_width = w;
+			g_height = h;
+			glViewport(0, 0, g_width, g_height);
+		}
+	}
 	SDL_Event ev;
 	while (SDL_PollEvent(&ev)) {
 		cImGui_ImplSDL3_ProcessEvent(&ev);
@@ -684,7 +699,9 @@ void update()
 		}
 	}
 
-	// F5: toggle recording
+	// F5: toggle recording. Browsers reserve F5 for reload, so this hotkey
+	// would half-trigger in the web build -- skip it there.
+#ifndef __EMSCRIPTEN__
 	if (ImGui_IsKeyPressedEx(ImGuiKey_F5, false)) {
 		if (!g_recording) {
 			afree(g_recorded_frames);
@@ -697,6 +714,7 @@ void update()
 			recording_save();
 		}
 	}
+#endif
 
 	// Playback mode: drive mouse events from recording
 	// g_playback_frame is now global g_playback_frame
