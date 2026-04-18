@@ -310,28 +310,16 @@ wide `/fp:fast` doesn't silently break determinism).
 
 - **Do not pair `-ffp-contract=off` with `-ffp-model=precise`.** The
   `precise` model implies `-ffp-contract=on` and silently re-enables
-  FMA fusion on ARM — AppleClang at `-O3` will emit `vfmaq_f32` for any
-  `a*b+c` pattern and you'll diverge from x86. Use one or the other.
-- **Standard libm `sinf` / `cosf` / `atan2f` are bit-identical across
-  every libc on the CI matrix today** (Microsoft UCRT, glibc, Apple Libc,
-  musl via ASan runtime, wasi-libc). We tested this directly -- every
-  CI job produces the same simulation hash with libm. The engine uses
-  libm internally for that reason; if a future libc drifts this will
-  surface as a CI hash mismatch on exactly one job, and the fix is
-  localized to whichever transcendental moved.
-- **The engine sets `#pragma STDC FP_CONTRACT OFF` at file scope in
-  `vmath.h` and `nudge_internal.h`** -- if you pull individual engine
-  sources into a larger TU, keep those pragmas at the top of the TU.
-  Command-line `-ffp-contract=off` alone is not enough on AppleClang.
-- **Threading is deterministic regardless of worker count** (disjoint-body
-  graph coloring in the PGS solver). You can run `world->thread_count = 8`
-  and still hash-match a single-threaded run. Don't add a parallel loop
-  that shares body writes without coloring -- that's the only way to
-  break this.
-
-Same-machine, same-binary determinism (snapshot save/load, rewind ring)
-works out of the box; cross-platform determinism is the stricter guarantee
-the flags above buy you.
+  FMA fusion on ARM -- AppleClang at `-O3` will emit `vfmaq_f32` for
+  `a*b+c` patterns and you'll diverge from x86. Use one or the other.
+- **Keep `#pragma STDC FP_CONTRACT OFF` at the top of the TU** if you
+  repackage engine sources into a larger build. `vmath.h` and
+  `nudge_internal.h` set it already; the command-line flag alone isn't
+  enough on AppleClang.
+- **Threading determinism is preserved by graph coloring in the PGS
+  solver** -- `world->thread_count = 8` produces the same hash as
+  single-threaded. A parallel loop that writes body state without that
+  coloring is the one way to break it.
 
 
 ### Language / packaging
