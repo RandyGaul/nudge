@@ -271,10 +271,13 @@ typedef struct SoftLink
 {
 	int   node_i, node_j;    // indices into owner SoftBody's node arrays
 	float rest_length;
-	float compliance;        // XPBD alpha = softness (0 = rigid floor, set in build)
-	float pos_to_vel;        // Baumgarte gain = beta / dt (rebuilt per substep)
-	float lambda;            // warm cache: soft links accumulate, rigid links SET
-	v3    axis;              // current world axis (p_j - p_i) / length; per-substep
+	// Per-substep scratch, refreshed at start of each substep:
+	v3    axis;              // (p_j - p_i) / length
+	float bias;              // clamped Baumgarte/XPBD position bias (m/s)
+	float softness;          // XPBD compliance term for this substep (0 = rigid)
+	float inv_eff_mass;      // 1 / (inv_m_i + inv_m_j + softness)
+	// Warm cache: accumulates across PGS iterations and persists across substeps.
+	float lambda;
 } SoftLink;
 
 typedef struct SoftPin
@@ -283,7 +286,7 @@ typedef struct SoftPin
 	v3  world_pos;           // target; node's position snapped to this each substep
 } SoftPin;
 
-// One soft body = one LDL island. All node/link/pin storage is owned here.
+// One soft body = independent particle network solved with PGS/XPBD iteration.
 // CK_DYNA arrays survive moves of the outer SoftBodyInternal entry because
 // they live on the heap under the CK_DYNA header.
 typedef struct SoftBodyInternal
@@ -301,21 +304,7 @@ typedef struct SoftBodyInternal
 	CK_DYNA SoftLink* links;
 	CK_DYNA SoftPin*  pins;
 
-	// LDL dense cache. Allocated in soft_body_build sized to link_count.
-	int     built;
-	int     link_count;   // snapshot at build time (== asize(links))
-	double* K;            // link_count*link_count symmetric, row-major
-	double* L;            // factored L (in lower triangle of K copy)
-	double* D;            // diagonal factor, length link_count
-	double* rhs;          // scratch, length link_count
-	double* lambda_sol;   // scratch, length link_count
-	// K is refactored only when the flag below is set -- for a soft body
-	// undergoing mostly rigid-body motion, K is invariant under rotation
-	// (rotation preserves axis dot products) and changes only when topology,
-	// pins, or sub_dt change. Saves most of the per-frame solver cost.
-	int     k_dirty;      // 1 = K needs rebuild + refactor on next step
-	int     k_factor_ok;  // last factor result: 1 usable, 0 singular
-	float   k_sub_dt;     // sub_dt used for the current factored K
+	int built;
 } SoftBodyInternal;
 
 typedef struct BVH_Tree BVH_Tree; // forward decl, defined in bvh.c

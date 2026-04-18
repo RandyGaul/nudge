@@ -902,11 +902,12 @@ typedef struct SoftBody { uint64_t id; } SoftBody;
 
 typedef struct SoftBodyParams
 {
-	SpringParams default_spring; // compliance for links added via soft_body_add_link without override
-	float node_radius;           // reserved for future collision; currently unused
+	SpringParams default_spring; // compliance for all links in this soft body (0,0 = rigid)
+	float node_radius;           // per-node sphere radius for collision (0 = no collision)
 	float linear_damping;        // per-substep exponential decay (default 0.02)
-	uint32_t collision_group;    // reserved for future collision
-	uint32_t collision_mask;     // reserved for future collision
+	int iterations;              // PGS velocity iterations per substep (default 12)
+	uint32_t collision_group;    // reserved for future collision filters
+	uint32_t collision_mask;     // reserved for future collision filters
 	uint8_t material_id;         // reserved for future contact summaries
 } SoftBodyParams;
 

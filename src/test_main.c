@@ -302,11 +302,8 @@ int main(int argc, char* argv[])
 		int L = soft_body_link_count(w, sb);
 		extern double g_soft_body_max_lambda;
 		extern double g_soft_body_max_rhs;
-		extern double g_soft_body_min_K_diag;
-		extern int g_soft_body_trace;
-		g_soft_body_trace = 1;
 		printf("[softbody] N=%d L=%d\n", N, L);
-		printf("frame | min_y | max_y | max|v| | max|lam| | max|rhs| | minD\n");
+		printf("frame | min_y | max_y | max|v| | max|lam| | max|rhs|\n");
 		for (int f = 0; f < frames; f++) {
 			world_step(w, 1.0f / 60.0f);
 			const v3* pos = soft_body_node_positions(w, sb);
@@ -319,9 +316,9 @@ int main(int argc, char* argv[])
 				float vm = sqrtf(vel[n].x*vel[n].x + vel[n].y*vel[n].y + vel[n].z*vel[n].z);
 				if (vm > max_v) max_v = vm;
 			}
-			printf("%5d | %7.3f | %7.3f | %7.2f | %8.2f | %8.2f | %6.3f\n",
+			printf("%5d | %7.3f | %7.3f | %7.2f | %8.2f | %8.2f\n",
 				f, min_y, max_y, max_v,
-				g_soft_body_max_lambda, g_soft_body_max_rhs, g_soft_body_min_K_diag);
+				g_soft_body_max_lambda, g_soft_body_max_rhs);
 		}
 		destroy_world(w);
 		return 0;

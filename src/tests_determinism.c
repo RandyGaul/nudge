@@ -132,6 +132,21 @@ static uint64_t det_run(int steps, int threads)
 // Build the scene, then print a hash at step 0, 1, 2, 10, 60, 240 so CI logs
 // show where cross-arch divergence starts to accumulate. Threads-free so the
 // trace is deterministic independent of the pool.
+static void det_dump_body(const char* label, BodyState* bs, BodyHot* bh)
+{
+	uint32_t p[4], r[4], v[4], w[4];
+	memcpy(p, &bs->position, 16);
+	memcpy(r, &bs->rotation, 16);
+	memcpy(v, &bh->velocity, 16);
+	memcpy(w, &bh->angular_velocity, 16);
+	printf("  %s pos=%08x,%08x,%08x rot=%08x,%08x,%08x,%08x vel=%08x,%08x,%08x avel=%08x,%08x,%08x\n",
+		label,
+		p[0], p[1], p[2],
+		r[0], r[1], r[2], r[3],
+		v[0], v[1], v[2],
+		w[0], w[1], w[2]);
+}
+
 static void det_trace()
 {
 	World w = det_build_scene();
@@ -145,17 +160,22 @@ static void det_trace()
 	for (int i = 0; i <= 240; i++) {
 		if (i == next) {
 			printf("  step %3d: 0x%016llx\n", i, (unsigned long long)det_hash_world(w));
+			// After step 1, dump per-body bits so cross-arch divergence can be
+			// pinned to a specific body + field.
+			if (i == 1) {
+				for (int bi = 1; bi < asize(wi->body_hot); bi++) {
+					if (!split_alive(wi->body_gen, bi)) continue;
+					char lbl[32];
+					snprintf(lbl, sizeof(lbl), "b[%d]", bi);
+					det_dump_body(lbl, &wi->body_state[bi], &wi->body_hot[bi]);
+				}
+			}
 			ci++;
 			if (ci < (int)(sizeof(checkpoints) / sizeof(checkpoints[0]))) next = checkpoints[ci];
 			else next = -1;
 		}
 		if (i < 240) world_step(w, dt);
 	}
-	// Also dump the raw bits of body[1] so cross-arch diffs are inspectable.
-	BodyState* bs = &wi->body_state[1];
-	uint32_t px, py, pz; memcpy(&px, &bs->position.x, 4); memcpy(&py, &bs->position.y, 4); memcpy(&pz, &bs->position.z, 4);
-	uint32_t qx, qy, qz, qw; memcpy(&qx, &bs->rotation.x, 4); memcpy(&qy, &bs->rotation.y, 4); memcpy(&qz, &bs->rotation.z, 4); memcpy(&qw, &bs->rotation.w, 4);
-	printf("  body[1] pos=0x%08x,0x%08x,0x%08x rot=0x%08x,0x%08x,0x%08x,0x%08x\n", px, py, pz, qx, qy, qz, qw);
 	destroy_world(w);
 }
 
