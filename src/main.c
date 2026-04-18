@@ -220,7 +220,6 @@ static const float CYL_HALF_H = 0.5f;
 // Scene system: each scene has a name, setup, and optional extra draw (joints etc.)
 typedef struct DrawEntry { Body body; int mesh; v3 scale; v3 color; } DrawEntry;
 static DrawEntry* g_draw_list; // ckit dynamic array
-static SoftBody* g_soft_bodies; // soft bodies to render (ckit dynamic array)
 
 typedef struct Scene {
 	const char* name;
@@ -237,9 +236,6 @@ static Joint g_mouse_joint;      // soft ball-socket connecting anchor to body
 static v3 g_mouse_local_hit;     // hit point in body's local space
 static float g_mouse_ray_dist;   // camera distance at pick time
 static int g_mouse_dragging;     // 1 while right-click is held (even if no body hit)
-// Soft-body drag state (exclusive with Body drag -- only one active at a time).
-static SoftBody g_mouse_sb;       // soft body being dragged ({0} if none)
-static int      g_mouse_sb_node = -1; // node index in g_mouse_sb
 
 // --- Mouse input recorder ---
 // Records mouse drag events per frame for deterministic test replay.
@@ -286,8 +282,6 @@ static Scene g_scenes[] = {
 	{ "Ragdoll",      scene_ragdoll_setup },
 	{ "Trimesh Terrain", scene_trimesh_terrain_setup },
 	{ "Trimesh Stress",  scene_trimesh_stress_setup },
-	{ "Soft Ball",       scene_soft_ball_setup },
-	{ "Soft Bodies",     scene_soft_bodies_setup },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 
@@ -424,38 +418,7 @@ static void mouse_begin_drag(float mx, float my)
 		}
 	}
 
-	// If no rigid body hit, try picking a soft-body node. Each node is a small
-	// sphere at its radius; we find the ray-closest hit across all alive soft
-	// bodies. Using a generous pick radius so nodes are easy to grab.
-	if (!best.id) {
-		SoftBody best_sb = { 0 };
-		int best_sb_node = -1;
-		float pick_radius = 0.15f;
-		for (int si = 0; si < asize(g_soft_bodies); si++) {
-			SoftBody sb = g_soft_bodies[si];
-			if (!soft_body_is_valid(g_world, sb)) continue;
-			const v3* np = soft_body_node_positions(g_world, sb);
-			int nc = soft_body_node_count(g_world, sb);
-			for (int n = 0; n < nc; n++) {
-				float t = ray_sphere_simple(origin, dir, np[n], pick_radius);
-				if (t >= 0 && t < best_t) {
-					best_t = t;
-					best_sb = sb;
-					best_sb_node = n;
-				}
-			}
-		}
-		if (best_sb_node >= 0) {
-			g_mouse_sb = best_sb;
-			g_mouse_sb_node = best_sb_node;
-			g_mouse_ray_dist = best_t;
-			// Pin the node at its current position. mouse_update_drag will move
-			// the pin target to follow the ray each frame.
-			v3 hit_world = add(origin, scale(dir, best_t));
-			soft_body_pin_static(g_world, best_sb, best_sb_node, hit_world);
-		}
-		return;
-	}
+	if (!best.id) return;
 
 	g_mouse_body = best;
 	g_mouse_ray_dist = best_t;
@@ -490,13 +453,6 @@ static void mouse_update_drag(float mx, float my)
 	screen_to_ray(mx, my, &origin, &dir);
 	v3 target = add(origin, scale(dir, g_mouse_ray_dist));
 
-	// Soft-body drag: re-pin the node to the new target. The solver snaps the
-	// node to pin.world_pos each substep; dragging is just refreshing that.
-	if (g_mouse_sb_node >= 0 && soft_body_is_valid(g_world, g_mouse_sb)) {
-		soft_body_pin_static(g_world, g_mouse_sb, g_mouse_sb_node, target);
-		return;
-	}
-
 	if (!g_mouse_body.id) return;
 
 	// Move anchor body to new target
@@ -513,13 +469,6 @@ static void mouse_update_drag(float mx, float my)
 
 static void mouse_end_drag()
 {
-	if (g_mouse_sb_node >= 0) {
-		if (soft_body_is_valid(g_world, g_mouse_sb))
-			soft_body_unpin(g_world, g_mouse_sb, g_mouse_sb_node);
-		g_mouse_sb = (SoftBody){ 0 };
-		g_mouse_sb_node = -1;
-		return;
-	}
 	if (!g_mouse_body.id) return;
 	destroy_joint(g_world, g_mouse_joint);
 	destroy_body(g_world, g_mouse_anchor);
@@ -579,12 +528,9 @@ static void setup_scene()
 	g_mouse_anchor = (Body){0};
 	g_mouse_joint = (Joint){0};
 	g_mouse_dragging = 0;
-	g_mouse_sb = (SoftBody){ 0 };
-	g_mouse_sb_node = -1;
 
 	if (g_world.id) destroy_world(g_world);
 	aclear(g_draw_list);
-	aclear(g_soft_bodies);
 	g_ldl_debug_info.valid = 0;
 
 	g_world = create_world((WorldParams){
@@ -636,6 +582,46 @@ void update()
 
 	// Camera input (skip when imgui wants the mouse)
 	ImGuiIO* io = ImGui_GetIO();
+
+	// Keyboard camera controls. Work regardless of mouse capture so the
+	// camera stays usable in the browser, where right/middle clicks often
+	// don't reach the canvas reliably.
+	//   WASD        -- pan focus point horizontally (world XZ)
+	//   Q / E       -- lower / raise focus point (world Y)
+	//   arrow keys  -- orbit (left/right = yaw, up/down = pitch)
+	//   = / -       -- zoom in / out (matches wheel)
+	if (!io->WantCaptureKeyboard) {
+		float dt = io->DeltaTime > 0.0f ? io->DeltaTime : 1.0f / 60.0f;
+		float pan_speed = 6.0f * g_cam_dist * dt;
+		float orbit_speed = 1.6f * dt;
+		float zoom_speed = 6.0f * dt;
+		quat rot_kb = cam_orientation();
+		v3 cam_right = quat_rotate(rot_kb, V3(1, 0, 0));
+		v3 cam_fwd = V3(-cam_right.z, 0, cam_right.x);
+		float fwd_len2 = cam_fwd.x * cam_fwd.x + cam_fwd.z * cam_fwd.z;
+		if (fwd_len2 > 1e-6f) {
+			float inv = 1.0f / sqrtf(fwd_len2);
+			cam_fwd = V3(cam_fwd.x * inv, 0.0f, cam_fwd.z * inv);
+		}
+		if (ImGui_IsKeyDown(ImGuiKey_W)) g_cam_focus = v3_add(g_cam_focus, v3_scale(cam_fwd,    pan_speed));
+		if (ImGui_IsKeyDown(ImGuiKey_S)) g_cam_focus = v3_add(g_cam_focus, v3_scale(cam_fwd,   -pan_speed));
+		if (ImGui_IsKeyDown(ImGuiKey_A)) g_cam_focus = v3_add(g_cam_focus, v3_scale(cam_right, -pan_speed));
+		if (ImGui_IsKeyDown(ImGuiKey_D)) g_cam_focus = v3_add(g_cam_focus, v3_scale(cam_right,  pan_speed));
+		if (ImGui_IsKeyDown(ImGuiKey_Q)) g_cam_focus.y -= pan_speed;
+		if (ImGui_IsKeyDown(ImGuiKey_E)) g_cam_focus.y += pan_speed;
+		if (ImGui_IsKeyDown(ImGuiKey_LeftArrow))  g_cam_yaw   += orbit_speed;
+		if (ImGui_IsKeyDown(ImGuiKey_RightArrow)) g_cam_yaw   -= orbit_speed;
+		if (ImGui_IsKeyDown(ImGuiKey_UpArrow))    g_cam_pitch -= orbit_speed;
+		if (ImGui_IsKeyDown(ImGuiKey_DownArrow))  g_cam_pitch += orbit_speed;
+		{
+			float limit = 1.5f;
+			if (g_cam_pitch < -limit) g_cam_pitch = -limit;
+			if (g_cam_pitch >  limit) g_cam_pitch =  limit;
+		}
+		if (ImGui_IsKeyDown(ImGuiKey_Equal))  cam_zoom( zoom_speed);
+		if (ImGui_IsKeyDown(ImGuiKey_Minus))  cam_zoom(-zoom_speed);
+	}
+
 	if (!io->WantCaptureMouse) {
 		if (io->MouseDown[0] && !g_mouse_dragging && !io->KeyCtrl)
 			cam_orbit(io->MouseDelta.x, io->MouseDelta.y);
@@ -1014,41 +1000,6 @@ void draw()
 	// Generic joint debug rendering
 	if (g_show_joints) {
 		world_debug_joints(g_world, draw_joint_debug, NULL);
-	}
-
-	// Soft bodies: draw each link as a white line, each node as a small cross.
-	for (int si = 0; si < asize(g_soft_bodies); si++) {
-		SoftBody sb = g_soft_bodies[si];
-		if (!soft_body_is_valid(g_world, sb)) continue;
-		const v3* pos = soft_body_node_positions(g_world, sb);
-		int nc = soft_body_node_count(g_world, sb);
-		int lc = soft_body_link_count(g_world, sb);
-		int pairs[4096];
-		int ncap = lc < 2048 ? lc : 2048;
-		soft_body_get_links(g_world, sb, pairs, ncap);
-		v3 line_color = V3(0.9f, 0.95f, 1.0f);
-		v3 node_color = V3(1.0f, 0.6f, 0.2f);
-		for (int k = 0; k < ncap; k++) {
-			render_debug_line(pos[pairs[2*k]], pos[pairs[2*k+1]], line_color);
-		}
-		float s = 0.04f;
-		for (int n = 0; n < nc; n++) {
-			v3 p = pos[n];
-			render_debug_line(V3(p.x-s, p.y, p.z), V3(p.x+s, p.y, p.z), node_color);
-			render_debug_line(V3(p.x, p.y-s, p.z), V3(p.x, p.y+s, p.z), node_color);
-			render_debug_line(V3(p.x, p.y, p.z-s), V3(p.x, p.y, p.z+s), node_color);
-		}
-	}
-
-	// Mouse constraint visual: grabbed soft-body node as a bigger orange cross.
-	if (g_mouse_sb_node >= 0 && soft_body_is_valid(g_world, g_mouse_sb)) {
-		const v3* pos = soft_body_node_positions(g_world, g_mouse_sb);
-		v3 p = pos[g_mouse_sb_node];
-		float s = 0.12f;
-		v3 c = V3(1.0f, 0.5f, 0.0f);
-		render_debug_line(V3(p.x - s, p.y, p.z), V3(p.x + s, p.y, p.z), c);
-		render_debug_line(V3(p.x, p.y - s, p.z), V3(p.x, p.y + s, p.z), c);
-		render_debug_line(V3(p.x, p.y, p.z - s), V3(p.x, p.y, p.z + s), c);
 	}
 
 	// Mouse constraint visual

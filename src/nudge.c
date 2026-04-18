@@ -27,7 +27,6 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 #include "solver_ldl.c"
 #include "islands.c"
 #include "contacts.c"
-#include "soft_body.c"
 #include "rewind.c"
 #include "deflate.c"
 #include "serialize.c"
@@ -85,7 +84,6 @@ void destroy_world(World world)
 	afree(w->joints); afree(w->joint_gen); afree(w->joint_free);
 	for (int i = 0; i < asize(w->sensors); i++) afree(w->sensors[i].shapes);
 	afree(w->sensors); afree(w->sensor_gen); afree(w->sensor_free);
-	soft_body_free_all(w);
 	map_free(w->hull_registry);
 	map_free(w->mesh_registry);
 	map_free(w->heightfield_registry);

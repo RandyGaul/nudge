@@ -35,34 +35,6 @@ static uint64_t det_hash_world(World world)
 	return h;
 }
 
-// Print the raw bits of a float -- handy for cross-arch diff hunting.
-static void det_dump_f(const char* label, float x)
-{
-	uint32_t bits;
-	memcpy(&bits, &x, 4);
-	printf("  %s = 0x%08x (%g)\n", label, bits, (double)x);
-}
-
-// Print the intermediate values of the scene-setup math so cross-arch
-// divergence during setup can be narrowed to an exact operation.
-static void det_dump_math()
-{
-	printf("det math:\n");
-	// The six tilt quats built in det_build_scene -- print sin/cos for each.
-	for (int i = 0; i < 6; i++) {
-		float angle = 0.02f * (float)i;
-		float half = angle * 0.5f;
-		float s = nudge_sinf(half);
-		float c = nudge_cosf(half);
-		printf("  i=%d angle=%g half=%g\n", i, (double)angle, (double)half);
-		det_dump_f("  sinf(half)", s);
-		det_dump_f("  cosf(half)", c);
-	}
-	// Box inertia has 1/12 factor -- exercise the divide path.
-	float m = 1.0f, h = 0.5f;
-	det_dump_f("m*(h*h+h*h)/12", m * (h*h + h*h) / 12.0f);
-}
-
 // Build a canonical scene. Mixed shapes so we exercise several narrowphase
 // pairs; small stack to exercise contact manifold accumulation; a tilt on
 // the top boxes to give the PGS something to chew on.
@@ -132,21 +104,8 @@ static uint64_t det_run(int steps, int threads)
 // Build the scene, then print a hash at step 0, 1, 2, 10, 60, 240 so CI logs
 // show where cross-arch divergence starts to accumulate. Threads-free so the
 // trace is deterministic independent of the pool.
-static void det_dump_body(const char* label, BodyState* bs, BodyHot* bh)
-{
-	uint32_t p[4], r[4], v[4], w[4];
-	memcpy(p, &bs->position, 16);
-	memcpy(r, &bs->rotation, 16);
-	memcpy(v, &bh->velocity, 16);
-	memcpy(w, &bh->angular_velocity, 16);
-	printf("  %s pos=%08x,%08x,%08x rot=%08x,%08x,%08x,%08x vel=%08x,%08x,%08x avel=%08x,%08x,%08x\n",
-		label,
-		p[0], p[1], p[2],
-		r[0], r[1], r[2], r[3],
-		v[0], v[1], v[2],
-		w[0], w[1], w[2]);
-}
-
+// Run the scene single-threaded, printing the world hash at a handful of
+// checkpoints so CI logs show where divergence starts accumulating.
 static void det_trace()
 {
 	World w = det_build_scene();
@@ -160,16 +119,6 @@ static void det_trace()
 	for (int i = 0; i <= 240; i++) {
 		if (i == next) {
 			printf("  step %3d: 0x%016llx\n", i, (unsigned long long)det_hash_world(w));
-			// After step 1, dump per-body bits so cross-arch divergence can be
-			// pinned to a specific body + field.
-			if (i == 1) {
-				for (int bi = 1; bi < asize(wi->body_hot); bi++) {
-					if (!split_alive(wi->body_gen, bi)) continue;
-					char lbl[32];
-					snprintf(lbl, sizeof(lbl), "b[%d]", bi);
-					det_dump_body(lbl, &wi->body_state[bi], &wi->body_hot[bi]);
-				}
-			}
 			ci++;
 			if (ci < (int)(sizeof(checkpoints) / sizeof(checkpoints[0]))) next = checkpoints[ci];
 			else next = -1;
@@ -179,10 +128,25 @@ static void det_trace()
 	destroy_world(w);
 }
 
-// Temporarily unpinned while chasing cross-arch determinism. Set to 0 so CI
-// prints the hash without asserting; we'll repin once all arches converge on
-// a single value. Within-arch determinism is still observable in the trace.
-#define DET_EXPECTED_HASH 0x0ULL
+// Per-arch pinned hashes. Within an arch every compiler (MSVC / GCC / Clang)
+// and every SIMD backend (SSE / NEON / WASM SIMD128 / scalar) produces the
+// exact same hash -- that's the cross-compiler guarantee this test enforces.
+//
+// Scene setup IS cross-arch bit-identical now (`step 0` hash matches on
+// x86, aarch64, and wasm32) thanks to #pragma STDC FP_CONTRACT OFF and the
+// -fno-{associative,reciprocal,unsafe}-math flag stack. Simulation steps
+// still diverge cross-arch because the narrowphase makes discrete contact
+// decisions on sub-ULP float comparisons, and a 1-ULP difference in SAT
+// depth flips whether a contact fires. Fixing that would need hysteresis
+// in the depth tests (e.g. `depth > -LINEAR_SLOP` instead of `depth > 0`),
+// not just more FP flags -- tracked as a follow-up.
+#if defined(__wasm__)
+#define DET_EXPECTED_HASH 0xebbb50883882fe05ULL
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define DET_EXPECTED_HASH 0xc293410039033e05ULL
+#else
+#define DET_EXPECTED_HASH 0x86c44c829ce09c07ULL
+#endif
 
 // Runs the canonical scene twice (single-threaded and N-threaded) and checks:
 //   1. Both runs produce the same hash -- threading does not affect output.
@@ -192,7 +156,6 @@ static void det_trace()
 static int run_determinism_test(int threads_hi)
 {
 	const int steps = 240;
-	det_dump_math();
 	det_trace();
 	uint64_t h1 = det_run(steps, 1);
 	uint64_t hN = det_run(steps, threads_hi);
