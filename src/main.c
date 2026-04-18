@@ -11,6 +11,7 @@
 
 #ifdef __EMSCRIPTEN__
 	#include <emscripten.h>
+	#include <emscripten/html5.h>
 #endif
 
 #define CKIT_IMPLEMENTATION
@@ -94,12 +95,29 @@ static void platform_shutdown()
 
 static void frame_step()
 {
-	// Sync window size every frame. The Emscripten SDL3 port doesn't reliably
-	// fire WINDOW_RESIZED when the canvas is reflowed via CSS, so the
-	// WINDOW_RESIZED path alone leaves g_width/g_height stuck at the initial
-	// 1280x720 and the projection aspect goes wrong. Native SDL3 keeps
-	// SDL_GetWindowSize consistent regardless so this is a cheap no-op
-	// everywhere else.
+#ifdef __EMSCRIPTEN__
+	// The HTML canvas has two sizes: CSS-visible size (what the user sees)
+	// and drawing-buffer size (what GL renders into). Our CSS stretches the
+	// canvas with flex:1 but doesn't touch the drawing buffer, which stays
+	// at its default (300x150). Query the CSS size each frame, push it into
+	// the drawing buffer + SDL window, and re-apply glViewport when it
+	// changes. Accounts for window resize, devicePixelRatio changes, and
+	// the initial post-load reflow.
+	{
+		double css_w = 0, css_h = 0;
+		emscripten_get_element_css_size("#canvas", &css_w, &css_h);
+		double dpr = emscripten_get_device_pixel_ratio();
+		int w = (int)(css_w * dpr + 0.5);
+		int h = (int)(css_h * dpr + 0.5);
+		if (w > 0 && h > 0 && (w != g_width || h != g_height)) {
+			emscripten_set_canvas_element_size("#canvas", w, h);
+			SDL_SetWindowSize(g_window, w, h);
+			g_width = w;
+			g_height = h;
+			glViewport(0, 0, g_width, g_height);
+		}
+	}
+#else
 	{
 		int w, h;
 		SDL_GetWindowSize(g_window, &w, &h);
@@ -109,6 +127,7 @@ static void frame_step()
 			glViewport(0, 0, g_width, g_height);
 		}
 	}
+#endif
 	SDL_Event ev;
 	while (SDL_PollEvent(&ev)) {
 		cImGui_ImplSDL3_ProcessEvent(&ev);
