@@ -55,3 +55,51 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_stacktrace=1
         run: ./build/nudge_tests
 
+  linux-clang-scalar:
+    name: Linux Clang scalar SIMD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_C_FLAGS="-DSIMD_FORCE_SCALAR"
+          -DNUDGE_BUILD_APP=OFF
+      - name: Build nudge_tests
+        run: cmake --build build --target nudge_tests
+      - name: Run tests
+        run: ./build/nudge_tests
+
+  macos-neon:
+    name: macOS Apple Silicon (NEON)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNUDGE_BUILD_APP=OFF
+      - name: Build nudge_tests
+        run: cmake --build build --target nudge_tests
+      - name: Run tests
+        run: ./build/nudge_tests
+      - name: Quick perf smoke (bench-stack 10)
+        run: ./build/nudge_tests --bench-stack 10
+
+  emscripten-wasm:
+    name: Emscripten WASM SIMD128
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.74
+      - name: Configure
+        run: >
+          emcmake cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_FLAGS="-msimd128"
+          -DNUDGE_BUILD_APP=OFF
+      - name: Build nudge_tests
+        run: cmake --build build --target nudge_tests
+      - name: Run tests under node
+        run: node ./build/nudge_tests.js
+

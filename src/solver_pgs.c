@@ -346,11 +346,12 @@ static void solve_joint(WorldInternal* w, SolverJoint* s);
 #define sv_inertia_mul(h, v) V3((h)->iw_diag.x*(v).x + (h)->iw_off.x*(v).y + (h)->iw_off.y*(v).z, (h)->iw_off.x*(v).x + (h)->iw_diag.y*(v).y + (h)->iw_off.z*(v).z, (h)->iw_off.y*(v).x + (h)->iw_off.z*(v).y + (h)->iw_diag.z*(v).z)
 
 // --- SIMD 4-wide batch solver (BEPU-style: store minimal, recompute inline) ---
-// Process 4 manifolds simultaneously using SSE. Each lane = one manifold.
+// Process 4 manifolds simultaneously via simd.h. Each lane = one manifold.
 // Contacts processed in lockstep: contact[0] across all 4, then [1], etc.
 // Store only raw offsets (r_a, r_b, centroid_r); recompute cross products and
 // inertia terms inline each iteration. Trades cheap ALU for expensive bandwidth.
-#if SIMD_SSE
+// Portable across SSE / NEON / WASM / scalar via the simd4f abstraction --
+// NEON and WASM hit real intrinsics; scalar falls back to per-lane float ops.
 
 // Lean contact layer: raw offsets + scalar prestep. Cross/inertia recomputed inline.
 typedef struct PGS_ContactLayer4
@@ -610,5 +611,3 @@ static void solve_contact_batch4_sv(BodyHot* bodies, PGS_Batch4* b)
 	SCATTER_V3(bodies, i0b, i1b, i2b, i3b, velocity, vb);
 	SCATTER_V3(bodies, i0b, i1b, i2b, i3b, angular_velocity, wb);
 }
-
-#endif // SIMD_SSE

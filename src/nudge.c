@@ -285,7 +285,6 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 	while (atomic_load(&pool_stage.completion_count) < n_blocks) simd_pause();
 }
 
-#if SIMD_SSE
 // --- PGS solver work function (per-color) ---
 typedef struct PGS_WorkCtx { BodyHot* bodies; PGS_Batch4* batches; SolverManifold* sm; SolverContact* sc; int scatter; } PGS_WorkCtx;
 static void pgs_work_fn(void* ctx, int start, int count)
@@ -371,7 +370,6 @@ static void refresh_work_fn(void* ctx, int start, int count)
 	RefreshCtx* r = (RefreshCtx*)ctx;
 	for (int i = start; i < start + count; i++) pgs_batch4_refresh(&r->batches[i], r->sm, r->sc);
 }
-#endif // SIMD_SSE
 
 // --- Integrate work function (parallel body integration) ---
 typedef struct IntegrateCtx { WorldInternal* w; float dt; int* body_indices; int mode; } IntegrateCtx;
@@ -922,13 +920,11 @@ void world_step(World world, float dt)
 	// K^-1 residual correction is applied at the configured iteration.
 	double t_pgs = 0, t_pos = 0, t_int_sub = 0;
 	double t_jlim = 0, t_ldl = 0, t_relax = 0, t_posJ = 0;
-#if SIMD_SSE
 	// SIMD path handles mixed contacts + joints via per-color partition:
 	// contacts batch4, joints scalar within the same color. Layout is
 	// (solve_island, color, batch-in-color); offsets live on each SolveIsland.
 	CK_DYNA PGS_Batch4* simd_batches = NULL;
 	int simd_batch_count = 0;
-#endif
 	for (int sub = 0; sub < n_sub; sub++) {
 		if (sub > 0) {
 			double ti = perf_now();
@@ -973,7 +969,6 @@ void world_step(World world, float dt)
 		// Each SolveIsland records simd_batch_start (absolute offset into the
 		// flat simd_batches array) and simd_color_batch_starts[c] (relative
 		// offsets within its own batch range).
-#if SIMD_SSE
 		if (sub == 0 && cref_count > 0) {
 			int total_batches = 0;
 			for (int sii = 0; sii < solve_island_count; sii++) {
@@ -1011,10 +1006,8 @@ void world_step(World world, float dt)
 				simd_batch_count = asize(simd_batches);
 			}
 		}
-#endif
 
 		double tp = perf_now();
-#if SIMD_SSE
 		// Refresh on substep 2+. Batches are all addressed into sm/sc by
 		// their stored indices, so a flat refresh pass works regardless of
 		// island layout.
@@ -1110,9 +1103,6 @@ void world_step(World world, float dt)
 				}
 			}
 		}
-#else
-#error "SIMD_SSE required: non-SSE solver path removed; add a SIMD_NEON backend if needed"
-#endif
 		t_pgs += perf_now() - tp;
 
 		double ti2 = perf_now();
@@ -1143,9 +1133,7 @@ void world_step(World world, float dt)
 		t_pos += (perf_now() - tr);
 	}
 
-#if SIMD_SSE
 	afree(simd_batches);
-#endif
 	afree(solve_islands);
 
 	w->perf.pgs_solve = t_pgs;
