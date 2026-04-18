@@ -463,7 +463,7 @@ static void coloring_work_fn(void* ctx, int start, int count)
 		SolveIsland* island = &cc->solve_islands[sii];
 		int rel_batch_starts[SOLVE_ISLAND_MAX_COLORS + 1];
 		int island_color_count = 0;
-		color_constraints_island(crefs + island->crefs_start, island->crefs_count, cc->body_colors, arena, rel_batch_starts, &island_color_count);
+		color_constraints_island(crefs + island->crefs_start, island->crefs_count, cc->body_colors, cc->w->body_hot, arena, rel_batch_starts, &island_color_count);
 		island->color_count = island_color_count;
 		for (int c = 0; c <= island_color_count; c++) island->batch_starts[c] = island->crefs_start + rel_batch_starts[c];
 

@@ -13848,7 +13848,6 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = 2, .velocity_iters = 8 };
 	World w = create_world(wp);
 	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->sleep_enabled = 0;
 	wi->trimesh_simd_enabled = simd_enabled;
 
 	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
@@ -13883,18 +13882,40 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 	}
 
 	// Warmup: settle the pile for ~60 frames before timing.
+	// Known first-offender on 50x50/100: body 85 tunnels through at warmup frame 54.
+	// Per physics-debug skill: break ONE frame BEFORE the bug (frame 53) so cdb /
+	// viewer can inspect pre-tunnel state, then step forward to watch narrowphase
+	// hand the solver the bad data.
 	float dt = 1.0f / 60.0f;
-	for (int f = 0; f < 60; f++) world_step(w, dt);
+	int catch_first_blowup = (mesh_n == 50 && body_grid == 10 && simd_enabled == 0);
+	World w_handle = w;
+	for (int wf = 0; wf < 60; wf++) {
+		if (catch_first_blowup && wf == 53) {
+			DBG_BREAK("tri:blowup:prev", w_handle); // one frame BEFORE tunnel — pre-bug inspection
+		}
+		world_step(w, dt);
+		if (catch_first_blowup && wf == 54) {
+			DBG_BREAK("tri:blowup:post", w_handle); // the bug moment — post-tunnel wreckage
+		}
+	}
 
-	// Measurement phase.
+	// Measurement phase + extra settle window so we see how much jitter remains
+	// once bodies *should* be at rest. end_v = max velocity across all bodies
+	// after 'frames + settle_extra' steps. A well-tuned physics engine should
+	// have end_v ~ 0 for a settled pile.
 	double acc_total = 0, acc_bp = 0;
 	float max_speed = 0.0f, max_abs_y = 0.0f;
 	int body_count = body_grid * body_grid;
-	for (int f = 0; f < frames; f++) {
+	int settle_extra = 600; // 10s settle window at 60Hz
+	// Jitter trace: in the 50x50/49 worst-case, sample body 49's speed+y every N frames.
+	int trace_target = (mesh_n == 50 && body_grid == 7 && simd_enabled == 0) ? 49 : -1;
+	for (int f = 0; f < frames + settle_extra; f++) {
 		world_step(w, dt);
-		PerfTimers t = world_get_perf(w);
-		acc_total += t.total;
-		acc_bp += t.broadphase;
+		if (f < frames) {
+			PerfTimers t = world_get_perf(w);
+			acc_total += t.total;
+			acc_bp += t.broadphase;
+		}
 		for (int bi = 0; bi < asize(wi->body_hot); bi++) {
 			if (wi->body_hot[bi].inv_mass == 0.0f) continue;
 			float spd = len(wi->body_hot[bi].velocity);
@@ -13903,14 +13924,40 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 			if (ay > max_abs_y) max_abs_y = ay;
 		}
 	}
+	// End-of-sim snapshot: which body is still moving, and how much.
+	float end_v_max = 0.0f; int end_v_body = -1; int end_moving = 0;
+	int moving_by_shape[5] = {0};
+	for (int bi = 0; bi < asize(wi->body_hot); bi++) {
+		if (wi->body_hot[bi].inv_mass == 0.0f) continue;
+		float spd = len(wi->body_hot[bi].velocity);
+		if (spd > 0.1f) { end_moving++; if (bi > 0) moving_by_shape[(bi - 1) % 5]++; }
+		if (spd > end_v_max) { end_v_max = spd; end_v_body = bi; }
+	}
+	if (trace_target >= 0) {
+		for (int bi = 1; bi < (int)asize(wi->body_hot); bi++) {
+			if (wi->body_hot[bi].inv_mass == 0.0f) continue;
+			float spd = len(wi->body_hot[bi].velocity);
+			if (spd > 0.05f) {
+				v3 p = wi->body_state[bi].position;
+				v3 v = wi->body_hot[bi].velocity;
+				v3 av = wi->body_hot[bi].angular_velocity;
+				int shape_class = (bi - 1) % 5;
+				const char* names[] = {"sph","box","cap","hull","cyl"};
+				printf("    [end b%d %s] pos=(%.3f,%.3f,%.3f) v=(%.3f,%.3f,%.3f)|%.4f av=%.4f\n",
+					bi, names[shape_class], p.x, p.y, p.z, v.x, v.y, v.z, spd, len(av));
+			}
+		}
+	}
 	double n = (double)frames;
 	int tri_count = (mesh_n - 1) * (mesh_n - 1) * 2;
-	printf("  %dx%d mesh (%d tris) x %d bodies  SIMD=%-3s   total=%7.3f ms   bp+NP=%7.3f ms  max_v=%.2f max|y|=%.2f\n",
+	printf("  %dx%d mesh (%d tris) x %d bodies  SIMD=%-3s   total=%7.3f ms   bp+NP=%7.3f ms  max_v=%.2f max|y|=%.2f  end_v=%.3f body=%d moving=%d (sph=%d box=%d cap=%d hull=%d cyl=%d)\n",
 		mesh_n, mesh_n, tri_count, body_count,
 		simd_enabled ? "ON" : "OFF",
 		acc_total / n * 1000.0,
 		acc_bp / n * 1000.0,
-		max_speed, max_abs_y);
+		max_speed, max_abs_y,
+		end_v_max, end_v_body, end_moving,
+		moving_by_shape[0], moving_by_shape[1], moving_by_shape[2], moving_by_shape[3], moving_by_shape[4]);
 
 	destroy_world(w);
 	trimesh_free(mesh);
@@ -13919,8 +13966,97 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 	free(indices);
 }
 
+// Minimal single-capsule-on-mesh drift test. Isolates the vertical-capsule-on-flat-mesh
+// drift bug seen in bench_trimesh_stress, away from any neighbor-body or island
+// interactions.
+static void bench_trimesh_single_cap()
+{
+	int N = 50;
+	float EXTENT = 24.0f;
+	v3* verts = (v3*)malloc(sizeof(v3) * N * N);
+	for (int z = 0; z < N; z++) {
+		for (int x = 0; x < N; x++) {
+			float fx = ((float)x / (N - 1)) * 2.0f - 1.0f;
+			float fz = ((float)z / (N - 1)) * 2.0f - 1.0f;
+			verts[z * N + x] = V3(fx * EXTENT, 0.0f, fz * EXTENT);
+		}
+	}
+	uint32_t* indices = (uint32_t*)malloc(sizeof(uint32_t) * (N - 1) * (N - 1) * 6);
+	int ti = 0;
+	for (int z = 0; z < N - 1; z++) {
+		for (int x = 0; x < N - 1; x++) {
+			int i00 = z * N + x, i10 = i00 + 1, i01 = i00 + N, i11 = i01 + 1;
+			indices[ti++] = i00; indices[ti++] = i01; indices[ti++] = i10;
+			indices[ti++] = i10; indices[ti++] = i01; indices[ti++] = i11;
+		}
+	}
+	TriMesh* mesh = trimesh_create(verts, N * N, indices, (N - 1) * (N - 1) * 2);
+
+	// Varied single-capsule sweep: 6 starting configs (mesh-local positions, drop
+	// heights, initial rotations). We want to prove no lone shape reproduces the
+	// drift, before blaming multi-body interactions.
+	struct Config { v3 pos; quat rot; const char* label; };
+	struct Config configs[] = {
+		{ V3(2.6124f,      0.7526f, 3.9525f), quat_identity(), "body48-origin (inside tri, exactly centered)" },
+		{ V3(2.6124f+0.1f, 0.7526f, 3.9525f), quat_identity(), "+0.1 X offset (still inside tri)" },
+		{ V3(2.6124f+0.3f, 0.7526f, 3.9525f), quat_identity(), "+0.3 X offset (inside tri, near diag)" },
+		{ V3(2.907f,       0.7526f, 3.9525f), quat_identity(), "on-diagonal edge (tri boundary)" },
+		{ V3(2.450f,       0.7526f, 3.9525f), quat_identity(), "near-vertex x-edge" },
+		{ V3(2.6124f,      1.5f,    3.9525f), quat_identity(), "high drop (impact bounce)" },
+		{ V3(2.6124f,      0.7526f, 3.9525f), quat_axis_angle(V3(1,0,0), 0.1f), "tilted X-axis 0.1 rad" },
+		{ V3(2.6124f,      0.7526f, 3.9525f), quat_axis_angle(V3(0,0,1), 0.01f), "tilted Z-axis 0.01 rad (tiny)" },
+		{ V3(2.6124f,      0.7526f, 3.9525f), quat_axis_angle(V3(0,0,1), 0.001f), "tilted Z-axis 0.001 rad (microscopic)" },
+	};
+	// Also sweep initial velocity kicks to see if a microscopic v_x triggers the
+	// upright-capsule runaway.
+	float v_kicks[] = { 0.0f, 1e-6f, 1e-4f, 1e-2f };
+	const char* kick_labels[] = { "no kick", "v_x=1e-6", "v_x=1e-4", "v_x=1e-2" };
+	for (size_t ki = 0; ki < sizeof(v_kicks)/sizeof(v_kicks[0]); ki++) {
+		WorldParams wpk = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = 2, .velocity_iters = 8 };
+		World wk = create_world(wpk);
+		WorldInternal* wki = (WorldInternal*)wk.id;
+		wki->sleep_enabled = 0;
+		Body floor_k = create_body(wk, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(wk, floor_k, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
+		Body cap_k = create_body(wk, (BodyParams){ .position = V3(2.6124f, 0.7526f, 3.9525f), .rotation = quat_identity(), .mass = 1.0f, .friction = 0.6f });
+		body_add_shape(wk, cap_k, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.4f, .radius = 0.25f } });
+		wki->body_hot[1].velocity = V3(v_kicks[ki], 0, 0);
+		for (int f = 0; f < 900; f++) world_step(wk, 1.0f / 60.0f);
+		v3 pe = wki->body_state[1].position;
+		v3 ve = wki->body_hot[1].velocity;
+		float dr = sqrtf((pe.x - 2.6124f)*(pe.x - 2.6124f) + (pe.z - 3.9525f)*(pe.z - 3.9525f));
+		printf("  [%-45s] end pos=(%.5f,%.5f,%.5f) |v|=%.5e |XZ_drift|=%.5e\n", kick_labels[ki], pe.x, pe.y, pe.z, len(ve), dr);
+		destroy_world(wk);
+	}
+
+	for (size_t ci = 0; ci < sizeof(configs)/sizeof(configs[0]); ci++) {
+		WorldParams wp_c = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = 2, .velocity_iters = 8 };
+		World w_c = create_world(wp_c);
+		WorldInternal* wi_c = (WorldInternal*)w_c.id;
+		wi_c->sleep_enabled = 0;
+
+		Body floor_c = create_body(w_c, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w_c, floor_c, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
+
+		Body cap_c = create_body(w_c, (BodyParams){ .position = configs[ci].pos, .rotation = configs[ci].rot, .mass = 1.0f, .friction = 0.6f });
+		body_add_shape(w_c, cap_c, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.4f, .radius = 0.25f } });
+
+		for (int f = 0; f < 900; f++) world_step(w_c, 1.0f / 60.0f);
+
+		v3 p_end = wi_c->body_state[1].position;
+		v3 v_end = wi_c->body_hot[1].velocity;
+		v3 av_end = wi_c->body_hot[1].angular_velocity;
+		float drift = sqrtf((p_end.x - configs[ci].pos.x)*(p_end.x - configs[ci].pos.x) + (p_end.z - configs[ci].pos.z)*(p_end.z - configs[ci].pos.z));
+		printf("  [%-45s] end pos=(%.5f,%.5f,%.5f) |v|=%.5e |av|=%.5e |XZ_drift|=%.5e\n",
+			configs[ci].label, p_end.x, p_end.y, p_end.z, len(v_end), len(av_end), drift);
+		destroy_world(w_c);
+	}
+	trimesh_free(mesh); free(verts); free(indices);
+}
+
 static void bench_trimesh_stress()
 {
+	bench_trimesh_single_cap();
 	printf("=== Trimesh stress A/B (2 substeps, 300 frames each) ===\n");
 	int mesh_sizes[]  = {  25, 25, 50, 50 };
 	int body_grids[]  = {   7, 10,  7, 10 };

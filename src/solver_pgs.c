@@ -264,29 +264,46 @@ static void warm_cache_age_and_evict(WorldInternal* w)
 //
 // out_batch_starts receives length = *out_color_count + 1. Offsets are
 // RELATIVE to refs (start at 0; last entry equals count).
-static void color_constraints_island(ConstraintRef* refs, int count, uint64_t* body_colors, Arena* arena, int* out_batch_starts, int* out_color_count)
+static void color_constraints_island(ConstraintRef* refs, int count, uint64_t* body_colors, BodyHot* bodies, Arena* arena, int* out_batch_starts, int* out_color_count)
 {
+	// Static bodies (inv_mass == 0) are read-only in the solver: their velocity
+	// is never written, so multiple constraints touching the same static in the
+	// same SIMD batch do NOT race. Masking them out of the color bitmap is
+	// required — otherwise `body_colors[static]` saturates (all 64 bits set
+	// after ~64 dynamic-to-static contacts) and forces every subsequent
+	// dynamic-to-static constraint into color 0 as a fallback, packing
+	// multiple same-dynamic-body constraints into one SIMD batch.
 	int max_color = 0;
 
 	for (int i = 0; i < count; i++) {
-		uint64_t used = body_colors[refs[i].body_a] | body_colors[refs[i].body_b];
+		int a = refs[i].body_a, b = refs[i].body_b;
+		int a_static = bodies[a].inv_mass == 0.0f;
+		int b_static = bodies[b].inv_mass == 0.0f;
+		uint64_t used = 0;
+		if (!a_static) used |= body_colors[a];
+		if (!b_static) used |= body_colors[b];
 		uint64_t avail = ~used;
+		// avail == 0 means this body has 64+ dynamic-neighbor constraints already
+		// colored — our 64-color bitmap is exhausted. Nudge has never seen this
+		// in practice; if it fires, upgrade to a variable-length bitset or split
+		// the offending body's constraints into a serial fallback. Silently
+		// defaulting to color 0 would cause a SIMD scatter race (see fix history
+		// for static-saturation bug). Assert loudly in debug; release still
+		// produces color 0 with the race — but now you know to fix it.
+		assert(avail && "color exhausted: body has 64+ dynamic-neighbor constraints — bump bitmap width");
+		// Find lowest set bit (MSVC: _BitScanForward64, GCC: __builtin_ctzll)
 		int color = 0;
-		if (avail) {
-			// Find lowest set bit (MSVC: _BitScanForward64, GCC: __builtin_ctzll)
 #ifdef _MSC_VER
-			unsigned long idx;
-			_BitScanForward64(&idx, avail);
-			color = (int)idx;
+		unsigned long idx;
+		if (_BitScanForward64(&idx, avail)) color = (int)idx;
 #else
-			color = __builtin_ctzll(avail);
+		if (avail) color = __builtin_ctzll(avail);
 #endif
-		}
 		assert(color < SOLVE_ISLAND_MAX_COLORS);
 		refs[i].color = (uint8_t)color;
 		uint64_t bit = 1ULL << color;
-		body_colors[refs[i].body_a] |= bit;
-		body_colors[refs[i].body_b] |= bit;
+		if (!a_static) body_colors[a] |= bit;
+		if (!b_static) body_colors[b] |= bit;
 		if (color > max_color) max_color = color;
 	}
 
