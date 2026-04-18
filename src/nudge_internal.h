@@ -2,6 +2,18 @@
 #ifndef NUDGE_INTERNAL_H
 #define NUDGE_INTERNAL_H
 
+// Force FP contraction off TU-wide. Repeated from vmath.h because Clang's
+// pragma scoping across included files has been observed to drop the state
+// on some build paths. Emitting the pragma again at the top of the engine's
+// main internal header guarantees every .c file included after this is
+// parsed with contraction disabled.
+#ifdef __clang__
+#pragma clang fp contract(off)
+#endif
+#ifndef __cplusplus
+#pragma STDC FP_CONTRACT OFF
+#endif
+
 // Internal constant: feature ID bit flag for edge-edge contacts.
 // Edge contacts: edge_a | (edge_b << 16) | FEATURE_EDGE_BIT
 #define FEATURE_EDGE_BIT 0x80000000u

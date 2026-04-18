@@ -57,7 +57,8 @@ typedef ptrdiff_t GLintptr;
 	X(void,    ActiveTexture,         GLenum texture) \
 	X(void,    Uniform1i,             GLint location, GLint v0) \
 	X(void,    Uniform1f,             GLint location, GLfloat v0) \
-	X(void,    DrawBuffers,           GLsizei n, const GLenum* bufs)
+	X(void,    DrawBuffers,           GLsizei n, const GLenum* bufs) \
+	X(void,    GetProgramInfoLog,     GLuint program, GLsizei bufSize, GLsizei* length, GLchar* infoLog)
 
 // Declare function pointers: gl_CreateShader, gl_ShaderSource, ...
 #define X(ret, name, ...) typedef ret (APIENTRY *PFN_gl##name)(__VA_ARGS__); static PFN_gl##name gl_##name;
@@ -115,7 +116,7 @@ static const char* s_frag_src =
 	"        vec3 proj = v_light_pos.xyz / v_light_pos.w * 0.5 + 0.5;\n"
 	"        if (proj.z < 1.0 && proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0) {\n"
 	"            float bias = max(0.005 * (1.0 - ndl), 0.001);\n"
-	"            vec2 texel = 1.0 / textureSize(u_shadow_map, 0);\n"
+	"            vec2 texel = 1.0 / vec2(textureSize(u_shadow_map, 0));\n"
 	"            for (int x = -1; x <= 1; x++) {\n"
 	"                for (int y = -1; y <= 1; y++) {\n"
 	"                    float d = texture(u_shadow_map, proj.xy + vec2(x, y) * texel).r;\n"
@@ -194,6 +195,13 @@ static GLuint create_program(const char* vs_src, const char* fs_src)
 	gl_AttachShader(prog, vs);
 	gl_AttachShader(prog, fs);
 	gl_LinkProgram(prog);
+	GLint linked = 0;
+	gl_GetProgramiv(prog, GL_LINK_STATUS, &linked);
+	if (!linked) {
+		char buf[1024];
+		gl_GetProgramInfoLog(prog, sizeof(buf), NULL, buf);
+		SDL_Log("Shader link error: %s", buf);
+	}
 	gl_DeleteShader(vs);
 	gl_DeleteShader(fs);
 	return prog;
@@ -838,7 +846,10 @@ void render_init()
 
 	glGenTextures(1, &r_shadow_tex);
 	glBindTexture(GL_TEXTURE_2D, r_shadow_tex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+	// WebGL2/GLES3 is strict about internalformat/type pairings:
+	// DEPTH_COMPONENT24 <-> UNSIGNED_INT. Desktop core accepts this combo too
+	// (GL_FLOAT was only ever valid with DEPTH_COMPONENT32F).
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);

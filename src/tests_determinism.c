@@ -104,6 +104,21 @@ static uint64_t det_run(int steps, int threads)
 // Build the scene, then print a hash at step 0, 1, 2, 10, 60, 240 so CI logs
 // show where cross-arch divergence starts to accumulate. Threads-free so the
 // trace is deterministic independent of the pool.
+// Print the raw bits of a known `a*b+c` pattern. volatile locals prevent
+// the compiler from constant-folding -- whatever the backend emits for a
+// runtime mul-add is what we see. If macOS/WASM show different bits than
+// x86, the backend is still fusing to FMA despite our flags.
+static void det_dump_fma_probe()
+{
+	volatile float a = 1.0000001f;
+	volatile float b = 3.0000003f;
+	volatile float c = 5.0000005f;
+	float r = a * b + c;
+	uint32_t bits;
+	memcpy(&bits, &r, 4);
+	printf("det fma probe: a*b+c bits = 0x%08x (%.9g)\n", bits, (double)r);
+}
+
 // Run the scene single-threaded, printing the world hash at a handful of
 // checkpoints so CI logs show where divergence starts accumulating.
 static void det_trace()
@@ -156,6 +171,7 @@ static void det_trace()
 static int run_determinism_test(int threads_hi)
 {
 	const int steps = 240;
+	det_dump_fma_probe();
 	det_trace();
 	uint64_t h1 = det_run(steps, 1);
 	printf("det hash (threads=1): 0x%016llx\n", (unsigned long long)h1);

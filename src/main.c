@@ -106,9 +106,8 @@ static void frame_step()
 	{
 		double css_w = 0, css_h = 0;
 		emscripten_get_element_css_size("#canvas", &css_w, &css_h);
-		double dpr = emscripten_get_device_pixel_ratio();
-		int w = (int)(css_w * dpr + 0.5);
-		int h = (int)(css_h * dpr + 0.5);
+		int w = (int)(css_w + 0.5);
+		int h = (int)(css_h + 0.5);
 		if (w > 0 && h > 0 && (w != g_width || h != g_height)) {
 			emscripten_set_canvas_element_size("#canvas", w, h);
 			SDL_SetWindowSize(g_window, w, h);
@@ -521,9 +520,8 @@ void init()
 	{
 		double css_w = 0, css_h = 0;
 		emscripten_get_element_css_size("#canvas", &css_w, &css_h);
-		double dpr = emscripten_get_device_pixel_ratio();
-		int w = (int)(css_w * dpr + 0.5);
-		int h = (int)(css_h * dpr + 0.5);
+		int w = (int)(css_w + 0.5);
+		int h = (int)(css_h + 0.5);
 		if (w > 0 && h > 0) {
 			emscripten_set_canvas_element_size("#canvas", w, h);
 			SDL_SetWindowSize(g_window, w, h);
