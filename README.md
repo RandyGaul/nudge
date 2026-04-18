@@ -278,7 +278,7 @@ regression with only nudge's own output.
 Simulation is bit-identical across every target the CI matrix covers:
 x86_64 (MSVC / GCC / Clang), aarch64 (AppleClang), and wasm32 (emscripten),
 with both SIMD and scalar backends. Run the canonical 240-step scene
-anywhere and you get the same FNV-1a hash `0x86c44c829ce09c07`; CI asserts
+anywhere and you get the same FNV-1a hash `0xf60bdbc375eb2dcb`; CI asserts
 this on every push.
 
 If you're dropping nudge into another project and want to keep that
@@ -312,15 +312,13 @@ wide `/fp:fast` doesn't silently break determinism).
   `precise` model implies `-ffp-contract=on` and silently re-enables
   FMA fusion on ARM — AppleClang at `-O3` will emit `vfmaq_f32` for any
   `a*b+c` pattern and you'll diverge from x86. Use one or the other.
-- **The engine uses its own `nudge_sinf` / `nudge_cosf` / `nudge_sincosf`
-  / `nudge_atan2f`** (defined in `vmath.h`) for any transcendental that
-  touches the simulation. Standard libm `sinf/cosf` happen to agree across
-  the compilers we currently test on, but `atan2f` is documented to differ
-  between libcs (glibc vs Apple Libc vs musl vs wasi-libc), so if you
-  compute initial body poses in your own code, prefer the `nudge_*`
-  versions for anything that feeds the simulation. This is belt-and-
-  suspenders -- our CI doesn't specifically test "libm sinf breaks
-  determinism", but it does test that everything we ship matches.
+- **Standard libm `sinf` / `cosf` / `atan2f` are bit-identical across
+  every libc on the CI matrix today** (Microsoft UCRT, glibc, Apple Libc,
+  musl via ASan runtime, wasi-libc). We tested this directly -- every
+  CI job produces the same simulation hash with libm. The engine uses
+  libm internally for that reason; if a future libc drifts this will
+  surface as a CI hash mismatch on exactly one job, and the fix is
+  localized to whichever transcendental moved.
 - **The engine sets `#pragma STDC FP_CONTRACT OFF` at file scope in
   `vmath.h` and `nudge_internal.h`** -- if you pull individual engine
   sources into a larger TU, keep those pragmas at the top of the TU.

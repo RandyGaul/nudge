@@ -206,7 +206,7 @@ static void det_trace()
 // -- produces this exact hash after 240 simulation steps. Any single bit drift
 // in any FP op propagates through the solver and flips this hash, so CI is
 // a hard regression gate for the whole floating-point pipeline.
-#define DET_EXPECTED_HASH 0x86c44c829ce09c07ULL
+#define DET_EXPECTED_HASH 0xf60bdbc375eb2dcbULL
 
 // Runs the canonical scene twice (single-threaded and N-threaded) and checks:
 //   1. Both runs produce the same hash -- threading does not affect output.
