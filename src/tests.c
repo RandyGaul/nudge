@@ -776,7 +776,12 @@ static void test_hull_on_quad_mesh_floor()
 	v3 p = body_get_position(w, hull_b);
 	v3 vel = body_get_velocity(w, hull_b);
 	printf("  trimesh hull final y=%.4f vel=%.4f\n", p.y, len(vel));
-	TEST_ASSERT(p.y > 0.4f); // octahedron radius 0.5 along each axis
+	// Octahedron dropped vertex-up is inverted-pendulum unstable -- FP noise
+	// tips it onto a face. Face-down rest: centroid at inscribed-sphere radius
+	// = (edge * sqrt(6)/6) = (0.5*sqrt(2)) * sqrt(6)/6 ~= 0.289. Accept any
+	// stable rest pose: face-down (0.289), edge-down (~0.35), or the unstable
+	// vertex-up if FP happens to keep it balanced (0.5).
+	TEST_ASSERT(p.y > 0.25f);
 	TEST_ASSERT(p.y < 1.0f);
 	TEST_ASSERT(len(vel) < 0.2f);
 
