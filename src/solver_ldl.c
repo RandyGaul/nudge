@@ -1808,15 +1808,12 @@ static void ldl_factor(WorldInternal* w, SolverJoint* sol_joints, int joint_coun
 	LDL_FactorCtx lfc = { .w = w, .sol_joints = sol_joints, .joint_count = joint_count, .sub = sub, .comp_bodies = comp_bodies };
 
 	int island_count = asize(w->islands);
-#ifdef _WIN32
 	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
 	// Debug capture writes a global; force serial when debug is active.
 	int can_parallel = n_workers > 1 && island_count >= 2 && g_ldl_debug_island < 0;
 	if (can_parallel) {
 		pool_dispatch(ldl_factor_island_work_fn, &lfc, island_count, 1, n_workers);
-	} else
-#endif
-	{
+	} else {
 		ldl_factor_island_work_fn(&lfc, 0, island_count);
 	}
 }
@@ -1876,13 +1873,10 @@ static void ldl_velocity_correct(WorldInternal* w, SolverJoint* sol_joints, int 
 
 	int island_count = asize(w->islands);
 	LDL_IslandCtx lc = { .w = w, .sol_joints = sol_joints, .joint_count = joint_count, .sub_dt = sub_dt, .comp_bodies = comp_bodies };
-#ifdef _WIN32
 	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
 	if (n_workers > 1 && island_count >= 2) {
 		pool_dispatch(ldl_velocity_correct_island_work_fn, &lc, island_count, 1, n_workers);
-	} else
-#endif
-	{
+	} else {
 		ldl_velocity_correct_island_work_fn(&lc, 0, island_count);
 	}
 }
@@ -1958,12 +1952,10 @@ static void ldl_position_solve(WorldInternal* w, SolverJoint* sol_joints, int jo
 
 	int island_count = asize(w->islands);
 	LDL_IslandCtx lc = { .w = w, .sol_joints = sol_joints, .joint_count = joint_count, .sub_dt = sub_dt, .comp_bodies = comp_bodies, .pos_delta = pos_delta, .ang_delta = ang_delta };
-#ifdef _WIN32
 	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
 	if (n_workers > 1 && island_count >= 2) {
 		pool_dispatch(ldl_position_solve_island_work_fn, &lc, island_count, 1, n_workers);
 	} else
-#endif
 	{
 		ldl_position_solve_island_work_fn(&lc, 0, island_count);
 	}

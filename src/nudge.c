@@ -18,6 +18,7 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 #include "collision.c"
 #include "sensor.c"
 #include "trimesh.c"
+#include "heightfield.c"
 #include "broadphase.c"
 #include "epa.c"
 #include "inertia.c"
@@ -85,6 +86,7 @@ void destroy_world(World world)
 	afree(w->sensors); afree(w->sensor_gen); afree(w->sensor_free);
 	map_free(w->hull_registry);
 	map_free(w->mesh_registry);
+	map_free(w->heightfield_registry);
 	for (int i = 0; i < asize(w->islands); i++) ldl_cache_free(&w->islands[i].ldl);
 	afree(w->islands); afree(w->island_gen); afree(w->island_free);
 	map_free(w->prev_touching);
@@ -165,23 +167,23 @@ static int perf_initialized;
 
 // -----------------------------------------------------------------------------
 // Thread pool for parallel PGS solver (Box2D/BEPU-style spin-wait).
+// Cross-platform: thread spawn via threads.h, atomics via <stdatomic.h>.
 
-#ifdef _WIN32
-#include <windows.h>
-#include <intrin.h>
+#include <stdatomic.h>
+#include "threads.h"
 
 #define SOLVER_MAX_THREADS 16
 #define SOLVER_BLOCK_SIZE  8
 
-typedef struct WorkBlock { int start, count; volatile long sync_index; } WorkBlock;
-typedef struct WorkStage { WorkBlock* blocks; int block_count; volatile long completion_count; } WorkStage;
+typedef struct WorkBlock { int start, count; atomic_int sync_index; } WorkBlock;
+typedef struct WorkStage { WorkBlock* blocks; int block_count; atomic_int completion_count; } WorkStage;
 
 // Generic work function: called per block with user context + block range.
 typedef void (*WorkFn)(void* ctx, int start, int count);
 
 typedef struct ThreadPoolCtx
 {
-	volatile long sync_bits;  // (stage_index << 16) | sync_counter. UINT_MAX = exit.
+	atomic_int sync_bits;  // (stage_index << 16) | sync_counter. UINT_MAX = exit.
 	WorkStage* stage;         // current stage
 	WorkFn fn;                // work function for current dispatch
 	void* fn_ctx;             // user context passed to fn
@@ -196,17 +198,19 @@ static void pool_execute(ThreadPoolCtx* ctx, int prev_sync, int cur_sync)
 	int completed = 0;
 	for (int bi = 0; bi < stage->block_count; bi++) {
 		WorkBlock* blk = &stage->blocks[bi];
-		if (_InterlockedCompareExchange(&blk->sync_index, cur_sync, prev_sync) != prev_sync) continue;
+		int expected = prev_sync;
+		if (!atomic_compare_exchange_strong(&blk->sync_index, &expected, cur_sync)) continue;
 		ctx->fn(ctx->fn_ctx, blk->start, blk->count);
 		completed++;
 	}
 	for (int bi = stage->block_count - 1; bi >= 0; bi--) {
 		WorkBlock* blk = &stage->blocks[bi];
-		if (_InterlockedCompareExchange(&blk->sync_index, cur_sync, prev_sync) != prev_sync) continue;
+		int expected = prev_sync;
+		if (!atomic_compare_exchange_strong(&blk->sync_index, &expected, cur_sync)) continue;
 		ctx->fn(ctx->fn_ctx, blk->start, blk->count);
 		completed++;
 	}
-	if (completed > 0) _InterlockedExchangeAdd(&stage->completion_count, completed);
+	if (completed > 0) atomic_fetch_add(&stage->completion_count, completed);
 }
 
 // Per-thread identity for TLS arena selection. Main thread stays 0; pool
@@ -215,26 +219,24 @@ static void pool_execute(ThreadPoolCtx* ctx, int prev_sync, int cur_sync)
 static _Thread_local int pool_worker_id = 0;
 
 // Global pool context: one instance shared by main thread + all workers.
-// Declared here so pool_worker_thread can take its address.
 static ThreadPoolCtx pool_ctx;
 
-static DWORD WINAPI pool_worker_thread(LPVOID param)
+static void pool_worker_thread(void* param)
 {
 	pool_worker_id = (int)(intptr_t)param;
 	ThreadPoolCtx* ctx = &pool_ctx;
-	long last_sync = 0;
+	int last_sync = 0;
 	for (;;) {
-		long sync = ctx->sync_bits;
-		if (sync == (long)0xFFFFFFFF) break;
+		int sync = atomic_load(&ctx->sync_bits);
+		if (sync == (int)0xFFFFFFFF) break;
 		if (sync == last_sync) { simd_pause(); continue; }
 		int cur_sync = (sync >> 16) & 0xFFFF;
 		pool_execute(ctx, cur_sync - 1, cur_sync);
 		last_sync = sync;
 	}
-	return 0;
 }
 
-static HANDLE pool_threads[SOLVER_MAX_THREADS];
+static Thread pool_threads[SOLVER_MAX_THREADS];
 static int pool_thread_count;
 
 static void pool_ensure(int n_workers)
@@ -244,11 +246,11 @@ static void pool_ensure(int n_workers)
 	int needed = n_workers - 1;
 	if (pool_thread_count >= needed) return;
 	pool_ctx.worker_count = n_workers;
-	pool_ctx.sync_bits = 0;
+	atomic_store(&pool_ctx.sync_bits, 0);
 	for (int i = pool_thread_count; i < needed; i++) {
-		// Worker slot index = i + 1 (main thread owns slot 0). Passed as the
-		// thread's LPVOID and latched into pool_worker_id on first instruction.
-		pool_threads[i] = CreateThread(NULL, 0, pool_worker_thread, (LPVOID)(intptr_t)(i + 1), 0, NULL);
+		// Worker slot index = i + 1 (main thread owns slot 0). Latched into
+		// pool_worker_id on first instruction of the worker.
+		pool_threads[i] = nudge_thread_create(pool_worker_thread, (void*)(intptr_t)(i + 1));
 	}
 	pool_thread_count = needed;
 }
@@ -264,18 +266,23 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 	if (total_items <= 0) return;
 	int n_blocks = (total_items + block_size - 1) / block_size;
 	if (n_blocks > 512) n_blocks = 512;
-	for (int i = 0; i < n_blocks; i++) { pool_blocks[i].start = i * block_size; int rem = total_items - pool_blocks[i].start; pool_blocks[i].count = rem < block_size ? rem : block_size; pool_blocks[i].sync_index = pool_sync_counter; }
+	for (int i = 0; i < n_blocks; i++) {
+		pool_blocks[i].start = i * block_size;
+		int rem = total_items - pool_blocks[i].start;
+		pool_blocks[i].count = rem < block_size ? rem : block_size;
+		atomic_store(&pool_blocks[i].sync_index, pool_sync_counter);
+	}
 	pool_stage.blocks = pool_blocks;
 	pool_stage.block_count = n_blocks;
-	pool_stage.completion_count = 0;
+	atomic_store(&pool_stage.completion_count, 0);
 	pool_ctx.stage = &pool_stage;
 	pool_ctx.fn = fn;
 	pool_ctx.fn_ctx = ctx;
 	pool_sync_counter++;
-	long sync_bits = (long)((pool_sync_counter << 16) | 0);
-	_InterlockedExchange(&pool_ctx.sync_bits, sync_bits);
+	int sync_bits = (pool_sync_counter << 16) | 0;
+	atomic_exchange(&pool_ctx.sync_bits, sync_bits);
 	pool_execute(&pool_ctx, pool_sync_counter - 1, pool_sync_counter);
-	while (pool_stage.completion_count < n_blocks) simd_pause();
+	while (atomic_load(&pool_stage.completion_count) < n_blocks) simd_pause();
 }
 
 // --- PGS solver work function (per-color) ---
@@ -551,20 +558,20 @@ static void np_work_fn(void* ctx, int start, int count)
 	CK_DYNA InternalManifold* local = NULL;
 	for (int i = start; i < start + count; i++) {
 		BroadPair* p = &np->pairs[i];
-		// Mesh pairs emit multiple manifolds per pair (one per contacted
-		// triangle), which doesn't fit the one-slot-per-pair output layout.
-		// The main thread handles them in a sequential post-pass below.
+		// Mesh / heightfield pairs emit multiple manifolds per pair (one per
+		// contacted triangle or cell), which doesn't fit the one-slot-per-pair
+		// output layout. The main thread handles them in a sequential post-pass
+		// below.
 		ShapeType ta = np->w->body_cold[p->a].shapes[0].type;
 		ShapeType tb = np->w->body_cold[p->b].shapes[0].type;
 		if (ta == SHAPE_MESH || tb == SHAPE_MESH) continue;
+		if (ta == SHAPE_HEIGHTFIELD || tb == SHAPE_HEIGHTFIELD) continue;
 		aclear(local);
 		narrowphase_pair(np->w, p->a, p->b, &local);
 		if (asize(local) > 0) np->output[i] = local[0];
 	}
 	afree(local);
 }
-
-#endif // _WIN32
 
 void world_step(World world, float dt)
 {
@@ -588,9 +595,7 @@ void world_step(World world, float dt)
 	double t0 = perf_now();
 	warm_cache_age_and_evict(w);
 	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
-#ifdef _WIN32
 	if (n_workers > 1) pool_ensure(n_workers);
-#endif
 	// Ensure one scratch arena per worker, lazily. 4 MB each; grows capacity
 	// only when thread_count rises. Reset (not freed) every step so solver-temp
 	// arrays bump-allocate with zero malloc traffic.
@@ -601,12 +606,10 @@ void world_step(World world, float dt)
 	}
 	for (int wi = 0; wi < n_workers; wi++) arena_reset(&w->worker_arenas[wi]);
 	int body_count = asize(w->body_hot);
-#ifdef _WIN32
 	if (n_workers > 1 && body_count >= 256) {
 		IntegrateCtx ic = { .w = w, .dt = sub_dt, .body_indices = NULL };
 		pool_dispatch(integrate_vel_work_fn, &ic, body_count, 64, n_workers);
 	} else
-#endif
 		integrate_velocities_and_inertia(w, sub_dt);
 	w->perf.integrate = perf_now() - t0;
 
@@ -636,17 +639,14 @@ void world_step(World world, float dt)
 	CK_DYNA InternalManifold* manifolds = NULL;
 	// Parallel narrowphase: broadphase outputs pair list, we dispatch narrowphase here.
 	CK_DYNA BroadPair* np_pairs = NULL;
-#ifdef _WIN32
 	if (n_workers > 1) {
 		w->np_pairs_out = &np_pairs;
 	} else
-#endif
 		w->np_pairs_out = NULL;
 
 	broadphase_and_collide(w, &manifolds);
 	w->np_pairs_out = NULL;
 
-#ifdef _WIN32
 	// Parallel narrowphase on collected pairs. Each pair writes to its fixed
 	// slot (pair index) so output order matches the serial broadphase pair
 	// order regardless of worker scheduling -- required for bit-identical
@@ -673,7 +673,10 @@ void world_step(World world, float dt)
 		// emit more than one manifold each).
 		for (int i = 0; i < np_count; i++) {
 			int a = np_pairs[i].a, b = np_pairs[i].b;
-			if (w->body_cold[a].shapes[0].type == SHAPE_MESH || w->body_cold[b].shapes[0].type == SHAPE_MESH) {
+			ShapeType ta = w->body_cold[a].shapes[0].type;
+			ShapeType tb = w->body_cold[b].shapes[0].type;
+			if (ta == SHAPE_MESH || tb == SHAPE_MESH
+			 || ta == SHAPE_HEIGHTFIELD || tb == SHAPE_HEIGHTFIELD) {
 				narrowphase_pair(w, a, b, &manifolds);
 			}
 		}
@@ -683,7 +686,6 @@ void world_step(World world, float dt)
 		}
 	}
 	afree(np_pairs);
-#endif
 	double t_iuc = perf_now();
 	if (w->sleep_enabled) islands_update_contacts(w, manifolds, asize(manifolds));
 	w->perf.pgs.pos_joints = perf_now() - t_iuc;
@@ -763,11 +765,9 @@ void world_step(World world, float dt)
 	SolverManifold* sm = NULL;
 	SolverContact*  sc = NULL;
 	// Pre-solve: parallel when threading enabled (each manifold writes to fixed-stride slots).
-#ifdef _WIN32
 	if (n_workers > 1 && manifold_count >= 64)
 		solver_pre_solve_dispatch(w, manifolds, manifold_count, &sm, &sc, sub_dt, pre_solve_work_fn, island_manifold_perm, island_manifold_offsets, asize(w->islands));
 	else
-#endif
 		solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, sub_dt);
 
 	SolverJoint* sol_joints = NULL;
@@ -930,12 +930,10 @@ void world_step(World world, float dt)
 	for (int sub = 0; sub < n_sub; sub++) {
 		if (sub > 0) {
 			double ti = perf_now();
-#ifdef _WIN32
 			if (n_workers > 1 && body_count >= 256) {
 				IntegrateCtx ic = { .w = w, .dt = sub_dt, .body_indices = NULL };
 				pool_dispatch(integrate_vel_work_fn, &ic, body_count, 64, n_workers);
 			} else
-#endif
 				integrate_velocities_and_inertia(w, sub_dt);
 			t_int_sub += perf_now() - ti;
 			// Refresh joint Jacobians/limits from current body state (positions
@@ -1019,12 +1017,10 @@ void world_step(World world, float dt)
 		// their stored indices, so a flat refresh pass works regardless of
 		// island layout.
 		if (sub > 0 && simd_batch_count > 0) {
-#ifdef _WIN32
 			if (n_workers > 1 && simd_batch_count >= n_workers * 2) {
 				RefreshCtx rc = { .batches = simd_batches, .sm = sm, .sc = sc };
 				pool_dispatch(refresh_work_fn, &rc, simd_batch_count, SOLVER_BLOCK_SIZE, n_workers);
 			} else
-#endif
 			for (int bi = 0; bi < simd_batch_count; bi++) {
 				pgs_batch4_refresh(&simd_batches[bi], sm, sc);
 			}
@@ -1047,7 +1043,6 @@ void world_step(World world, float dt)
 		// bit-identical output because islands are disjoint (order across
 		// islands cannot affect per-body update sequence).
 		int first_big = solve_island_count;
-#ifdef _WIN32
 		if (n_workers > 1) {
 			int i = 0;
 			while (i < first_big) {
@@ -1061,7 +1056,6 @@ void world_step(World world, float dt)
 				}
 			}
 		}
-#endif
 		int small_count = first_big;
 
 		// Small islands: dispatch across workers (whole-island claim).
@@ -1070,12 +1064,9 @@ void world_step(World world, float dt)
 			.sm = sm, .sc = sc, .sol_joints = sol_joints,
 			.simd_batches = simd_batches, .velocity_iters = w->velocity_iters,
 		};
-#ifdef _WIN32
 		if (n_workers > 1 && small_count >= 2) {
 			pool_dispatch(island_solve_work_fn, &island_ctx, small_count, 1, n_workers);
-		} else
-#endif
-		if (small_count > 0) {
+		} else if (small_count > 0) {
 			island_solve_work_fn(&island_ctx, 0, small_count);
 		}
 
@@ -1089,12 +1080,10 @@ void world_step(World world, float dt)
 					int bs = island->simd_batch_start + island->simd_color_batch_starts[c];
 					int be = island->simd_batch_start + island->simd_color_batch_starts[c + 1];
 					int n_color_batches = be - bs;
-#ifdef _WIN32
 					if (n_workers > 1 && n_color_batches >= n_workers * 2) {
 						PGS_WorkCtx pgs_ctx = { .bodies = w->body_hot, .batches = simd_batches + bs, .sm = sm, .sc = sc, .scatter = do_scatter };
 						pool_dispatch(pgs_work_fn, &pgs_ctx, n_color_batches, SOLVER_BLOCK_SIZE, n_workers);
 					} else
-#endif
 					{
 						for (int bi2 = bs; bi2 < be; bi2++) {
 							solve_contact_batch4_sv(w->body_hot, &simd_batches[bi2]);
@@ -1125,12 +1114,10 @@ void world_step(World world, float dt)
 		t_pgs += perf_now() - tp;
 
 		double ti2 = perf_now();
-#ifdef _WIN32
 		if (n_workers > 1 && body_count >= 256) {
 			IntegrateCtx ic = { .w = w, .dt = sub_dt, .body_indices = NULL };
 			pool_dispatch(integrate_pos_work_fn, &ic, body_count, 64, n_workers);
 		} else
-#endif
 			integrate_positions(w, sub_dt);
 		t_int_sub += perf_now() - ti2;
 
@@ -1326,6 +1313,9 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	case SHAPE_MESH:    assert(w->body_hot[idx].inv_mass == 0.0f && "SHAPE_MESH requires mass=0 (static body)");
 	                    assert(params.mesh.mesh && "SHAPE_MESH.mesh is NULL");
 	                    s.mesh.mesh = params.mesh.mesh; break;
+	case SHAPE_HEIGHTFIELD: assert(w->body_hot[idx].inv_mass == 0.0f && "SHAPE_HEIGHTFIELD requires mass=0 (static body)");
+	                        assert(params.heightfield.hf && "SHAPE_HEIGHTFIELD.hf is NULL");
+	                        s.heightfield.hf = params.heightfield.hf; break;
 	}
 	apush(w->body_cold[idx].shapes, s);
 	if (params.type == SHAPE_CYLINDER && w->body_state[idx].angular_damping < 0.15f)
@@ -2075,6 +2065,24 @@ const TriMesh* world_find_mesh(World world, const char* name)
 	WorldInternal* w = (WorldInternal*)world.id;
 	const char* interned = sintern(name);
 	const TriMesh** slot = map_get_ptr(w->mesh_registry, (uint64_t)(uintptr_t)interned);
+	return slot ? *slot : NULL;
+}
+
+void world_register_heightfield(World world, const Heightfield* hf)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	const char* name = heightfield_get_name(hf);
+	assert(name && "world_register_heightfield: hf must have a name (use heightfield_set_name)");
+	uint64_t key = (uint64_t)(uintptr_t)name;
+	map_set(w->heightfield_registry, key, hf);
+}
+
+const Heightfield* world_find_heightfield(World world, const char* name)
+{
+	if (!name) return NULL;
+	WorldInternal* w = (WorldInternal*)world.id;
+	const char* interned = sintern(name);
+	const Heightfield** slot = map_get_ptr(w->heightfield_registry, (uint64_t)(uintptr_t)interned);
 	return slot ? *slot : NULL;
 }
 
