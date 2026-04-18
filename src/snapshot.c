@@ -61,11 +61,35 @@ static ShapeParams snapshot_shape_from_internal(const ShapeInternal* sh)
 		sp.cylinder.radius = sh->cylinder.radius;
 		break;
 	case SHAPE_HULL:
+		sp.hull.hull = sh->hull.hull;   // SV_SERIALIZABLE reads the name field
+		sp.hull.scale = sh->hull.scale;
+		break;
 	case SHAPE_MESH:
-		assert(0 && "world_save_snapshot: SHAPE_HULL and SHAPE_MESH not supported yet");
+		sp.mesh.mesh = sh->mesh.mesh;
 		break;
 	}
 	return sp;
+}
+
+// Deserialized shapes (from SV_SERIALIZABLE(ShapeParams) for SHAPE_HULL /
+// SHAPE_MESH) carry a sinterned name in the pointer field. Resolve against
+// the world's asset registry before the shape is applied (create_body +
+// body_add_shape read the hull to compute AABBs / inertia).
+static void snapshot_resolve_shape_name(WorldInternal* w, ShapeParams* sp)
+{
+	if (sp->type == SHAPE_HULL) {
+		const char* name = (const char*)(uintptr_t)sp->hull.hull;
+		if (!name) return;
+		const Hull** slot = map_get_ptr(w->hull_registry, (uint64_t)(uintptr_t)name);
+		assert(slot && "world_load_snapshot: SHAPE_HULL name not registered (use world_register_hull)");
+		sp->hull.hull = *slot;
+	} else if (sp->type == SHAPE_MESH) {
+		const char* name = (const char*)(uintptr_t)sp->mesh.mesh;
+		if (!name) return;
+		const TriMesh** slot = map_get_ptr(w->mesh_registry, (uint64_t)(uintptr_t)name);
+		assert(slot && "world_load_snapshot: SHAPE_MESH name not registered (use world_register_mesh)");
+		sp->mesh.mesh = *slot;
+	}
 }
 
 int world_save_snapshot(World world, const char* path)
@@ -312,16 +336,15 @@ int world_save_snapshot(World world, const char* path)
 	return 1;
 }
 
-// Load snapshot into a fresh world. Returns (World){0} on failure.
-World world_load_snapshot(const char* path)
+// Shared body of world_load_snapshot + world_load_snapshot_into. If
+// target.id == 0 creates a new world from the file's WorldParams; otherwise
+// uses the existing target world and discards file's params.
+static World snapshot_load_impl(SV_Context* S, World target)
 {
-	SV_LOAD_BEGIN(path);
-	if (!S->file) { SV_LOAD_END(); return (World){0}; }
-
 	WorldParams wp = {0};
 	SV_ADD_LOCAL(SV_INITIAL, wp);
 
-	World world = create_world(wp);
+	World world = target.id ? target : create_world(wp);
 	WorldInternal* w = (WorldInternal*)world.id;
 
 	int saved_count = 0;
@@ -334,8 +357,10 @@ World world_load_snapshot(const char* path)
 		SavedBody sb = {0};
 		SV_ADD_LOCAL(SV_INITIAL, sb);
 		Body b = create_body(world, sb.params);
-		for (int s = 0; s < asize(sb.shapes); s++)
+		for (int s = 0; s < asize(sb.shapes); s++) {
+			snapshot_resolve_shape_name(w, &sb.shapes[s]);
 			body_add_shape(world, b, sb.shapes[s]);
+		}
 		body_set_velocity(world, b, sb.velocity);
 		body_set_angular_velocity(world, b, sb.angular_velocity);
 		body_set_collision_filter(world, b, sb.collision_group, sb.collision_mask);
@@ -495,8 +520,10 @@ World world_load_snapshot(const char* path)
 			.position = ssv.position, .rotation = ssv.rotation,
 			.collision_group = ssv.collision_group, .collision_mask = ssv.collision_mask,
 		});
-		for (int k = 0; k < asize(ssv.shapes); k++)
+		for (int k = 0; k < asize(ssv.shapes); k++) {
+			snapshot_resolve_shape_name(w, &ssv.shapes[k]);
 			sensor_add_shape(world, s, ssv.shapes[k]);
+		}
 		afree(ssv.shapes);
 	}
 
@@ -504,6 +531,24 @@ World world_load_snapshot(const char* path)
 	CK_FREE(joint_table);
 	CK_FREE(saved_bodies);
 	CK_FREE(saved_joints);
-	SV_LOAD_END();
 	return world;
+}
+
+World world_load_snapshot(const char* path)
+{
+	SV_LOAD_BEGIN(path);
+	if (!S->file) { SV_LOAD_END(); return (World){0}; }
+	World w = snapshot_load_impl(S, (World){0});
+	SV_LOAD_END();
+	return w;
+}
+
+int world_load_snapshot_into(World target, const char* path)
+{
+	assert(target.id && "world_load_snapshot_into: target world is null");
+	SV_LOAD_BEGIN(path);
+	if (!S->file) { SV_LOAD_END(); return 0; }
+	snapshot_load_impl(S, target);
+	SV_LOAD_END();
+	return 1;
 }

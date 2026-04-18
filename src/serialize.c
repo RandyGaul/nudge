@@ -42,6 +42,9 @@ enum
 	SV_DETERMINISTIC_WORLD,
 	// Added sensors to snapshot save/load.
 	SV_SENSORS_IN_SAVE,
+	// SHAPE_HULL and SHAPE_MESH now serialize a name string (from
+	// hull_get_name / trimesh_get_name); loader resolves via world registry.
+	SV_HULL_MESH_NAMES,
 	// --- insert new entries here ---
 	SV_LATEST_PLUS_ONE
 };
@@ -406,13 +409,32 @@ SV_SERIALIZABLE(ShapeParams)
 		SV_ADD(SV_INITIAL, cylinder.half_height);
 		SV_ADD(SV_INITIAL, cylinder.radius);
 		break;
-	case SHAPE_HULL:
-	case SHAPE_MESH:
-		// Hull and mesh shapes depend on caller-owned Hull* / TriMesh*
-		// pointers; snapshots don't capture that geometry. Save/load of a
-		// scene that contains them asserts.
-		assert(0 && "SV: SHAPE_HULL and SHAPE_MESH are not supported in snapshots yet");
+	case SHAPE_HULL: {
+		// Hulls serialize as a name string (set via hull_set_name) + scale.
+		// On load the pointer is temporarily reinterpreted as the sinterned
+		// name; snapshot.c resolves it against the world's hull registry.
+		const char* name = NULL;
+		if (S->saving) {
+			assert(o->hull.hull && "SV: SHAPE_HULL missing hull pointer");
+			name = o->hull.hull->name;
+			assert(name && "SV: SHAPE_HULL must be named via hull_set_name before save");
+		}
+		SV_ADD_LOCAL(SV_HULL_MESH_NAMES, name);
+		if (S->loading) o->hull.hull = (const Hull*)(uintptr_t)name;
+		SV_ADD(SV_HULL_MESH_NAMES, hull.scale);
 		break;
+	}
+	case SHAPE_MESH: {
+		const char* name = NULL;
+		if (S->saving) {
+			assert(o->mesh.mesh && "SV: SHAPE_MESH missing mesh pointer");
+			name = trimesh_get_name(o->mesh.mesh);
+			assert(name && "SV: SHAPE_MESH must be named via trimesh_set_name before save");
+		}
+		SV_ADD_LOCAL(SV_HULL_MESH_NAMES, name);
+		if (S->loading) o->mesh.mesh = (const TriMesh*)(uintptr_t)name;
+		break;
+	}
 	}
 }
 

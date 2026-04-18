@@ -13,6 +13,14 @@ static inline int v3_is_valid(v3 v) { return float_valid(v.x) && float_valid(v.y
 static inline int quat_is_valid(quat q) { return float_valid(q.x) && float_valid(q.y) && float_valid(q.z) && float_valid(q.w); }
 #define is_valid(x) _Generic((x), float: float_valid, v3: v3_is_valid, quat: quat_is_valid)(x)
 
+// Per-body contact listener entry. Stored in WorldInternal.body_listeners,
+// keyed by body index. Behavior lives in contacts.c.
+typedef struct BodyListener
+{
+	BodyContactListener fn;
+	void* ud;
+} BodyListener;
+
 // -----------------------------------------------------------------------------
 // Internal types: cold (metadata) and hot (solver iteration) splits.
 
@@ -472,6 +480,11 @@ typedef struct WorldInternal
 	CK_DYNA SensorInternal* sensors;
 	CK_DYNA uint32_t*       sensor_gen;
 	CK_DYNA int*            sensor_free;
+
+	// Asset registries for snapshot save/load. Keys are sinterned names
+	// (cast to uint64), values are user-owned Hull* / TriMesh*.
+	CK_MAP(const Hull*)    hull_registry;
+	CK_MAP(const TriMesh*) mesh_registry;
 	// Broadphase
 	BroadphaseType broadphase_type;
 	BVH_Tree* bvh_static;
@@ -538,6 +551,16 @@ typedef struct WorldInternal
 	// Rewind ring buffer (NULL until world_rewind_init). Defined in rewind.c.
 	// Topology-mutating API calls (create/destroy body+joint+shape) flush it.
 	struct RewindBuffer* rewind;
+
+	// Contact summaries -- built once per world_step after narrowphase by
+	// contacts.c. One entry per touching body pair, sorted by (a.id, b.id)
+	// with canonical a.id < b.id. Per-body listeners fire immediately after.
+	CK_DYNA ContactSummary* contact_summaries;
+	// Per-body listener callbacks, keyed by body index. Cleared on destroy_body.
+	CK_MAP(BodyListener) body_listeners;
+	// Scratch buffer reused across listener fires each step (grown to the
+	// largest per-body contact count). Avoids per-listener malloc churn.
+	CK_DYNA ContactSummary* listener_scratch;
 } WorldInternal;
 
 // -----------------------------------------------------------------------------

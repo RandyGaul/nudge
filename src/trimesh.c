@@ -69,7 +69,16 @@ struct TriMesh
 	int tri_count;
 
 	BVH_Tree bvh;
+
+	const char* name;  // sinterned name for snapshot identification; NULL = unnamed
 };
+
+void trimesh_set_name(TriMesh* mesh, const char* name)
+{
+	mesh->name = name ? sintern(name) : NULL;
+}
+
+const char* trimesh_get_name(const TriMesh* mesh) { return mesh->name; }
 
 // -----------------------------------------------------------------------------
 // trimesh_create -- build per-triangle Hull structs + BVH.

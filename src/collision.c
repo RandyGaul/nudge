@@ -1529,6 +1529,13 @@ int collide_box_box(Box a, Box b, Manifold* manifold) { return collide_box_box_e
 
 const Hull* hull_unit_box() { return &s_unit_box_hull; }
 
+void hull_set_name(Hull* hull, const char* name)
+{
+	hull->name = name ? sintern(name) : NULL;
+}
+
+const char* hull_get_name(const Hull* hull) { return hull->name; }
+
 // -----------------------------------------------------------------------------
 // Cylinder Voronoi region classification.
 //

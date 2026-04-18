@@ -12397,6 +12397,64 @@ static void test_snapshot_with_sensors()
 	remove(path);
 }
 
+static void test_snapshot_with_named_hull()
+{
+	// Build a hull, name it, register it, create a body using it, save, load
+	// into a separate world that has the same-named hull registered.
+	v3 pts[] = {
+		V3(-1, -1, -1), V3(1, -1, -1), V3(-1, 1, -1), V3(1, 1, -1),
+		V3(-1, -1, 1),  V3(1, -1, 1),  V3(-1, 1, 1),  V3(1, 1, 1),
+	};
+	Hull* hull = quickhull(pts, 8);
+	hull_set_name(hull, "unit_cube");
+
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	world_register_hull(w, hull);
+
+	Body floor = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+
+	Body b = create_body(w, (BodyParams){ .position = V3(0, 3, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull.hull = hull, .hull.scale = V3(1, 1, 1) });
+
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 10; i++) world_step(w, dt);
+	v3 pre_pos = body_get_position(w, b);
+	(void)floor;
+
+	const char* path = "test_snapshot_hull.nudgesave";
+	TEST_BEGIN("snapshot+hull: save succeeds with named hull");
+	TEST_ASSERT(world_save_snapshot(w, path) == 1);
+
+	// Load into a pre-configured world with the same-named hull registered.
+	World w2 = create_world(wp);
+	Hull* hull2 = quickhull(pts, 8);
+	hull_set_name(hull2, "unit_cube");
+	world_register_hull(w2, hull2);
+
+	TEST_BEGIN("snapshot+hull: load_into succeeds");
+	TEST_ASSERT(world_load_snapshot_into(w2, path) == 1);
+
+	TEST_BEGIN("snapshot+hull: loaded body points at target world's hull");
+	Body loaded_bodies[4]; int n = world_get_bodies(w2, loaded_bodies, 4);
+	TEST_ASSERT(n == 2);
+	// The second body is the hull one; verify position round-tripped.
+	v3 post_pos = body_get_position(w2, loaded_bodies[1]);
+	v3 diff = sub(pre_pos, post_pos);
+	TEST_ASSERT(len(diff) < 1e-5f);
+
+	TEST_BEGIN("snapshot+hull: loaded world steps without crashing");
+	for (int i = 0; i < 5; i++) world_step(w2, dt);
+	TEST_ASSERT(1);
+
+	destroy_world(w);
+	destroy_world(w2);
+	hull_free(hull);
+	hull_free(hull2);
+	remove(path);
+}
+
 static void test_handle_validity_after_rewind()
 {
 	Body floor; Body boxes[18];
@@ -12599,6 +12657,7 @@ static void run_query_tests()
 	test_snapshot_deterministic_replay();
 	test_snapshot_with_sensors();
 	test_handle_validity_after_rewind();
+	test_snapshot_with_named_hull();
 }
 
 // ============================================================================

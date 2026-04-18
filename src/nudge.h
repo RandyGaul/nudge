@@ -101,6 +101,10 @@ typedef struct HullFace
 
 // Convex hull -- half-edge mesh with precomputed face planes.
 // Can point to static data (e.g. unit box) or dynamically built via quickhull.
+//
+// The `name` field (NULL by default) identifies the hull in snapshots. Tag a
+// hull you want to save with `hull_set_name`, then `world_register_hull` so
+// the loading world can resolve the name back to a live Hull* you provide.
 typedef struct Hull
 {
 	v3 centroid;
@@ -117,7 +121,13 @@ typedef struct Hull
 	int face_count;
 	float epsilon;      // build tolerance: 3*(max|x|+max|y|+max|z|)*FLT_EPSILON
 	float maxoutside;   // max distance any vertex was widened beyond Newell plane
+	const char* name;   // stable sinterned tag for snapshots; NULL = not named
 } Hull;
+
+// Tag a hull with a name so it can appear in snapshot files. Interns the
+// string internally; pass the same name on load to resolve it back.
+void hull_set_name(Hull* hull, const char* name);
+const char* hull_get_name(const Hull* hull);
 
 // Compact hull variant -- uint8_t indices, single heap block, no SoA or HullFace.
 // Caps: vert_count, edge_count, face_count all <= 256.
@@ -167,6 +177,12 @@ void trimesh_free(TriMesh* mesh);
 
 // Debug: number of triangles in the mesh.
 int trimesh_tri_count(const TriMesh* mesh);
+
+// Tag the mesh with a name for snapshot identification. Same pattern as
+// hull_set_name: caller pre-registers the named mesh with both the saving
+// world and the loading world.
+void trimesh_set_name(TriMesh* mesh, const char* name);
+const char* trimesh_get_name(const TriMesh* mesh);
 
 // -----------------------------------------------------------------------------
 // Contact manifold.
@@ -347,6 +363,51 @@ void body_set_sleep_allowed(World world, Body body, int allowed);  // per-body o
 // Debug: contact points from last step. Returns count, *out valid until next step.
 int world_get_contacts(World world, const Contact** out);
 
+// -----------------------------------------------------------------------------
+// Contact summaries -- user-facing, one entry per colliding body pair.
+//
+// Populated after narrowphase each world_step. The underlying buffer is:
+//   - sorted by (a.id, b.id) with canonical order a.id < b.id
+//   - deduped -- multi-triangle mesh pairs or multi-shape bodies collapse
+//     into a single summary per body pair
+//   - stable across a step (valid until the next world_step)
+//
+// Each summary reduces the manifold to a single contact patch: one normal,
+// the patch centroid, the radius of the patch (max dist from centroid to any
+// contact), and the deepest penetration. Sub-indices (sub_a/sub_b) carry
+// the tri index + 1 when the body is a trimesh (0 otherwise); the material
+// fields carry the resolved per-shape material id (0 until wired).
+
+typedef struct ContactSummary
+{
+	Body a, b;
+	v3 normal;          // world-space, from a toward b
+	v3 point;           // patch centroid (world space)
+	float radius;       // max dist from centroid to any contact in the patch
+	float depth;        // deepest penetration in the patch (>= 0)
+	uint8_t material_a; // resolved material id on side a (palette index)
+	uint8_t material_b; // resolved material id on side b
+	uint16_t _pad;
+	uint32_t sub_a;     // tri index + 1 if a is a trimesh, else 0
+	uint32_t sub_b;     // tri index + 1 if b is a trimesh, else 0
+} ContactSummary;
+
+// Fetch the current frame's contact summaries. Returned pointer + count are
+// valid until the next world_step. Writes count into *out_count.
+const ContactSummary* world_contact_summaries(World world, int* out_count);
+
+// Per-body contact listener. Fired once per body per step (only when the
+// body has >= 1 contact that step). The pairs[] view is contiguous and
+// normalized: `self` is always in the `a` slot -- when the underlying
+// summary has `self == b`, the engine flips the normal and swaps the
+// material/sub fields before the call so the callback always reads "from
+// self's perspective." Pointer validity is only guaranteed for the
+// duration of the call.
+//
+// Set fn=NULL to clear. Replacing overwrites the previous listener.
+typedef void (*BodyContactListener)(Body self, const ContactSummary* pairs, int count, void* ud);
+void body_set_contact_listener(World world, Body body, BodyContactListener fn, void* ud);
+
 // Per-frame EPA narrowphase stats. Reset at the top of each world_step.
 // Only populated when narrowphase_backend == NARROWPHASE_GJK_EPA.
 typedef struct WorldEpaStats
@@ -445,7 +506,29 @@ int   world_save_snapshot(World world, const char* path);
 // world_get_bodies() + world_get_joints() return handles in the same order
 // the caller supplied at save time. Use those to rebind gameplay-object
 // references to the new handles.
+//
+// This variant asserts if the snapshot contains SHAPE_HULL or SHAPE_MESH
+// bodies (no asset registry to resolve names). Use world_load_snapshot_into
+// when the file references named hulls or meshes.
 World world_load_snapshot(const char* path);
+
+// Load a snapshot into a pre-configured world. The world's registered hulls
+// and meshes (via world_register_hull / world_register_mesh) are used to
+// resolve SHAPE_HULL / SHAPE_MESH shape names in the file. The world should
+// be empty (no existing bodies/joints/sensors) -- asserts otherwise. The
+// file's WorldParams are ignored; the existing world's config is used.
+int world_load_snapshot_into(World world, const char* path);
+
+// Asset registration. Attach a named hull/mesh to a world so snapshots can
+// reference it by name. The Hull* or TriMesh* must have a non-NULL name set
+// via hull_set_name / trimesh_set_name before registering.
+void world_register_hull(World world, const Hull* hull);
+void world_register_mesh(World world, const TriMesh* mesh);
+
+// Lookup by name (returns NULL if not registered). Lets callers keep their
+// own "asset id -> Hull*" maps out of sight.
+const Hull*    world_find_hull(World world, const char* name);
+const TriMesh* world_find_mesh(World world, const char* name);
 
 // Iterate all live bodies / joints in the world. Writes up to max handles
 // into out[], returns the total count (may exceed max -- use to size a retry).

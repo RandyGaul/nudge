@@ -80,6 +80,8 @@ void destroy_world(World world)
 	afree(w->joints); afree(w->joint_gen); afree(w->joint_free);
 	for (int i = 0; i < asize(w->sensors); i++) afree(w->sensors[i].shapes);
 	afree(w->sensors); afree(w->sensor_gen); afree(w->sensor_free);
+	map_free(w->hull_registry);
+	map_free(w->mesh_registry);
 	for (int i = 0; i < asize(w->islands); i++) ldl_cache_free(&w->islands[i].ldl);
 	afree(w->islands); afree(w->island_gen); afree(w->island_free);
 	map_free(w->prev_touching);
@@ -1997,6 +1999,44 @@ int world_get_joints(World world, Joint* out, int max)
 		total++;
 	}
 	return total;
+}
+
+// -----------------------------------------------------------------------------
+// Asset registry (for snapshot hull/mesh name resolution).
+
+void world_register_hull(World world, const Hull* hull)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	assert(hull && hull->name && "world_register_hull: hull must have a name (use hull_set_name)");
+	uint64_t key = (uint64_t)(uintptr_t)hull->name;  // sinterned, unique per name
+	map_set(w->hull_registry, key, hull);
+}
+
+void world_register_mesh(World world, const TriMesh* mesh)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	const char* name = trimesh_get_name(mesh);
+	assert(name && "world_register_mesh: mesh must have a name (use trimesh_set_name)");
+	uint64_t key = (uint64_t)(uintptr_t)name;
+	map_set(w->mesh_registry, key, mesh);
+}
+
+const Hull* world_find_hull(World world, const char* name)
+{
+	if (!name) return NULL;
+	WorldInternal* w = (WorldInternal*)world.id;
+	const char* interned = sintern(name);
+	const Hull** slot = map_get_ptr(w->hull_registry, (uint64_t)(uintptr_t)interned);
+	return slot ? *slot : NULL;
+}
+
+const TriMesh* world_find_mesh(World world, const char* name)
+{
+	if (!name) return NULL;
+	WorldInternal* w = (WorldInternal*)world.id;
+	const char* interned = sintern(name);
+	const TriMesh** slot = map_get_ptr(w->mesh_registry, (uint64_t)(uintptr_t)interned);
+	return slot ? *slot : NULL;
 }
 
 int body_is_valid(World world, Body body)
