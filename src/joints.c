@@ -1054,8 +1054,32 @@ static void joints_split_impulse(WorldInternal* w, SolverJoint* joints, int join
 	CK_FREE(saved_lambda);
 }
 
-// NGS position correction for joints. Operates on positions only, no velocity modification.
-// TODO: could be made generic with pos_error[] field, but position error is inherently geometric.
+// Integrate world-frame angular correction w one unit step into a quaternion:
+// q += 0.5 * (w, 0) * q, then renormalise. Used by the NGS pseudo-impulse
+// below. solver_ldl.c has a double-precision variant but it's included later
+// in the unity build, so joints.c carries its own float version.
+static inline void ngs_integrate_rotation(quat* q, v3 w)
+{
+	if (w.x == 0 && w.y == 0 && w.z == 0) return;
+	float dqx = w.y * q->z - w.z * q->y + q->w * w.x;
+	float dqy = w.z * q->x - w.x * q->z + q->w * w.y;
+	float dqz = w.x * q->y - w.y * q->x + q->w * w.z;
+	float dqw = -w.x * q->x - w.y * q->y - w.z * q->z;
+	q->x += 0.5f * dqx;
+	q->y += 0.5f * dqy;
+	q->z += 0.5f * dqz;
+	q->w += 0.5f * dqw;
+	float l = sqrtf(q->x*q->x + q->y*q->y + q->z*q->z + q->w*q->w);
+	if (l > 1e-15f) { float inv = 1.0f / l; q->x *= inv; q->y *= inv; q->z *= inv; q->w *= inv; }
+}
+
+// NGS position correction for joints. Operates on positions + rotations, no
+// velocity modification. Ball/hinge/fixed/swing-twist point-block anchors use
+// the 3x3 K^-1 pseudo-impulse (same structure as PGS velocity solve): applying
+// lambda moves BOTH position and rotation so the coupled constraint actually
+// closes. The previous linear-only code made Gauss-Seidel thrash on chains --
+// adjacent joints cancelled each other's linear pushes because rotational
+// effective mass was ignored.
 static void joints_position_correct(WorldInternal* w, SolverJoint* joints, int joint_count, int iters)
 {
 	for (int iter = 0; iter < iters; iter++) {
@@ -1077,14 +1101,32 @@ static void joints_position_correct(WorldInternal* w, SolverJoint* joints, int j
 				v3 error = sub(add(sb->position, r_b), add(sa->position, r_a));
 				float err_len = len(error);
 				if (err_len < 1e-6f) continue;
-				float inv_mass_sum = a->inv_mass + b->inv_mass;
-				if (inv_mass_sum <= 0) continue;
-				float correction = SOLVER_POS_BAUMGARTE * err_len;
-				if (correction > SOLVER_POS_MAX_CORRECTION) correction = SOLVER_POS_MAX_CORRECTION;
-				v3 n = scale(error, 1.0f / err_len);
-				float P = correction / inv_mass_sum;
-				sa->position = add(sa->position, scale(n, P * a->inv_mass));
-				sb->position = sub(sb->position, scale(n, P * b->inv_mass));
+				float correction_mag = SOLVER_POS_BAUMGARTE * err_len;
+				if (correction_mag > SOLVER_POS_MAX_CORRECTION) correction_mag = SOLVER_POS_MAX_CORRECTION;
+				v3 corr = scale(error, correction_mag / err_len);
+
+				// Pseudo-impulse lambda = K^-1 * (-corr) drives K * lambda = -corr,
+				// i.e. reduces anchor separation by corr. Same K^-1 that PGS
+				// velocity solve uses -- stored by joints_pre_solve.
+				v3 lambda = sym3x3_mul_v3(s->lin_inv_eff_mass, neg(corr));
+				sa->position = sub(sa->position, scale(lambda, a->inv_mass));
+				sb->position = add(sb->position, scale(lambda, b->inv_mass));
+				v3 dw_a = neg(inv_inertia_mul(sa->rotation, sa->inv_inertia_local, cross(r_a, lambda)));
+				v3 dw_b = inv_inertia_mul(sb->rotation, sb->inv_inertia_local, cross(r_b, lambda));
+				// Cap per-iter rotation delta so stored K^-1 (from start of
+				// substep) stays valid: small rotations -> skew(r) barely
+				// changes -> K approximately unchanged. Without this cap, a
+				// large initial pose error can rotate a body far enough in one
+				// iter that the stale K^-1 aims lambda the wrong way on the
+				// next iter, causing the body to spin past the equilibrium.
+				#define NGS_MAX_ROT_PER_ITER 0.05f
+				float la2 = dot(dw_a, dw_a);
+				if (la2 > NGS_MAX_ROT_PER_ITER * NGS_MAX_ROT_PER_ITER) dw_a = scale(dw_a, NGS_MAX_ROT_PER_ITER / sqrtf(la2));
+				float lb2 = dot(dw_b, dw_b);
+				if (lb2 > NGS_MAX_ROT_PER_ITER * NGS_MAX_ROT_PER_ITER) dw_b = scale(dw_b, NGS_MAX_ROT_PER_ITER / sqrtf(lb2));
+				#undef NGS_MAX_ROT_PER_ITER
+				ngs_integrate_rotation(&sa->rotation, dw_a);
+				ngs_integrate_rotation(&sb->rotation, dw_b);
 			} else if (s->type == JOINT_PRISMATIC) {
 				v3 r_a = rotate(sa->rotation, w->joints[s->joint_idx].prismatic.local_a);
 				v3 r_b = rotate(sb->rotation, w->joints[s->joint_idx].prismatic.local_b);

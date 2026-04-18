@@ -524,7 +524,7 @@ typedef struct WorldInternal
 // Solver types and constants.
 
 #define SOLVER_VELOCITY_ITERS      10
-#define SOLVER_POSITION_ITERS      2
+#define SOLVER_POSITION_ITERS      4
 // SOLVER_BAUMGARTE removed: joints use NGS or LDL position correction, not velocity bias.
 #define SOLVER_SLOP                0.005f // NGS position correction dead zone
 #define SOLVER_RESTITUTION_THRESH  1.0f

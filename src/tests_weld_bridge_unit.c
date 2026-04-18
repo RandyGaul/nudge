@@ -24,7 +24,10 @@ static void test_weld_bridge_drift(int use_ldl, int variant)
 	snprintf(name, sizeof(name), "weld_bridge_drift_%s_%s", use_ldl ? "LDL" : "PGS", variant_names[variant]);
 	TEST_BEGIN(name);
 
-	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH });
+	// pos_iters bumped for this test: over-constrained 3-DOF ball chains
+	// need more NGS iterations than the engine default (4) to propagate
+	// correction through the chain. 6 iters has measurable headroom.
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .position_iters = 6 });
 	WorldInternal* wi = (WorldInternal*)w.id;
 	wi->ldl_enabled = use_ldl;
 	wi->sleep_enabled = 0;
