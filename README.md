@@ -223,9 +223,54 @@ world_rewind_by_steps(world, 30);             // or: jump back 30 steps
 A tiny TCP debug server is built into the engine and a remote viewer
 (`tools/viewer.c`) attaches to a running game and walks its memory directly
 -- no engine changes needed to inspect bodies, manifolds, contacts,
-islands, BVH, or the warm cache. There's also a cross-engine testbed that
-runs the same scene in nudge, Bepu, and Jolt side-by-side so you can diff
-behavior or compare perf.
+islands, BVH, or the warm cache.
+
+
+### Cross-engine testbed
+
+Same scenes, same initial state, run in nudge / Bepu / Jolt simultaneously
+so correctness and perf can be compared at a glance. Native DLLs for nudge
+and Jolt are P/Invoked from a C# harness; Bepu is native C#.
+
+[![nudge vs Bepu vs Jolt -- 100 boxes thrown against a wall](docs/testbed.png)](docs/testbed.mp4)
+
+*Click to play. Scene 4 "Box Wall": each column is a different engine
+stepping the same 102 boxes with identical initial conditions.*
+
+Two apps ship in `testbed/`:
+
+- **`Testbed`** -- headless benchmark. Runs a fixed scenario matrix
+  (`StackBoxes_100`, `SphereDrop_10x10`, `PyramidBoxes_20`, ...) across
+  all three engines with warmup + measure phases, prints avg / min / max
+  / p50 / p95 ms per frame.
+- **`Testbed.Visual`** -- live side-by-side viewer (Raylib). Scenes
+  numbered on the number keys, `LEFT/RIGHT` cycle, `SPACE` pauses, LMB
+  orbits, RMB drags a body. Good for "does this engine get the same
+  answer as Jolt on scene X" sanity checks.
+
+Build and run:
+
+```sh
+# 1. Native DLLs (nudge + Jolt). Bepu is managed so it's pulled by dotnet.
+cmake -B testbed/native/build -S testbed/native
+cmake --build testbed/native/build --config Release
+
+# 2. C# harness.
+dotnet run -c Release --project testbed/src/Testbed          # benchmark tables
+dotnet run -c Release --project testbed/src/Testbed.Visual   # live viewer
+```
+
+The C# side was chosen specifically so Bepu (managed) is first-class;
+Jolt and nudge get exposed as native DLLs via `testbed/native/jolt_dll.cpp`
+and `testbed/native/nudge_dll.c`. The engine itself stays C.
+
+
+### Debugging across engines
+
+Run a scenario in all three at once and compare: if nudge and Jolt agree
+but Bepu drifts, it's a Bepu config; if Bepu and Jolt agree and nudge
+drifts, you found a nudge bug. Much faster than chasing a suspected
+regression with only nudge's own output.
 
 
 ### Cross-platform FP determinism
@@ -267,11 +312,15 @@ wide `/fp:fast` doesn't silently break determinism).
   `precise` model implies `-ffp-contract=on` and silently re-enables
   FMA fusion on ARM — AppleClang at `-O3` will emit `vfmaq_f32` for any
   `a*b+c` pattern and you'll diverge from x86. Use one or the other.
-- **Standard libm `sinf/cosf/atan2f` differ across libcs.** nudge ships
-  `nudge_sinf` / `nudge_cosf` / `nudge_sincosf` / `nudge_atan2f` in
-  `vmath.h` and uses them internally. If you compute initial body poses
-  with your own transcendentals, use the `nudge_*` versions (or your own
-  deterministic ones) for any value that feeds into the simulation.
+- **The engine uses its own `nudge_sinf` / `nudge_cosf` / `nudge_sincosf`
+  / `nudge_atan2f`** (defined in `vmath.h`) for any transcendental that
+  touches the simulation. Standard libm `sinf/cosf` happen to agree across
+  the compilers we currently test on, but `atan2f` is documented to differ
+  between libcs (glibc vs Apple Libc vs musl vs wasi-libc), so if you
+  compute initial body poses in your own code, prefer the `nudge_*`
+  versions for anything that feeds the simulation. This is belt-and-
+  suspenders -- our CI doesn't specifically test "libm sinf breaks
+  determinism", but it does test that everything we ship matches.
 - **The engine sets `#pragma STDC FP_CONTRACT OFF` at file scope in
   `vmath.h` and `nudge_internal.h`** -- if you pull individual engine
   sources into a larger TU, keep those pragmas at the top of the TU.
