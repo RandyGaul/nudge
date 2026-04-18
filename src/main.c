@@ -174,7 +174,7 @@ static int g_mesh_hull;
 static int g_mesh_cylinder;
 static bool g_show_contacts = true;
 static bool g_show_joints = true;
-static bool g_show_bvh = true;
+static bool g_show_bvh = false;
 static bool g_show_proxies = false;
 static bool g_show_sleep = true;
 static bool g_show_shadows = true;
@@ -412,6 +412,11 @@ static void mouse_begin_drag(float mx, float my)
 	}
 
 	if (!best.id) return;
+
+	// Wake the target body so a drag actually moves it even if the island
+	// had settled into sleep (picking succeeds on sleeping bodies -- they
+	// just need a kick before the soft joint can do anything).
+	body_wake(g_world, best);
 
 	g_mouse_body = best;
 	g_mouse_ray_dist = best_t;

@@ -132,7 +132,25 @@
 		canvas: (function () {
 			var c = document.getElementById('canvas');
 			// Grab focus on click so keyboard events (WASD, arrows) fire.
-			c.addEventListener('mousedown', function () { c.focus(); });
+			// Also capture the pointer so mouseup still reaches SDL even if
+			// the cursor leaves the canvas during a drag (otherwise right-
+			// click drag sticks until the next click).
+			c.addEventListener('pointerdown', function (e) {
+				c.focus();
+				try { c.setPointerCapture(e.pointerId); } catch (err) {}
+			});
+			// Belt-and-suspenders: forward document-level mouseup to the
+			// canvas for non-primary buttons. Some browsers route right/
+			// middle mouseup to document when a contextmenu was suppressed.
+			document.addEventListener('mouseup', function (e) {
+				if (e.target !== c && e.button !== 0) {
+					c.dispatchEvent(new MouseEvent('mouseup', {
+						bubbles: true, cancelable: true,
+						button: e.button, buttons: e.buttons,
+						clientX: e.clientX, clientY: e.clientY,
+					}));
+				}
+			}, { capture: true });
 			c.addEventListener('webglcontextlost', function (e) {
 				alert('WebGL context lost -- reload the page.');
 				e.preventDefault();
