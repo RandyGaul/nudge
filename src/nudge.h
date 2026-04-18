@@ -76,7 +76,6 @@ typedef struct PerfTimers
 	double position_correct;
 	double integrate;
 	double islands;
-	double soft_body;      // soft-body LDL step (velocity solve + integrate + pin snap)
 	double total;
 	PGSTimers pgs;
 } PerfTimers;
@@ -874,80 +873,6 @@ typedef struct JointDebugInfo
 } JointDebugInfo;
 typedef void (*JointDebugFn)(JointDebugInfo info, void* user);
 NUDGE_API void world_debug_joints(World world, JointDebugFn fn, void* user);
-
-// -----------------------------------------------------------------------------
-// Soft bodies -- native particle networks solved with direct LDL.
-//
-// A SoftBody is a bag of 3-DOF particles connected by scalar distance links
-// (XPBD-style compliance). Unlike chaining rigid bodies together, particles
-// are first-class solver entities with their own storage: no Body handles,
-// no per-particle inertia tensors, no rotations.
-//
-// Topology is baked at build time. The solver caches a dense LDL factorization
-// of K = J M^-1 J^T per soft body and refactors each substep (lever arms
-// change with positions). For the scale this targets (cobwebs, ropes, jelly
-// blobs of up to a few hundred nodes), dense LDL is fast and has zero
-// symbolic-analysis cost.
-//
-// Sweet spot: small-to-medium gameplay objects where topology is constant
-// and stiffness matters -- rope, cobweb, cloth patch, squishy creature.
-//
-// Not for: tearing, runtime topology changes, thousands of particles,
-// volumetric FEM with hyperelastic materials.
-//
-// v1 scope: internal dynamics + pin-to-static. No collision, no rigid-body
-// coupling. Those land in follow-up phases once the solver path is proven.
-
-typedef struct SoftBody { uint64_t id; } SoftBody;
-
-typedef struct SoftBodyParams
-{
-	SpringParams default_spring; // compliance for all links in this soft body (0,0 = rigid)
-	float node_radius;           // per-node sphere radius for collision (0 = no collision)
-	float linear_damping;        // per-substep exponential decay (default 0.02)
-	int iterations;              // PGS velocity iterations per substep (default 12)
-	uint32_t collision_group;    // reserved for future collision filters
-	uint32_t collision_mask;     // reserved for future collision filters
-	uint8_t material_id;         // reserved for future contact summaries
-} SoftBodyParams;
-
-// Lifecycle. Nodes and links are added between create and build.
-NUDGE_API SoftBody create_soft_body(World world, SoftBodyParams params);
-NUDGE_API void destroy_soft_body(World world, SoftBody sb);
-NUDGE_API int soft_body_is_valid(World world, SoftBody sb);
-
-// Assembly. All add_* must happen before soft_body_build(). Returns the node
-// index (0..n-1, local to this soft body). mass<=0 is treated as 0 = pinned.
-NUDGE_API int  soft_body_add_node(World world, SoftBody sb, v3 pos, float mass);
-// rest_length<0 = compute from current node positions.
-NUDGE_API void soft_body_add_link(World world, SoftBody sb, int node_i, int node_j, float rest_length, SpringParams spring);
-
-// Freeze topology. After this, subsequent add_* calls assert. The dense K
-// matrix and lambda warm cache are allocated here.
-NUDGE_API void soft_body_build(World world, SoftBody sb);
-
-// Pinning. Static pin anchors a node to a fixed world position (the node's
-// position is snapped each step). Safe to call after build.
-NUDGE_API void soft_body_pin_static(World world, SoftBody sb, int node, v3 world_pos);
-NUDGE_API void soft_body_unpin(World world, SoftBody sb, int node);
-
-// Readback for rendering / gameplay. Pointers are engine-owned; valid until
-// the next world_step or a topology change on this soft body.
-NUDGE_API int           soft_body_node_count(World world, SoftBody sb);
-NUDGE_API const v3*     soft_body_node_positions(World world, SoftBody sb);
-NUDGE_API const v3*     soft_body_node_velocities(World world, SoftBody sb);
-NUDGE_API int           soft_body_link_count(World world, SoftBody sb);
-// Fills out[0..count-1] with {i, j} index pairs for each link. Return value
-// is total link count (may exceed max; use to size a retry).
-NUDGE_API int           soft_body_get_links(World world, SoftBody sb, int* out_pairs, int max);
-
-// Gameplay pokes.
-NUDGE_API void soft_body_apply_force(World world, SoftBody sb, int node, v3 force);
-NUDGE_API void soft_body_apply_impulse(World world, SoftBody sb, int node, v3 impulse);
-
-// Enumeration.
-NUDGE_API int world_get_soft_body_count(World world);
-NUDGE_API int world_get_soft_bodies(World world, SoftBody* out, int max);
 
 #ifdef __cplusplus
 }

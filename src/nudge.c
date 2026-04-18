@@ -584,12 +584,6 @@ void world_step(World world, float dt)
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
 
-	// Soft bodies advance independently of the rigid substep loop. Runs first
-	// so rigid fast-paths (all-asleep shortcut below) don't freeze soft bodies.
-	double t_sb = perf_now();
-	soft_body_step_world(w, dt);
-	w->perf.soft_body = perf_now() - t_sb;
-
 	// Reset per-frame EPA telemetry. Only meaningful when EPA backend is active,
 	// but clearing unconditionally keeps the counters honest after backend toggles.
 	w->epa_stats = (EpaStats){ 0 };
