@@ -2356,13 +2356,15 @@ int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold)
 
 // Narrowphase dispatch for a single body pair.
 // Narrowphase timing accumulators (indexed by shape pair type).
-// Pair encoding: type_a * 5 + type_b (upper triangle, type_a <= type_b).
-#define NP_PAIR_COUNT 25
+// Pair encoding: type_a * NP_TYPE_COUNT + type_b (upper triangle). The stride
+// covers every SHAPE_* enum value, including MESH and HEIGHTFIELD.
+#define NP_TYPE_COUNT 7
+#define NP_PAIR_COUNT (NP_TYPE_COUNT * NP_TYPE_COUNT)
 static double np_time_acc[NP_PAIR_COUNT];
 static int np_call_acc[NP_PAIR_COUNT];
 static int np_frame_count;
 
-static int np_pair_idx(int ta, int tb) { return ta * 5 + tb; }
+static int np_pair_idx(int ta, int tb) { return ta * NP_TYPE_COUNT + tb; }
 
 void narrowphase_reset_timers() { memset(np_time_acc, 0, sizeof(np_time_acc)); memset(np_call_acc, 0, sizeof(np_call_acc)); np_frame_count = 0; }
 void narrowphase_end_frame() { np_frame_count++; }
