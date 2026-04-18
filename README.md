@@ -355,6 +355,21 @@ What's missing
 - Character controller, vehicles, soft bodies.
 
 
+Known issues
+------------
+
+- **Cylinder collisions** can jitter or lose contacts on edge-rest poses.
+  The native cylinder-vs-{sphere,capsule,box,hull,cyl} paths are newer
+  and less battle-tested than the hull-backed fallback; if you hit a
+  regression, toggling the native-cyl flags in the debug panel is the
+  fastest workaround.
+- **LDL solver** is equality-only -- any joint with active limits or a
+  motor falls back to PGS for that row, and mixed chains where equality
+  and inequality rows share bodies can converge slower than either pure
+  solver would alone. Tune `position_iters` / `velocity_iters` upward if
+  a specific articulated assembly drifts.
+
+
 Building
 --------
 
