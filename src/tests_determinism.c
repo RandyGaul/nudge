@@ -101,6 +101,36 @@ static uint64_t det_run(int steps, int threads)
 	return h;
 }
 
+// Build the scene, then print a hash at step 0, 1, 2, 10, 60, 240 so CI logs
+// show where cross-arch divergence starts to accumulate. Threads-free so the
+// trace is deterministic independent of the pool.
+static void det_trace()
+{
+	World w = det_build_scene();
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->thread_count = 1;
+	float dt = 1.0f / 60.0f;
+	int checkpoints[] = { 0, 1, 2, 10, 60, 240 };
+	int ci = 0;
+	int next = checkpoints[ci];
+	printf("det trace:\n");
+	for (int i = 0; i <= 240; i++) {
+		if (i == next) {
+			printf("  step %3d: 0x%016llx\n", i, (unsigned long long)det_hash_world(w));
+			ci++;
+			if (ci < (int)(sizeof(checkpoints) / sizeof(checkpoints[0]))) next = checkpoints[ci];
+			else next = -1;
+		}
+		if (i < 240) world_step(w, dt);
+	}
+	// Also dump the raw bits of body[1] so cross-arch diffs are inspectable.
+	BodyState* bs = &wi->body_state[1];
+	uint32_t px, py, pz; memcpy(&px, &bs->position.x, 4); memcpy(&py, &bs->position.y, 4); memcpy(&pz, &bs->position.z, 4);
+	uint32_t qx, qy, qz, qw; memcpy(&qx, &bs->rotation.x, 4); memcpy(&qy, &bs->rotation.y, 4); memcpy(&qz, &bs->rotation.z, 4); memcpy(&qw, &bs->rotation.w, 4);
+	printf("  body[1] pos=0x%08x,0x%08x,0x%08x rot=0x%08x,0x%08x,0x%08x,0x%08x\n", px, py, pz, qx, qy, qz, qw);
+	destroy_world(w);
+}
+
 // Expected hash per architecture. Within an arch, every compiler and every
 // SIMD backend (SSE / NEON / WASM SIMD128 / scalar) produces the exact same
 // hash -- this is the cross-compiler determinism guarantee we enforce in CI.
@@ -127,6 +157,7 @@ static uint64_t det_run(int steps, int threads)
 static int run_determinism_test(int threads_hi)
 {
 	const int steps = 240;
+	det_trace();
 	uint64_t h1 = det_run(steps, 1);
 	uint64_t hN = det_run(steps, threads_hi);
 	printf("det hash (threads=1): 0x%016llx\n", (unsigned long long)h1);
