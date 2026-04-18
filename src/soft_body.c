@@ -21,6 +21,12 @@
 //
 // v1 scope: internal dynamics + static pins. No collision, no coupling.
 
+// Diagnostics: updated each soft_body_step_world, read by test harness/debug UI.
+double g_soft_body_max_lambda;
+double g_soft_body_max_rhs;
+double g_soft_body_min_K_diag;
+int    g_soft_body_trace;
+
 #define SB_COMPLIANCE_FLOOR      5e-5  // regularization floor for rigid links, scaled by trace(K)/n
 #define SB_OVER_CONSTRAINT_SCALE 1.0   // compliance *= (1 + scale * redundant_dofs) for over-constrained islands
 #define SB_BAUMGARTE_GAIN        0.2f  // beta for rigid links' position drift correction
@@ -557,6 +563,36 @@ static void soft_body_substep(WorldInternal* w, SoftBodyInternal* sb, v3 gravity
 
 		// 3) Back-substitute against the factored K.
 		sb_ldl_solve(sb->K, sb->D, sb->rhs, sb->lambda_sol, L);
+		// Diagnostics.
+		double lam_peak = 0, rhs_peak = 0;
+		int lam_peak_k = 0;
+		for (int k = 0; k < L; k++) {
+			double mag = sb->lambda_sol[k]; if (mag < 0) mag = -mag;
+			if (mag > lam_peak) { lam_peak = mag; lam_peak_k = k; }
+			double rm = sb->rhs[k]; if (rm < 0) rm = -rm;
+			if (rm > rhs_peak) rhs_peak = rm;
+			if (sb->D[k] < g_soft_body_min_K_diag) g_soft_body_min_K_diag = sb->D[k];
+		}
+		if (lam_peak > g_soft_body_max_lambda) g_soft_body_max_lambda = lam_peak;
+		if (rhs_peak > g_soft_body_max_rhs) g_soft_body_max_rhs = rhs_peak;
+
+		// Trace: print any substep where lambda goes crazy, with full context.
+		extern int g_soft_body_trace;
+		if (g_soft_body_trace && lam_peak > 100.0) {
+			int kk = lam_peak_k;
+			SoftLink* lk = &sb->links[kk];
+			fprintf(stderr, "[sb-trace] big lambda k=%d lam=%.1f rhs=%.2f D=%.4f "
+				"link(i=%d,j=%d,rest=%.3f) axis=(%.2f,%.2f,%.2f) "
+				"v_i=(%.2f,%.2f,%.2f) v_j=(%.2f,%.2f,%.2f) "
+				"p_i=(%.2f,%.2f,%.2f) p_j=(%.2f,%.2f,%.2f)\n",
+				kk, lam_peak, sb->rhs[kk], sb->D[kk],
+				lk->node_i, lk->node_j, lk->rest_length,
+				lk->axis.x, lk->axis.y, lk->axis.z,
+				sb->node_vel[lk->node_i].x, sb->node_vel[lk->node_i].y, sb->node_vel[lk->node_i].z,
+				sb->node_vel[lk->node_j].x, sb->node_vel[lk->node_j].y, sb->node_vel[lk->node_j].z,
+				sb->node_pos[lk->node_i].x, sb->node_pos[lk->node_i].y, sb->node_pos[lk->node_i].z,
+				sb->node_pos[lk->node_j].x, sb->node_pos[lk->node_j].y, sb->node_pos[lk->node_j].z);
+		}
 
 		// 4) Apply impulses along CURRENT axes.
 		int rigid_default = (sb->params.default_spring.frequency <= 0.0f);
@@ -599,6 +635,9 @@ static void soft_body_substep(WorldInternal* w, SoftBodyInternal* sb, v3 gravity
 // even on rigid fast-paths (all-asleep shortcut).
 static void soft_body_step_world(WorldInternal* w, float dt)
 {
+	g_soft_body_max_lambda = 0.0;
+	g_soft_body_max_rhs = 0.0;
+	g_soft_body_min_K_diag = 1e30;
 	int count = asize(w->soft_bodies);
 	if (count == 0) return;
 	int n_sub = w->sub_steps > 0 ? w->sub_steps : 1;

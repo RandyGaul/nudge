@@ -43,8 +43,17 @@ static inline v3 V3(float vx, float vy, float vz) { v3 r; r.m = simd_set(vx, vy,
 // today, but are not guaranteed to stay that way across libc releases or
 // ISAs. atan2f in particular differs between glibc, musl, Apple Libc, and
 // wasi-libc. These implementations lock in one polynomial approximation so
-// every platform produces the same bit pattern -- provided the build disables
-// FMA contraction (-ffp-contract=off on Clang/GCC, default on MSVC).
+// every platform produces the same bit pattern -- provided FMA contraction
+// stays off.
+//
+// -ffp-contract=off at the command line isn't enough on AppleClang at -O3:
+// the backend still emits fmadd for `a*b+c` expressions. The standard
+// pragma forces it off TU-wide; belt-and-suspenders with the clang-specific
+// pragma so we're covered if the standard one is ignored.
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+#pragma STDC FP_CONTRACT OFF
 //
 // Accuracy: ~2e-7 peak error on sin/cos, ~3e-5 on atan2. Good enough for
 // rigid-body physics -- the error budget is dwarfed by substep integration

@@ -300,25 +300,28 @@ int main(int argc, char* argv[])
 		int frames = 180;
 		int N = soft_body_node_count(w, sb);
 		int L = soft_body_link_count(w, sb);
+		extern double g_soft_body_max_lambda;
+		extern double g_soft_body_max_rhs;
+		extern double g_soft_body_min_K_diag;
+		extern int g_soft_body_trace;
+		g_soft_body_trace = 1;
 		printf("[softbody] N=%d L=%d\n", N, L);
-		printf("frame | min_y | max_y | max|v| | sum|v| | sb_dt(us)\n");
+		printf("frame | min_y | max_y | max|v| | max|lam| | max|rhs| | minD\n");
 		for (int f = 0; f < frames; f++) {
-			double t0 = perf_now();
 			world_step(w, 1.0f / 60.0f);
-			double dt_us = (perf_now() - t0) * 1e6;
 			const v3* pos = soft_body_node_positions(w, sb);
 			const v3* vel = soft_body_node_velocities(w, sb);
 			float min_y = 1e9f, max_y = -1e9f;
-			float max_v = 0, sum_v = 0;
+			float max_v = 0;
 			for (int n = 0; n < N; n++) {
 				if (pos[n].y < min_y) min_y = pos[n].y;
 				if (pos[n].y > max_y) max_y = pos[n].y;
 				float vm = sqrtf(vel[n].x*vel[n].x + vel[n].y*vel[n].y + vel[n].z*vel[n].z);
 				if (vm > max_v) max_v = vm;
-				sum_v += vm;
 			}
-			printf("%5d | %6.3f | %6.3f | %6.2f | %6.2f | %7.1f\n",
-				f, min_y, max_y, max_v, sum_v, dt_us);
+			printf("%5d | %7.3f | %7.3f | %7.2f | %8.2f | %8.2f | %6.3f\n",
+				f, min_y, max_y, max_v,
+				g_soft_body_max_lambda, g_soft_body_max_rhs, g_soft_body_min_K_diag);
 		}
 		destroy_world(w);
 		return 0;
