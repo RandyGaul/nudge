@@ -4,6 +4,9 @@ nudge
 Small, handle-based 3D rigid body physics engine in C. Tiny API surface, drop
 a couple of headers + one translation unit into your project and go.
 
+**[▶ Try it live in the browser](https://randygaul.github.io/nudge/)** -- all
+scenes run in WebAssembly; same build as the desktop demo.
+
 ```c
 #include "nudge.h"
 

@@ -274,10 +274,14 @@ static void recording_save()
 
 // Maya-style orbit camera: yaw/pitch angles, quaternion rebuilt each frame.
 // Y-locked: up is always world (0,1,0), no roll.
-static v3    g_cam_focus = { 0, 1, 0 };
-static float g_cam_yaw   = 0.0f;       // radians around world Y
-static float g_cam_pitch = -0.25f;     // radians around local X (clamped)
-static float g_cam_dist  = 15.0f;
+//
+// Spawn defaults aim for a 3/4 view of the Shape Showcase scene: slightly
+// off-axis horizontally (yaw), angled down (pitch), and far enough that
+// the dynamic bodies at y=5..9 fit comfortably above the floor.
+static v3    g_cam_focus = { 1.0f, 2.0f, 0.0f };
+static float g_cam_yaw   = 0.5f;       // radians around world Y (~29 deg)
+static float g_cam_pitch = -0.35f;     // radians around local X (clamped)
+static float g_cam_dist  = 20.0f;
 
 static quat cam_orientation()
 {
