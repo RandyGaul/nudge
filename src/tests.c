@@ -13428,8 +13428,8 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 			float fz = ((float)z / (N - 1)) * 2.0f - 1.0f;
 			float px = fx * EXTENT;
 			float pz = fz * EXTENT;
-			float py = 0.0f; // DIAG flat
-			(void)px; (void)pz;
+			float py = 0.4f * sinf(px * 0.6f) * cosf(pz * 0.6f)
+			         + 0.2f * sinf(px * 1.7f + pz * 1.3f);
 			verts[z * N + x] = V3(px, py, pz);
 		}
 	}

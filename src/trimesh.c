@@ -21,15 +21,18 @@
 // -----------------------------------------------------------------------------
 // Shared half-edge topology for all triangles.
 //
-// Front face edges (CCW around +n): 0: v0->v1, 1: v1->v2, 2: v2->v0.
-// Back face edges (CCW around -n):  3: v0->v2, 4: v2->v1, 5: v1->v0.
-// Twin pairs: (0, 5), (1, 4), (2, 3) -- opposite half-edges across the disc.
+// Twin pairs at adjacent indices (2k, 2k+1) -- engine-wide convention required
+// by sat_query_edges' undirected-edge iteration.
+//   pair 0 (v0-v1): 0 front v0->v1 / 1 back v1->v0
+//   pair 1 (v1-v2): 2 front v1->v2 / 3 back v2->v1
+//   pair 2 (v2-v0): 4 front v2->v0 / 5 back v0->v2
+// Front face (face 0, +n) CCW: 0 -> 2 -> 4. Back face (face 1, -n) CCW: 5 -> 3 -> 1.
 
-static const int s_tri_edge_twin[6]   = { 5, 4, 3, 2, 1, 0 };
-static const int s_tri_edge_next[6]   = { 1, 2, 0, 4, 5, 3 };
-static const int s_tri_edge_origin[6] = { 0, 1, 2, 0, 2, 1 };
-static const int s_tri_edge_face[6]   = { 0, 0, 0, 1, 1, 1 };
-static const HullFace s_tri_faces[2]  = { { .edge = 0 }, { .edge = 3 } };
+static const int s_tri_edge_twin[6]   = { 1, 0, 3, 2, 5, 4 };
+static const int s_tri_edge_next[6]   = { 2, 5, 4, 1, 0, 3 };
+static const int s_tri_edge_origin[6] = { 0, 1, 1, 2, 2, 0 };
+static const int s_tri_edge_face[6]   = { 0, 1, 0, 1, 0, 1 };
+static const HullFace s_tri_faces[2]  = { { .edge = 0 }, { .edge = 5 } };
 
 // -----------------------------------------------------------------------------
 // TriMesh layout. Single heap block with:
@@ -278,13 +281,8 @@ static void trimesh_query_aabb_node(const BVH_Tree* t, int ni, AABB q, CK_DYNA i
 
 static void trimesh_query_aabb(const TriMesh* m, AABB q, CK_DYNA int** out)
 {
-	// DIAGNOSTIC: bypass BVH, linear scan every triangle.
-	for (int t = 0; t < m->tri_count; t++) {
-		uint32_t i0 = m->indices[3*t + 0], i1 = m->indices[3*t + 1], i2 = m->indices[3*t + 2];
-		v3 a = m->verts[i0], b = m->verts[i1], c = m->verts[i2];
-		AABB ta = { v3_min(a, v3_min(b, c)), v3_max(a, v3_max(b, c)) };
-		if (aabb_overlaps(ta, q)) apush(*out, t);
-	}
+	if (m->bvh.root < 0) return;
+	trimesh_query_aabb_node(&m->bvh, m->bvh.root, q, out);
 }
 
 // -----------------------------------------------------------------------------
@@ -295,21 +293,17 @@ static void trimesh_query_aabb(const TriMesh* m, AABB q, CK_DYNA int** out)
 //      using the pre-built triangle Hull, emit one InternalManifold per hit.
 
 // Push a per-triangle manifold with local-space contacts transformed to world.
-// collide_{sphere,capsule,hull,cylinder}_hull already returns Contact.normal
-// in A-toward-B convention (convex toward triangle-hull), which matches the
-// dispatch's expected A=convex, B=mesh orientation -- no normal flip needed.
+// Each routine returns Contact.normal in A-toward-B convention (convex toward
+// triangle), which matches dispatch's A=convex, B=mesh orientation.
 static inline void trimesh_push_mesh_manifold(WorldInternal* w, int body_a, int body_b, int tri_idx, Manifold m_local, v3 mesh_pos, quat mesh_rot, uint32_t sub_id_base, InternalManifold** manifolds)
 {
 	if (m_local.count == 0) return;
-	uint32_t sub_id = sub_id_base | (uint32_t)(tri_idx + 1);
-	InternalManifold im = { .body_a = body_a, .body_b = body_b, .sub_id = sub_id };
+	InternalManifold im = { .body_a = body_a, .body_b = body_b, .sub_id = sub_id_base | (uint32_t)(tri_idx + 1) };
 	im.m = m_local;
 	for (int c = 0; c < im.m.count; c++) {
 		im.m.contacts[c].point = add(mesh_pos, rotate(mesh_rot, im.m.contacts[c].point));
 		im.m.contacts[c].normal = rotate(mesh_rot, im.m.contacts[c].normal);
 	}
-	// DIAGNOSTIC: mesh warm-start off to isolate warm-cache contribution.
-	(void)sub_id;
 	apush(*manifolds, im);
 }
 
@@ -427,6 +421,146 @@ static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, Con
 }
 
 // -----------------------------------------------------------------------------
+// Cylinder vs flat triangle (single-triangle collision, mesh-local space).
+// Replaces collide_cylinder_hull for triangle-mesh because the generic hull
+// routine treats a zero-volume triangle as a degenerate polyhedron and its
+// edge-edge SAT family produces false-positive lateral contacts (edge axes
+// treat the edge as an infinite 3D prism, not a 2D segment).
+//
+// Strategy:
+//   1. Signed distance from cyl center to tri plane; reject if separated.
+//   2. Contact normal = tri plane normal, oriented from cyl toward tri.
+//   3. CAP-like contacts (cyl axis ~parallel to tri normal): emit up to 4
+//      rim-point projections AND up to 3 tri-vertex projections that lie
+//      inside the cylinder disk, clipping rim points to the triangle.
+//   4. SIDE-like contacts (cyl axis ~perpendicular to tri normal): emit two
+//      contacts at the cylinder axis endpoints offset by radius toward tri.
+//   5. Depth = (cyl_extent_along_normal) - |signed_distance|.
+//
+// All contacts share the same face normal per triangle -- no false lateral
+// normals from edge-prism SAT.
+static int point_in_triangle_2d(v3 p, v3 v0, v3 v1, v3 v2, v3 n)
+{
+	// Barycentric via normal-projected cross products.
+	v3 e0 = sub(v1, v0), e1 = sub(v2, v1), e2 = sub(v0, v2);
+	v3 c0 = cross(e0, sub(p, v0));
+	v3 c1 = cross(e1, sub(p, v1));
+	v3 c2 = cross(e2, sub(p, v2));
+	float d0 = dot(c0, n), d1 = dot(c1, n), d2 = dot(c2, n);
+	return (d0 >= 0.0f && d1 >= 0.0f && d2 >= 0.0f) || (d0 <= 0.0f && d1 <= 0.0f && d2 <= 0.0f);
+}
+
+// Sample cylinder surface at representative points (both cap rims + axial side
+// band), project each to triangle plane, keep those below the plane AND inside
+// the triangle. Reduce to MAX_CONTACTS deepest. This unifies CAP/SIDE handling:
+// vertical cyls dominated by cap-rim contacts, horizontal by axial, tilted get
+// both -- no discontinuity at any tilt.
+static int collide_cylinder_triangle_local(Cylinder cyl, v3 v0, v3 v1, v3 v2, v3 tri_n, Manifold* m)
+{
+	v3 cyl_axis = rotate(cyl.rotation, V3(0, 1, 0));
+	float hh = cyl.half_height, r = cyl.radius;
+
+	// Signed distance of cyl center from tri plane (positive = same side as tri_n).
+	float plane_off = dot(tri_n, v0);
+	float c_signed_d = dot(cyl.center, tri_n) - plane_off;
+
+	// Cylinder extent along +/- tri_n.
+	float an = dot(cyl_axis, tri_n);
+	float axial = fabsf(an) * hh;
+	float sin2 = 1.0f - an * an;
+	float radial = sin2 > 0.0f ? sqrtf(sin2) * r : 0.0f;
+	float cyl_extent = axial + radial;
+
+	float c_abs_d = fabsf(c_signed_d);
+	float gap = c_abs_d - cyl_extent;
+	if (gap > LINEAR_SLOP) return 0;
+
+	// Contact normal: cyl A toward tri B. Cyl on +tri_n side -> points -tri_n.
+	v3 contact_n = c_signed_d >= 0.0f ? neg(tri_n) : tri_n;
+	int on_plus_side = c_signed_d >= 0.0f;
+
+	// Build orthonormal basis for cylinder: axis + two perpendicular directions.
+	v3 probe = fabsf(cyl_axis.y) < 0.9f ? V3(0, 1, 0) : V3(1, 0, 0);
+	v3 perp1 = norm(cross(cyl_axis, probe));
+	v3 perp2 = cross(cyl_axis, perp1);
+
+	// Candidate contact samples on the cylinder surface. Combine: cap rims at
+	// both ends (8 directions each) + axial samples along the side (5 axial
+	// positions at 2 opposing perpendicular directions = 10 samples).
+	// Keep only those below tri plane AND inside triangle.
+	#define CYL_TRI_MAX_SAMPLES 32
+	v3 s_points[CYL_TRI_MAX_SAMPLES]; float s_depths[CYL_TRI_MAX_SAMPLES];
+	int sc = 0;
+
+	// Cap rims at +hh and -hh along cyl_axis (8 directions per cap).
+	float cap_axials[2] = { -hh, +hh };
+	int rim_dirs_n = 8;
+	for (int cap = 0; cap < 2; cap++) {
+		v3 cap_center = add(cyl.center, scale(cyl_axis, cap_axials[cap]));
+		for (int i = 0; i < rim_dirs_n && sc < CYL_TRI_MAX_SAMPLES; i++) {
+			float theta = (float)i / (float)rim_dirs_n * 6.28318530718f;
+			v3 rim = add(cap_center, add(scale(perp1, cosf(theta) * r), scale(perp2, sinf(theta) * r)));
+			float d_signed = dot(rim, tri_n) - plane_off;
+			if (on_plus_side && d_signed > 0.0f) continue;
+			if (!on_plus_side && d_signed < 0.0f) continue;
+			v3 on_plane = sub(rim, scale(tri_n, d_signed));
+			if (!point_in_triangle_2d(on_plane, v0, v1, v2, tri_n)) continue;
+			s_points[sc] = on_plane;
+			s_depths[sc] = fabsf(d_signed);
+			sc++;
+		}
+	}
+
+	// Axial side samples along cylinder's deepest contact line: at each of
+	// 5 axial positions, the cyl surface point nearest the tri plane.
+	int axial_samples = 5;
+	for (int i = 0; i < axial_samples && sc < CYL_TRI_MAX_SAMPLES; i++) {
+		float t = (float)i / (float)(axial_samples - 1) * 2.0f - 1.0f;
+		v3 on_axis = add(cyl.center, scale(cyl_axis, t * hh));
+		// Deepest perpendicular offset: project contact_n onto axis-perp plane, scale to r.
+		float ap = dot(contact_n, cyl_axis);
+		v3 perp = sub(contact_n, scale(cyl_axis, ap));
+		float pl2 = len2(perp);
+		v3 offset = pl2 > 1e-8f ? scale(perp, r / sqrtf(pl2)) : V3(0, 0, 0);
+		v3 on_surface = add(on_axis, offset);
+		float d_signed = dot(on_surface, tri_n) - plane_off;
+		if (on_plus_side && d_signed > 0.0f) continue;
+		if (!on_plus_side && d_signed < 0.0f) continue;
+		v3 on_plane = sub(on_surface, scale(tri_n, d_signed));
+		if (!point_in_triangle_2d(on_plane, v0, v1, v2, tri_n)) continue;
+		s_points[sc] = on_plane;
+		s_depths[sc] = fabsf(d_signed);
+		sc++;
+	}
+
+	if (sc == 0) return 0;
+
+	// Reduce to MAX_CONTACTS by picking the 4 deepest and well-separated points.
+	// Simple greedy: sort by depth desc, dedupe by spatial distance.
+	int cp = 0;
+	v3 points[MAX_CONTACTS]; float depths[MAX_CONTACTS];
+	for (int pass = 0; pass < MAX_CONTACTS; pass++) {
+		int best = -1; float best_d = -1e18f;
+		for (int i = 0; i < sc; i++) {
+			if (s_depths[i] < 0.0f) continue; // already consumed
+			int too_close = 0;
+			for (int j = 0; j < cp; j++) {
+				if (len2(sub(s_points[i], points[j])) < 1e-4f) { too_close = 1; break; }
+			}
+			if (too_close) { s_depths[i] = -1.0f; continue; }
+			if (s_depths[i] > best_d) { best_d = s_depths[i]; best = i; }
+		}
+		if (best < 0) break;
+		points[cp] = s_points[best]; depths[cp] = s_depths[best];
+		s_depths[best] = -1.0f; cp++;
+	}
+	if (cp == 0) return 0;
+
+	m->count = cp;
+	for (int i = 0; i < cp; i++) m->contacts[i] = (Contact){ .point = points[i], .normal = contact_n, .penetration = depths[i] };
+	return 1;
+}
+
 // Cylinder vs mesh.
 static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds)
 {
@@ -446,8 +580,10 @@ static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b,
 	trimesh_query_aabb(mesh, q, &cands);
 	for (int i = 0; i < asize(cands); i++) {
 		int t = cands[i];
+		uint32_t i0 = mesh->indices[3*t + 0], i1 = mesh->indices[3*t + 1], i2 = mesh->indices[3*t + 2];
+		v3 v0 = mesh->verts[i0], v1 = mesh->verts[i1], v2 = mesh->verts[i2];
 		Manifold m = {0};
-		if (!collide_cylinder_hull(local, trimesh_tri_as_hull_local(mesh, t), &m)) continue;
+		if (!collide_cylinder_triangle_local(local, v0, v1, v2, mesh->tri_normal[t], &m)) continue;
 		trimesh_push_mesh_manifold(w, body_a, body_b, t, m, mesh_pos, mesh_rot, sub_id_base, manifolds);
 	}
 	afree(cands);
