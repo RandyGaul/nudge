@@ -504,7 +504,11 @@ void init()
 	ImGui_CreateContext(NULL);
 	ImGui_StyleColorsDark(NULL);
 	cImGui_ImplSDL3_InitForOpenGL(g_window, g_glctx);
+#ifdef __EMSCRIPTEN__
+	cImGui_ImplOpenGL3_InitEx("#version 300 es");
+#else
 	cImGui_ImplOpenGL3_InitEx("#version 330");
+#endif
 
 	// Build test hull (bipyramid)
 	v3 hull_pts[] = {

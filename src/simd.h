@@ -183,14 +183,21 @@ static inline simd4f simd_div(simd4f a, simd4f b)
 #endif
 }
 
+// SSE-style min/max: `a < b ? a : b`. NaN in either lane returns b; equal
+// lanes return b. NEON's vminq_f32 propagates NaN, and WASM pmin uses the
+// mirrored predicate `b < a`, so both diverge from SSE on NaN or +0/-0.
+// Emulate via cmpgt + blendv everywhere except SSE so cross-arch hashes
+// match. Scalar fallback already matches SSE semantics lane-by-lane.
+static inline simd4f simd_cmpgt(simd4f a, simd4f b);
+static inline simd4f simd_blendv(simd4f a, simd4f b, simd4f mask);
+
 static inline simd4f simd_min(simd4f a, simd4f b)
 {
 #if SIMD_SSE
 	return _mm_min_ps(a, b);
-#elif SIMD_NEON
-	return vminq_f32(a, b);
-#elif SIMD_WASM
-	return wasm_f32x4_pmin(a, b);
+#elif SIMD_NEON || SIMD_WASM
+	simd4f mask = simd_cmpgt(b, a);
+	return simd_blendv(b, a, mask);
 #else
 	simd4f r;
 	for (int i = 0; i < 4; i++) r.v[i] = a.v[i] < b.v[i] ? a.v[i] : b.v[i];
@@ -202,10 +209,9 @@ static inline simd4f simd_max(simd4f a, simd4f b)
 {
 #if SIMD_SSE
 	return _mm_max_ps(a, b);
-#elif SIMD_NEON
-	return vmaxq_f32(a, b);
-#elif SIMD_WASM
-	return wasm_f32x4_pmax(a, b);
+#elif SIMD_NEON || SIMD_WASM
+	simd4f mask = simd_cmpgt(a, b);
+	return simd_blendv(b, a, mask);
 #else
 	simd4f r;
 	for (int i = 0; i < 4; i++) r.v[i] = a.v[i] > b.v[i] ? a.v[i] : b.v[i];

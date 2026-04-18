@@ -56,7 +56,8 @@ typedef ptrdiff_t GLintptr;
 	X(void,    FramebufferTexture2D,  GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) \
 	X(void,    ActiveTexture,         GLenum texture) \
 	X(void,    Uniform1i,             GLint location, GLint v0) \
-	X(void,    Uniform1f,             GLint location, GLfloat v0)
+	X(void,    Uniform1f,             GLint location, GLfloat v0) \
+	X(void,    DrawBuffers,           GLsizei n, const GLenum* bufs)
 
 // Declare function pointers: gl_CreateShader, gl_ShaderSource, ...
 #define X(ret, name, ...) typedef ret (APIENTRY *PFN_gl##name)(__VA_ARGS__); static PFN_gl##name gl_##name;
@@ -149,7 +150,31 @@ static const char* s_shadow_frag_src =
 static GLuint compile_shader(GLenum type, const char* src)
 {
 	GLuint s = gl_CreateShader(type);
+#ifdef __EMSCRIPTEN__
+	// WebGL2 uses GLSL ES 3.00, not desktop 3.30. Patch the header:
+	//   #version 330 core  ->  #version 300 es\nprecision mediump float;\n...
+	// Shaders here are all small (< 2 KB); stack buffer is fine.
+	const char* body = src;
+	if (strncmp(src, "#version 330 core", 17) == 0) {
+		const char* rest = src + 17;
+		while (*rest == '\r' || *rest == '\n') rest++;
+		static const char* header =
+			"#version 300 es\n"
+			"precision highp float;\n"
+			"precision highp int;\n"
+			"precision highp sampler2D;\n"
+			"precision highp sampler2DShadow;\n";
+		char patched[4096];
+		int n = snprintf(patched, sizeof(patched), "%s%s", header, rest);
+		(void)n;
+		body = patched;
+		gl_ShaderSource(s, 1, &body, NULL);
+	} else {
+		gl_ShaderSource(s, 1, &src, NULL);
+	}
+#else
 	gl_ShaderSource(s, 1, &src, NULL);
+#endif
 	gl_CompileShader(s);
 	GLint ok;
 	gl_GetShaderiv(s, GL_COMPILE_STATUS, &ok);
@@ -823,18 +848,13 @@ void render_init()
 	gl_GenFramebuffers(1, &r_shadow_fbo);
 	gl_BindFramebuffer(GL_FRAMEBUFFER, r_shadow_fbo);
 	gl_FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, r_shadow_tex, 0);
-#ifdef __EMSCRIPTEN__
-	// GLES3 / WebGL2: no glDrawBuffer scalar; use glDrawBuffers with an empty
-	// list. glReadBuffer exists but is a no-op here since we only sample from
-	// the depth texture during the main pass.
+	// Depth-only shadow FBO: set no color draw/read target. GLES3/WebGL2
+	// drops the singular glDrawBuffer/glReadBuffer, so use glDrawBuffers
+	// everywhere (desktop core accepts it too).
 	{
 		GLenum none[1] = { GL_NONE };
 		gl_DrawBuffers(1, none);
 	}
-#else
-	glDrawBuffer(GL_NONE);
-	glReadBuffer(GL_NONE);
-#endif
 	gl_BindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	// Background gradient

@@ -61,9 +61,12 @@ if(NUDGE_BUILD_APP)
 		# Web build: use Emscripten's bundled SDL3 port (-sUSE_SDL=3) and
 		# compile ImGui sources directly into the nudge exe (no intermediate
 		# static lib -- SDL3::SDL3 target doesn't exist under the port).
-		# Output is a single .html + .js + .wasm + .data that Pages serves.
+		# Output is a single .html + .js + .wasm that Pages serves.
 		add_executable(nudge src/main.c ${NUDGE_IMGUI_SRC})
 		target_include_directories(nudge PRIVATE ${NUDGE_IMGUI_DIR})
+		# WebGL2 = GLES 3.0; ImGui's OpenGL3 backend needs this to pull in
+		# <GLES3/gl3.h> instead of desktop GL loaders.
+		target_compile_definitions(nudge PRIVATE IMGUI_IMPL_OPENGL_ES3=1)
 		target_compile_options(nudge PRIVATE
 			-sUSE_SDL=3
 			-msimd128
