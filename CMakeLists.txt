@@ -43,18 +43,8 @@ else()
 endif()
 
 if(NUDGE_BUILD_APP)
-	include(FetchContent)
-	FetchContent_Declare(
-		SDL3
-		GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-		GIT_TAG main
-		GIT_SHALLOW TRUE
-	)
-	FetchContent_MakeAvailable(SDL3)
-
-	# Dear ImGui (compiled as C++ separately from the unity C build)
 	set(NUDGE_IMGUI_DIR ${CMAKE_SOURCE_DIR}/libraries/imgui)
-	add_library(nudge_imgui STATIC
+	set(NUDGE_IMGUI_SRC
 		${NUDGE_IMGUI_DIR}/imgui.cpp
 		${NUDGE_IMGUI_DIR}/imgui_draw.cpp
 		${NUDGE_IMGUI_DIR}/imgui_tables.cpp
@@ -66,40 +56,79 @@ if(NUDGE_BUILD_APP)
 		${NUDGE_IMGUI_DIR}/dcimgui_impl_sdl3.cpp
 		${NUDGE_IMGUI_DIR}/dcimgui_impl_opengl3.cpp
 	)
-	target_include_directories(nudge_imgui PUBLIC ${NUDGE_IMGUI_DIR})
-	target_link_libraries(nudge_imgui PUBLIC SDL3::SDL3)
 
-	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT nudge)
-	add_executable(nudge src/main.c)
-	# OpenGL lib name differs per platform. On platforms we don't support the
-	# GUI on, this just fails at link time (harmless if NUDGE_BUILD_APP=OFF).
-	if(WIN32)
-		target_link_libraries(nudge nudge_imgui opengl32)
+	if(EMSCRIPTEN)
+		# Web build: use Emscripten's bundled SDL3 port (-sUSE_SDL=3) and
+		# compile ImGui sources directly into the nudge exe (no intermediate
+		# static lib -- SDL3::SDL3 target doesn't exist under the port).
+		# Output is a single .html + .js + .wasm + .data that Pages serves.
+		add_executable(nudge src/main.c ${NUDGE_IMGUI_SRC})
+		target_include_directories(nudge PRIVATE ${NUDGE_IMGUI_DIR})
+		target_compile_options(nudge PRIVATE
+			-sUSE_SDL=3
+			-msimd128
+			-O3
+			-ffp-contract=off
+			-ffp-model=precise
+		)
+		target_link_options(nudge PRIVATE
+			-sUSE_SDL=3
+			-sFULL_ES3=1
+			-sMIN_WEBGL_VERSION=2
+			-sMAX_WEBGL_VERSION=2
+			-sALLOW_MEMORY_GROWTH=1
+			-sINITIAL_MEMORY=64MB
+			-sSTACK_SIZE=8MB
+			-sEXIT_RUNTIME=0
+			-sASSERTIONS=1
+			--shell-file=${CMAKE_SOURCE_DIR}/web/shell.html
+		)
+		set_target_properties(nudge PROPERTIES SUFFIX ".html")
 	else()
-		find_package(OpenGL)
-		target_link_libraries(nudge nudge_imgui OpenGL::GL)
-	endif()
+		include(FetchContent)
+		FetchContent_Declare(
+			SDL3
+			GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+			GIT_TAG main
+			GIT_SHALLOW TRUE
+		)
+		FetchContent_MakeAvailable(SDL3)
 
-	if(MSVC)
-		target_compile_options(nudge PRIVATE /std:clatest /experimental:c11atomics /Ob3 /fp:precise)
-	else()
-		target_compile_options(nudge PRIVATE -ffp-contract=off)
-		if(CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
-			target_compile_options(nudge PRIVATE -ffp-model=precise)
+		# Dear ImGui (compiled as C++ separately from the unity C build)
+		add_library(nudge_imgui STATIC ${NUDGE_IMGUI_SRC})
+		target_include_directories(nudge_imgui PUBLIC ${NUDGE_IMGUI_DIR})
+		target_link_libraries(nudge_imgui PUBLIC SDL3::SDL3)
+
+		set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT nudge)
+		add_executable(nudge src/main.c)
+		if(WIN32)
+			target_link_libraries(nudge nudge_imgui opengl32)
+		else()
+			find_package(OpenGL)
+			target_link_libraries(nudge nudge_imgui OpenGL::GL)
 		endif()
-	endif()
 
-	# Remote debug viewer is Win32-only (uses ReadProcessMemory).
-	if(WIN32)
-		add_executable(nudge_viewer tools/viewer.c)
-		target_link_libraries(nudge_viewer ws2_32)
-	endif()
+		if(MSVC)
+			target_compile_options(nudge PRIVATE /std:clatest /experimental:c11atomics /Ob3 /fp:precise)
+		else()
+			target_compile_options(nudge PRIVATE -ffp-contract=off)
+			if(CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
+				target_compile_options(nudge PRIVATE -ffp-model=precise)
+			endif()
+		endif()
 
-	# Copy SDL3.dll next to executables so F5 works in MSVC
-	if(WIN32)
-		add_custom_command(TARGET nudge POST_BUILD
-			COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3-shared> $<TARGET_FILE_DIR:nudge>)
-		add_custom_command(TARGET nudge_tests POST_BUILD
-			COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3-shared> $<TARGET_FILE_DIR:nudge_tests>)
+		# Remote debug viewer is Win32-only (uses ReadProcessMemory).
+		if(WIN32)
+			add_executable(nudge_viewer tools/viewer.c)
+			target_link_libraries(nudge_viewer ws2_32)
+		endif()
+
+		# Copy SDL3.dll next to executables so F5 works in MSVC
+		if(WIN32)
+			add_custom_command(TARGET nudge POST_BUILD
+				COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3-shared> $<TARGET_FILE_DIR:nudge>)
+			add_custom_command(TARGET nudge_tests POST_BUILD
+				COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3-shared> $<TARGET_FILE_DIR:nudge_tests>)
+		endif()
 	endif()
 endif()

@@ -309,6 +309,13 @@ typedef struct SoftBodyInternal
 	double* D;            // diagonal factor, length link_count
 	double* rhs;          // scratch, length link_count
 	double* lambda_sol;   // scratch, length link_count
+	// K is refactored only when the flag below is set -- for a soft body
+	// undergoing mostly rigid-body motion, K is invariant under rotation
+	// (rotation preserves axis dot products) and changes only when topology,
+	// pins, or sub_dt change. Saves most of the per-frame solver cost.
+	int     k_dirty;      // 1 = K needs rebuild + refactor on next step
+	int     k_factor_ok;  // last factor result: 1 usable, 0 singular
+	float   k_sub_dt;     // sub_dt used for the current factored K
 } SoftBodyInternal;
 
 typedef struct BVH_Tree BVH_Tree; // forward decl, defined in bvh.c

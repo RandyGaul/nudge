@@ -174,6 +174,7 @@ void soft_body_build(World world, SoftBody sb_h)
 		afit(sb->lambda_sol, L);     asetlen(sb->lambda_sol, L);
 	}
 	sb->built = 1;
+	sb->k_dirty = 1; // force K build + factor on first step
 }
 
 void soft_body_pin_static(World world, SoftBody sb_h, int node, v3 world_pos)
@@ -182,16 +183,22 @@ void soft_body_pin_static(World world, SoftBody sb_h, int node, v3 world_pos)
 	SoftBodyInternal* sb = sb_lookup(w, sb_h);
 	assert(node >= 0 && node < asize(sb->node_pos));
 	int pi = sb_find_pin(sb, node);
+	int was_pinned = pi >= 0;
 	if (pi < 0) {
 		SoftPin p = (SoftPin){ .node = node, .world_pos = world_pos };
 		apush(sb->pins, p);
 	} else {
 		sb->pins[pi].world_pos = world_pos;
 	}
-	// Snap effective inv_mass to 0 (and remember user's original for unpin).
-	sb->node_inv_mass[node] = 0.0f;
 	sb->node_pos[node] = world_pos;
 	sb->node_vel[node] = V3(0, 0, 0);
+	// inv_mass transitions to 0 only on first pin for this node; K diagonal
+	// changes then, so mark dirty. Re-pinning the same node (moving the pin
+	// target) doesn't change K -- pos/vel snap each substep is enough.
+	if (!was_pinned) {
+		sb->node_inv_mass[node] = 0.0f;
+		sb->k_dirty = 1;
+	}
 }
 
 void soft_body_unpin(World world, SoftBody sb_h, int node)
@@ -204,6 +211,7 @@ void soft_body_unpin(World world, SoftBody sb_h, int node)
 	if (pi != last) sb->pins[pi] = sb->pins[last];
 	apop(sb->pins);
 	sb->node_inv_mass[node] = sb->node_user_inv_mass[node];
+	sb->k_dirty = 1; // inv_mass changed -> K diagonal changes
 }
 
 // -----------------------------------------------------------------------------
@@ -371,23 +379,26 @@ static void sb_collide_node_with_world(WorldInternal* w, SoftBodyInternal* sb, i
 				default: break;
 			}
 			if (!hit) continue;
-			// Manifold normal points from A (node sphere) toward B (world).
-			// Push node along -normal by penetration; cancel inward velocity;
-			// apply simple Coulomb-clamped tangential damping.
+			// Manifold normal points from A (node sphere) toward B (world body).
+			// For a node penetrating a static body, `normal` points into the body,
+			// so:
+			//   - dot(v, normal) > 0 => node moving INTO the surface (cancel)
+			//   - dot(v, normal) < 0 => node moving away (already separating)
+			// Position correction: push the node back along -normal by penetration.
 			for (int ci = 0; ci < m.count; ci++) {
 				Contact* c = &m.contacts[ci];
 				sb->node_pos[node_idx] = sub(sb->node_pos[node_idx], scale(c->normal, c->penetration));
 				node_sphere.center = sb->node_pos[node_idx];
 				v3 v = sb->node_vel[node_idx];
 				float vn = dot(v, c->normal);
-				if (vn >= 0.0f) continue; // already separating
-				v3 vn_vec = scale(c->normal, vn);
-				v3 vt = sub(v, vn_vec);
-				v3 new_v = vt; // inelastic: zero out normal
-				// Friction: clamp |vt| by mu * |vn|
+				if (vn <= 0.0f) continue; // already separating
+				// Remove the inward (into-body) component.
+				v3 vt = sub(v, scale(c->normal, vn));
+				// Coulomb-clamped tangential damping against max_friction = mu * |vn|.
 				float mu = 0.4f;
+				float max_friction = mu * vn;
 				float vt_len = len(vt);
-				float max_friction = mu * (-vn);
+				v3 new_v;
 				if (vt_len > max_friction && vt_len > 1e-6f) {
 					new_v = scale(vt, (vt_len - max_friction) / vt_len);
 				} else {
@@ -399,80 +410,47 @@ static void sb_collide_node_with_world(WorldInternal* w, SoftBodyInternal* sb, i
 	}
 }
 
-// Single soft-body substep. Called once per rigid substep from world_step.
-static void soft_body_substep(WorldInternal* w, SoftBodyInternal* sb, v3 gravity, float dt)
+// Once-per-frame: refresh link axes from current positions, compute per-link
+// compliance/bias from sub_dt, build K, factor K. The axes and K are reused
+// across every substep this frame -- K changes only with node positions and
+// inverse masses, and per-substep position drift is small enough that stale
+// K + fresh RHS is a standard approximation. Returns 0 on success, -1 if K
+// is singular (caller then skips the solve but still integrates / collides).
+static int sb_prepare_frame(SoftBodyInternal* sb, float sub_dt)
 {
-	if (!sb->built) return;
-	int N = asize(sb->node_pos);
 	int L = sb->link_count;
+	if (L == 0) return 0;
 
-	// Shared spring params from soft-body defaults.
-	float ptv = 0.0f, soft_compliance = 0.0f;
-	{
-		SpringParams sp = sb->params.default_spring;
-		if (sp.frequency > 0.0f) {
-			float omega = 6.2831853f * sp.frequency;
-			float zeta = sp.damping_ratio > 0.0f ? sp.damping_ratio : 1.0f;
-			float hk = dt * omega * omega;
-			float d = 2.0f * zeta * omega;
-			float denom = dt * (d + hk);
-			if (denom > 1e-12f) {
-				soft_compliance = 1.0f / denom;
-				ptv = hk * soft_compliance;
-			}
+	// Shared spring params from soft-body defaults, once per frame.
+	float soft_compliance = 0.0f, soft_ptv = 0.0f;
+	SpringParams sp = sb->params.default_spring;
+	if (sp.frequency > 0.0f) {
+		float omega = 6.2831853f * sp.frequency;
+		float zeta = sp.damping_ratio > 0.0f ? sp.damping_ratio : 1.0f;
+		float hk = sub_dt * omega * omega;
+		float d = 2.0f * zeta * omega;
+		float denom = sub_dt * (d + hk);
+		if (denom > 1e-12f) {
+			soft_compliance = 1.0f / denom;
+			soft_ptv = hk * soft_compliance;
 		}
 	}
-	int rigid = (soft_compliance == 0.0f); // user asked for rigid default
+	int rigid_default = (soft_compliance == 0.0f);
 	float rigid_compliance = SB_COMPLIANCE_FLOOR;
-	float rigid_ptv = SB_BAUMGARTE_GAIN / dt;
+	float rigid_ptv = SB_BAUMGARTE_GAIN / sub_dt;
 
-	// 1) Integrate velocity: gravity + ext_force + damping.
-	float damp_mul = 1.0f / (1.0f + sb->params.linear_damping * dt);
-	for (int n = 0; n < N; n++) {
-		if (sb->node_inv_mass[n] == 0.0f) { sb->node_ext_force[n] = V3(0, 0, 0); continue; }
-		v3 a = add(gravity, scale(sb->node_ext_force[n], sb->node_inv_mass[n]));
-		sb->node_vel[n] = add(sb->node_vel[n], scale(a, dt));
-		sb->node_vel[n] = scale(sb->node_vel[n], damp_mul);
-		sb->node_ext_force[n] = V3(0, 0, 0);
-	}
-
-	if (L == 0) {
-		// No constraints -- just integrate positions and snap pins.
-		for (int n = 0; n < N; n++) {
-			if (sb->node_inv_mass[n] == 0.0f) continue;
-			sb->node_pos[n] = add(sb->node_pos[n], scale(sb->node_vel[n], dt));
-		}
-		for (int p = 0; p < asize(sb->pins); p++) {
-			sb->node_pos[sb->pins[p].node] = sb->pins[p].world_pos;
-			sb->node_vel[sb->pins[p].node] = V3(0, 0, 0);
-		}
-		return;
-	}
-
-	// 2) Refresh link axes and rhs.
+	// Refresh axes + store per-link compliance / pos_to_vel for this sub_dt.
 	for (int k = 0; k < L; k++) {
 		SoftLink* lk = &sb->links[k];
 		v3 d = sub(sb->node_pos[lk->node_j], sb->node_pos[lk->node_i]);
 		float l2 = len2(d);
 		float length = l2 > 1e-16f ? sqrtf(l2) : 1e-8f;
 		lk->axis = scale(d, 1.0f / length);
-		float err = length - lk->rest_length;
-
-		v3 va = sb->node_vel[lk->node_i];
-		v3 vb = sb->node_vel[lk->node_j];
-		float jv = dot(sub(vb, va), lk->axis);
-
-		float compliance = rigid ? rigid_compliance : soft_compliance;
-		float bias_gain  = rigid ? rigid_ptv : ptv;
-		lk->compliance = compliance;
-		lk->pos_to_vel = bias_gain;
-
-		double bias = (double)bias_gain * (double)err;
-		sb->rhs[k] = -(double)jv - bias - (double)compliance * (double)lk->lambda;
+		lk->compliance = rigid_default ? rigid_compliance : soft_compliance;
+		lk->pos_to_vel = rigid_default ? rigid_ptv : soft_ptv;
 	}
 
-	// 3) Build K (dense). K is symmetric, but we fill the full matrix because
-	//    sb_ldl_factor reads both halves during elimination.
+	// Build dense K. Symmetric, stored full.
 	double* K = sb->K;
 	memset(K, 0, (size_t)L * (size_t)L * sizeof(double));
 	for (int k = 0; k < L; k++) {
@@ -487,58 +465,84 @@ static void soft_body_substep(WorldInternal* w, SoftBodyInternal* sb, v3 gravity
 			SoftLink* ll = &sb->links[l];
 			double dot_ax = (double)dot(lk->axis, ll->axis);
 			double sum = 0.0;
-			// sign of a node in a link: -1 for node_i, +1 for node_j.
-			// contribution: sign_k(n) * sign_l(n) * inv_m[n] * (a_k . a_l)
-			if (lk->node_i == ll->node_i) sum += (double)sb->node_inv_mass[lk->node_i] * dot_ax; // (-)(-)=+
-			if (lk->node_i == ll->node_j) sum -= (double)sb->node_inv_mass[lk->node_i] * dot_ax; // (-)(+)=-
-			if (lk->node_j == ll->node_i) sum -= (double)sb->node_inv_mass[lk->node_j] * dot_ax; // (+)(-)=-
-			if (lk->node_j == ll->node_j) sum += (double)sb->node_inv_mass[lk->node_j] * dot_ax; // (+)(+)=+
+			if (lk->node_i == ll->node_i) sum += (double)sb->node_inv_mass[lk->node_i] * dot_ax;
+			if (lk->node_i == ll->node_j) sum -= (double)sb->node_inv_mass[lk->node_i] * dot_ax;
+			if (lk->node_j == ll->node_i) sum -= (double)sb->node_inv_mass[lk->node_j] * dot_ax;
+			if (lk->node_j == ll->node_j) sum += (double)sb->node_inv_mass[lk->node_j] * dot_ax;
 			K[k * L + l] = sum;
 			K[l * L + k] = sum;
 		}
 	}
 
-	// 4) Factor + solve.
-	if (sb_ldl_factor(K, sb->D, L) != 0) {
-		// Singular: bail on this substep. Impulses and positions still advance
-		// from step 1's integration-up-to-this-point, so the worst case is a
-		// frame of drift, not a divergence.
-		goto integrate_and_snap;
-	}
-	sb_ldl_solve(K, sb->D, sb->rhs, sb->lambda_sol, L);
+	return sb_ldl_factor(K, sb->D, L);
+}
 
-	// 5) Apply impulses: v += M^-1 J^T lambda.
-	for (int k = 0; k < L; k++) {
-		SoftLink* lk = &sb->links[k];
-		double lam = sb->lambda_sol[k];
-		// Clamp paranoia: if factorization gave something preposterous, ignore.
-		if (!(lam > -1e12 && lam < 1e12)) continue;
-		v3 imp = scale(lk->axis, (float)lam);
-		float mi = sb->node_inv_mass[lk->node_i];
-		float mj = sb->node_inv_mass[lk->node_j];
-		sb->node_vel[lk->node_i] = sub(sb->node_vel[lk->node_i], scale(imp, mi));
-		sb->node_vel[lk->node_j] = add(sb->node_vel[lk->node_j], scale(imp, mj));
-		// Warm cache: soft links accumulate for spring inertia; rigid SET (since
-		// rigid_compliance is tiny, the contribution to next-frame RHS is negligible).
-		if (rigid) lk->lambda = (float)lam;
-		else       lk->lambda += (float)lam;
+// Per-substep: integrate velocity, compute RHS (using axes frozen in
+// sb_prepare_frame), back-substitute against the factored K, apply impulses,
+// integrate positions, collide, snap pins. k_factored = result of
+// sb_prepare_frame (0 = usable, -1 = skip the solve).
+static void soft_body_substep(WorldInternal* w, SoftBodyInternal* sb, v3 gravity, float dt, int k_factored)
+{
+	if (!sb->built) return;
+	int N = asize(sb->node_pos);
+	int L = sb->link_count;
+
+	// 1) Integrate velocity: gravity + ext_force + damping.
+	float damp_mul = 1.0f / (1.0f + sb->params.linear_damping * dt);
+	for (int n = 0; n < N; n++) {
+		if (sb->node_inv_mass[n] == 0.0f) { sb->node_ext_force[n] = V3(0, 0, 0); continue; }
+		v3 a = add(gravity, scale(sb->node_ext_force[n], sb->node_inv_mass[n]));
+		sb->node_vel[n] = add(sb->node_vel[n], scale(a, dt));
+		sb->node_vel[n] = scale(sb->node_vel[n], damp_mul);
+		sb->node_ext_force[n] = V3(0, 0, 0);
 	}
 
-integrate_and_snap:
-	// 6) Integrate positions.
+	if (L > 0 && k_factored == 0) {
+		// 2) RHS using frozen axes + current velocities + current positions.
+		for (int k = 0; k < L; k++) {
+			SoftLink* lk = &sb->links[k];
+			v3 d = sub(sb->node_pos[lk->node_j], sb->node_pos[lk->node_i]);
+			float length = sqrtf(len2(d));
+			float err = length - lk->rest_length;
+			v3 va = sb->node_vel[lk->node_i];
+			v3 vb = sb->node_vel[lk->node_j];
+			float jv = dot(sub(vb, va), lk->axis);
+			double bias = (double)lk->pos_to_vel * (double)err;
+			sb->rhs[k] = -(double)jv - bias - (double)lk->compliance * (double)lk->lambda;
+		}
+
+		// 3) Back-substitute (forward, diagonal, backward) -- no refactor.
+		sb_ldl_solve(sb->K, sb->D, sb->rhs, sb->lambda_sol, L);
+
+		// 4) Apply impulses.
+		int rigid_default = (sb->params.default_spring.frequency <= 0.0f);
+		for (int k = 0; k < L; k++) {
+			SoftLink* lk = &sb->links[k];
+			double lam = sb->lambda_sol[k];
+			if (!(lam > -1e12 && lam < 1e12)) continue;
+			v3 imp = scale(lk->axis, (float)lam);
+			float mi = sb->node_inv_mass[lk->node_i];
+			float mj = sb->node_inv_mass[lk->node_j];
+			sb->node_vel[lk->node_i] = sub(sb->node_vel[lk->node_i], scale(imp, mi));
+			sb->node_vel[lk->node_j] = add(sb->node_vel[lk->node_j], scale(imp, mj));
+			if (rigid_default) lk->lambda = (float)lam;
+			else               lk->lambda += (float)lam;
+		}
+	}
+
+	// 5) Integrate positions.
 	for (int n = 0; n < N; n++) {
 		if (sb->node_inv_mass[n] == 0.0f) continue;
 		sb->node_pos[n] = add(sb->node_pos[n], scale(sb->node_vel[n], dt));
 	}
 
-	// 7) Collide each node against world static rigid bodies.
+	// 6) Collide each node against world static rigid bodies.
 	for (int n = 0; n < N; n++) {
 		sb_collide_node_with_world(w, sb, n);
 	}
 
-	// 8) Snap pinned nodes to their target world position. Lets the user move
-	//    a pin by re-calling soft_body_pin_static -- the node teleports to the
-	//    new target each substep.
+	// 7) Snap pinned nodes to pin target (idempotent; lets the user move a
+	//    pin by calling soft_body_pin_static again with a new target).
 	for (int p = 0; p < asize(sb->pins); p++) {
 		sb->node_pos[sb->pins[p].node] = sb->pins[p].world_pos;
 		sb->node_vel[sb->pins[p].node] = V3(0, 0, 0);
@@ -555,10 +559,34 @@ static void soft_body_step_world(WorldInternal* w, float dt)
 	if (count == 0) return;
 	int n_sub = w->sub_steps > 0 ? w->sub_steps : 1;
 	float sub_dt = dt / (float)n_sub;
+
+	// Refactor K only when necessary: topology/pin change, sub_dt change, or
+	// the previous factorization failed. For a stiff soft body undergoing
+	// mostly rigid-body motion, K is rotation-invariant (rotation preserves
+	// axis dot products), so we reuse the factorization for many frames --
+	// this is the classic LDL amortization: factor once, back-sub many.
+	for (int i = 0; i < count; i++) {
+		if (!split_alive(w->soft_body_gen, i)) continue;
+		SoftBodyInternal* sb = &w->soft_bodies[i];
+		if (!sb->built) continue;
+		int need_refactor = sb->k_dirty || sb->k_sub_dt != sub_dt || sb->k_factor_ok == 0;
+		if (sb->link_count == 0) {
+			sb->k_factor_ok = 0;
+			sb->k_dirty = 0;
+		} else if (need_refactor) {
+			int rc = sb_prepare_frame(sb, sub_dt);
+			sb->k_factor_ok = (rc == 0);
+			sb->k_dirty = 0;
+			sb->k_sub_dt = sub_dt;
+		}
+	}
+
+	// Substeps just re-do back-sub + integrate + collide + pin. No factor.
 	for (int s = 0; s < n_sub; s++) {
 		for (int i = 0; i < count; i++) {
 			if (!split_alive(w->soft_body_gen, i)) continue;
-			soft_body_substep(w, &w->soft_bodies[i], w->gravity, sub_dt);
+			SoftBodyInternal* sb = &w->soft_bodies[i];
+			soft_body_substep(w, sb, w->gravity, sub_dt, sb->k_factor_ok ? 0 : -1);
 		}
 	}
 }

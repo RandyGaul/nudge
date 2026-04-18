@@ -1,17 +1,27 @@
 // See LICENSE for licensing info.
-#define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
-#undef small
-#undef near
-#undef far
+#ifdef _WIN32
+	#define WIN32_LEAN_AND_MEAN
+	#include <winsock2.h>
+	#include <ws2tcpip.h>
+	#pragma comment(lib, "ws2_32.lib")
+	#undef small
+	#undef near
+	#undef far
+#endif
+
+#ifdef __EMSCRIPTEN__
+	#include <emscripten.h>
+#endif
 
 #define CKIT_IMPLEMENTATION
 #include "ckit.h"
 
 #include <SDL3/SDL.h>
-#include <SDL3/SDL_opengl.h>
+#ifdef __EMSCRIPTEN__
+	#include <SDL3/SDL_opengles2.h>
+#else
+	#include <SDL3/SDL_opengl.h>
+#endif
 
 #include "dcimgui.h"
 #include "dcimgui_impl_sdl3.h"
@@ -41,9 +51,17 @@ void start_app(AppSettings settings)
 {
 	SDL_Init(SDL_INIT_VIDEO);
 
+#ifdef __EMSCRIPTEN__
+	// WebGL2 maps to GLES 3.0. ImGui's GL3 backend auto-detects ES on
+	// Emscripten. No depth bits request -- emscripten's defaults are fine.
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#else
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#endif
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
@@ -74,38 +92,48 @@ static void platform_shutdown()
 	SDL_Quit();
 }
 
+static void frame_step()
+{
+	SDL_Event ev;
+	while (SDL_PollEvent(&ev)) {
+		cImGui_ImplSDL3_ProcessEvent(&ev);
+		if (ev.type == SDL_EVENT_QUIT) g_running = 0;
+		if (ev.type == SDL_EVENT_WINDOW_RESIZED) {
+			g_width = ev.window.data1;
+			g_height = ev.window.data2;
+			glViewport(0, 0, g_width, g_height);
+		}
+	}
+	cImGui_ImplOpenGL3_NewFrame();
+	cImGui_ImplSDL3_NewFrame();
+	ImGui_NewFrame();
+	update();
+	draw();
+	ImGui_Render();
+	cImGui_ImplOpenGL3_RenderDrawData(ImGui_GetDrawData());
+	SDL_GL_SwapWindow(g_window);
+}
+
 int main(int argc, char* argv[])
 {
 	(void)argc; (void)argv;
 
 	init();
 
-	while (g_running) {
-		SDL_Event ev;
-		while (SDL_PollEvent(&ev)) {
-			cImGui_ImplSDL3_ProcessEvent(&ev);
-			if (ev.type == SDL_EVENT_QUIT) g_running = 0;
-			if (ev.type == SDL_EVENT_WINDOW_RESIZED) {
-				g_width = ev.window.data1;
-				g_height = ev.window.data2;
-				glViewport(0, 0, g_width, g_height);
-			}
-		}
-		cImGui_ImplOpenGL3_NewFrame();
-		cImGui_ImplSDL3_NewFrame();
-		ImGui_NewFrame();
-		update();
-		draw();
-		ImGui_Render();
-		cImGui_ImplOpenGL3_RenderDrawData(ImGui_GetDrawData());
-		SDL_GL_SwapWindow(g_window);
-	}
+#ifdef __EMSCRIPTEN__
+	// Browsers own the event loop, so we hand the step callback to Emscripten
+	// and return from main. EXIT_RUNTIME=0 in the link flags keeps the module
+	// alive across calls. 0 FPS = tied to requestAnimationFrame.
+	emscripten_set_main_loop(frame_step, 0, 1);
+#else
+	while (g_running) frame_step();
 
 	debug_server_shutdown();
 	cImGui_ImplOpenGL3_Shutdown();
 	cImGui_ImplSDL3_Shutdown();
 	ImGui_DestroyContext(NULL);
 	platform_shutdown();
+#endif
 	return 0;
 }
 
@@ -496,8 +524,10 @@ void init()
 
 	setup_scene();
 
+#ifndef __EMSCRIPTEN__
 	debug_server_set_world(g_world);
 	debug_server_init();
+#endif
 }
 
 static void setup_scene()
@@ -519,7 +549,9 @@ static void setup_scene()
 		.gravity = V3(0, -9.81f, 0),
 		.broadphase = BROADPHASE_BVH,
 	});
+#ifndef __EMSCRIPTEN__
 	debug_server_set_world(g_world);
+#endif
 
 	((WorldInternal*)g_world.id)->sleep_enabled = g_sleep_enabled;
 	((WorldInternal*)g_world.id)->ldl_enabled = g_ldl_enabled;
@@ -541,12 +573,23 @@ static void draw_aabb_wireframe(v3 lo, v3 hi, v3 color);
 
 static bool g_npv_mode = false;
 #include "np_viz.c"
-#define NUDGE_HOST_APP
-#include "debug_server.c"
+#ifndef __EMSCRIPTEN__
+	#define NUDGE_HOST_APP
+	#include "debug_server.c"
+#else
+	// Emscripten: no sockets, no remote viewer. Stub the public interface so
+	// call sites (already guarded) still link if something slips through.
+	static void debug_server_init() {}
+	static void debug_server_poll() {}
+	static void debug_server_shutdown() {}
+	static void debug_server_set_world(World w) { (void)w; }
+#endif
 
 void update()
 {
+#ifndef __EMSCRIPTEN__
 	debug_server_poll();
+#endif
 	if (g_npv_mode) { npv_update(); return; }
 
 	// Camera input (skip when imgui wants the mouse)
@@ -682,7 +725,9 @@ void update()
 		if (g_run_frames > 0 && --g_run_frames == 0) g_paused = true;
 	}
 
+#ifndef __EMSCRIPTEN__
 	debug_server_poll();
+#endif
 
 	// Debug panel
 	ImGui_Begin("Debug", NULL, 0);

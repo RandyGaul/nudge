@@ -823,8 +823,18 @@ void render_init()
 	gl_GenFramebuffers(1, &r_shadow_fbo);
 	gl_BindFramebuffer(GL_FRAMEBUFFER, r_shadow_fbo);
 	gl_FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, r_shadow_tex, 0);
+#ifdef __EMSCRIPTEN__
+	// GLES3 / WebGL2: no glDrawBuffer scalar; use glDrawBuffers with an empty
+	// list. glReadBuffer exists but is a no-op here since we only sample from
+	// the depth texture during the main pass.
+	{
+		GLenum none[1] = { GL_NONE };
+		gl_DrawBuffers(1, none);
+	}
+#else
 	glDrawBuffer(GL_NONE);
 	glReadBuffer(GL_NONE);
+#endif
 	gl_BindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	// Background gradient

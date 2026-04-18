@@ -1,0 +1,58 @@
+name: deploy web demo to github pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A single concurrent deploy; in-flight runs get cancelled so latest-main wins.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up emsdk
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 4.0.16
+          actions-cache-folder: emsdk-cache
+
+      - name: configure
+        run: emcmake cmake -B build-web -DCMAKE_BUILD_TYPE=Release
+
+      - name: build
+        run: cmake --build build-web --target nudge -j
+
+      - name: stage site
+        run: |
+          mkdir -p site
+          cp build-web/nudge.html   site/index.html
+          cp build-web/nudge.js     site/
+          cp build-web/nudge.wasm   site/
+          if [ -f build-web/nudge.data ]; then cp build-web/nudge.data site/; fi
+
+      - name: upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

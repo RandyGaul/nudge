@@ -1,6 +1,7 @@
 .claude/
 build/
 build2/
+build-web/
 ref/
 imgui.ini
 CLAUDE.md
