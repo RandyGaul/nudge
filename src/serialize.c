@@ -96,7 +96,17 @@ typedef struct SV_Context
 	int version;        // file's schema version (== SV_LATEST when saving)
 	int saving;
 	int loading;
-	FILE* file;
+
+	// All serialized bytes go through an in-memory buffer so the entire
+	// stream can be DEFLATE-compressed on save and decompressed on load.
+	// On save: grows as SV_ADD writes; flushed+compressed in SV_SAVE_END.
+	// On load: populated once by SV_LOAD_BEGIN from a decompressed file.
+	uint8_t* buf;
+	int buf_len;
+	int buf_cap;
+	int buf_pos;
+
+	const char* path;  // save-only; path to write on destroy
 	int sync_counter;
 } SV_Context;
 
@@ -107,14 +117,28 @@ typedef struct SV_Context
 #define SV_LOAD_BEGIN(path) SV_Context _sv_ctx = sv_make(path, 0), *S = &_sv_ctx
 #define SV_LOAD_END()       sv_destroy(S)
 
+static int sv_ok(const SV_Context* S) { return S->buf != NULL; }
+
 static int sv_raw_write(SV_Context* S, const void* data, size_t n)
 {
-	return fwrite(data, 1, n, S->file) == n;
+	int need = S->buf_len + (int)n;
+	if (need > S->buf_cap) {
+		int new_cap = S->buf_cap ? S->buf_cap : 1024;
+		while (new_cap < need) new_cap *= 2;
+		S->buf = (uint8_t*)CK_REALLOC(S->buf, (size_t)new_cap);
+		S->buf_cap = new_cap;
+	}
+	memcpy(S->buf + S->buf_len, data, n);
+	S->buf_len = need;
+	return 1;
 }
 
 static int sv_raw_read(SV_Context* S, void* data, size_t n)
 {
-	return fread(data, 1, n, S->file) == n;
+	if (S->buf_pos + (int)n > S->buf_len) return 0;
+	memcpy(data, S->buf + S->buf_pos, n);
+	S->buf_pos += (int)n;
+	return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -321,45 +345,83 @@ static void sv_quat_array(SV_Context* S, quat** a)
 
 #define SV_MAGIC 0x5633444Eu  // "ND3V"
 
+// On-disk layout:
+//   uint32 magic
+//   uint32 sv_version
+//   uint32 uncompressed_size
+//   uint32 compressed_size
+//   uint8[compressed_size] deflate_stream
+//
+// Version is written outside the compressed region so the loader can reject
+// unknown versions without decompressing.
+
 static SV_Context sv_make(const char* path, int saving)
 {
 	SV_Context ctx = { 0 };
 	ctx.saving  = saving;
 	ctx.loading = !saving;
+	ctx.path = path;
+
 	if (saving) {
-		ctx.file = fopen(path, "wb");
-		if (!ctx.file) return ctx;
-		uint32_t magic = SV_MAGIC;
-		fwrite(&magic, 4, 1, ctx.file);
 		ctx.version = SV_LATEST;
-		fwrite(&ctx.version, 4, 1, ctx.file);
-	} else {
-		ctx.file = fopen(path, "rb");
-		if (!ctx.file) return ctx;
-		uint32_t magic = 0;
-		if (fread(&magic, 4, 1, ctx.file) != 1 || magic != SV_MAGIC) {
-			fclose(ctx.file);
-			ctx.file = NULL;
-			return ctx;
-		}
-		if (fread(&ctx.version, 4, 1, ctx.file) != 1) {
-			fclose(ctx.file);
-			ctx.file = NULL;
-			return ctx;
-		}
-		// Newer files can't be loaded by older code (forward incompat).
-		if (ctx.version > SV_LATEST) {
-			fclose(ctx.file);
-			ctx.file = NULL;
-			return ctx;
-		}
+		ctx.buf_cap = 1024;
+		ctx.buf = (uint8_t*)CK_ALLOC((size_t)ctx.buf_cap);
+		return ctx;
 	}
+
+	// Load: read file header, decompress body into buf.
+	FILE* f = fopen(path, "rb");
+	if (!f) return ctx;
+	uint32_t hdr[4] = {0};
+	if (fread(hdr, 4, 4, f) != 4 || hdr[0] != SV_MAGIC) { fclose(f); return ctx; }
+	uint32_t version = hdr[1];
+	uint32_t uncompressed_size = hdr[2];
+	uint32_t compressed_size   = hdr[3];
+	if (version > SV_LATEST) { fclose(f); return ctx; }  // forward incompat
+
+	uint8_t* cbuf = (uint8_t*)CK_ALLOC(compressed_size ? compressed_size : 1);
+	if (fread(cbuf, 1, compressed_size, f) != compressed_size) {
+		CK_FREE(cbuf); fclose(f); return ctx;
+	}
+	fclose(f);
+
+	uint8_t* ubuf = (uint8_t*)CK_ALLOC(uncompressed_size ? uncompressed_size : 1);
+	if (!deflate_decompress(cbuf, (int)compressed_size, ubuf, (int)uncompressed_size)) {
+		CK_FREE(cbuf); CK_FREE(ubuf);
+		return ctx;
+	}
+	CK_FREE(cbuf);
+
+	ctx.version = (int)version;
+	ctx.buf     = ubuf;
+	ctx.buf_len = (int)uncompressed_size;
+	ctx.buf_pos = 0;
 	return ctx;
 }
 
 static void sv_destroy(SV_Context* S)
 {
-	if (S->file) { fclose(S->file); S->file = NULL; }
+	if (S->saving && S->buf && S->path) {
+		// Compress the accumulated buffer and flush to disk.
+		uint8_t* cbuf = NULL;
+		int clen = 0;
+		deflate_compress(S->buf, S->buf_len, &cbuf, &clen);
+
+		FILE* f = fopen(S->path, "wb");
+		if (f) {
+			uint32_t hdr[4];
+			hdr[0] = SV_MAGIC;
+			hdr[1] = (uint32_t)S->version;
+			hdr[2] = (uint32_t)S->buf_len;   // uncompressed size
+			hdr[3] = (uint32_t)clen;          // compressed size
+			fwrite(hdr, 4, 4, f);
+			fwrite(cbuf, 1, (size_t)clen, f);
+			fclose(f);
+		}
+		CK_FREE(cbuf);
+	}
+	CK_FREE(S->buf);
+	S->buf = NULL;
 }
 
 // ---------------------------------------------------------------------------

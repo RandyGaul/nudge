@@ -96,7 +96,7 @@ int world_save_snapshot(World world, const char* path)
 {
 	WorldInternal* w = (WorldInternal*)world.id;
 	SV_SAVE_BEGIN(path);
-	if (!S->file) return 0;
+	if (!sv_ok(S)) return 0;
 
 	// World parameters
 	WorldParams wp = {
@@ -537,7 +537,7 @@ static World snapshot_load_impl(SV_Context* S, World target)
 World world_load_snapshot(const char* path)
 {
 	SV_LOAD_BEGIN(path);
-	if (!S->file) { SV_LOAD_END(); return (World){0}; }
+	if (!sv_ok(S)) { SV_LOAD_END(); return (World){0}; }
 	World w = snapshot_load_impl(S, (World){0});
 	SV_LOAD_END();
 	return w;
@@ -547,7 +547,7 @@ int world_load_snapshot_into(World target, const char* path)
 {
 	assert(target.id && "world_load_snapshot_into: target world is null");
 	SV_LOAD_BEGIN(path);
-	if (!S->file) { SV_LOAD_END(); return 0; }
+	if (!sv_ok(S)) { SV_LOAD_END(); return 0; }
 	snapshot_load_impl(S, target);
 	SV_LOAD_END();
 	return 1;

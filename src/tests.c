@@ -12276,6 +12276,16 @@ static void test_snapshot_roundtrip()
 	const char* path = "test_snapshot.nudgesave";
 	TEST_BEGIN("snapshot: save succeeds");
 	TEST_ASSERT(world_save_snapshot(w, path) == 1);
+
+	// Peek the header to report compression ratio for visibility.
+	{
+		FILE* fp = fopen(path, "rb");
+		uint32_t hdr[4] = {0};
+		if (fp) { (void)!fread(hdr, 4, 4, fp); fclose(fp); }
+		printf("  [snapshot-mem] uncompressed=%u compressed=%u (%.2fx)\n",
+		       hdr[2], hdr[3], hdr[3] ? (double)hdr[2] / (double)hdr[3] : 0.0);
+	}
+
 	destroy_world(w);
 
 	TEST_BEGIN("snapshot: load returns a valid world");

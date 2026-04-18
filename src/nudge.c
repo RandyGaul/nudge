@@ -25,7 +25,9 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 #include "joints.c"
 #include "solver_ldl.c"
 #include "islands.c"
+#include "contacts.c"
 #include "rewind.c"
+#include "deflate.c"
 #include "serialize.c"
 #include "snapshot.c"
 
@@ -88,6 +90,9 @@ void destroy_world(World world)
 	map_free(w->joint_pairs);
 	for (int i = 0; i < asize(w->worker_arenas); i++) arena_free(&w->worker_arenas[i]);
 	afree(w->worker_arenas);
+	afree(w->contact_summaries);
+	afree(w->listener_scratch);
+	map_free(w->body_listeners);
 	CK_FREE(w);
 }
 
@@ -682,6 +687,12 @@ void world_step(World world, float dt)
 	if (w->sleep_enabled) islands_update_contacts(w, manifolds, asize(manifolds));
 	w->perf.pgs.pos_joints = perf_now() - t_iuc;
 	w->perf.broadphase = perf_now() - t1;
+
+	// User-facing ContactSummary: build sorted/deduped array, fire per-body
+	// listeners. Runs before the solver so listeners see pre-solve geometry
+	// (contact normal + penetration from narrowphase).
+	contacts_build(w, manifolds, asize(manifolds));
+	contacts_dispatch_listeners(w);
 
 	// Phase 1: bucket manifolds by owning island. Consumed by per-island
 	// coloring / solve in later phases; computed now for wiring validation.
@@ -1284,6 +1295,7 @@ void destroy_body(World world, Body body)
 		if (moved_body >= 0) w->body_cold[moved_body].bvh_leaf = w->body_cold[idx].bvh_leaf;
 	}
 	afree(w->body_cold[idx].shapes);
+	if (w->body_listeners) map_del(w->body_listeners, (uint64_t)idx);
 	split_del(w->body_cold, w->body_hot, w->body_gen, w->body_free, idx);
 }
 
