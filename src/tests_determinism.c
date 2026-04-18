@@ -50,8 +50,8 @@ static World det_build_scene()
 	// 6-box stack, each tilted slightly so the rest isn't trivial.
 	for (int i = 0; i < 6; i++) {
 		float angle = 0.02f * (float)i;
-		float s = nudge_sinf(angle * 0.5f);
-		float c = nudge_cosf(angle * 0.5f);
+		float s = sinf(angle * 0.5f);
+		float c = cosf(angle * 0.5f);
 		quat q = { 0, 0, s, c };
 		Body b = create_body(w, (BodyParams){
 			.position = V3(0, 0.5f + (float)i * 1.02f, 0),

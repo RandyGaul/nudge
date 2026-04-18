@@ -1934,7 +1934,7 @@ void world_debug_joints(World world, JointDebugFn fn, void* user)
 			info.limit_max = j->hinge.limit_max;
 			info.ref_a = rotate(sa->rotation, j->hinge.local_ref_a);
 			info.ref_b = rotate(sb->rotation, j->hinge.local_ref_b);
-			float angle = nudge_atan2f(dot(cross(info.ref_a, info.ref_b), info.axis_a), dot(info.ref_a, info.ref_b));
+			float angle = atan2f(dot(cross(info.ref_a, info.ref_b), info.axis_a), dot(info.ref_a, info.ref_b));
 			info.current_angle = angle;
 			info.limit_active = (j->hinge.limit_min != 0 && angle <= j->hinge.limit_min) || (j->hinge.limit_max != 0 && angle >= j->hinge.limit_max);
 		} else if (j->type == JOINT_FIXED) {
