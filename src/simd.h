@@ -612,7 +612,7 @@ static inline void simd_store_i(int* p, simd4i v)
 			float v[4] = { vgetq_lane_f32(a,1), vgetq_lane_f32(a,2), vgetq_lane_f32(a,0), vgetq_lane_f32(a,3) };
 			return vld1q_f32(v);
 		}
-		case 0xD8: { // SIMD_SHUFFLE(3,1,0,2) = zxyw (vmath v3_dot second shuffle)
+		case 0xD2: { // SIMD_SHUFFLE(3,1,0,2) = zxyw (vmath v3_dot second shuffle)
 			float v[4] = { vgetq_lane_f32(a,2), vgetq_lane_f32(a,0), vgetq_lane_f32(a,1), vgetq_lane_f32(a,3) };
 			return vld1q_f32(v);
 		}
@@ -638,7 +638,7 @@ static inline void simd_store_i(int* p, simd4i v)
 		case 0x55: return wasm_i32x4_shuffle(a, a, 1, 1, 1, 1);
 		case 0xAA: return wasm_i32x4_shuffle(a, a, 2, 2, 2, 2);
 		case 0xC9: return wasm_i32x4_shuffle(a, a, 1, 2, 0, 3);  // SIMD_SHUFFLE(3,0,2,1)
-		case 0xD8: return wasm_i32x4_shuffle(a, a, 2, 0, 1, 3);  // SIMD_SHUFFLE(3,1,0,2)
+		case 0xD2: return wasm_i32x4_shuffle(a, a, 2, 0, 1, 3);  // SIMD_SHUFFLE(3,1,0,2)
 		default:   return a;
 		}
 	}
