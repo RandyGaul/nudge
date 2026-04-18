@@ -18,11 +18,12 @@ option(NUDGE_BUILD_APP "Build the GUI app + ImGui + remote viewer" ON)
 # ----- always-on: the headless test binary ------------------------------------
 add_executable(nudge_tests src/test_main.c)
 
-# pthreads on Unix-like platforms (empty on Windows, which uses Win32 directly).
+# pthreads + libm on Unix-like platforms (empty on Windows, which uses Win32
+# directly and links the math runtime as part of the CRT).
 if(NOT WIN32)
 	set(THREADS_PREFER_PTHREAD_FLAG ON)
 	find_package(Threads REQUIRED)
-	target_link_libraries(nudge_tests Threads::Threads)
+	target_link_libraries(nudge_tests Threads::Threads m)
 endif()
 
 if(MSVC)
