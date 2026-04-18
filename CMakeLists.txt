@@ -53,10 +53,6 @@ else()
 		target_compile_options(nudge_tests PRIVATE
 			-fno-vectorize
 			-fno-slp-vectorize
-			# -Xclang -ffp-contract=off forces the frontend flag *through* to
-			# LLVM (plain -ffp-contract=off goes via the driver and can get
-			# re-asserted downstream). Belt-and-suspenders with the pragma.
-			-Xclang -ffp-contract=off
 		)
 	endif()
 endif()
