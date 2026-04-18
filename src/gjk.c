@@ -192,7 +192,7 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 		const float* sx = soa, *sy = sx + count, *sz = sy + count;
 		simd4f vbest2 = simd_set1(-1e18f);
 		simd4i ibest2 = simd_set1_i(0);
-		simd4i idx0 = _mm_set_epi32(3, 2, 1, 0), idx1 = _mm_set_epi32(7, 6, 5, 4);
+		simd4i idx0 = simd_seti(0, 1, 2, 3), idx1 = simd_seti(4, 5, 6, 7);
 		simd4i eight = simd_set1_i(8);
 		for (; hi + 7 < count; hi += 8) {
 			simd4f d0 = simd_add(simd_add(simd_mul(simd_load(sx+hi), ldx), simd_mul(simd_load(sy+hi), ldy)), simd_mul(simd_load(sz+hi), ldz));
@@ -210,7 +210,7 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 		ibest = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest), simd_cast_itof(ibest2), mg));
 		for (; hi + 3 < count; hi += 4) {
 			simd4f dots = simd_add(simd_add(simd_mul(simd_load(sx+hi), ldx), simd_mul(simd_load(sy+hi), ldy)), simd_mul(simd_load(sz+hi), ldz));
-			simd4i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);
+			simd4i idx = simd_seti(hi, hi+1, hi+2, hi+3);
 			simd4f mask = simd_cmpgt(dots, vbest);
 			vbest = simd_blendv(vbest, dots, mask);
 			ibest = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest), simd_cast_itof(idx), mask));
@@ -222,7 +222,7 @@ static int gjk_hull_support_scan(const v3* __restrict verts, int count, const fl
 			simd4f t0 = simd_unpacklo(v0, v1), t1 = simd_unpacklo(v2, v3r);
 			simd4f t2 = simd_unpackhi(v0, v1), t3 = simd_unpackhi(v2, v3r);
 			simd4f dots = simd_add(simd_add(simd_mul(simd_movelh(t0, t1), ldx), simd_mul(simd_movehl(t1, t0), ldy)), simd_mul(simd_movelh(t2, t3), ldz));
-			simd4i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);
+			simd4i idx = simd_seti(hi, hi+1, hi+2, hi+3);
 			simd4f mask = simd_cmpgt(dots, vbest);
 			vbest = simd_blendv(vbest, dots, mask);
 			ibest = simd_cast_ftoi(simd_blendv(simd_cast_itof(ibest), simd_cast_itof(idx), mask));
@@ -249,7 +249,7 @@ static void gjk_hull_minmax_scan(const v3* __restrict verts, int count, const fl
 
 	if (soa) {
 		const float* sx = soa, *sy = sx + count, *sz = sy + count;
-		simd4i idx = _mm_set_epi32(3, 2, 1, 0);
+		simd4i idx = simd_seti(0, 1, 2, 3);
 		simd4i four = simd_set1_i(4);
 		for (; hi + 3 < count; hi += 4) {
 			simd4f d = simd_add(simd_add(simd_mul(simd_load(sx+hi), ldx), simd_mul(simd_load(sy+hi), ldy)), simd_mul(simd_load(sz+hi), ldz));
@@ -267,7 +267,7 @@ static void gjk_hull_minmax_scan(const v3* __restrict verts, int count, const fl
 			simd4f t0 = simd_unpacklo(v0, v1), t1 = simd_unpacklo(v2, v3r);
 			simd4f t2 = simd_unpackhi(v0, v1), t3 = simd_unpackhi(v2, v3r);
 			simd4f d = simd_add(simd_add(simd_mul(simd_movelh(t0, t1), ldx), simd_mul(simd_movehl(t1, t0), ldy)), simd_mul(simd_movelh(t2, t3), ldz));
-			simd4i idx = _mm_set_epi32(hi+3, hi+2, hi+1, hi);
+			simd4i idx = simd_seti(hi, hi+1, hi+2, hi+3);
 			simd4f mx = simd_cmpgt(d, vmax);
 			vmax = simd_blendv(vmax, d, mx);
 			imax = simd_cast_ftoi(simd_blendv(simd_cast_itof(imax), simd_cast_itof(idx), mx));

@@ -22,7 +22,7 @@ static v3 hull_support(const Hull* hull, v3 dir)
 		simd4f vdx = simd_set1(dir.x), vdy = simd_set1(dir.y), vdz = simd_set1(dir.z);
 		simd4f best4 = simd_set1(-1e18f);
 		simd4i besti4 = simd_set1_i(0);
-		simd4i idx4 = _mm_set_epi32(3, 2, 1, 0);
+		simd4i idx4 = simd_seti(0, 1, 2, 3);
 		simd4i inc4 = simd_set1_i(4);
 		int n4 = n & ~3;
 		for (int i = 0; i < n4; i += 4) {

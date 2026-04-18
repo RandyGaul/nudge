@@ -226,7 +226,7 @@ static DWORD WINAPI pool_worker_thread(LPVOID param)
 	for (;;) {
 		long sync = ctx->sync_bits;
 		if (sync == (long)0xFFFFFFFF) break;
-		if (sync == last_sync) { _mm_pause(); continue; }
+		if (sync == last_sync) { simd_pause(); continue; }
 		int cur_sync = (sync >> 16) & 0xFFFF;
 		pool_execute(ctx, cur_sync - 1, cur_sync);
 		last_sync = sync;
@@ -275,7 +275,7 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 	long sync_bits = (long)((pool_sync_counter << 16) | 0);
 	_InterlockedExchange(&pool_ctx.sync_bits, sync_bits);
 	pool_execute(&pool_ctx, pool_sync_counter - 1, pool_sync_counter);
-	while (pool_stage.completion_count < n_blocks) _mm_pause();
+	while (pool_stage.completion_count < n_blocks) simd_pause();
 }
 
 // --- PGS solver work function (per-color) ---

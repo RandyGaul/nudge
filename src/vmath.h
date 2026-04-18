@@ -33,8 +33,8 @@ static inline v3 v3_scale(v3 a, float s) { return (v3){ .m = simd_mul(a.m, simd_
 // Dot product returning broadcast simd4f (stays in register for downstream ops).
 static inline simd4f v3_dot_m(v3 a, v3 b) {
 	simd4f m = simd_mul(a.m, b.m);
-	simd4f s = simd_add(m, simd_shuffle(m, m, _MM_SHUFFLE(3,0,2,1)));
-	return simd_add(s, simd_shuffle(m, m, _MM_SHUFFLE(3,1,0,2)));
+	simd4f s = simd_add(m, simd_shuffle(m, m, SIMD_SHUFFLE(3,0,2,1)));
+	return simd_add(s, simd_shuffle(m, m, SIMD_SHUFFLE(3,1,0,2)));
 }
 static inline float v3_dot(v3 a, v3 b) { return simd_get_x(v3_dot_m(a, b)); }
 
@@ -42,10 +42,10 @@ static inline float v3_dot(v3 a, v3 b) { return simd_get_x(v3_dot_m(a, b)); }
 static inline v3 v3_scale_m(v3 a, simd4f s) { return (v3){ .m = simd_mul(a.m, s) }; }
 
 static inline v3 v3_cross(v3 a, v3 b) {
-	simd4f a_yzx = simd_shuffle(a.m, a.m, _MM_SHUFFLE(3,0,2,1));
-	simd4f b_yzx = simd_shuffle(b.m, b.m, _MM_SHUFFLE(3,0,2,1));
+	simd4f a_yzx = simd_shuffle(a.m, a.m, SIMD_SHUFFLE(3,0,2,1));
+	simd4f b_yzx = simd_shuffle(b.m, b.m, SIMD_SHUFFLE(3,0,2,1));
 	simd4f c = simd_sub(simd_mul(a.m, b_yzx), simd_mul(a_yzx, b.m));
-	return (v3){ .m = simd_shuffle(c, c, _MM_SHUFFLE(3,0,2,1)) };
+	return (v3){ .m = simd_shuffle(c, c, SIMD_SHUFFLE(3,0,2,1)) };
 }
 
 static inline float v3_len2(v3 a) { return v3_dot(a, a); }
