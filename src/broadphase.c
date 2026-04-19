@@ -180,15 +180,24 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	// narrowphase. Insertion sort: stable, O(n) for nearly-sorted input
 	// (settled frames produce stable pair order), acceptable O(n^2) worst.
 	int dd_count = asize(dd_pairs);
+	// Pre-pack a tight per-body shape-type table. body_cold[i].shapes is a
+	// dynamic-array pointer (cold cache miss) and dd_count >> body_count for
+	// dense piles, so reusing 1B/body in L1 beats the cold pointer-chase per
+	// comparison in the inner sort loop.
+	uint8_t type_stack[256];
+	uint8_t* btype = (body_count <= 256) ? type_stack : CK_ALLOC(body_count);
+	for (int i = 0; i < body_count; i++) {
+		btype[i] = (split_alive(w->body_gen, i) && asize(w->body_cold[i].shapes) > 0)
+			? (uint8_t)w->body_cold[i].shapes[0].type
+			: 0;
+	}
 	for (int i = 1; i < dd_count; i++) {
 		BroadPair key = dd_pairs[i];
-		int ka = w->body_cold[key.a].shapes[0].type;
-		int kb = w->body_cold[key.b].shapes[0].type;
+		int ka = btype[key.a], kb = btype[key.b];
 		uint32_t kk = (ka <= kb) ? ((uint32_t)ka << 8) | (uint32_t)kb : ((uint32_t)kb << 8) | (uint32_t)ka;
 		int j = i - 1;
 		while (j >= 0) {
-			int ja = w->body_cold[dd_pairs[j].a].shapes[0].type;
-			int jb = w->body_cold[dd_pairs[j].b].shapes[0].type;
+			int ja = btype[dd_pairs[j].a], jb = btype[dd_pairs[j].b];
 			uint32_t jk = (ja <= jb) ? ((uint32_t)ja << 8) | (uint32_t)jb : ((uint32_t)jb << 8) | (uint32_t)ja;
 			if (jk <= kk) break;
 			dd_pairs[j + 1] = dd_pairs[j];
@@ -196,6 +205,7 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		}
 		dd_pairs[j + 1] = key;
 	}
+	if (body_count > 256) CK_FREE(btype);
 
 	// Narrowphase on all collected pairs.
 	// If parallel dispatch is available (thread_count > 1), output pairs for external dispatch.
