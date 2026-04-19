@@ -669,6 +669,74 @@ static void collide_box_mesh_emit(WorldInternal* w, int body_a, int body_b, Box 
 
 // -----------------------------------------------------------------------------
 // Hull vs mesh.
+// Dedicated hull-vs-triangle narrowphase. Replaces collide_hull_hull on a
+// degenerate (zero-volume, 2-face) triangle-as-hull for the mesh path. The
+// generic hull-hull SAT produces false-positive edge-edge axes because the
+// triangle edges are treated as infinite 3D prisms; the "minimum separation"
+// axis can be lateral to the triangle plane even when the hull is straddling
+// the surface, causing the reducer to kill the (correct) face contact and
+// letting bodies sink through. Fix: bypass edge-edge SAT entirely, use the
+// triangle's known face normal, and sample hull vertices for contact points.
+//
+// Handles vertex-down (1 contact), edge-down (2 contacts), and face-down
+// (up to MAX_CONTACTS) rest poses. Hull on either side of the plane is
+// allowed (back-face hit = body tunneled; normal flipped as usual).
+static int collide_hull_triangle_local(ConvexHull hull, v3 v0, v3 v1, v3 v2, v3 tri_n, Manifold* m)
+{
+	const Hull* h = hull.hull;
+	v3 sc = hull.scale;
+	float plane_off = dot(tri_n, v0);
+	float c_signed_d = dot(hull.center, tri_n) - plane_off;
+	int on_plus_side = c_signed_d >= 0.0f;
+	// Contact normal: A(hull) -> B(triangle). Hull on +tri_n side -> normal = -tri_n.
+	v3 contact_n = on_plus_side ? neg(tri_n) : tri_n;
+
+	#define HULL_TRI_MAX_SAMPLES 64
+	v3 s_points[HULL_TRI_MAX_SAMPLES]; float s_depths[HULL_TRI_MAX_SAMPLES]; int sc_count = 0;
+
+	// Sample every hull vertex: if it's on the far side of the plane (past it
+	// relative to the hull center) AND projects inside the triangle, it is a
+	// contact point. "Far side" = opposite of the hull center's side.
+	for (int i = 0; i < h->vert_count && sc_count < HULL_TRI_MAX_SAMPLES; i++) {
+		v3 lv = V3(h->verts[i].x * sc.x, h->verts[i].y * sc.y, h->verts[i].z * sc.z);
+		v3 wv = add(hull.center, rotate(hull.rotation, lv));
+		float d = dot(wv, tri_n) - plane_off;
+		// Vertex must be on the OPPOSITE side of the plane from the hull center
+		// (past the plane), i.e., through it.
+		if (on_plus_side ? (d > 0.0f) : (d < 0.0f)) continue;
+		v3 on_plane = sub(wv, scale(tri_n, d));
+		if (!point_in_triangle_2d(on_plane, v0, v1, v2, tri_n)) continue;
+		s_points[sc_count] = on_plane;
+		s_depths[sc_count] = fabsf(d);
+		sc_count++;
+	}
+
+	if (sc_count == 0) return 0;
+
+	// Reduce to MAX_CONTACTS by picking deepest and spatially well-separated.
+	v3 points[MAX_CONTACTS]; float depths[MAX_CONTACTS]; int cp = 0;
+	for (int pass = 0; pass < MAX_CONTACTS; pass++) {
+		int best = -1; float best_d = -1e18f;
+		for (int i = 0; i < sc_count; i++) {
+			if (s_depths[i] < 0.0f) continue; // consumed
+			int too_close = 0;
+			for (int j = 0; j < cp; j++) {
+				if (len2(sub(s_points[i], points[j])) < 1e-4f) { too_close = 1; break; }
+			}
+			if (too_close) { s_depths[i] = -1.0f; continue; }
+			if (s_depths[i] > best_d) { best_d = s_depths[i]; best = i; }
+		}
+		if (best < 0) break;
+		points[cp] = s_points[best]; depths[cp] = s_depths[best];
+		s_depths[best] = -1.0f; cp++;
+	}
+	if (cp == 0) return 0;
+
+	m->count = cp;
+	for (int i = 0; i < cp; i++) m->contacts[i] = (Contact){ .point = points[i], .normal = contact_n, .penetration = depths[i], .feature_id = (uint32_t)i };
+	return 1;
+}
+
 static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, ConvexHull hull_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds)
 {
 	quat inv_rot = inv(mesh_rot);
@@ -692,8 +760,10 @@ static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, Con
 	ReduceRec recs[TRIMESH_MAX_LOCAL_MANIFOLDS]; int n_recs = 0;
 	for (int i = 0; i < asize(cands) && n_recs < TRIMESH_MAX_LOCAL_MANIFOLDS; i++) {
 		int t = cands[i];
+		uint32_t i0 = mesh->indices[3*t + 0], i1 = mesh->indices[3*t + 1], i2 = mesh->indices[3*t + 2];
+		v3 tv0 = mesh->verts[i0], tv1 = mesh->verts[i1], tv2 = mesh->verts[i2];
 		Manifold m = {0};
-		if (!collide_hull_hull(local_hull, trimesh_tri_as_hull_local(mesh, t), &m)) continue;
+		if (!collide_hull_triangle_local(local_hull, tv0, tv1, tv2, mesh->tri_normal[t], &m)) continue;
 		trimesh_collect(mesh, t, m, recs, &n_recs);
 	}
 	trimesh_reduce(recs, n_recs);

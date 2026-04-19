@@ -405,6 +405,12 @@ Known issues
   setups; PGS is the default for a reason. Tune `position_iters` /
   `velocity_iters` upward as a workaround, or stay on PGS until the LDL
   path matures.
+- **Triangle mesh** is still new; bugs are being ironed out. Narrowphase
+  against triangles goes through per-shape dedicated paths rather than
+  generic hull-hull (degenerate 2-face triangle hulls produce false
+  edge-edge SAT axes), and the internal-edge / wedge reducer is
+  heuristic. Expect the occasional stuck/tunneling edge case on complex
+  meshes.
 
 
 Building

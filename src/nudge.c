@@ -51,7 +51,7 @@ World create_world(WorldParams params)
 	w->incremental_np_enabled = 1;
 	w->velocity_iters = params.velocity_iters > 0 ? params.velocity_iters : SOLVER_VELOCITY_ITERS;
 	w->position_iters = params.position_iters > 0 ? params.position_iters : SOLVER_POSITION_ITERS;
-	w->contact_hertz = params.contact_hertz > 0.0f ? params.contact_hertz : 60.0f;
+	w->contact_hertz = params.contact_hertz > 0.0f ? params.contact_hertz : 240.0f;
 	w->contact_damping_ratio = params.contact_damping_ratio > 0.0f ? params.contact_damping_ratio : 3.0f;
 	w->max_push_velocity = params.max_push_velocity > 0.0f ? params.max_push_velocity : 3.0f;
 	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 4;
