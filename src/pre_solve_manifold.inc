@@ -74,7 +74,8 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		}
 		SolverContact* s = &sc[contact_base + c];
 		s->r_a = r_a; s->r_b = r_b; s->normal = ct->normal; s->penetration = ct->penetration;
-		s->feature_id = ct->feature_id; s->eff_mass_n = eff_mass_n;
+		s->feature_id = ct->feature_id; s->rn_a = rn_a; s->rn_b = rn_b;
+		s->w_n_a = w_n_a; s->w_n_b = w_n_b; s->eff_mass_n = eff_mass_n;
 		s->softness = softness; s->bias = bias; s->bounce = bounce;
 		s->lambda_n = 0;
 	}
