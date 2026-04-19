@@ -96,30 +96,39 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	AABB* tight = (body_count <= 256) ? tight_stack : CK_ALLOC(sizeof(AABB) * body_count);
 	AABB scene_bounds = aabb_empty();
 	CK_DYNA SAP_Entry* sap = NULL;
-	// Compute tight AABBs. Skip sleeping dynamic bodies (they don't move).
 	CK_DYNA int* sleeping_bodies = NULL;
+	// Pre-grow to skip the apush realloc cascade when all bodies are awake (the common case).
+	afit(sap, body_count);
+	// Single pass: classify each body as awake-dynamic (record index), sleeping-dynamic
+	// (record for wake detection), or skip (static / dead). Defer SAP entry build to a
+	// second pass over the much smaller awake list once axis is known.
+	CK_DYNA int* awake_dynamic = NULL;
+	afit(awake_dynamic, body_count);
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
-		if (body_inv_mass(w, i) > 0.0f) {
+		float inv_m = body_inv_mass(w, i);
+		if (inv_m > 0.0f) {
 			int isl = w->body_cold[i].island_id;
 			if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) {
 				tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]); // needed for wake detection
 				apush(sleeping_bodies, i);
 				continue;
 			}
+			tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]);
+			scene_bounds = aabb_merge(scene_bounds, tight[i]);
+			apush(awake_dynamic, i);
+		} else {
+			tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]);
 		}
-		tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]);
-		if (body_inv_mass(w, i) > 0.0f) { scene_bounds = aabb_merge(scene_bounds, tight[i]); }
 	}
 	v3 extent = sub(scene_bounds.max, scene_bounds.min);
 	int axis = (extent.y > extent.x && extent.y > extent.z) ? 1 : (extent.z > extent.x) ? 2 : 0;
-	for (int i = 0; i < body_count; i++) {
-		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) continue;
-		if (body_inv_mass(w, i) == 0.0f) continue;
-		int isl = w->body_cold[i].island_id;
-		if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) continue;
+	int n_awake = asize(awake_dynamic);
+	for (int k = 0; k < n_awake; k++) {
+		int i = awake_dynamic[k];
 		apush(sap, ((SAP_Entry){ i, ((float*)&tight[i].min)[axis], ((float*)&tight[i].max)[axis] }));
 	}
+	afree(awake_dynamic);
 
 	// Sort awake dynamic bodies by chosen axis AABB min.
 	int sap_count = asize(sap);
