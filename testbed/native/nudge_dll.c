@@ -19,8 +19,11 @@ EXPORT uint64_t nudge_create_world(float gx, float gy, float gz, int solver_type
 	p.gravity = V3(gx, gy, gz);
 	p.broadphase = BROADPHASE_BVH;
 	p.solver_type = solver_type;
-	p.sub_steps = sub_steps > 0 ? sub_steps : 2;
-	p.velocity_iters = velocity_iters > 0 ? velocity_iters : 8;
+	// Pass 0 through so WorldParams defaults apply (sub_steps=4, velocity_iters=8).
+	// Earlier this forced sub_steps=2, which under-converged rigid-chain joint
+	// scenes (heavy pendulum stretches 18%, bridge planks oscillate noticeably).
+	p.sub_steps = sub_steps;
+	p.velocity_iters = velocity_iters;
 	return create_world(p).id;
 }
 

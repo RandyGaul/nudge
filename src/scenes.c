@@ -422,19 +422,14 @@ static void scene_joint_demo_setup()
 }
 
 // Scene: Mass Ratio -- tiny box at bottom, each box above is larger and heavier.
-// Exercises solver stability under significant mass ratios (1:16 here, 2x per
-// level). Past ~4x per level the scene collapses through the floor because
-// PGS at default iter budgets cannot converge contact forces large enough to
-// support the stack -- nothing upstream is wrong, it's a real convergence
-// limit of iterative LCP. A block/direct contact solver would handle 100x+
-// ratios; that's tracked in "Known issues".
+// Stress test for solver stability under extreme mass ratios.
 // ---------------------------------------------------------------------------
 static void scene_mass_ratio_setup()
 {
 	add_floor();
 
 	float sizes[] = { 0.15f, 0.25f, 0.4f, 0.55f, 0.75f };
-	float masses[] = { 1.0f, 2.0f, 4.0f, 8.0f, 16.0f };
+	float masses[] = { 0.5f, 2.0f, 8.0f, 30.0f, 100.0f };
 	v3 colors[] = {
 		V3(0.9f, 0.2f, 0.2f), V3(0.9f, 0.5f, 0.2f), V3(0.9f, 0.8f, 0.2f),
 		V3(0.4f, 0.8f, 0.3f), V3(0.3f, 0.5f, 0.9f), V3(0.5f, 0.3f, 0.9f),

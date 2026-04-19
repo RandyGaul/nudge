@@ -4655,6 +4655,418 @@ static void bounce_test_for_solver(SolverType solver, const char* name)
 	destroy_world(w);
 }
 
+static int bench_thread_count; // fwd decl (defined later in this TU)
+
+// Minimal: 1 static anchor + 1 heavy ball, connected by a single distance joint.
+// No chain, no wall, no ground. Tests if LDL velocity solve alone can hold a
+// heavy ball on one constraint.
+static void test_ldl_single_heavy_pendulum()
+{
+	int substeps_env = 0, veliters_env = 0;
+	const char* ss = getenv("NUDGE_SUBSTEPS"); if (ss) substeps_env = atoi(ss);
+	const char* vi = getenv("NUDGE_VELITERS"); if (vi) veliters_env = atoi(vi);
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .sub_steps = substeps_env > 0 ? substeps_env : 2, .velocity_iters = veliters_env > 0 ? veliters_env : 8 });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = 1;
+	wi->thread_count = bench_thread_count;
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 0.2f, 0.2f) });
+
+	Body ball = create_body(w, (BodyParams){ .position = V3(1.0f, 10.0f, 0), .rotation = quat_identity(), .mass = 60.0f });
+	body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+
+	create_distance(w, (DistanceParams){ .body_a = anchor, .body_b = ball, .rest_length = 1.0f });
+
+	float max_stretch = 0.0f;
+	int max_frame = -1;
+	for (int f = 0; f < 600; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 bp = body_get_position(w, ball);
+		float d = len(sub(bp, V3(0, 10, 0)));
+		if (d > max_stretch) { max_stretch = d; max_frame = f; }
+	}
+	printf("  [LDL single heavy pendulum] max_stretch=%.3f @ frame %d (rest_length=1.0)\n", max_stretch, max_frame);
+	destroy_world(w);
+}
+
+// Mirror of testbed BoxStack50: 50 unit boxes stacked vertically.
+// Measures how far the top box sinks below expected height -- "squish" per box.
+static void test_box_stack_squish()
+{
+	int substeps_env = 0, veliters_env = 0;
+	const char* ss = getenv("NUDGE_SUBSTEPS"); if (ss) substeps_env = atoi(ss);
+	const char* vi = getenv("NUDGE_VELITERS"); if (vi) veliters_env = atoi(vi);
+	int count = getenv("NUDGE_COUNT") ? atoi(getenv("NUDGE_COUNT")) : 50;
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .sub_steps = substeps_env, .velocity_iters = veliters_env });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->thread_count = bench_thread_count;
+
+	Body ground = create_body(w, (BodyParams){ .position = V3(0, -0.5f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, ground, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 0.5f, 20) });
+
+	Body* boxes = NULL;
+	for (int i = 0; i < count; i++) {
+		Body b = create_body(w, (BodyParams){ .position = V3(0, 0.5f + i, 0), .rotation = quat_identity(), .mass = 1.0f, .friction = 0.5f });
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+		apush(boxes, b);
+	}
+
+	int trace = getenv("NUDGE_TRACE") ? 1 : 0;
+	for (int f = 0; f < 600; f++) {
+		world_step(w, 1.0f / 60.0f);
+		if (trace && (f == 1 || f == 5 || f == 30 || f == 120 || f == 300 || f == 599)) {
+			v3 t0 = body_get_position(w, boxes[0]);
+			v3 t25 = body_get_position(w, boxes[count/2]);
+			v3 t49 = body_get_position(w, boxes[count-1]);
+			fprintf(stderr, "f=%3d box[0].y=%.3f box[%d].y=%.3f box[%d].y=%.3f  x0=%.3f x49=%.3f\n", f, t0.y, count/2, t25.y, count-1, t49.y, t0.x, t49.x);
+		}
+	}
+	// Find max Y over all boxes to see if any box is high
+	float max_y = -1e9f;
+	int max_i = -1;
+	for (int i = 0; i < count; i++) {
+		v3 p = body_get_position(w, boxes[i]);
+		if (p.y > max_y) { max_y = p.y; max_i = i; }
+	}
+	v3 top = body_get_position(w, boxes[count - 1]);
+	float expected_top = (float)count - 0.5f;
+	float squish = expected_top - top.y;
+	printf("  [box stack %d] top_y=%.3f (x=%.2f) expected=%.3f total_squish=%.3f highest_box=#%d y=%.3f sub=%d vi=%d\n",
+	       count, top.y, body_get_position(w, boxes[count-1]).x, expected_top, squish, max_i, max_y, wi->sub_steps, wi->velocity_iters);
+	afree(boxes);
+	destroy_world(w);
+}
+
+// Mirror of Pyramid15: 15-base pyramid. Expects top box center at y=14.5.
+static void test_pyramid_squish()
+{
+	int substeps_env = 0, veliters_env = 0;
+	const char* ss = getenv("NUDGE_SUBSTEPS"); if (ss) substeps_env = atoi(ss);
+	const char* vi = getenv("NUDGE_VELITERS"); if (vi) veliters_env = atoi(vi);
+	int baseSize = getenv("NUDGE_BASE") ? atoi(getenv("NUDGE_BASE")) : 15;
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .sub_steps = substeps_env, .velocity_iters = veliters_env });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->thread_count = bench_thread_count;
+
+	Body ground = create_body(w, (BodyParams){ .position = V3(0, -0.5f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, ground, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 0.5f, 20) });
+
+	Body top_box = {0};
+	for (int row = 0; row < baseSize; row++) {
+		int n = baseSize - row;
+		float startX = -(n - 1) * 0.5f;
+		for (int i = 0; i < n; i++) {
+			Body b = create_body(w, (BodyParams){ .position = V3(startX + i, 0.5f + row, 0), .rotation = quat_identity(), .mass = 1.0f, .friction = 0.6f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+			if (row == baseSize - 1) top_box = b;
+		}
+	}
+
+	for (int f = 0; f < 600; f++) world_step(w, 1.0f / 60.0f);
+	v3 top = body_get_position(w, top_box);
+	float expected_top = (float)(baseSize - 1) + 0.5f;
+	float squish = expected_top - top.y;
+	printf("  [pyramid base=%d] top_y=%.3f expected=%.3f total_squish=%.3f per_row=%.4fm sub=%d vi=%d\n",
+	       baseSize, top.y, expected_top, squish, squish / baseSize, wi->sub_steps, wi->velocity_iters);
+	destroy_world(w);
+}
+
+// Mirror of testbed SuspensionBridge scene: 10 planks + 2 static towers,
+// 2 distance joints per pair (±Z corners), 3 balls dropped on bridge.
+// Bug: bridge oscillates strangely, balls sink through planks.
+static void test_ldl_suspension_bridge()
+{
+	int substeps_env = 0, veliters_env = 0;
+	const char* ss = getenv("NUDGE_SUBSTEPS"); if (ss) substeps_env = atoi(ss);
+	const char* vi = getenv("NUDGE_VELITERS"); if (vi) veliters_env = atoi(vi);
+	int ldl = 1;
+	const char* nlldl = getenv("NUDGE_NO_LDL"); if (nlldl && nlldl[0]=='1') ldl = 0;
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .sub_steps = substeps_env > 0 ? substeps_env : 2, .velocity_iters = veliters_env > 0 ? veliters_env : 8 });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = ldl;
+	wi->thread_count = bench_thread_count;
+
+	const int nPlanks = 10;
+	const float plankHX = 0.5f, plankHY = 0.15f, plankHZ = 1.5f;
+	const float gap = 0.2f;
+	const float plankSpacing = plankHX * 2 + gap;
+	const float bridgeY = 6.0f;
+	const float towerHalfH = bridgeY * 0.5f;
+	float bridgeHalfLen = nPlanks * plankSpacing * 0.5f;
+	// Testbed had leftTowerX = -bridgeHalfLen - 0.4 but plank[0] left edge is at
+	// -bridgeHalfLen + 0.1 (since plankSpacing/2 - plankHX = 0.1). Gap between
+	// tower right and plank left is then 0.1, not 0.2 as the joint rest_length
+	// expects. Env var NUDGE_TOWER_SHIFT=1 shifts towers by extra 0.1 to match.
+	float tower_shift = getenv("NUDGE_TOWER_SHIFT") ? 0.1f : 0.0f;
+	float leftTowerX = -bridgeHalfLen - 0.4f - tower_shift;
+	float rightTowerX = +bridgeHalfLen + 0.4f + tower_shift;
+
+	Body ground = create_body(w, (BodyParams){ .position = V3(0, -0.5f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, ground, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 0.5f, 20) });
+
+	Body leftTower = create_body(w, (BodyParams){ .position = V3(leftTowerX, towerHalfH, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, leftTower, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, towerHalfH, plankHZ + 0.3f) });
+
+	Body rightTower = create_body(w, (BodyParams){ .position = V3(rightTowerX, towerHalfH, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, rightTower, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.4f, towerHalfH, plankHZ + 0.3f) });
+
+	Body planks[10];
+	for (int i = 0; i < nPlanks; i++) {
+		float x = -bridgeHalfLen + plankSpacing * (i + 0.5f);
+		planks[i] = create_body(w, (BodyParams){ .position = V3(x, bridgeY, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, planks[i], (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(plankHX, plankHY, plankHZ) });
+	}
+
+	for (int i = 0; i < nPlanks - 1; i++) {
+		create_distance(w, (DistanceParams){ .body_a = planks[i], .body_b = planks[i + 1], .local_offset_a = V3(plankHX, 0, plankHZ), .local_offset_b = V3(-plankHX, 0, plankHZ), .rest_length = gap });
+		create_distance(w, (DistanceParams){ .body_a = planks[i], .body_b = planks[i + 1], .local_offset_a = V3(plankHX, 0, -plankHZ), .local_offset_b = V3(-plankHX, 0, -plankHZ), .rest_length = gap });
+	}
+	// Tower-plank: in testbed rest_length=gap=0.2, but actual initial distance
+	// is 0.1m — joints are 50% compressed at t=0. Env var NUDGE_TOWER_REST_FIX=1
+	// uses rest_length=0 (create_distance auto-measures from initial positions).
+	float tower_rest = getenv("NUDGE_TOWER_REST_FIX") ? 0.0f : gap;
+	create_distance(w, (DistanceParams){ .body_a = leftTower, .body_b = planks[0], .local_offset_a = V3(0.4f, towerHalfH, plankHZ), .local_offset_b = V3(-plankHX, 0, plankHZ), .rest_length = tower_rest });
+	create_distance(w, (DistanceParams){ .body_a = leftTower, .body_b = planks[0], .local_offset_a = V3(0.4f, towerHalfH, -plankHZ), .local_offset_b = V3(-plankHX, 0, -plankHZ), .rest_length = tower_rest });
+	create_distance(w, (DistanceParams){ .body_a = rightTower, .body_b = planks[nPlanks - 1], .local_offset_a = V3(-0.4f, towerHalfH, plankHZ), .local_offset_b = V3(plankHX, 0, plankHZ), .rest_length = tower_rest });
+	create_distance(w, (DistanceParams){ .body_a = rightTower, .body_b = planks[nPlanks - 1], .local_offset_a = V3(-0.4f, towerHalfH, -plankHZ), .local_offset_b = V3(plankHX, 0, -plankHZ), .rest_length = tower_rest });
+
+	int n_balls = getenv("NUDGE_BALLS") ? atoi(getenv("NUDGE_BALLS")) : 3;
+	Body balls[3] = {0};
+	for (int i = 0; i < n_balls; i++) {
+		balls[i] = create_body(w, (BodyParams){ .position = V3(-2.0f + i * 2.0f, 9.0f + i * 0.3f, 0), .rotation = quat_identity(), .mass = 1.5f, .restitution = 0.05f });
+		body_add_shape(w, balls[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.4f });
+	}
+
+	// Track joint stretching and ball-plank penetration
+	float max_joint_stretch = 0.0f;
+	float max_penetration = 0.0f;
+	int max_pen_frame = -1;
+	float min_middle_y = 1e9f, max_middle_y = -1e9f;
+	float min_ball_y = 1e9f;
+	int nan_frame = -1;
+	int trace = getenv("NUDGE_TRACE") ? 1 : 0;
+	for (int f = 0; f < 600; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 mid = body_get_position(w, planks[nPlanks/2]);
+		if (!(mid.y == mid.y) && nan_frame < 0) nan_frame = f;
+		if (mid.y < min_middle_y) min_middle_y = mid.y;
+		if (mid.y > max_middle_y) max_middle_y = mid.y;
+
+		// Joint stretch: measure actual distance vs rest_length for each plank-plank joint
+		for (int i = 0; i < nPlanks - 1; i++) {
+			v3 pa = body_get_position(w, planks[i]);
+			v3 pb = body_get_position(w, planks[i + 1]);
+			quat ra = body_get_rotation(w, planks[i]);
+			quat rb = body_get_rotation(w, planks[i + 1]);
+			v3 aw_top = add(pa, rotate(ra, V3(plankHX, 0, plankHZ)));
+			v3 bw_top = add(pb, rotate(rb, V3(-plankHX, 0, plankHZ)));
+			float d_top = len(sub(bw_top, aw_top));
+			float stretch_top = fabsf(d_top - gap);
+			if (stretch_top > max_joint_stretch) max_joint_stretch = stretch_top;
+		}
+
+		// Ball penetration into planks: ball center to nearest plank Y
+		for (int bi = 0; bi < n_balls; bi++) {
+			v3 bp = body_get_position(w, balls[bi]);
+			if (bp.y < min_ball_y) min_ball_y = bp.y;
+			// Find plank directly beneath ball
+			for (int i = 0; i < nPlanks; i++) {
+				v3 pp = body_get_position(w, planks[i]);
+				if (fabsf(bp.x - pp.x) < plankHX && fabsf(bp.z - pp.z) < plankHZ) {
+					// Ball above/through this plank
+					float plank_top = pp.y + plankHY;
+					float ball_bottom = bp.y - 0.4f;
+					float pen = plank_top - ball_bottom;
+					if (pen > max_penetration) { max_penetration = pen; max_pen_frame = f; }
+				}
+			}
+		}
+
+		if (trace && f % 5 == 0 && f < 300) {
+			fprintf(stderr, "f=%3d y:", f);
+			for (int i = 0; i < nPlanks; i++) { v3 pp = body_get_position(w, planks[i]); fprintf(stderr, " %5.2f", pp.y); }
+			fprintf(stderr, " | av:");
+			for (int i = 0; i < nPlanks; i++) { v3 av = body_get_angular_velocity(w, planks[i]); fprintf(stderr, " %4.1f", len(av)); }
+			fprintf(stderr, "\n");
+		}
+	}
+	v3 final_mid = body_get_position(w, planks[nPlanks/2]);
+	printf("  [LDL bridge] ldl=%d mid_plank final_y=%.3f range=%.3f max_joint_stretch=%.4f max_pen=%.4f @ %d min_ball_y=%.3f nan=%d\n",
+	       ldl, final_mid.y, max_middle_y - min_middle_y, max_joint_stretch, max_penetration, max_pen_frame, min_ball_y, nan_frame);
+
+	destroy_world(w);
+}
+
+// Variable-length chain with heavy end body to pinpoint where LDL breaks.
+static void test_ldl_chain_sweep()
+{
+	int n_links = 8;
+	const char* nl = getenv("NUDGE_LINKS"); if (nl) n_links = atoi(nl);
+	float heavy_mass = 60.0f;
+	const char* hm = getenv("NUDGE_HEAVY"); if (hm) heavy_mass = (float)atof(hm);
+	float spacing = 1.0f;
+	const char* sp = getenv("NUDGE_SPACING"); if (sp) spacing = (float)atof(sp);
+	int steps = 600;
+	int ldl = 1;
+	const char* nlldl = getenv("NUDGE_NO_LDL"); if (nlldl && nlldl[0]=='1') ldl = 0;
+
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .sub_steps = 2, .velocity_iters = 8 });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->ldl_enabled = ldl;
+	wi->thread_count = bench_thread_count;
+
+	int with_ground = getenv("NUDGE_GROUND") ? atoi(getenv("NUDGE_GROUND")) : 0;
+	if (with_ground) {
+		Body ground = create_body(w, (BodyParams){ .position = V3(0, -0.5f, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, ground, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 0.5f, 20) });
+	}
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(0, 10, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 0.2f, 0.2f) });
+
+	Body prev = anchor;
+	Body last = anchor;
+	for (int i = 0; i < n_links; i++) {
+		int is_last = (i == n_links - 1);
+		float mass = is_last ? heavy_mass : 1.0f;
+		float radius = is_last ? 0.9f : 0.15f;
+		Body b = create_body(w, (BodyParams){
+			.position = V3((i + 1) * spacing, 10, 0),
+			.rotation = quat_identity(),
+			.mass = mass,
+		});
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = radius });
+		create_distance(w, (DistanceParams){ .body_a = prev, .body_b = b, .rest_length = spacing });
+		prev = b;
+		last = b;
+	}
+
+	float max_stretch = 0.0f;
+	int max_frame = -1;
+	float chain_reach = n_links * spacing;
+	for (int f = 0; f < steps; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 bp = body_get_position(w, last);
+		float d = len(sub(bp, V3(0, 10, 0)));
+		if (d > max_stretch) { max_stretch = d; max_frame = f; }
+	}
+	printf("  [LDL chain-sweep] links=%d heavy=%.1f reach=%.1f max_stretch=%.3f stretch_pct=%.1f%% @ frame %d ldl=%d\n",
+	       n_links, heavy_mass, chain_reach, max_stretch, 100.0f * (max_stretch - chain_reach) / chain_reach, max_frame, ldl);
+
+	destroy_world(w);
+}
+
+// Mirror of testbed PendulumChain scene: 8 light links + heavy (60x) ball,
+// anchor static at (-1, 11, 0), chain displaced 45 deg, spacing=1.0.
+// Bug: chain sometimes falls straight to the floor despite LDL enabled.
+static void test_ldl_pendulum_chain_testbed()
+{
+	const float anchorY = 11.0f;
+	const float anchorX = -1.0f;
+	const int linkCount = 8;
+	const float spacing = 1.0f;
+	const float launchAngle = -0.8f;
+
+	int substeps_env = 0, veliters_env = 0, positers_env = 0;
+	const char* ss = getenv("NUDGE_SUBSTEPS"); if (ss) substeps_env = atoi(ss);
+	const char* vi = getenv("NUDGE_VELITERS"); if (vi) veliters_env = atoi(vi);
+	const char* pi = getenv("NUDGE_POSITERS"); if (pi) positers_env = atoi(pi);
+	World w = create_world((WorldParams){ .gravity = V3(0, -9.81f, 0), .sub_steps = substeps_env > 0 ? substeps_env : 2, .velocity_iters = veliters_env > 0 ? veliters_env : 8, .position_iters = positers_env > 0 ? positers_env : 4 });
+	WorldInternal* wi = (WorldInternal*)w.id;
+	const char* no_ldl = getenv("NUDGE_NO_LDL");
+	wi->ldl_enabled = (no_ldl && no_ldl[0] == '1') ? 0 : 1;
+	wi->thread_count = bench_thread_count;
+
+	int with_ground = getenv("NUDGE_GROUND") ? atoi(getenv("NUDGE_GROUND")) : 1;
+	if (with_ground) {
+		Body ground = create_body(w, (BodyParams){ .position = V3(0, -0.5f, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, ground, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 0.5f, 20) });
+	}
+
+	Body anchor = create_body(w, (BodyParams){ .position = V3(anchorX, anchorY, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, anchor, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.3f, 0.3f, 0.3f) });
+
+	Body links[8];
+	for (int i = 0; i < linkCount; i++) {
+		float t = (i + 1) * spacing;
+		links[i] = create_body(w, (BodyParams){
+			.position = V3(anchorX + t * sinf(launchAngle), anchorY - t * cosf(launchAngle), 0),
+			.rotation = quat_identity(),
+			.mass = 1.0f,
+		});
+		body_add_shape(w, links[i], (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.22f });
+	}
+
+	float tBall = (linkCount + 1) * spacing;
+	Body ball = create_body(w, (BodyParams){
+		.position = V3(anchorX + tBall * sinf(launchAngle), anchorY - tBall * cosf(launchAngle), 0),
+		.rotation = quat_identity(),
+		.mass = 60.0f,
+	});
+	body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.9f });
+
+	create_distance(w, (DistanceParams){ .body_a = anchor, .body_b = links[0], .rest_length = spacing });
+	for (int i = 0; i < linkCount - 1; i++)
+		create_distance(w, (DistanceParams){ .body_a = links[i], .body_b = links[i + 1], .rest_length = spacing });
+	create_distance(w, (DistanceParams){ .body_a = links[linkCount - 1], .body_b = ball, .rest_length = spacing });
+
+	int wall_mode = getenv("NUDGE_WALL") ? atoi(getenv("NUDGE_WALL")) : 1;
+	// 0 = no wall, 1 = dynamic box wall (default testbed), 2 = single static wall
+	if (wall_mode == 1) {
+		const float wallX = 6.0f;
+		for (int r = 0; r < 8; r++)
+			for (int cz = 0; cz < 3; cz++)
+				for (int cy = 0; cy < 2; cy++) {
+					Body wb = create_body(w, (BodyParams){
+						.position = V3(wallX + cy * 1.0f, 0.5f + r, (cz - 1) * 1.0f),
+						.rotation = quat_identity(),
+						.mass = 1.0f,
+					});
+					body_add_shape(w, wb, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+				}
+	} else if (wall_mode == 2) {
+		Body sw = create_body(w, (BodyParams){ .position = V3(6.5f, 4.0f, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, sw, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 4.0f, 3.0f) });
+	} else if (wall_mode == 3) {
+		Body sw = create_body(w, (BodyParams){ .position = V3(6.0f, 0.5f, 0), .rotation = quat_identity(), .mass = 1.0f });
+		body_add_shape(w, sw, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+	} else if (wall_mode == 4) {
+		// Vertical column of dynamic boxes (dynamic stack) -- shares dynamic-stack topology but no chain-like structure
+		for (int r = 0; r < 8; r++) {
+			Body b = create_body(w, (BodyParams){ .position = V3(6.0f, 0.5f + r, 0), .rotation = quat_identity(), .mass = 1.0f });
+			body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+		}
+	}
+
+	float min_ball_y = 1e9f, max_stretch = 0.0f;
+	int max_stretch_frame = -1;
+	int nan_frame = -1;
+	for (int f = 0; f < 600; f++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 bp = body_get_position(w, ball);
+		if (!(bp.y == bp.y) && nan_frame < 0) nan_frame = f;
+		if (bp.y < min_ball_y) min_ball_y = bp.y;
+		float stretch = len(sub(bp, V3(anchorX, anchorY, 0)));
+		if (stretch > max_stretch) { max_stretch = stretch; max_stretch_frame = f; }
+	}
+
+	v3 final_ball = body_get_position(w, ball);
+	float anchor_ball_dist = len(sub(final_ball, V3(anchorX, anchorY, 0)));
+	printf("  [LDL pendulum testbed] min_y=%.3f final_y=%.3f final_d=%.3f max_stretch=%.3f @ frame %d nan_frame=%d\n", min_ball_y, final_ball.y, anchor_ball_dist, max_stretch, max_stretch_frame, nan_frame);
+
+	TEST_BEGIN("LDL pendulum (testbed): ball stays within chain reach");
+	// Chain has 10 spacings * 1.0 = 10m total reach. If chain holds, ball never farther than ~10m from anchor.
+	// If chain fails, ball free-falls and anchor_ball_dist explodes.
+	TEST_ASSERT(anchor_ball_dist < 15.0f);
+	TEST_ASSERT(nan_frame < 0);
+
+	destroy_world(w);
+}
+
 // LDL heavy chain: 10-link chain with 100:1 mass ratio on the last link.
 // With LDL enabled, joint gaps should be much tighter than without.
 static void test_ldl_heavy_chain()

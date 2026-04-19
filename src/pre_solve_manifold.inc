@@ -42,12 +42,23 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		float softness = 0.0f, bias = 0.0f;
 		if (soft_val > 0.0f) {
 			float K = eff_mass_n > 0.0f ? 1.0f / eff_mass_n : 0.0f;
-			// Bepu-style softened effective mass: 1 / (K * (1 + softness)).
-			// The softness term is extra = 1/(w^2*dt^2 + w*dr*dt).
-			// effectiveMassCFMScale = 1/(1+extra), so eff_mass = (1/(1+extra)) / K.
-			// softnessImpulseScale = extra/(1+extra) = extra * effectiveMassCFMScale.
-			float denom = 1.0f + soft_val;
-			softness = soft_val / denom;           // softnessImpulseScale
+			// Bepu-style softened constraint, mass-aware. With extraDt = soft_val
+			// (= 1/den) the constraint has:
+			//   softness_impulse_scale_bepu = K / (K + den)     (dimensionless, <= 1)
+			//   eff_mass_softened           = den / (K*(K+den))
+			// Our PGS update has the form
+			//     delta_lam = eff_mass * (-(vn+bias) - softness * lam_old)
+			// i.e. the softness*lam_old term is multiplied by eff_mass. Matching
+			// Bepu's decay factor requires eff_mass * softness == softness_bepu,
+			// so softness = softness_bepu / eff_mass = K * Ks (Ks = K*soft_val).
+			// Product eff_mass*softness = Ks/(1+Ks) <= 1 — stable for all masses.
+			// Prior formulation used softness = Ks/(1+Ks) directly, making the
+			// product Ks * Ks/(1+Ks)^2 / K = soft_val/(K*(1+soft_val)^2). For heavy
+			// bodies this blew up to ~5.5 and left deep-pen contacts oscillating
+			// between full and zero lambda every PGS iteration.
+			float Ks = K * soft_val;
+			float denom = 1.0f + Ks;
+			softness = K * Ks / denom;
 			eff_mass_n = (K * denom) > 1e-12f ? 1.0f / (K * denom) : 0.0f;
 			float pen = ct->penetration - SOLVER_SLOP;
 			bias = pen > 0.0f ? -bias_rate_val * pen : 0.0f;

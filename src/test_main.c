@@ -334,6 +334,12 @@ int main(int argc, char* argv[])
 			else if (strcmp(argv[i], "lift-drop") == 0) test_ldl_lift_and_drop();
 			else if (strcmp(argv[i], "heavy-chain") == 0) test_ldl_heavy_chain();
 			else if (strcmp(argv[i], "mouse-yank") == 0) test_ldl_mouse_yank_chain();
+			else if (strcmp(argv[i], "pendulum-testbed") == 0) test_ldl_pendulum_chain_testbed();
+			else if (strcmp(argv[i], "single-heavy") == 0) test_ldl_single_heavy_pendulum();
+			else if (strcmp(argv[i], "chain-sweep") == 0) test_ldl_chain_sweep();
+			else if (strcmp(argv[i], "bridge") == 0) test_ldl_suspension_bridge();
+			else if (strcmp(argv[i], "stack") == 0) test_box_stack_squish();
+			else if (strcmp(argv[i], "pyramid-squish") == 0) test_pyramid_squish();
 			else printf("unknown test: %s\n", argv[i]);
 		}
 		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
