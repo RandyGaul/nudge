@@ -133,21 +133,11 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 		float max_val = sap[i].max_val;
 		int a = sap[i].body_idx;
 		AABB ta = tight[a];
-		// Hoist a-side filter data: cold loads from body_cold[a] are constant
-		// across the inner loop, but the original filter_pair_skip(w,a,b) call
-		// re-loaded them per pair. For dense piles inner-iter avg is ~10, so
-		// hoisting drops ~30k cold loads per frame on the 10k-box scene.
-		BodyCold* ca_cold = &w->body_cold[a];
-		uint32_t a_compound = ca_cold->compound_id, a_group = ca_cold->collision_group, a_mask = ca_cold->collision_mask;
 		for (int j = i + 1; j < sap_count && sap[j].min_val <= max_val; j++) {
 			int b = sap[j].body_idx;
 			if (!aabb_overlaps(ta, tight[b])) continue;
 			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
-			BodyCold* cb_cold = &w->body_cold[b];
-			uint32_t b_compound = cb_cold->compound_id;
-			if (a_compound != 0 && a_compound == b_compound) continue;
-			uint32_t b_group = cb_cold->collision_group, b_mask = cb_cold->collision_mask;
-			if (((a_group & b_mask) == 0) || ((b_group & a_mask) == 0)) continue;
+			if (filter_pair_skip(w, a, b)) continue;
 			apush(dd_pairs, ((BroadPair){ a, b }));
 		}
 	}
@@ -157,17 +147,11 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	for (int i = 0; i < sap_count; i++) {
 		int a = sap[i].body_idx;
 		AABB ta = tight[a];
-		BodyCold* ca_cold = &w->body_cold[a];
-		uint32_t a_compound = ca_cold->compound_id, a_group = ca_cold->collision_group, a_mask = ca_cold->collision_mask;
 		for (int si = 0; si < n_sleeping; si++) {
 			int b = sleeping_bodies[si];
 			if (!aabb_overlaps(ta, tight[b])) continue;
 			if (jointed_pair_skip(w->joint_pairs, a, b)) continue;
-			BodyCold* cb_cold = &w->body_cold[b];
-			uint32_t b_compound = cb_cold->compound_id;
-			if (a_compound != 0 && a_compound == b_compound) continue;
-			uint32_t b_group = cb_cold->collision_group, b_mask = cb_cold->collision_mask;
-			if (((a_group & b_mask) == 0) || ((b_group & a_mask) == 0)) continue;
+			if (filter_pair_skip(w, a, b)) continue;
 			apush(dd_pairs, ((BroadPair){ a, b }));
 		}
 	}
