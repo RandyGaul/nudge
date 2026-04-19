@@ -598,11 +598,9 @@ typedef struct WorldInternal
 
 typedef struct SolverContact
 {
-	// --- Hot fields for patch-mode PGS inner loop (first 92 bytes = 2 cache lines) ---
+	// --- Hot fields for patch-mode PGS inner loop ---
 	v3 r_a;              // contact offset from body A
 	v3 r_b;              // contact offset from body B
-	v3 rn_a, rn_b;       // precomputed cross(r, normal)
-	v3 w_n_a, w_n_b;     // precomputed I_w * cross(r, normal) — angular impulse direction
 	float eff_mass_n;    // 1/K for normal row
 	float bias;          // velocity bias for penetration recovery
 	float bounce;        // restitution velocity bias
