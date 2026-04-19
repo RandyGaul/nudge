@@ -669,6 +669,7 @@ static void collide_box_mesh_emit(WorldInternal* w, int body_a, int body_b, Box 
 
 // -----------------------------------------------------------------------------
 // Hull vs mesh.
+static int point_in_triangle_2d(v3 p, v3 v0, v3 v1, v3 v2, v3 n);
 // Dedicated hull-vs-triangle narrowphase. Replaces collide_hull_hull on a
 // degenerate (zero-volume, 2-face) triangle-as-hull for the mesh path. The
 // generic hull-hull SAT produces false-positive edge-edge axes because the
