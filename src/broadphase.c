@@ -84,39 +84,32 @@ int bp_frame_count;
 
 static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 {
+	double t0 = perf_now();
+	bvh_refit(w->bvh_dynamic, w);
+	bp_refit_acc += perf_now() - t0;
+
+	// Build tight AABBs + sweep-and-prune entries for awake dynamic bodies only.
+	// Sleeping bodies live in bvh_sleeping and are excluded from SAP.
+	double t1 = perf_now();
 	int body_count = asize(w->body_hot);
 	AABB tight_stack[256];
 	AABB* tight = (body_count <= 256) ? tight_stack : CK_ALLOC(sizeof(AABB) * body_count);
-
-	// Refit fills tight[bi] for each non-sleeping leaf it visits. Skips body_aabb
-	// recompute in the precomp pass below for awake-dynamic bodies (the dominant
-	// case in dense piles).
-	double t0 = perf_now();
-	bvh_refit(w->bvh_dynamic, w, tight);
-	bp_refit_acc += perf_now() - t0;
-
-	// Build SAP entries for awake dynamic bodies. Sleeping/static bodies still
-	// need their tight box (wake detection, static-vs-dynamic cross test) but
-	// refit didn't touch them, so compute on demand here.
-	double t1 = perf_now();
 	AABB scene_bounds = aabb_empty();
 	CK_DYNA SAP_Entry* sap = NULL;
+	// Compute tight AABBs. Skip sleeping dynamic bodies (they don't move).
 	CK_DYNA int* sleeping_bodies = NULL;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
 		if (body_inv_mass(w, i) > 0.0f) {
 			int isl = w->body_cold[i].island_id;
 			if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) {
-				tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]); // wake detection
+				tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]); // needed for wake detection
 				apush(sleeping_bodies, i);
 				continue;
 			}
-			// awake dynamic: tight[i] was filled by refit above
-			scene_bounds = aabb_merge(scene_bounds, tight[i]);
-		} else {
-			// static: not in bvh_dynamic, refit didn't fill
-			tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]);
 		}
+		tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]);
+		if (body_inv_mass(w, i) > 0.0f) { scene_bounds = aabb_merge(scene_bounds, tight[i]); }
 	}
 	v3 extent = sub(scene_bounds.max, scene_bounds.min);
 	int axis = (extent.y > extent.x && extent.y > extent.z) ? 1 : (extent.z > extent.x) ? 2 : 0;

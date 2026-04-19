@@ -51,7 +51,7 @@ World create_world(WorldParams params)
 	w->incremental_np_enabled = 1;
 	w->velocity_iters = params.velocity_iters > 0 ? params.velocity_iters : SOLVER_VELOCITY_ITERS;
 	w->position_iters = params.position_iters > 0 ? params.position_iters : SOLVER_POSITION_ITERS;
-	w->contact_hertz = params.contact_hertz > 0.0f ? params.contact_hertz : 240.0f;
+	w->contact_hertz = params.contact_hertz > 0.0f ? params.contact_hertz : 60.0f;
 	w->contact_damping_ratio = params.contact_damping_ratio > 0.0f ? params.contact_damping_ratio : 3.0f;
 	w->max_push_velocity = params.max_push_velocity > 0.0f ? params.max_push_velocity : 3.0f;
 	w->sub_steps = params.sub_steps > 0 ? params.sub_steps : 4;
@@ -1165,7 +1165,7 @@ void world_step(World world, float dt)
 	// Post-step BVH refit: update leaves after all substeps so they're correct
 	// for next frame's broadphase. Without this, bodies accelerated by the solver
 	// can escape their fat AABBs between frames.
-	bvh_refit(w->bvh_dynamic, w, NULL);
+	bvh_refit(w->bvh_dynamic, w);
 
 	double t4 = perf_now();
 	if (w->sleep_enabled) {
@@ -1292,17 +1292,17 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	float lr_m2 = params.local_rot.x*params.local_rot.x + params.local_rot.y*params.local_rot.y + params.local_rot.z*params.local_rot.z + params.local_rot.w*params.local_rot.w;
 	s.local_rot = (lr_m2 < 0.5f) ? quat_identity() : params.local_rot;
 	switch (params.type) {
-	case SHAPE_SPHERE:      s.sphere.radius = params.sphere.radius; break;
-	case SHAPE_CAPSULE:     s.capsule.half_height = params.capsule.half_height;
-	                        s.capsule.radius = params.capsule.radius; break;
-	case SHAPE_BOX:         s.box.half_extents = params.box.half_extents; break;
-	case SHAPE_HULL:        s.hull.hull = params.hull.hull;
-	                        s.hull.scale = params.hull.scale; break;
-	case SHAPE_CYLINDER:    s.cylinder.half_height = params.cylinder.half_height;
-	                        s.cylinder.radius = params.cylinder.radius; break;
-	case SHAPE_MESH:        assert(w->body_hot[idx].inv_mass == 0.0f && "SHAPE_MESH requires mass=0 (static body)");
-	                        assert(params.mesh.mesh && "SHAPE_MESH.mesh is NULL");
-	                        s.mesh.mesh = params.mesh.mesh; break;
+	case SHAPE_SPHERE:  s.sphere.radius = params.sphere.radius; break;
+	case SHAPE_CAPSULE: s.capsule.half_height = params.capsule.half_height;
+	                    s.capsule.radius = params.capsule.radius; break;
+	case SHAPE_BOX:     s.box.half_extents = params.box.half_extents; break;
+	case SHAPE_HULL:    s.hull.hull = params.hull.hull;
+	                    s.hull.scale = params.hull.scale; break;
+	case SHAPE_CYLINDER: s.cylinder.half_height = params.cylinder.half_height;
+	                     s.cylinder.radius = params.cylinder.radius; break;
+	case SHAPE_MESH:    assert(w->body_hot[idx].inv_mass == 0.0f && "SHAPE_MESH requires mass=0 (static body)");
+	                    assert(params.mesh.mesh && "SHAPE_MESH.mesh is NULL");
+	                    s.mesh.mesh = params.mesh.mesh; break;
 	case SHAPE_HEIGHTFIELD: assert(w->body_hot[idx].inv_mass == 0.0f && "SHAPE_HEIGHTFIELD requires mass=0 (static body)");
 	                        assert(params.heightfield.hf && "SHAPE_HEIGHTFIELD.hf is NULL");
 	                        s.heightfield.hf = params.heightfield.hf; break;
