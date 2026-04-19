@@ -11823,7 +11823,7 @@ static void test_bvh_empty_trees()
 
 	TEST_BEGIN("bvh refit empty tree");
 	// Should not crash
-	bvh_refit(&t, NULL); // NULL world is fine since no leaves to visit
+	bvh_refit(&t, NULL, NULL); // NULL world is fine since no leaves to visit
 
 	bvh_free(&t);
 }

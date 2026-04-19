@@ -752,6 +752,11 @@ typedef struct BVHRefit
 	BVHMeta* dst_meta;
 	BVH_Tree* tree;
 	WorldInternal* world;
+	// Optional: per-body tight AABB output. If non-NULL, refit writes the
+	// body's computed tight box (without margin expansion) into tight_out[bi]
+	// for each non-sleeping leaf it visits. The broadphase precomp pass then
+	// avoids recomputing body_aabb for those bodies.
+	AABB* tight_out;
 } BVHRefit;
 
 // Refit+reorder a single child. Returns updated child for parent to store.
@@ -790,7 +795,9 @@ static BVH_Child bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int 
 		dst->a = sa;
 		if (!bvh_body_sleeping(r->world, bi)) {
 			all_sleeping = 0;
-			AABB tight = aabb_expand(body_aabb(&r->world->body_state[bi], &r->world->body_cold[bi]), BVH_AABB_MARGIN);
+			AABB raw = body_aabb(&r->world->body_state[bi], &r->world->body_cold[bi]);
+			if (r->tight_out) r->tight_out[bi] = raw;
+			AABB tight = aabb_expand(raw, BVH_AABB_MARGIN);
 			v3 fmin = r->tree->leaves[li].fat_min, fmax = r->tree->leaves[li].fat_max;
 			if (!(tight.min.x >= fmin.x && tight.min.y >= fmin.y && tight.min.z >= fmin.z && tight.max.x <= fmax.x && tight.max.y <= fmax.y && tight.max.z <= fmax.z)) {
 				AABB fat = aabb_expand(tight, BVH_FAT_MARGIN);
@@ -819,7 +826,9 @@ static BVH_Child bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int 
 		dst->b = sb;
 		if (!bvh_body_sleeping(r->world, bi)) {
 			all_sleeping = 0;
-			AABB tight = aabb_expand(body_aabb(&r->world->body_state[bi], &r->world->body_cold[bi]), BVH_AABB_MARGIN);
+			AABB raw = body_aabb(&r->world->body_state[bi], &r->world->body_cold[bi]);
+			if (r->tight_out) r->tight_out[bi] = raw;
+			AABB tight = aabb_expand(raw, BVH_AABB_MARGIN);
 			v3 fmin = r->tree->leaves[li].fat_min, fmax = r->tree->leaves[li].fat_max;
 			if (!(tight.min.x >= fmin.x && tight.min.y >= fmin.y && tight.min.z >= fmin.z && tight.max.x <= fmax.x && tight.max.y <= fmax.y && tight.max.z <= fmax.z)) {
 				AABB fat = aabb_expand(tight, BVH_FAT_MARGIN);
@@ -851,7 +860,7 @@ static BVH_Child bvh_fused_recurse(BVHRefit* r, int src_ni, int target_idx, int 
 	return result;
 }
 
-static void bvh_refit(BVH_Tree* t, WorldInternal* w)
+static void bvh_refit(BVH_Tree* t, WorldInternal* w, AABB* tight_out)
 {
 	if (t->root == -1) return;
 
@@ -860,7 +869,7 @@ static void bvh_refit(BVH_Tree* t, WorldInternal* w)
 	BVHNode* new_nodes = (cap <= 256) ? stack_nodes : CK_ALLOC(sizeof(BVHNode) * cap);
 	BVHMeta* new_meta = (cap <= 256) ? stack_meta : CK_ALLOC(sizeof(BVHMeta) * cap);
 
-	BVHRefit r = { t->nodes, t->meta, new_nodes, new_meta, t, w };
+	BVHRefit r = { t->nodes, t->meta, new_nodes, new_meta, t, w, tight_out };
 	int changed = 0;
 	bvh_fused_recurse(&r, t->root, 0, -1, 0, &changed);
 
