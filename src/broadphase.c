@@ -84,19 +84,16 @@ int bp_frame_count;
 
 static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 {
-	double t0 = perf_now();
-	bvh_refit(w->bvh_dynamic, w);
-	bp_refit_acc += perf_now() - t0;
-
-	// Build tight AABBs + sweep-and-prune entries for awake dynamic bodies only.
-	// Sleeping bodies live in bvh_sleeping and are excluded from SAP.
+	// Compute tight AABBs FIRST in linear body order (cache-friendly stream),
+	// then feed the result to refit (which would otherwise random-access
+	// body_state via leaves in DFS order). Same total work, fewer cache misses
+	// in refit's hot per-leaf path.
 	double t1 = perf_now();
 	int body_count = asize(w->body_hot);
 	AABB tight_stack[256];
 	AABB* tight = (body_count <= 256) ? tight_stack : CK_ALLOC(sizeof(AABB) * body_count);
 	AABB scene_bounds = aabb_empty();
 	CK_DYNA SAP_Entry* sap = NULL;
-	// Compute tight AABBs. Skip sleeping dynamic bodies (they don't move).
 	CK_DYNA int* sleeping_bodies = NULL;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
@@ -125,6 +122,11 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	int sap_count = asize(sap);
 	if (sap_count > 1) sap_insertion_sort(sap, sap_count);
 	bp_precomp_acc += perf_now() - t1;
+
+	// Refit AFTER precomp so it can read tight[] instead of recomputing.
+	double t0 = perf_now();
+	bvh_refit(w->bvh_dynamic, w, tight);
+	bp_refit_acc += perf_now() - t0;
 
 	// Sweep: test overlapping awake-awake pairs.
 	double t2 = perf_now();

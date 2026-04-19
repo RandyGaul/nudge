@@ -1165,7 +1165,7 @@ void world_step(World world, float dt)
 	// Post-step BVH refit: update leaves after all substeps so they're correct
 	// for next frame's broadphase. Without this, bodies accelerated by the solver
 	// can escape their fat AABBs between frames.
-	bvh_refit(w->bvh_dynamic, w);
+	bvh_refit(w->bvh_dynamic, w, NULL);
 
 	double t4 = perf_now();
 	if (w->sleep_enabled) {
