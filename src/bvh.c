@@ -159,12 +159,6 @@ typedef struct BVH_Tree
 	CK_DYNA int* node_free;
 	int root; // -1 = empty
 	int refine_cursor; // leaf-space position for incremental refinement
-	// Persistent scratch for bvh_refit's DFS-reorder. Sized to current node
-	// capacity, grown via realloc when the tree grows. Avoids the per-frame
-	// 1.5MB malloc/free cycle on dense scenes.
-	BVHNode* refit_scratch_nodes;
-	BVHMeta* refit_scratch_meta;
-	int refit_scratch_cap;
 } BVH_Tree;
 
 typedef struct BroadPair { int a, b; } BroadPair;
@@ -177,7 +171,7 @@ typedef struct BroadPair { int a, b; } BroadPair;
 
 static void bvh_init(BVH_Tree* t) { memset(t, 0, sizeof(*t)); t->root = -1; }
 
-static void bvh_free(BVH_Tree* t) { afree(t->nodes); afree(t->meta); afree(t->leaves); afree(t->node_free); if (t->refit_scratch_nodes) CK_FREE(t->refit_scratch_nodes); if (t->refit_scratch_meta) CK_FREE(t->refit_scratch_meta); }
+static void bvh_free(BVH_Tree* t) { afree(t->nodes); afree(t->meta); afree(t->leaves); afree(t->node_free); }
 
 // Alloc/free with freelist.
 static int bvh_alloc_node(BVH_Tree* t)
@@ -863,24 +857,8 @@ static void bvh_refit(BVH_Tree* t, WorldInternal* w)
 
 	int cap = asize(t->nodes);
 	BVHNode stack_nodes[256]; BVHMeta stack_meta[256];
-	BVHNode* new_nodes;
-	BVHMeta* new_meta;
-	if (cap <= 256) {
-		new_nodes = stack_nodes;
-		new_meta = stack_meta;
-	} else {
-		// Grow persistent scratch only when the tree exceeds prior capacity.
-		// Steady-state refits hit this with no allocation work at all.
-		if (cap > t->refit_scratch_cap) {
-			if (t->refit_scratch_nodes) CK_FREE(t->refit_scratch_nodes);
-			if (t->refit_scratch_meta) CK_FREE(t->refit_scratch_meta);
-			t->refit_scratch_nodes = (BVHNode*)CK_ALLOC(sizeof(BVHNode) * cap);
-			t->refit_scratch_meta = (BVHMeta*)CK_ALLOC(sizeof(BVHMeta) * cap);
-			t->refit_scratch_cap = cap;
-		}
-		new_nodes = t->refit_scratch_nodes;
-		new_meta = t->refit_scratch_meta;
-	}
+	BVHNode* new_nodes = (cap <= 256) ? stack_nodes : CK_ALLOC(sizeof(BVHNode) * cap);
+	BVHMeta* new_meta = (cap <= 256) ? stack_meta : CK_ALLOC(sizeof(BVHMeta) * cap);
 
 	BVHRefit r = { t->nodes, t->meta, new_nodes, new_meta, t, w };
 	int changed = 0;
@@ -895,6 +873,9 @@ static void bvh_refit(BVH_Tree* t, WorldInternal* w)
 	memcpy(t->meta, new_meta, live_count * sizeof(BVHMeta));
 	aclear(t->node_free);
 	t->root = 0;
+
+	if (new_nodes != stack_nodes) CK_FREE(new_nodes);
+	if (new_meta != stack_meta) CK_FREE(new_meta);
 }
 
 // -----------------------------------------------------------------------------
