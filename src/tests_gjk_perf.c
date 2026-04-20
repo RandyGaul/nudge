@@ -427,9 +427,8 @@ static void test_gjk_known_distances()
 	TEST_BEGIN("hull-hull (box via hull)");
 	{
 		const Hull* ub = hull_unit_box();
-		v3 s1[8], s2[8]; float so1[24], so2[24];
-		GJK_Shape ga = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s1, so1);
-		GJK_Shape gb = gjk_hull_scaled(ub, V3(4,0,0), id, V3(1,1,1), s2, so2);
+		GJK_Shape ga = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1));
+		GJK_Shape gb = gjk_hull_scaled(ub, V3(4,0,0), id, V3(1,1,1));
 		r = gjk_distance_v(ga, gb, NULL);
 		TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
 	}
@@ -439,7 +438,7 @@ static void test_gjk_known_distances()
 		const Hull* ub = hull_unit_box();
 		v3 s[8]; float so[24];
 		GJK_Shape pt = gjk_sphere(V3(2,2,2), 0);
-		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s, so);
+		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1));
 		r = gjk_distance_v(pt, bx, NULL);
 		TEST_ASSERT_FLOAT(r.distance, sqrtf(3.0f), 0.02f);
 	}
@@ -449,7 +448,7 @@ static void test_gjk_known_distances()
 		const Hull* ub = hull_unit_box();
 		v3 s[8]; float so[24];
 		GJK_Shape pt = gjk_sphere(V3(1.5f,1.5f,0), 0);
-		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s, so);
+		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1));
 		r = gjk_distance_v(pt, bx, NULL);
 		TEST_ASSERT_FLOAT(r.distance, sqrtf(0.5f), 0.02f);
 	}
@@ -459,7 +458,7 @@ static void test_gjk_known_distances()
 		const Hull* ub = hull_unit_box();
 		v3 s[8]; float so[24];
 		GJK_Shape pt = gjk_sphere(V3(3,0,0), 0);
-		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1), s, so);
+		GJK_Shape bx = gjk_hull_scaled(ub, V3(0,0,0), id, V3(1,1,1));
 		r = gjk_distance_v(pt, bx, NULL);
 		TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
 	}
@@ -511,9 +510,8 @@ static void test_gjk_bf_box_box()
 		BruteResult ref = bf_hull_hull(wa, ub, wb, ub);
 
 		// gjk_hull path
-		v3 s1[8], s2[8]; float so1[24], so2[24];
-		GJK_Shape ga = gjk_hull_scaled(ub, posA, rA, heA, s1, so1);
-		GJK_Shape gb = gjk_hull_scaled(ub, posB, rB, heB, s2, so2);
+		GJK_Shape ga = gjk_hull_scaled(ub, posA, rA, heA);
+		GJK_Shape gb = gjk_hull_scaled(ub, posB, rB, heB);
 		double err = fabs((double)gjk_distance_v(ga, gb, NULL).distance - ref.distance);
 		if (err > max_err_hull) max_err_hull = err;
 
@@ -548,7 +546,7 @@ static void test_gjk_bf_segment_hull()
 
 		v3 sb[8]; float sosb[24];
 		GJK_Shape sa = gjk_capsule(segP, segQ, 0);
-		GJK_Shape sbx = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb, sosb);
+		GJK_Shape sbx = gjk_hull_scaled(ub, boxPos, rB, boxHE);
 		double err = fabs((double)gjk_distance_v(sa, sbx, NULL).distance - ref.distance);
 		if (err > max_err) max_err = err;
 	}
@@ -580,7 +578,7 @@ static void test_gjk_bf_capsule_box()
 
 		v3 sb[8]; float sosb[24];
 		GJK_Shape sa = gjk_capsule(capP, capQ, capR);
-		GJK_Shape sbx = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb, sosb);
+		GJK_Shape sbx = gjk_hull_scaled(ub, boxPos, rB, boxHE);
 		double err = fabs((double)gjk_distance_v(sa, sbx, NULL).distance - bf_dist);
 		if (err > max_err) max_err = err;
 
@@ -616,7 +614,7 @@ static void test_gjk_bf_sphere_box()
 
 		GJK_Shape sa = gjk_sphere(sphC, sphR);
 		v3 sb[8]; float sosb[24];
-		GJK_Shape sbh = gjk_hull_scaled(ub, boxPos, rB, boxHE, sb, sosb);
+		GJK_Shape sbh = gjk_hull_scaled(ub, boxPos, rB, boxHE);
 		double err = fabs((double)gjk_distance_v(sa, sbh, NULL).distance - bf_dist);
 		if (err > max_err) max_err = err;
 
@@ -938,8 +936,8 @@ static PerfRow perf_hull_hull(int n_target)
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		PerfMotion* mc = &m[c];
 		for (int i = 0; i < n_iters; i++) {
-			GJK_Shape ga = gjk_hull_scaled(ha, mc->posA, mc->rotA, mc->heA, NULL, NULL);
-			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB, NULL, NULL);
+			GJK_Shape ga = gjk_hull_scaled(ha, mc->posA, mc->rotA, mc->heA);
+			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB);
 			GJK_Result r = gjk_distance(&ga, &gb, &cache[c]);
 			sum += r.distance; iters += r.iterations;
 			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
@@ -977,9 +975,8 @@ static void test_gjk_bf_hull_hull(int n_target)
 		bf_hull_world_verts(wb, hb, heB, dv3_from_v3(posB), dquat_from_quat(rB));
 		BruteResult ref = bf_hull_hull(wa, ha, wb, hb);
 
-		v3 sa[1024], sb[1024]; float soa[3072], sob[3072];
-		GJK_Shape ga = gjk_hull_scaled(ha, posA, rA, heA, sa, soa);
-		GJK_Shape gb = gjk_hull_scaled(hb, posB, rB, heB, sb, sob);
+		GJK_Shape ga = gjk_hull_scaled(ha, posA, rA, heA);
+		GJK_Shape gb = gjk_hull_scaled(hb, posB, rB, heB);
 		double err = fabs((double)gjk_distance_v(ga, gb, NULL).distance - ref.distance);
 		if (err > max_err) max_err = err;
 
@@ -1018,7 +1015,7 @@ static PerfRow perf_sphere_hull(int n_target)
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		PerfMotion* mc = &m[c];
 		for (int i = 0; i < n_iters; i++) {
-			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB, NULL, NULL);
+			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB);
 			GJK_Shape a = gjk_sphere(mc->posA, mc->radiusA);
 			GJK_Result r = gjk_distance(&a, &gb, &cache[c]);
 			sum += r.distance; iters += r.iterations;
@@ -1064,7 +1061,7 @@ static PerfRow perf_capsule_hull(int n_target)
 			v3 cap_dir = quat_rotate(mc->rotA, V3(0,1,0));
 			v3 cap_p = sub(mc->posA, scale(cap_dir, mc->heA.y));
 			v3 cap_q = add(mc->posA, scale(cap_dir, mc->heA.y));
-			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB, NULL, NULL);
+			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB);
 			GJK_Shape a = gjk_capsule(cap_p, cap_q, mc->radiusA);
 			GJK_Result r = gjk_distance(&a, &gb, &cache[c]);
 			sum += r.distance; iters += r.iterations;
@@ -1107,7 +1104,7 @@ static PerfRow perf_box_hull(int n_target)
 	for (int c = 0; c < PERF_CONFIGS; c++) {
 		PerfMotion* mc = &m[c];
 		for (int i = 0; i < n_iters; i++) {
-			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB, NULL, NULL);
+			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB);
 			GJK_Shape a = gjk_box(mc->posA, mc->rotA, mc->heA);
 			GJK_Result r = gjk_distance(&a, &gb, &cache[c]);
 			sum += r.distance; iters += r.iterations;

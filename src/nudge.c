@@ -705,7 +705,6 @@ void world_step(World world, float dt)
 	if (asize(manifolds) > 0) {
 		islands_bucket_manifolds(w, manifolds, asize(manifolds), &w->worker_arenas[0], &island_manifold_offsets, &island_manifold_perm);
 	}
-	(void)island_manifold_offsets;
 
 	// Only populate debug_contacts when the array was previously queried (non-NULL).
 	// Avoids 48KB of per-frame apush when debug visualization is unused.

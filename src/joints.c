@@ -930,14 +930,6 @@ static void joints_warm_start(WorldInternal* w, SolverJoint* joints, int count)
 	}
 }
 
-static int solver_joint_has_limits(SolverJoint* s)
-{
-	for (int d = 0; d < s->dof; d++) {
-		if (s->lo[d] > -1e18f || s->hi[d] < 1e18f) return 1;
-	}
-	return 0;
-}
-
 // Swing-twist 5-DOF PGS step: linear 3-DOF (point block) + cone (DOF 3, bounded
 // angular) + twist (DOF 4, bounded angular). Each part either fires (when active)
 // or short-circuits via eff_mass==0 (set by joint_fill_rows when within range).

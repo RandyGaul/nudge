@@ -695,9 +695,8 @@ static int epa_hit_from_gjk_shapes(GJK_Shape* ga, GJK_Shape* gb, EpaHit* out)
 // Hull-hull EPA entry point.
 static int epa_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 {
-	v3 sa[MAX_HULL_VERTS], sb[MAX_HULL_VERTS]; float soa_a[MAX_HULL_VERTS*3], soa_b[MAX_HULL_VERTS*3];
-	GJK_Shape ga = gjk_hull_scaled(a.hull, a.center, a.rotation, a.scale, sa, soa_a);
-	GJK_Shape gb = gjk_hull_scaled(b.hull, b.center, b.rotation, b.scale, sb, soa_b);
+	GJK_Shape ga = gjk_hull_scaled(a.hull, a.center, a.rotation, a.scale);
+	GJK_Shape gb = gjk_hull_scaled(b.hull, b.center, b.rotation, b.scale);
 	EpaHit hit;
 	if (!epa_hit_from_gjk_shapes(&ga, &gb, &hit)) return 0;
 	if (!manifold) return 1;
@@ -715,9 +714,8 @@ static int epa_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 // Sphere-hull EPA entry point.
 static int epa_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold)
 {
-	v3 sb[MAX_HULL_VERTS]; float soa_b[MAX_HULL_VERTS*3];
 	GJK_Shape ga = gjk_sphere(a.center, a.radius);
-	GJK_Shape gb = gjk_hull_scaled(b.hull, b.center, b.rotation, b.scale, sb, soa_b);
+	GJK_Shape gb = gjk_hull_scaled(b.hull, b.center, b.rotation, b.scale);
 	EpaHit hit;
 	if (!epa_hit_from_gjk_shapes(&ga, &gb, &hit)) return 0;
 	if (!manifold) return 1;
@@ -735,9 +733,8 @@ static int epa_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold)
 // Capsule-hull EPA entry point.
 static int epa_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 {
-	v3 sb[MAX_HULL_VERTS]; float soa_b[MAX_HULL_VERTS*3];
 	GJK_Shape ga = gjk_capsule(a.p, a.q, a.radius);
-	GJK_Shape gb = gjk_hull_scaled(b.hull, b.center, b.rotation, b.scale, sb, soa_b);
+	GJK_Shape gb = gjk_hull_scaled(b.hull, b.center, b.rotation, b.scale);
 	EpaHit hit;
 	if (!epa_hit_from_gjk_shapes(&ga, &gb, &hit)) return 0;
 	if (!manifold) return 1;
@@ -872,9 +869,7 @@ static void epa_validate_contacts(EpaManifold* em, v3 pa, quat ra, v3 pb, quat r
 // for A and B, or sphere/capsule + hull).
 static int epa_narrowphase_pair(struct WorldInternal* w, int body_a_idx, int body_b_idx, ShapeInternal* s0, ShapeInternal* s1, BodyState* bs0, BodyState* bs1, Manifold* manifold)
 {
-	(void)body_a_idx; (void)body_b_idx;
 	// Build GJK shapes for each body.
-	v3 sa_buf[MAX_HULL_VERTS], sb_buf[MAX_HULL_VERTS]; float soa_a[MAX_HULL_VERTS*3], soa_b[MAX_HULL_VERTS*3];
 	GJK_Shape ga, gb;
 	if (s0->type == SHAPE_SPHERE) {
 		v3 center = add(bs0->position, rotate(bs0->rotation, s0->local_pos));
@@ -887,9 +882,9 @@ static int epa_narrowphase_pair(struct WorldInternal* w, int body_a_idx, int bod
 		ga = gjk_capsule(P, Q, s0->capsule.radius);
 	} else if (s0->type == SHAPE_BOX) {
 		extern const Hull s_unit_box_hull;
-		ga = gjk_hull_scaled(&s_unit_box_hull, bs0->position, bs0->rotation, s0->box.half_extents, sa_buf, soa_a);
+		ga = gjk_hull_scaled(&s_unit_box_hull, bs0->position, bs0->rotation, s0->box.half_extents);
 	} else if (s0->type == SHAPE_HULL) {
-		ga = gjk_hull_scaled(s0->hull.hull, bs0->position, bs0->rotation, s0->hull.scale, sa_buf, soa_a);
+		ga = gjk_hull_scaled(s0->hull.hull, bs0->position, bs0->rotation, s0->hull.scale);
 	} else {
 		return 0; // unsupported
 	}
@@ -904,9 +899,9 @@ static int epa_narrowphase_pair(struct WorldInternal* w, int body_a_idx, int bod
 		gb = gjk_capsule(P, Q, s1->capsule.radius);
 	} else if (s1->type == SHAPE_BOX) {
 		extern const Hull s_unit_box_hull;
-		gb = gjk_hull_scaled(&s_unit_box_hull, bs1->position, bs1->rotation, s1->box.half_extents, sb_buf, soa_b);
+		gb = gjk_hull_scaled(&s_unit_box_hull, bs1->position, bs1->rotation, s1->box.half_extents);
 	} else if (s1->type == SHAPE_HULL) {
-		gb = gjk_hull_scaled(s1->hull.hull, bs1->position, bs1->rotation, s1->hull.scale, sb_buf, soa_b);
+		gb = gjk_hull_scaled(s1->hull.hull, bs1->position, bs1->rotation, s1->hull.scale);
 	} else {
 		return 0;
 	}
@@ -936,7 +931,6 @@ static int epa_narrowphase_pair(struct WorldInternal* w, int body_a_idx, int bod
 	int got = epa_hit_from_gjk_shapes_ex(&ga, &gb, &hit, em, &w->epa_stats);
 	if (got) {
 		EpaContact c_new;
-		v3 world_point = scale(add(hit.point_a, hit.point_b), 0.5f);
 		c_new.point_a_local = epa_world_to_local(hit.point_a, bs0->position, bs0->rotation);
 		c_new.point_b_local = epa_world_to_local(hit.point_b, bs1->position, bs1->rotation);
 		c_new.normal_local_a = rotate(inv(bs0->rotation), hit.normal);
@@ -944,7 +938,6 @@ static int epa_narrowphase_pair(struct WorldInternal* w, int body_a_idx, int bod
 		c_new.feature_id = hit.feature_id;
 		c_new.age = 0;
 		epa_merge_contact(em, &c_new);
-		(void)world_point;
 	}
 
 	em->stale = 0;

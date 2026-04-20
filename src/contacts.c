@@ -103,8 +103,6 @@ static void contact_row_from_manifold(WorldInternal* w, const InternalManifold* 
 // whichever input was deeper (single-normal reduction).
 static void contact_row_merge(ContactSummary* dst, const ContactSummary* src)
 {
-	v3 d = sub(src->point, dst->point);
-	float dlen = v3_len(d);
 	// Weighted centroid (by depth, floored to epsilon so degenerate zero-depth
 	// pairs still contribute). Approximation -- we've already lost contact
 	// counts by this point.
@@ -115,7 +113,6 @@ static void contact_row_merge(ContactSummary* dst, const ContactSummary* src)
 	// Radius bound: enclose both old patch centres under the new centre.
 	float ra = dst->radius + v3_len(sub(dst->point, new_centroid));
 	float rb = src->radius + v3_len(sub(src->point, new_centroid));
-	(void)dlen;
 	dst->point = new_centroid;
 	dst->radius = ra > rb ? ra : rb;
 	if (src->depth > dst->depth) {

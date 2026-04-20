@@ -102,7 +102,7 @@ typedef struct R_EnumTable
 
 // --- Enum tables ---
 
-static const R_EnumEntry renum_ShapeType_entries[] = { {"sphere",0}, {"capsule",1}, {"box",2}, {"hull",3}, {"mesh",4} };
+static const R_EnumEntry renum_ShapeType_entries[] = { {"sphere",0}, {"capsule",1}, {"box",2}, {"hull",3}, {"mesh",4}, {"heightfield",5} };
 static const R_EnumEntry renum_SolverType_entries[] = { {"soft_step",0}, {"si_soft",1}, {"si",2} };
 static const R_EnumEntry renum_BroadphaseType_entries[] = { {"n2",0}, {"bvh",1} };
 static const R_EnumEntry renum_JointType_entries[] = {

@@ -110,12 +110,10 @@ static GJK_Shape gjk_hull_m(v3 center, v3 col0, v3 col1, v3 col2, v3 sc, const v
 // -----------------------------------------------------------------------------
 // Hull convenience constructor with vert-edge table caching.
 
-static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc, v3* scaled_verts, float* soa_buf)
+static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc)
 {
 	int n = hull->vert_count;
 	const v3* raw_verts = hull->verts;
-	(void)scaled_verts;
-	(void)soa_buf;
 	const float* soa = hull->soa_verts;
 
 	// Cache per-vertex first-edge lookup: topology-only, rebuild when hull pointer changes.
