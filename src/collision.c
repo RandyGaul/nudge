@@ -1355,6 +1355,74 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 }
 
 // -----------------------------------------------------------------------------
+// Box face clip + emit: shared tail between collide_box_box_ex and
+// refresh_box_box_face. Given the already-chosen ref/inc faces (identified by
+// columns + center + half_extents + local-axis index + sign), clip the
+// incident face against the ref side planes, corner-snap, depth-filter, and
+// fill the output manifold. Returns 1 on any emitted contacts, 0 if all were
+// rejected. Does not touch sat_hint / out_pair — callers own those.
+static int box_face_clip_and_emit(const v3 ref_cols[3], const v3 inc_cols[3],
+	v3 ref_pos, v3 inc_pos, v3 ref_he, v3 inc_he,
+	int la, float nsign, int inc_la, float inc_nsign,
+	int flip, int ref_face, int inc_face, Manifold* manifold)
+{
+	v3 ref_n = scale(ref_cols[la], nsign);
+	float ref_off = dot(ref_n, ref_pos) + (&ref_he.x)[la];
+	int u = (la + 1) % 3, v_ax = (la + 2) % 3;
+	int inc_u = (inc_la + 1) % 3, inc_v = (inc_la + 2) % 3;
+
+	v3 inc_center = add(inc_pos, scale(inc_cols[inc_la], inc_nsign * (&inc_he.x)[inc_la]));
+	v3 inc_eu = scale(inc_cols[inc_u], (&inc_he.x)[inc_u]), inc_ev = scale(inc_cols[inc_v], (&inc_he.x)[inc_v]);
+	v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
+	uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
+	buf1[0] = add(inc_center, add(inc_eu, inc_ev));
+	buf1[1] = add(inc_center, sub(neg(inc_eu), neg(inc_ev)));
+	buf1[2] = add(inc_center, sub(neg(inc_eu), inc_ev));
+	buf1[3] = add(inc_center, sub(inc_eu, inc_ev));
+	if (dot(cross(sub(buf1[1], buf1[0]), sub(buf1[2], buf1[0])), ref_n) > 0) { v3 tmp = buf1[1]; buf1[1] = buf1[3]; buf1[3] = tmp; }
+	for (int i = 0; i < 4; i++) fid1[i] = 0x80 | (uint8_t)i;
+	int clip_count = 4;
+
+	v3 side_n[4] = { ref_cols[u], neg(ref_cols[u]), ref_cols[v_ax], neg(ref_cols[v_ax]) };
+	float side_d[4] = { dot(ref_cols[u], ref_pos) + (&ref_he.x)[u], dot(neg(ref_cols[u]), ref_pos) + (&ref_he.x)[u], dot(ref_cols[v_ax], ref_pos) + (&ref_he.x)[v_ax], dot(neg(ref_cols[v_ax]), ref_pos) + (&ref_he.x)[v_ax] };
+
+	v3* in_buf = buf1; v3* out_buf = buf2;
+	uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
+	for (int i = 0; i < 4; i++) {
+		clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n[i], side_d[i], (uint8_t)i, out_buf, out_fid);
+		v3* sw = in_buf; in_buf = out_buf; out_buf = sw;
+		uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
+	}
+
+	// Corner snap: 4 reference face corners from rotation columns.
+	v3 ref_center = add(ref_pos, scale(ref_cols[la], nsign * (&ref_he.x)[la]));
+	v3 ref_eu = scale(ref_cols[u], (&ref_he.x)[u]), ref_ev = scale(ref_cols[v_ax], (&ref_he.x)[v_ax]);
+	v3 corners[4] = { add(ref_center, add(ref_eu, ref_ev)), add(ref_center, sub(ref_eu, ref_ev)), add(ref_center, sub(neg(ref_eu), neg(ref_ev))), add(ref_center, sub(neg(ref_eu), ref_ev)) };
+	float snap_tol2 = 1e-6f;
+	for (int i = 0; i < clip_count; i++) {
+		for (int c = 0; c < 4; c++) {
+			if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
+		}
+	}
+
+	v3 contact_n = flip ? neg(ref_n) : ref_n;
+	Contact tmp_contacts[MAX_CLIP_VERTS];
+	int cp = 0;
+	for (int i = 0; i < clip_count; i++) {
+		float depth = ref_off - dot(ref_n, in_buf[i]);
+		if (depth >= -LINEAR_SLOP) {
+			uint32_t fid = flip ? ((uint32_t)inc_face | ((uint32_t)ref_face << 8) | ((uint32_t)in_fid[i] << 16)) : ((uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16));
+			tmp_contacts[cp++] = (Contact){ .point = in_buf[i], .normal = contact_n, .penetration = depth, .feature_id = fid };
+		}
+	}
+	if (cp == 0) return 0;
+	cp = reduce_contacts(tmp_contacts, cp);
+	manifold->count = cp;
+	for (int i = 0; i < cp; i++) manifold->contacts[i] = tmp_contacts[i];
+	return 1;
+}
+
+// -----------------------------------------------------------------------------
 // Dedicated box-box SAT: Gottschalk OBB test with direct rotation column arithmetic.
 // Tests all 15 separating axes without generic hull machinery (plane_transform, hull_support loops, Gauss map).
 // Falls through to collide_hull_hull for contact generation when penetrating.
@@ -1441,72 +1509,20 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint, C
 		float nsign = proj_sign >= 0.0f ? 1.0f : -1.0f;
 		if (flip) nsign = -nsign;
 		v3 ref_n = scale(ref_cols[la], nsign);
-		float ref_off = dot(ref_n, ref_pos) + (&ref_he.x)[la];
-		int u = (la + 1) % 3, v_ax = (la + 2) % 3;
 
 		// Incident face: find which inc column is most anti-parallel to ref_n.
 		int inc_la = 0; float inc_best = 1e18f;
 		for (int i = 0; i < 3; i++) { float d = dot(inc_cols[i], ref_n); if (d < inc_best) { inc_best = d; inc_la = i; } if (-d < inc_best) { inc_best = -d; inc_la = i; } }
-		// Determine sign of incident face normal.
 		float inc_nsign = dot(inc_cols[inc_la], ref_n) > 0 ? -1.0f : 1.0f;
-		int inc_u = (inc_la + 1) % 3, inc_v = (inc_la + 2) % 3;
 
-		// Incident face vertices (4 corners of the incident face).
-		v3 inc_center = add(inc_pos, scale(inc_cols[inc_la], inc_nsign * (&inc_he.x)[inc_la]));
-		v3 inc_eu = scale(inc_cols[inc_u], (&inc_he.x)[inc_u]), inc_ev = scale(inc_cols[inc_v], (&inc_he.x)[inc_v]);
-		v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
-		uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
-		buf1[0] = add(inc_center, add(inc_eu, inc_ev));
-		buf1[1] = add(inc_center, sub(neg(inc_eu), neg(inc_ev)));
-		buf1[2] = add(inc_center, sub(neg(inc_eu), inc_ev));
-		buf1[3] = add(inc_center, sub(inc_eu, inc_ev));
-		// Fix winding: ensure CCW when viewed from ref_n direction.
-		if (dot(cross(sub(buf1[1], buf1[0]), sub(buf1[2], buf1[0])), ref_n) > 0) { v3 tmp = buf1[1]; buf1[1] = buf1[3]; buf1[3] = tmp; }
-		for (int i = 0; i < 4; i++) fid1[i] = 0x80 | (uint8_t)i;
-		int clip_count = 4;
-
-		// 4 side planes from rotation columns (no cross product, no normalize).
-		v3 side_n[4] = { ref_cols[u], neg(ref_cols[u]), ref_cols[v_ax], neg(ref_cols[v_ax]) };
-		float side_d[4] = { dot(ref_cols[u], ref_pos) + (&ref_he.x)[u], dot(neg(ref_cols[u]), ref_pos) + (&ref_he.x)[u], dot(ref_cols[v_ax], ref_pos) + (&ref_he.x)[v_ax], dot(neg(ref_cols[v_ax]), ref_pos) + (&ref_he.x)[v_ax] };
-
-		v3* in_buf = buf1; v3* out_buf = buf2;
-		uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
-		for (int i = 0; i < 4; i++) {
-			clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n[i], side_d[i], (uint8_t)i, out_buf, out_fid);
-			v3* sw = in_buf; in_buf = out_buf; out_buf = sw;
-			uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
-		}
-
-		// Corner snap: 4 reference face corners from rotation columns.
-		v3 ref_center = add(ref_pos, scale(ref_cols[la], nsign * (&ref_he.x)[la]));
-		v3 ref_eu = scale(ref_cols[u], (&ref_he.x)[u]), ref_ev = scale(ref_cols[v_ax], (&ref_he.x)[v_ax]);
-		v3 corners[4] = { add(ref_center, add(ref_eu, ref_ev)), add(ref_center, sub(ref_eu, ref_ev)), add(ref_center, sub(neg(ref_eu), neg(ref_ev))), add(ref_center, sub(neg(ref_eu), ref_ev)) };
-		float snap_tol2 = 1e-6f;
-		for (int i = 0; i < clip_count; i++) {
-			for (int c = 0; c < 4; c++) {
-				if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
-			}
-		}
-
-		// Build face indices for feature IDs. Map (la, nsign) to hull face index.
+		// Map (la, nsign) to hull face index for feature IDs.
 		static const int face_map[3][2] = { {2, 3}, {4, 5}, {0, 1} };
 		int ref_face = face_map[la][nsign > 0 ? 1 : 0];
 		int inc_face = face_map[inc_la][inc_nsign > 0 ? 1 : 0];
 
-		v3 contact_n = flip ? neg(ref_n) : ref_n;
-		Contact tmp_contacts[MAX_CLIP_VERTS];
-		int cp = 0;
-		for (int i = 0; i < clip_count; i++) {
-			float depth = ref_off - dot(ref_n, in_buf[i]);
-			if (depth >= -LINEAR_SLOP) {
-				uint32_t fid = flip ? ((uint32_t)inc_face | ((uint32_t)ref_face << 8) | ((uint32_t)in_fid[i] << 16)) : ((uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16));
-				tmp_contacts[cp++] = (Contact){ .point = in_buf[i], .normal = contact_n, .penetration = depth, .feature_id = fid };
-			}
-		}
-		if (cp == 0) return 0;
-		cp = reduce_contacts(tmp_contacts, cp);
-		manifold->count = cp;
-		for (int i = 0; i < cp; i++) manifold->contacts[i] = tmp_contacts[i];
+		if (!box_face_clip_and_emit(ref_cols, inc_cols, ref_pos, inc_pos, ref_he, inc_he,
+		                            la, nsign, inc_la, inc_nsign, flip, ref_face, inc_face, manifold))
+			return 0;
 		if (sat_hint) *sat_hint = best_axis;
 		if (out_pair) *out_pair = (CachedFeaturePair){.type = 1, .ref_body = (int16_t)flip, .face_a = (int16_t)(flip ? inc_face : ref_face), .face_b = (int16_t)(flip ? ref_face : inc_face)};
 		return 1;
@@ -1599,59 +1615,8 @@ static int refresh_box_box_face(Box a, Box b, Manifold* manifold, CachedFeatureP
 	static const int face_map[3][2] = { {2, 3}, {4, 5}, {0, 1} };
 	inc_fi = face_map[inc_la][inc_nsign > 0 ? 1 : 0];
 
-	// Re-run face clip with known ref / recomputed inc faces.
-	float ref_off = dot(ref_n, ref_pos) + (&ref_he.x)[la];
-	int u = (la + 1) % 3, v_ax = (la + 2) % 3;
-	int inc_u = (inc_la + 1) % 3, inc_v = (inc_la + 2) % 3;
-
-	v3 inc_center = add(inc_pos, scale(inc_cols[inc_la], inc_nsign * (&inc_he.x)[inc_la]));
-	v3 inc_eu = scale(inc_cols[inc_u], (&inc_he.x)[inc_u]), inc_ev = scale(inc_cols[inc_v], (&inc_he.x)[inc_v]);
-	v3 buf1[MAX_CLIP_VERTS], buf2[MAX_CLIP_VERTS];
-	uint8_t fid1[MAX_CLIP_VERTS], fid2[MAX_CLIP_VERTS];
-	buf1[0] = add(inc_center, add(inc_eu, inc_ev));
-	buf1[1] = add(inc_center, sub(neg(inc_eu), neg(inc_ev)));
-	buf1[2] = add(inc_center, sub(neg(inc_eu), inc_ev));
-	buf1[3] = add(inc_center, sub(inc_eu, inc_ev));
-	if (dot(cross(sub(buf1[1], buf1[0]), sub(buf1[2], buf1[0])), ref_n) > 0) { v3 tmp = buf1[1]; buf1[1] = buf1[3]; buf1[3] = tmp; }
-	for (int i = 0; i < 4; i++) fid1[i] = 0x80 | (uint8_t)i;
-	int clip_count = 4;
-
-	v3 side_n[4] = { ref_cols[u], neg(ref_cols[u]), ref_cols[v_ax], neg(ref_cols[v_ax]) };
-	float side_d[4] = { dot(ref_cols[u], ref_pos) + (&ref_he.x)[u], dot(neg(ref_cols[u]), ref_pos) + (&ref_he.x)[u], dot(ref_cols[v_ax], ref_pos) + (&ref_he.x)[v_ax], dot(neg(ref_cols[v_ax]), ref_pos) + (&ref_he.x)[v_ax] };
-
-	v3* in_buf = buf1; v3* out_buf = buf2;
-	uint8_t* in_fid = fid1; uint8_t* out_fid = fid2;
-	for (int i = 0; i < 4; i++) {
-		clip_count = clip_to_plane(in_buf, in_fid, clip_count, side_n[i], side_d[i], (uint8_t)i, out_buf, out_fid);
-		v3* sw = in_buf; in_buf = out_buf; out_buf = sw;
-		uint8_t* fs = in_fid; in_fid = out_fid; out_fid = fs;
-	}
-
-	v3 ref_center = add(ref_pos, scale(ref_cols[la], nsign * (&ref_he.x)[la]));
-	v3 ref_eu = scale(ref_cols[u], (&ref_he.x)[u]), ref_ev = scale(ref_cols[v_ax], (&ref_he.x)[v_ax]);
-	v3 corners[4] = { add(ref_center, add(ref_eu, ref_ev)), add(ref_center, sub(ref_eu, ref_ev)), add(ref_center, sub(neg(ref_eu), neg(ref_ev))), add(ref_center, sub(neg(ref_eu), ref_ev)) };
-	float snap_tol2 = 1e-6f;
-	for (int i = 0; i < clip_count; i++) {
-		for (int c = 0; c < 4; c++) {
-			if (len2(sub(in_buf[i], corners[c])) < snap_tol2) { in_fid[i] = 0xC0 | (uint8_t)c; break; }
-		}
-	}
-
-	v3 contact_n = flip ? neg(ref_n) : ref_n;
-	Contact tmp_contacts[MAX_CLIP_VERTS];
-	int cpc = 0;
-	for (int i = 0; i < clip_count; i++) {
-		float depth = ref_off - dot(ref_n, in_buf[i]);
-		if (depth >= -LINEAR_SLOP) {
-			uint32_t fid = flip ? ((uint32_t)inc_fi | ((uint32_t)ref_fi << 8) | ((uint32_t)in_fid[i] << 16)) : ((uint32_t)ref_fi | ((uint32_t)inc_fi << 8) | ((uint32_t)in_fid[i] << 16));
-			tmp_contacts[cpc++] = (Contact){ .point = in_buf[i], .normal = contact_n, .penetration = depth, .feature_id = fid };
-		}
-	}
-	if (cpc == 0) return 0;
-	cpc = reduce_contacts(tmp_contacts, cpc);
-	manifold->count = cpc;
-	for (int i = 0; i < cpc; i++) manifold->contacts[i] = tmp_contacts[i];
-	return 1;
+	return box_face_clip_and_emit(ref_cols, inc_cols, ref_pos, inc_pos, ref_he, inc_he,
+	                              la, nsign, inc_la, inc_nsign, flip, ref_fi, inc_fi, manifold);
 }
 
 // Refresh hull-hull face contact using cached feature pair.

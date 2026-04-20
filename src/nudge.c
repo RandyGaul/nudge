@@ -45,7 +45,6 @@ World create_world(WorldParams params)
 	w->sat_hint_enabled = 1;
 	w->sat_hillclimb_enabled = 1;
 	w->warm_start_enabled = 1;
-	w->trimesh_simd_enabled = 1;
 	w->incremental_np_enabled = 1;
 	w->velocity_iters = params.velocity_iters > 0 ? params.velocity_iters : SOLVER_VELOCITY_ITERS;
 	w->position_iters = params.position_iters > 0 ? params.position_iters : SOLVER_POSITION_ITERS;

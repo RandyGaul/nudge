@@ -12062,7 +12062,7 @@ static void bench_incremental_np(int base_2d, int base_3d, int frames)
 // `body_grid` controls body count (body_grid x body_grid bodies). All bodies
 // contact the mesh simultaneously by frame ~60, so the measurement captures
 // steady-state narrowphase work under a representative load.
-static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid, int frames)
+static void bench_trimesh_stress_run(int mesh_n, int body_grid, int frames)
 {
 	int N = mesh_n;
 	float EXTENT = 12.0f * (mesh_n / 25.0f);
@@ -12092,7 +12092,6 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH, .sub_steps = 2, .velocity_iters = 8 };
 	World w = create_world(wp);
 	WorldInternal* wi = (WorldInternal*)w.id;
-	wi->trimesh_simd_enabled = simd_enabled;
 
 	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 0 });
 	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_MESH, .mesh.mesh = mesh });
@@ -12130,7 +12129,7 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 	// viewer can inspect pre-tunnel state, then step forward to watch narrowphase
 	// hand the solver the bad data.
 	float dt = 1.0f / 60.0f;
-	int catch_first_blowup = (mesh_n == 50 && body_grid == 10 && simd_enabled == 0);
+	int catch_first_blowup = (mesh_n == 50 && body_grid == 10);
 	World w_handle = w;
 	for (int wf = 0; wf < 60; wf++) {
 		if (catch_first_blowup && wf == 53) {
@@ -12151,7 +12150,7 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 	int body_count = body_grid * body_grid;
 	int settle_extra = 600; // 10s settle window at 60Hz
 	// Jitter trace: in the 50x50/49 worst-case, sample body 49's speed+y every N frames.
-	int trace_target = (mesh_n == 50 && body_grid == 7 && simd_enabled == 0) ? 49 : -1;
+	int trace_target = (mesh_n == 50 && body_grid == 7) ? 49 : -1;
 	for (int f = 0; f < frames + settle_extra; f++) {
 		world_step(w, dt);
 		if (f < frames) {
@@ -12193,9 +12192,8 @@ static void bench_trimesh_stress_run(int simd_enabled, int mesh_n, int body_grid
 	}
 	double n = (double)frames;
 	int tri_count = (mesh_n - 1) * (mesh_n - 1) * 2;
-	printf("  %dx%d mesh (%d tris) x %d bodies  SIMD=%-3s   total=%7.3f ms   bp+NP=%7.3f ms  max_v=%.2f max|y|=%.2f  end_v=%.3f body=%d moving=%d (sph=%d box=%d cap=%d hull=%d)\n",
+	printf("  %dx%d mesh (%d tris) x %d bodies  total=%7.3f ms   bp+NP=%7.3f ms  max_v=%.2f max|y|=%.2f  end_v=%.3f body=%d moving=%d (sph=%d box=%d cap=%d hull=%d)\n",
 		mesh_n, mesh_n, tri_count, body_count,
-		simd_enabled ? "ON" : "OFF",
 		acc_total / n * 1000.0,
 		acc_bp / n * 1000.0,
 		max_speed, max_abs_y,
@@ -12300,13 +12298,12 @@ static void bench_trimesh_single_cap()
 static void bench_trimesh_stress()
 {
 	bench_trimesh_single_cap();
-	printf("=== Trimesh stress A/B (2 substeps, 300 frames each) ===\n");
+	printf("=== Trimesh stress (2 substeps, 300 frames each) ===\n");
 	int mesh_sizes[]  = {  25, 25, 50, 50 };
 	int body_grids[]  = {   7, 10,  7, 10 };
 	int n_scales = sizeof(mesh_sizes) / sizeof(mesh_sizes[0]);
 	for (int s = 0; s < n_scales; s++) {
-		bench_trimesh_stress_run(0, mesh_sizes[s], body_grids[s], 300);
-		bench_trimesh_stress_run(1, mesh_sizes[s], body_grids[s], 300);
+		bench_trimesh_stress_run(mesh_sizes[s], body_grids[s], 300);
 	}
 	printf("========================================================\n");
 }
