@@ -12987,6 +12987,50 @@ static void test_post_ccd_capsule_not_frozen_4c9aeda6()
 	destroy_world(w);
 }
 
+// Soak repro: spawn_rng=0x5c801e62, HULL_TET scale=1.1345,
+// vel=(135.237,1.388,-3.681), omega=(5.327,-1.181,-2.354). Body's post-solve
+// pose ends INSIDE beam AABB; TOI's velocity-based sweep misses. Fix: center-
+// in-AABB tunnel detection fires regardless of body speed.
+static void test_post_ccd_hull_tet_not_inside_beam_5c801e62()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	v3 tet[] = { {0, 0.6f, 0}, {0.5f, -0.3f, 0.3f}, {-0.5f, -0.3f, 0.3f}, {0, -0.3f, -0.5f} };
+	Hull* h_tet = quickhull(tet, 4);
+	float s = 1.1345f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_tet, .scale = V3(0.18f*s, 0.18f*s, 0.18f*s) } });
+	body_set_velocity(w, b, V3(135.237f, 1.388f, -3.681f));
+	body_set_angular_velocity(w, b, V3(5.327f, -1.181f, -2.354f));
+
+	float dt = 1.0f / 60.0f;
+	int stuck = 0;
+	for (int frame = 0; frame < 30; frame++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, b);
+		int inside_wall = fabsf(pos.x - 5.0f) < 0.05f && fabsf(pos.y - 2.0f) < 3.0f && fabsf(pos.z) < 3.0f;
+		int inside_beam = fabsf(pos.x - 5.0f) < 0.35f && fabsf(pos.y - 2.0f) < 0.15f && fabsf(pos.z) < 3.0f;
+		if (inside_wall || inside_beam) { stuck = 1; break; }
+	}
+	TEST_BEGIN("post-CCD hull_tet (soak 0x5c801e62): not inside beam");
+	TEST_ASSERT(!stuck);
+	hull_free(h_tet);
+	destroy_world(w);
+}
+
 static void run_post_ccd_tests()
 {
 	printf("--- nudge post-CCD motion tests ---\n");
@@ -12996,6 +13040,7 @@ static void run_post_ccd_tests()
 	test_post_ccd_hull_chunk_not_frozen_d696882a();
 	test_post_ccd_capsule_not_wedged_814d37c7();
 	test_post_ccd_capsule_not_frozen_4c9aeda6();
+	test_post_ccd_hull_tet_not_inside_beam_5c801e62();
 	test_post_ccd_tet_not_stuck_in_beam();
 	test_post_ccd_box_bullet_no_freeze_after_rebound();
 	test_post_ccd_box_bullet_no_tunnel_soak_seed();
@@ -13681,8 +13726,11 @@ static void bench_ccd_soak(int max_frames)
 
 			int prev_flags = b->violation_reported;
 
-			// TUNNEL: body center is past the wall far-face.
-			if (pos.x > CCD_SOAK_WALL_FAR_X && !(b->violation_reported & 1)) {
+			// TUNNEL: body center is past the wall far-face AND still inside
+			// the wall's y/z projection — otherwise the bullet went over or
+			// around the wall (valid physics, not a tunnel).
+			int in_wall_yz = fabsf(pos.y - 2.0f) < CCD_SOAK_WALL_HY && fabsf(pos.z) < CCD_SOAK_WALL_HZ;
+			if (pos.x > CCD_SOAK_WALL_FAR_X && in_wall_yz && !(b->violation_reported & 1)) {
 				soak_log_violation(log_fp, frame, "TUNNEL", b, pos, vel);
 				b->violation_reported |= 1;
 				total_violations++;
@@ -13824,7 +13872,8 @@ static void ccd_soak_repro(int kind, float scale_f, float vx, float vy, float vz
 		v3 vel = body_get_velocity(w, b);
 		int inside_wall = fabsf(pos.x - CCD_SOAK_WALL_X) < CCD_SOAK_WALL_HX && fabsf(pos.y - 2.0f) < CCD_SOAK_WALL_HY && fabsf(pos.z) < CCD_SOAK_WALL_HZ;
 		int inside_beam = fabsf(pos.x - CCD_SOAK_WALL_X) < CCD_SOAK_BEAM_HX && fabsf(pos.y - 2.0f) < CCD_SOAK_BEAM_HY && fabsf(pos.z) < CCD_SOAK_BEAM_HZ;
-		if (pos.x > CCD_SOAK_WALL_FAR_X) { printf("  TUNNEL at frame %d pos=(%.3f,%.3f,%.3f)\n", frame, pos.x, pos.y, pos.z); break; }
+		int in_wall_yz = fabsf(pos.y - 2.0f) < CCD_SOAK_WALL_HY && fabsf(pos.z) < CCD_SOAK_WALL_HZ;
+		if (pos.x > CCD_SOAK_WALL_FAR_X && in_wall_yz) { printf("  TUNNEL at frame %d pos=(%.3f,%.3f,%.3f)\n", frame, pos.x, pos.y, pos.z); break; }
 		if (inside_wall || inside_beam) { printf("  STUCK at frame %d pos=(%.3f,%.3f,%.3f)\n", frame, pos.x, pos.y, pos.z); break; }
 		float d = v3_len(sub(pos, prev));
 		if (v3_len(vel) > CCD_SOAK_FROZEN_VEL_MIN && d < CCD_SOAK_FROZEN_POS_EPS) {

@@ -677,35 +677,29 @@ static void toi_lerp_pose(v3 pa, quat qa, v3 pb, quat qb, float t, v3* out_pos, 
 	*out_rot = quat_norm(q);
 }
 
-// Helper: does body `bi` at pose (pos, rot) overlap ANY static body reachable
-// from the given query AABB? Used by the post-TOI safety clamp to decide
-// whether to binary-search for a safe pose.
-static int toi_aabb_overlaps_any_static(WorldInternal* w, int bi, v3 pos, quat rot, AABB query)
+// Helper: is body `bi`'s COM at `pos` inside any static body's AABB?
+// Used as a tunnel indicator: only "body center inside static volume"
+// triggers a clamp, not just surface-tangent gravity overlap on a resting
+// body. The rot parameter is unused (center check is pose-invariant) but
+// kept for API symmetry with pose-carrying callers.
+static int toi_center_in_static(WorldInternal* w, int bi, v3 pos, quat rot, AABB query)
 {
-	BodyCold* bc = &w->body_cold[bi];
-	int nshapes = asize(bc->shapes);
+	(void)rot;
 	CK_DYNA int* cands = NULL;
 	bvh_query_aabb(w->bvh_static, query, &cands);
-	int overlapping = 0;
-	for (int c = 0; c < asize(cands) && !overlapping; c++) {
+	int inside = 0;
+	for (int c = 0; c < asize(cands) && !inside; c++) {
 		int sbi = cands[c];
 		if (sbi == bi || !split_alive(w->body_gen, sbi)) continue;
-		BodyCold* sbc = &w->body_cold[sbi];
-		BodyState* sbs = &w->body_state[sbi];
-		for (int sshi = 0; sshi < asize(sbc->shapes) && !overlapping; sshi++) {
-			ShapeInternal* ss = &sbc->shapes[sshi];
-			if (ss->type == SHAPE_MESH || ss->type == SHAPE_HEIGHTFIELD) continue;
-			GJK_Shape gb = toi_shape_at_pose(ss, sbs->position, sbs->rotation);
-			for (int ashi = 0; ashi < nshapes && !overlapping; ashi++) {
-				ShapeInternal* sa = &bc->shapes[ashi];
-				if (sa->type == SHAPE_MESH || sa->type == SHAPE_HEIGHTFIELD) continue;
-				GJK_Shape ga = toi_shape_at_pose(sa, pos, rot);
-				if (gjk_distance(&ga, &gb, NULL).distance <= 0.0f) overlapping = 1;
-			}
+		AABB sbbox = body_aabb(&w->body_state[sbi], &w->body_cold[sbi]);
+		if (pos.x >= sbbox.min.x && pos.x <= sbbox.max.x
+		 && pos.y >= sbbox.min.y && pos.y <= sbbox.max.y
+		 && pos.z >= sbbox.min.z && pos.z <= sbbox.max.z) {
+			inside = 1;
 		}
 	}
 	afree(cands);
-	return overlapping;
+	return inside;
 }
 
 // Per-body TOI step. Pure function of (pre-pose, post-pose, static BVH).
@@ -731,41 +725,24 @@ static void toi_advance_one_body(WorldInternal* w, int k, float dt)
 		// post-solve pose against static candidates; if any overlap, clamp to
 		// the last safe pose along the lerp from pre to post.
 		//
-		// Only run this check for bodies moving fast enough that the curved
-		// substep path can genuinely diverge from the linear sweep (> 5x the
-		// inscribed sphere in one frame). Resting/slow bodies have vanishingly
-		// small curvature in their path and the check would otherwise fight
-		// with the solver's speculative-contact penetration handling (shallow
-		// gravity-induced overlap at each step gets erroneously reverted,
-		// freezing the body against the resting surface).
 		BodyCold* bc = &w->body_cold[bi];
-		float v_norm_pre = v3_len(w->body_hot[bi].velocity);
-		float r_min_pre = bc->r_min_body;
-		// r_min == 0 means compound with no inscribed sphere around COM —
-		// always run overlap check (the body has no self-contained safety zone
-		// and can tunnel at any speed). For positive r_min, gate on speed.
-		if (r_min_pre > 0.0f && v_norm_pre * dt < 5.0f * r_min_pre) return;
-		int nshapes = asize(bc->shapes);
+		int nshapes = asize(bc->shapes); (void)nshapes;
 		AABB body_aabb_now = body_aabb(bs, bc);
 		CK_DYNA int* cands = NULL;
 		bvh_query_aabb(w->bvh_static, body_aabb_now, &cands);
+		// "Overlapping" here means body CENTER is inside a static body's AABB.
+		// This flags tunneling (body ended up INSIDE the volume) while ignoring
+		// shallow gravity-induced surface penetration on resting bodies (center
+		// stays outside the static AABB, only surface crosses it).
 		int overlapping = 0;
 		for (int c = 0; c < asize(cands) && !overlapping; c++) {
 			int sbi = cands[c];
 			if (sbi == bi || !split_alive(w->body_gen, sbi)) continue;
-			BodyCold* sbc = &w->body_cold[sbi];
-			BodyState* sbs = &w->body_state[sbi];
-			for (int sshi = 0; sshi < asize(sbc->shapes) && !overlapping; sshi++) {
-				ShapeInternal* ss = &sbc->shapes[sshi];
-				if (ss->type == SHAPE_MESH || ss->type == SHAPE_HEIGHTFIELD) continue;
-				GJK_Shape gb = toi_shape_at_pose(ss, sbs->position, sbs->rotation);
-				for (int ashi = 0; ashi < nshapes && !overlapping; ashi++) {
-					ShapeInternal* sa = &bc->shapes[ashi];
-					if (sa->type == SHAPE_MESH || sa->type == SHAPE_HEIGHTFIELD) continue;
-					GJK_Shape ga = toi_shape_at_pose(sa, bs->position, bs->rotation);
-					GJK_Result r = gjk_distance(&ga, &gb, NULL);
-					if (r.distance <= 0.0f) overlapping = 1;
-				}
+			AABB sbbox = body_aabb(&w->body_state[sbi], &w->body_cold[sbi]);
+			if (bs->position.x >= sbbox.min.x && bs->position.x <= sbbox.max.x
+			 && bs->position.y >= sbbox.min.y && bs->position.y <= sbbox.max.y
+			 && bs->position.z >= sbbox.min.z && bs->position.z <= sbbox.max.z) {
+				overlapping = 1;
 			}
 		}
 		afree(cands);
@@ -779,14 +756,14 @@ static void toi_advance_one_body(WorldInternal* w, int k, float dt)
 			// frame) while preventing deep tunnel.
 			v3 post_pos = bs->position;
 			quat post_rot = bs->rotation;
-			int pre_overlaps = toi_aabb_overlaps_any_static(w, bi, p0, q0, body_aabb_now);
+			int pre_overlaps = toi_center_in_static(w, bi, p0, q0, body_aabb_now);
 			if (!pre_overlaps) {
 				float lo = 0.0f, hi = 1.0f;
 				for (int iter = 0; iter < 8; iter++) {
 					float mid = 0.5f * (lo + hi);
 					v3 tp; quat tr;
 					toi_lerp_pose(p0, q0, post_pos, post_rot, mid, &tp, &tr);
-					if (toi_aabb_overlaps_any_static(w, bi, tp, tr, body_aabb_now)) hi = mid;
+					if (toi_center_in_static(w, bi, tp, tr, body_aabb_now)) hi = mid;
 					else lo = mid;
 				}
 				toi_lerp_pose(p0, q0, post_pos, post_rot, lo, &bs->position, &bs->rotation);
@@ -814,10 +791,12 @@ static void toi_advance_one_body(WorldInternal* w, int k, float dt)
 	// shape deeper into a static. If the lerp has no safe fraction (pre_pos
 	// also overlaps; body is embedded and rotating into/out of contact),
 	// keep the solver's best-effort clamped pose.
+	int post_clamp_fired = 0;
 	{
 		BodyCold* bc = &w->body_cold[bi];
 		AABB body_aabb_clamped = body_aabb(bs, bc);
-		if (toi_aabb_overlaps_any_static(w, bi, bs->position, bs->rotation, body_aabb_clamped)) {
+		int clamped_in = toi_center_in_static(w, bi, bs->position, bs->rotation, body_aabb_clamped);
+		if (clamped_in) {
 			v3 clamped_pos = bs->position;
 			quat clamped_rot = bs->rotation;
 			float lo = -1.0f, hi = 1.0f;
@@ -826,7 +805,7 @@ static void toi_advance_one_body(WorldInternal* w, int k, float dt)
 				float u = (float)i / 4.0f;
 				v3 tp; quat tr;
 				toi_lerp_pose(p0, q0, clamped_pos, clamped_rot, u, &tp, &tr);
-				if (!toi_aabb_overlaps_any_static(w, bi, tp, tr, body_aabb_clamped)) { lo = u; break; }
+				if (!toi_center_in_static(w, bi, tp, tr, body_aabb_clamped)) { lo = u; break; }
 			}
 			if (lo >= 0.0f) {
 				// Binary search between safe lo and the first overlap above it.
@@ -834,10 +813,11 @@ static void toi_advance_one_body(WorldInternal* w, int k, float dt)
 					float mid = 0.5f * (lo + hi);
 					v3 tp; quat tr;
 					toi_lerp_pose(p0, q0, clamped_pos, clamped_rot, mid, &tp, &tr);
-					if (toi_aabb_overlaps_any_static(w, bi, tp, tr, body_aabb_clamped)) hi = mid;
+					if (toi_center_in_static(w, bi, tp, tr, body_aabb_clamped)) hi = mid;
 					else lo = mid;
 				}
 				toi_lerp_pose(p0, q0, clamped_pos, clamped_rot, lo, &bs->position, &bs->rotation);
+				post_clamp_fired = 1;
 			}
 		}
 	}
@@ -886,7 +866,10 @@ static void toi_advance_one_body(WorldInternal* w, int k, float dt)
 
 	// Multi-pass: after clamping, re-sweep the remaining (1 - earliest) of
 	// the step so the body can slide along the struck surface or hit a
-	// second primitive. Capped by TOI_SUBSTEP_MAX.
+	// second primitive. Capped by TOI_SUBSTEP_MAX. Skip when the post-clamp
+	// safety binary-searched us back — additional forward sweeps would
+	// undo that safety by re-integrating INTO the static we just escaped.
+	if (post_clamp_fired) return;
 	float t_consumed = earliest;
 	for (int pass = 1; pass < TOI_SUBSTEP_MAX; pass++) {
 		float remaining = 1.0f - t_consumed;
