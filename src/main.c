@@ -854,8 +854,6 @@ void update()
 	int ncontacts = world_get_contacts(g_world, &contacts);
 	{ int bp = dbg_w->broadphase_type;
 	  if (ImGui_Combo("Broadphase", &bp, "N^2\0BVH\0")) dbg_w->broadphase_type = bp; }
-	{ int np = dbg_w->narrowphase_backend;
-	  if (ImGui_Combo("Narrowphase", &np, "SAT\0GJK+EPA\0")) dbg_w->narrowphase_backend = np; }
 	ImGui_Text("Contacts: %d", ncontacts);
 	{
 		int n_islands = 0, n_sleeping = 0;
@@ -867,16 +865,6 @@ void update()
 		ImGui_Text("Islands: %d (%d sleeping)", n_islands, n_sleeping);
 	}
 	ImGui_Text("Bodies: %d", asize(g_draw_list));
-	if (dbg_w->narrowphase_backend == NARROWPHASE_GJK_EPA) {
-		WorldEpaStats es = world_get_epa_stats(g_world);
-		float avg_iters = es.queries > 0 ? (float)es.total_iters / (float)es.queries : 0.0f;
-		float warm_pct  = es.queries > 0 ? 100.0f * (float)es.warm_reseeds / (float)es.queries : 0.0f;
-		float avg_cts   = es.pair_count > 0 ? (float)es.contacts_emitted / (float)es.pair_count : 0.0f;
-		ImGui_Text("EPA queries: %d (cap %d)", es.queries, es.iter_cap_hits);
-		ImGui_Text("EPA avg iters: %.2f", avg_iters);
-		ImGui_Text("EPA warm reseed: %.1f%%", warm_pct);
-		ImGui_Text("EPA contacts/pair: %.2f", avg_cts);
-	}
 	if (g_ldl_inspect_island >= 0) {
 		ImGui_TextDisabled("Inspecting island %d", g_ldl_inspect_island);
 	} else {

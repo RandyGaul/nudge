@@ -31,7 +31,6 @@
 // Not captured (regenerated on next step):
 //   - BVH trees (rebuilt from body AABBs during body_add_shape on load)
 //   - LDL_Cache per island (rebuilt on next ldl_factor)
-//   - EPA manifold cache (use SAT backend if you need determinism across save/load)
 //   - Rewind ring (caller re-enables after load if desired)
 //   - Sensors (caller-owned, outside the world)
 //
@@ -107,7 +106,6 @@ int world_save_snapshot(World world, const char* path)
 	WorldParams wp = {
 		.gravity = w->gravity,
 		.broadphase = w->broadphase_type,
-		.narrowphase_backend = (NarrowphaseBackend)w->narrowphase_backend,
 		.solver_type = w->solver_type,
 		.velocity_iters = w->velocity_iters,
 		.position_iters = w->position_iters,

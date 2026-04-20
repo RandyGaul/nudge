@@ -23,8 +23,7 @@
 // joint_pairs, body_gen, body_free — stored full per frame.
 //
 // NOT captured: BVH trees (rebuilt on restore), LDL caches (zeroed on
-// restore), EPA manifold cache (use SAT backend), perf timers, worker
-// arenas.
+// restore), perf timers, worker arenas.
 
 typedef struct RewindIsland
 {

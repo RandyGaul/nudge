@@ -109,14 +109,11 @@ static const R_EnumEntry renum_JointType_entries[] = {
 	{"ball_socket",0}, {"distance",1}, {"hinge",2}, {"fixed",3}, {"prismatic",4},
 	{"angular_motor",5}, {"twist_limit",6}, {"cone_limit",7}, {"swing_twist",8}
 };
-static const R_EnumEntry renum_NarrowphaseBackend_entries[] = { {"sat",0}, {"gjk_epa",1} };
-
 static const R_EnumTable g_enum_tables[] = {
 	{ "ShapeType", 6, renum_ShapeType_entries },
 	{ "SolverType", 3, renum_SolverType_entries },
 	{ "BroadphaseType", 2, renum_BroadphaseType_entries },
 	{ "JointType", 9, renum_JointType_entries },
-	{ "NarrowphaseBackend", 2, renum_NarrowphaseBackend_entries },
 };
 #define NUM_ENUM_TABLES (int)(sizeof(g_enum_tables)/sizeof(g_enum_tables[0]))
 
@@ -247,30 +244,6 @@ REFLECT(JointHot,
 	{ "warm_lambda3", RFK_FLOAT, offsetof(JointHot, warm_lambda[3]), 4, NULL, NULL },
 	{ "warm_lambda4", RFK_FLOAT, offsetof(JointHot, warm_lambda[4]), 4, NULL, NULL },
 	{ "warm_lambda5", RFK_FLOAT, offsetof(JointHot, warm_lambda[5]), 4, NULL, NULL },
-);
-
-REFLECT(EpaContact,
-	RF_V3(EpaContact, point_a_local),
-	RF_V3(EpaContact, point_b_local),
-	RF_V3(EpaContact, normal_local_a),
-	RF_FLOAT(EpaContact, penetration),
-	RF_UINT(EpaContact, feature_id),
-	RF_INT(EpaContact, age),
-);
-
-REFLECT(EpaManifold,
-	RF_INT(EpaManifold, count),
-	RF_INT(EpaManifold, stale),
-	RF_INT(EpaManifold, warm_valid),
-);
-
-REFLECT(EpaStats,
-	RF_INT(EpaStats, queries),
-	RF_INT(EpaStats, iter_cap_hits),
-	RF_INT(EpaStats, total_iters),
-	RF_INT(EpaStats, warm_reseeds),
-	RF_INT(EpaStats, contacts_emitted),
-	RF_INT(EpaStats, pair_count),
 );
 
 REFLECT(JointInternal,
@@ -470,9 +443,6 @@ REFLECT(WorldInternal,
 	RF_INT(WorldInternal, incremental_np_enabled),
 	RF_INT(WorldInternal, warm_start_enabled),
 	RF_INT(WorldInternal, trimesh_simd_enabled),
-	RF_ENUM(WorldInternal, narrowphase_backend, NarrowphaseBackend),
-	RF_MAP(WorldInternal, epa_cache, EpaManifold),
-	RF_STRUCT(WorldInternal, epa_stats, EpaStats),
 	RF_INT(WorldInternal, thread_count),
 	RF_INT(WorldInternal, ldl_enabled),
 	RF_INT(WorldInternal, ldl_topo_version),
@@ -510,7 +480,6 @@ static const R_TypeDesc *g_type_registry[] = {
 	&rtype_JointInternal, &rtype_JointHot, &rtype_Island,
 	&rtype_BVH_Child, &rtype_BVHNode, &rtype_BVHLeaf, &rtype_BVH_Tree,
 	&rtype_PerfTimers, &rtype_PGSTimers, &rtype_NP_DebugSnapshot,
-	&rtype_EpaContact, &rtype_EpaManifold, &rtype_EpaStats,
 	&rtype_RewindIsland, &rtype_RewindFrame, &rtype_RewindBuffer,
 };
 #define NUM_TYPES (int)(sizeof(g_type_registry)/sizeof(g_type_registry[0]))

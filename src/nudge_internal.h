@@ -174,48 +174,6 @@ typedef struct NarrowphaseCtx
 
 typedef int (*NarrowphaseAgent)(NarrowphaseCtx*);
 
-// Incremental manifold for EPA-backed narrowphase. One contact is produced per
-// frame by EPA; the cache accumulates up to MAX_CONTACTS contacts over frames
-// by merging via feature_id and aging out stale entries.
-#define EPA_MAX_CONTACT_AGE 8
-#define EPA_CONTACT_REFRESH_DIST 0.05f         // re-validate tolerance along normal
-#define EPA_CONTACT_TANGENTIAL_DRIFT 0.1f      // drop contact if it slid this far tangentially
-
-typedef struct EpaContact
-{
-	v3 point_a_local;    // in body A local space
-	v3 point_b_local;    // in body B local space
-	v3 normal_local_a;   // contact normal in body A local space (from A toward B)
-	float penetration;
-	uint32_t feature_id;
-	int age;             // frames since last refresh
-} EpaContact;
-
-typedef struct EpaManifold
-{
-	EpaContact contacts[MAX_CONTACTS];
-	int count;
-	int stale;           // frames since last touched (for eviction)
-	// Warm-start seed from prior-frame terminating face. Stored in Minkowski
-	// difference space: directions used to resupport a near-converged tetra on
-	// the next EPA call for this pair. Invalidated when the pair goes dormant.
-	v3 warm_dirs[4];
-	int warm_valid;      // 1 if warm_dirs contains last-frame data
-} EpaManifold;
-
-// Per-frame EPA telemetry. Reset at the top of world_step, mutated inside
-// epa_narrowphase_pair and epa_run. Published via world_get_epa_stats.
-typedef struct EpaStats
-{
-	int queries;             // EPA calls this frame (epa_hit_from_gjk_shapes invocations)
-	int iter_cap_hits;       // queries that ran to EPA_MAX_ITERATIONS
-	int total_iters;         // sum of iteration counts across queries
-	int warm_reseeds;        // queries that used warm_dirs seed
-	int contacts_emitted;    // total contacts emitted to manifolds
-	int pair_count;          // EPA pairs with at least one contact this frame
-} EpaStats;
-
-
 // Joint persistent storage (handle-based, parallel arrays like bodies).
 typedef enum JointType {
 	JOINT_BALL_SOCKET, JOINT_DISTANCE, JOINT_HINGE, JOINT_FIXED, JOINT_PRISMATIC,
@@ -520,9 +478,6 @@ typedef struct WorldInternal
 	int incremental_np_enabled; // 1 = incremental narrowphase (cached feature pair refresh)
 	int warm_start_enabled;    // 1 = warm-start contact impulses from cache
 	int trimesh_simd_enabled;  // 1 = SIMD 4-triangle batch in convex-mesh pair routines (0 = scalar)
-	int narrowphase_backend;   // NarrowphaseBackend: 0=SAT, 1=GJK_EPA
-	CK_MAP(EpaManifold) epa_cache; // per body-pair incremental manifold cache (EPA backend)
-	EpaStats epa_stats;        // per-frame EPA telemetry (reset at start of world_step)
 	int thread_count;        // 0 or 1 = single-threaded, >1 = parallel PGS solver
 	// Per-worker scratch arenas. Lazily sized to max(1, thread_count) on first
 	// step; reset at the start of each step; freed in destroy_world. Workers

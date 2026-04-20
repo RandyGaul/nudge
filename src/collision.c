@@ -1773,9 +1773,6 @@ static void collide_box_heightfield_emit(WorldInternal* w, int body_a, int body_
 static void collide_hull_heightfield_emit(WorldInternal* w, int body_a, int body_b, ConvexHull hull_world, v3 hf_pos, quat hf_rot, const Heightfield* hf, uint32_t sub_id_base, InternalManifold** manifolds);
 static int ray_heightfield(v3 ro, v3 rd, v3 hf_pos, quat hf_rot, const Heightfield* hf, float max_t, float* t_out, v3* n_out);
 
-// Forward decls (defined in epa.c, included later in the unity build).
-static int epa_narrowphase_pair(WorldInternal* w, int body_a_idx, int body_b_idx, ShapeInternal* s0, ShapeInternal* s1, BodyState* bs0, BodyState* bs1, Manifold* manifold);
-
 // -----------------------------------------------------------------------------
 // Narrowphase agent table. Each entry is the routine invoked for a specific
 // (shape_a, shape_b) pair after canonicalisation (shape_a->type <= shape_b->type).
@@ -1988,18 +1985,6 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 
 		int hit = 0;
 		CachedFeaturePair out_pair = {0};
-
-		int epa_backend = w->narrowphase_backend == NARROWPHASE_GJK_EPA;
-		int hull_involved_pair = (s0->type == SHAPE_BOX || s0->type == SHAPE_HULL || s1->type == SHAPE_BOX || s1->type == SHAPE_HULL);
-		if (epa_backend && hull_involved_pair) {
-			hit = epa_narrowphase_pair(w, body_a, body_b, s0, s1, bs0, bs1, &im.m);
-			np_call_acc[np_pair_idx(s0->type, s1->type)]++;
-			if (hit) {
-				im.warm = NULL;
-				apush(*manifolds, im);
-			}
-			continue;
-		}
 
 		NarrowphaseAgent agent = g_np_table[s0->type][s1->type];
 		if (agent) {

@@ -366,15 +366,6 @@ typedef struct BodyParams
 
 typedef enum BroadphaseType { BROADPHASE_N2, BROADPHASE_BVH } BroadphaseType;
 
-// Narrowphase backend choice. Default SAT produces one-shot 4-contact manifolds
-// with feature-ID warm cache. GJK+EPA produces a single contact per frame and
-// accumulates contacts via an incremental per-pair manifold (see EpaManifold).
-typedef enum NarrowphaseBackend
-{
-	NARROWPHASE_SAT,
-	NARROWPHASE_GJK_EPA,
-} NarrowphaseBackend;
-
 typedef enum SolverType
 {
 	SOLVER_SOFT_STEP,  // soft contacts, relax each substep (default)
@@ -386,7 +377,6 @@ typedef struct WorldParams
 {
 	v3 gravity;
 	BroadphaseType broadphase;
-	NarrowphaseBackend narrowphase_backend; // default NARROWPHASE_SAT
 	SolverType solver_type;
 	int velocity_iters;  // 0 = default (10)
 	int position_iters;  // 0 = default (4)
@@ -506,19 +496,6 @@ NUDGE_API uint8_t trimesh_get_material_id(const TriMesh* mesh, int tri_index);
 typedef void (*BodyContactListener)(Body self, const ContactSummary* pairs, int count, void* ud);
 NUDGE_API void body_set_contact_listener(World world, Body body, BodyContactListener fn, void* ud);
 
-// Per-frame EPA narrowphase stats. Reset at the top of each world_step.
-// Only populated when narrowphase_backend == NARROWPHASE_GJK_EPA.
-typedef struct WorldEpaStats
-{
-	int queries;
-	int iter_cap_hits;
-	int total_iters;
-	int warm_reseeds;
-	int contacts_emitted;
-	int pair_count;
-} WorldEpaStats;
-NUDGE_API WorldEpaStats world_get_epa_stats(World world);
-
 // -----------------------------------------------------------------------------
 // World queries.
 
@@ -551,7 +528,6 @@ NUDGE_API int world_raycast(World world, v3 origin, v3 direction, float max_dist
 // body / joint / shape flushes the ring buffer. Mutation replay is a v2.
 //
 // Not supported by v1:
-//   - EPA backend (epa_cache is not captured; use the SAT backend).
 //   - Mutating the world between capture and restore (flushes the buffer).
 
 typedef struct RewindParams

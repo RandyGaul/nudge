@@ -53,10 +53,6 @@ typedef struct GJK_Cache
 	v3 point2[4]; // cached world-space support points on B
 } GJK_Cache;
 
-// (GJK_Simplex_Out removed: EPA seeds from warm-cache Minkowski directions
-// stored in EpaManifold instead, avoiding the CORE-vs-inflated support mismatch
-// for sphere/capsule shapes.)
-
 // -----------------------------------------------------------------------------
 // Shape types and constructors.
 

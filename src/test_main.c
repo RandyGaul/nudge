@@ -45,7 +45,6 @@
 #include "tests_contacts_unit.c"
 #include "tests_heightfield_unit.c"
 #include "tests_trimesh_unit.c"
-#include "tests_epa_perf.c"
 #include "tests_determinism.c"
 
 int main(int argc, char* argv[])
@@ -73,8 +72,6 @@ int main(int argc, char* argv[])
 			break_pat ? break_pat : "*", debug_port > 0 ? debug_port : 9999);
 	}
 
-	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--bench-epa") == 0) { bench_epa_vs_sat(); return 0; }
-	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--bench-epa-scenes") == 0) { bench_epa_scenes(); return 0; }
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--determinism") == 0) {
 			int det_threads = 1;
@@ -82,16 +79,6 @@ int main(int argc, char* argv[])
 				if (strcmp(argv[j], "--threads") == 0 && j + 1 < argc) det_threads = atoi(argv[j + 1]);
 			}
 			return run_determinism_test(det_threads);
-		}
-	}
-	for (int i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "--fuzz-epa") == 0 && i + 1 < argc) {
-			int n = atoi(argv[i + 1]);
-			test_pass = 0; test_fail = 0;
-			printf("--- epa fuzz (%d iterations per pair) ---\n", n);
-			test_epa_fuzz(n);
-			printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
-			return test_fail > 0 ? 1 : 0;
 		}
 	}
 	int fuzz_iters = 0;

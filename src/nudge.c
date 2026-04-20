@@ -20,7 +20,6 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 #include "trimesh.c"
 #include "heightfield.c"
 #include "broadphase.c"
-#include "epa.c"
 #include "inertia.c"
 #include "solver_pgs.c"
 #include "joints.c"
@@ -41,7 +40,6 @@ World create_world(WorldParams params)
 	memset(w, 0, sizeof(*w));
 	w->gravity = params.gravity;
 	w->broadphase_type = params.broadphase;
-	w->narrowphase_backend = (int)params.narrowphase_backend;
 	w->solver_type = params.solver_type;
 	w->sleep_enabled = 1;
 	w->sat_hint_enabled = 1;
@@ -76,7 +74,6 @@ void destroy_world(World world)
 	afree(w->debug_contacts);
 	afree(w->body_state);
 	map_free(w->warm_cache);
-	map_free(w->epa_cache);
 	bvh_free(w->bvh_static); CK_FREE(w->bvh_static);
 	bvh_free(w->bvh_dynamic); CK_FREE(w->bvh_dynamic);
 	bvh_free(w->bvh_sleeping); CK_FREE(w->bvh_sleeping);
@@ -547,9 +544,9 @@ typedef struct NP_WorkCtx
 // required for bit-identical cross-thread-count results. Non-hitting pairs
 // leave their slot zero-initialized (contact_count=0); caller compacts.
 //
-// Calls the full narrowphase_pair so warm-cache lookups, SAT hints,
-// incremental NP refresh, and EPA backend selection all match the serial
-// path. Thread-safe because narrowphase_pair only reads the warm_cache map
+// Calls the full narrowphase_pair so warm-cache lookups, SAT hints, and
+// incremental NP refresh all match the serial path. Thread-safe because
+// narrowphase_pair only reads the warm_cache map
 // structure (no map_set / map_del) and only writes to each pair's own
 // WarmManifold entry (disjoint across workers).
 static void np_work_fn(void* ctx, int start, int count)
@@ -583,10 +580,6 @@ void world_step(World world, float dt)
 	w->frame++;
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
-
-	// Reset per-frame EPA telemetry. Only meaningful when EPA backend is active,
-	// but clearing unconditionally keeps the counters honest after backend toggles.
-	w->epa_stats = (EpaStats){ 0 };
 
 	afree(w->dbg_solver_manifolds); w->dbg_solver_manifolds = NULL;
 	afree(w->dbg_solver_contacts);  w->dbg_solver_contacts = NULL;
@@ -1955,19 +1948,6 @@ int world_get_contacts(World world, const Contact** out)
 	if (!w->debug_contacts) { afit(w->debug_contacts, 1); asetlen(w->debug_contacts, 0); }
 	*out = w->debug_contacts;
 	return asize(w->debug_contacts);
-}
-
-WorldEpaStats world_get_epa_stats(World world)
-{
-	WorldInternal* w = (WorldInternal*)world.id;
-	WorldEpaStats s;
-	s.queries          = w->epa_stats.queries;
-	s.iter_cap_hits    = w->epa_stats.iter_cap_hits;
-	s.total_iters      = w->epa_stats.total_iters;
-	s.warm_reseeds     = w->epa_stats.warm_reseeds;
-	s.contacts_emitted = w->epa_stats.contacts_emitted;
-	s.pair_count       = w->epa_stats.pair_count;
-	return s;
 }
 
 // -----------------------------------------------------------------------------

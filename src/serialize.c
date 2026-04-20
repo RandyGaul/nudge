@@ -540,14 +540,13 @@ SV_SERIALIZABLE(WorldParams)
 {
 	SV_ADD(SV_INITIAL, gravity);
 	int bp = (int)o->broadphase;
-	int nb = (int)o->narrowphase_backend;
+	int nb = 0;  // was narrowphase_backend (EPA removed); kept in stream for format compat.
 	int st = (int)o->solver_type;
 	SV_ADD_LOCAL(SV_INITIAL, bp);
 	SV_ADD_LOCAL(SV_INITIAL, nb);
 	SV_ADD_LOCAL(SV_INITIAL, st);
 	if (S->loading) {
 		o->broadphase = (BroadphaseType)bp;
-		o->narrowphase_backend = (NarrowphaseBackend)nb;
 		o->solver_type = (SolverType)st;
 	}
 	SV_ADD(SV_INITIAL, velocity_iters);
