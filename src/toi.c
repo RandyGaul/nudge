@@ -764,6 +764,7 @@ static void toi_advance_one_body(WorldInternal* w, int k, float dt)
 	quat q0 = w->fast_body_pre_rot[k];
 
 	float earliest = toi_body_vs_static(w, bi, p0, q0, dt);
+	if (getenv("TOI_DBG")) printf("  TOI bi=%d earliest=%.4f pre=(%.3f,%.3f,%.3f) post=(%.3f,%.3f,%.3f)\n", bi, earliest, p0.x, p0.y, p0.z, bs->position.x, bs->position.y, bs->position.z);
 	if (earliest >= 1.0f) {
 		// TOI sweep reported no hit. The sweep uses straight-line integration
 		// from pre_pos with post-solve velocity. Multi-substep integration can

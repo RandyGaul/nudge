@@ -13926,6 +13926,7 @@ static void ccd_soak_repro(int kind, float scale_f, float vx, float vy, float vz
 		if (pos.x > CCD_SOAK_WALL_FAR_X && in_wall_yz) { printf("  TUNNEL at frame %d pos=(%.3f,%.3f,%.3f)\n", frame, pos.x, pos.y, pos.z); break; }
 		if (inside_wall || inside_beam) { printf("  STUCK at frame %d pos=(%.3f,%.3f,%.3f)\n", frame, pos.x, pos.y, pos.z); break; }
 		float d = v3_len(sub(pos, prev));
+		if (getenv("CCD_TRACE")) printf("  f=%3d pos=(%7.4f,%7.4f,%7.4f) vel=(%7.3f,%7.3f,%7.3f) d=%.5f\n", frame, pos.x, pos.y, pos.z, vel.x, vel.y, vel.z, d);
 		if (v3_len(vel) > CCD_SOAK_FROZEN_VEL_MIN && d < CCD_SOAK_FROZEN_POS_EPS) {
 			frozen++;
 			if (frozen >= CCD_SOAK_FROZEN_WINDOW) { printf("  FROZEN at frame %d pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f)\n", frame, pos.x, pos.y, pos.z, vel.x, vel.y, vel.z); break; }
