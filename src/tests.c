@@ -11709,7 +11709,7 @@ static void test_toi_feature_sphere_sphere()
 	TEST_ASSERT(kA == 1);
 	TEST_BEGIN("TOI feat sphere-sphere: kB == 1");
 	TEST_ASSERT(kB == 1);
-	ToiSepFn fn = toi_make_sep_fn(&simplex, &r, V3(0,0,0), quat_identity());
+	ToiSepFn fn = toi_make_sep_fn(&simplex, &r, quat_identity(), &ga, &gb);
 	TEST_BEGIN("TOI feat sphere-sphere: POINTS");
 	TEST_ASSERT(fn.type == TOI_POINTS);
 }
@@ -11747,8 +11747,8 @@ static void test_toi_feature_hull_hull_edge_parallel()
 	TEST_ASSERT_FLOAT(r.distance, 4.0f, 1e-3f);
 	TEST_BEGIN("TOI feat hull-hull parallel: kA + kB >= 2");
 	TEST_ASSERT(kA + kB >= 2);
-	ToiSepFn fn = toi_make_sep_fn(&simplex, &r, V3(-3,0,0), quat_identity());
-	v3 axis = toi_axis_world(&fn, V3(-3,0,0), quat_identity());
+	ToiSepFn fn = toi_make_sep_fn(&simplex, &r, quat_identity(), &ga, &gb);
+	v3 axis = toi_axis_world(&fn, quat_identity());
 	TEST_BEGIN("TOI feat hull-hull parallel: axis unit length");
 	TEST_ASSERT_FLOAT(v3_len(axis), 1.0f, 1e-3f);
 }
@@ -11769,8 +11769,8 @@ static void test_toi_feature_hull_hull_edge_cross()
 	toi_simplex_feature_counts(&simplex, &kA, &kB, fa, fb);
 	TEST_BEGIN("TOI feat hull-hull skew: distance > 0");
 	TEST_ASSERT(r.distance > 0.0f);
-	ToiSepFn fn = toi_make_sep_fn(&simplex, &r, V3(0,0,0), quat_identity());
-	v3 axis = toi_axis_world(&fn, V3(0,0,0), quat_identity());
+	ToiSepFn fn = toi_make_sep_fn(&simplex, &r, quat_identity(), &ga, &gb);
+	v3 axis = toi_axis_world(&fn, quat_identity());
 	TEST_BEGIN("TOI feat hull-hull skew: axis is unit-length");
 	TEST_ASSERT_FLOAT(v3_len(axis), 1.0f, 1e-3f);
 	(void)kA; (void)kB; (void)fa; (void)fb;

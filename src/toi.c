@@ -81,31 +81,40 @@ static GJK_Shape toi_shape_at_pose(ShapeInternal* s, v3 body_pos, quat body_rot)
 // common face tangent — acceptable loss of generality for this MVP; full
 // 3D edge-edge support is future work).
 
-enum { TOI_POINTS = 0, TOI_FACE_A = 1, TOI_FACE_B = 2, TOI_EDGE_EDGE = 3 };
+// Separation function (Box2D v3 b2SeparationFunction / distance.c:932, adapted
+// to 3D). Three types classified from GJK simplex unique-feature counts kA/kB:
+//   POINTS (kA=1, kB=1)   : vertex-vs-vertex. Axis stored in world frame.
+//                           sep(t) = dot(pB(idxB) - pA_t(idxA), axis_world).
+//   FACE_A (kA>=2)        : face/edge on A. Axis stored in A's local frame;
+//                           rotates with A so it tracks A's face normal.
+//                           sep(t) = dot(pB(idxB) - pA_t(idxA_ref), rotate(rotA(t), axis_local)).
+//   FACE_B (kA=1, kB>=2)  : face/edge on B. Since B is static, axis stored
+//                           in world frame (equivalent to B-local * static rot).
+// All evaluation goes through gjk_support_feature() at FIXED vertex indices —
+// stable across pose sweeps, no live support calls during root find.
+//
+// Key differences from the previous (now-deleted) 4-type design:
+//   - No separate EDGE_EDGE type. True 3D edge-vs-edge gets classified as
+//     kA=2, kB=2 → FACE_A with the GJK closest-direction axis; this is
+//     geometrically correct (the GJK axis is perpendicular to both edges when
+//     they are skew, and lies in the edge plane when they are coplanar).
+//     The old EDGE_EDGE used cross(eA, eB) which misfires whenever GJK pulls
+//     multiple vertices on each side for a face-vs-edge contact (e.g.
+//     capsule-vs-box face).
+//   - POINTS axis stored in world, not A-local. For translational sweeps
+//     this gives linear sep(t); the previous A-local storage rotated the
+//     axis with A every sample and produced false zero-crossings.
+//   - Evaluate uses fixed vertex indices via gjk_support_feature rather than
+//     world-space witnesses re-rotated through A's pose. Matches box2d's
+//     proxyA->points[cache->indexA] approach and is simpler.
+enum { TOI_POINTS = 0, TOI_FACE_A = 1, TOI_FACE_B = 2 };
 
 typedef struct ToiSepFn
 {
 	int type;
-	// `axis_local` is a unit direction.
-	//   POINTS / FACE_A: stored in A's local frame (rotates with A over t).
-	//   FACE_B:          stored in world (B static, axis doesn't move).
-	//   EDGE_EDGE:       stored in A's local frame. Derived from seed-time
-	//                    normalize(eA_world x eB_world) and sign-locked so
-	//                    positive means B is on the + side of A's edge
-	//                    plane. Rotated to world via rot_A at each sample
-	//                    — never recomputed via cross product, which is
-	//                    what produced the sign flip at parallel edges.
-	v3 axis_local;
-	// Reference support points. POINTS: A-local witness on A, B-world witness
-	// on B. FACE_A: A-local reference point on the face. FACE_B: B-world
-	// reference point on the face. EDGE_EDGE: A-local edge endpoints in
-	// edge_a_loc0/edge_a_loc1; B-world endpoints in edge_b_w0/edge_b_w1.
-	v3 local_point_a;
-	v3 world_point_b;
-	// Edge-edge extras.
-	v3 edge_a_loc0, edge_a_loc1;
-	v3 edge_b_w0,   edge_b_w1;
-	int axis_sign; // +1 or -1 for edge-edge axis sign lock; 0 otherwise
+	int idxA;   // A vertex index (reference feature, stable across t)
+	int idxB;   // B vertex index (reference feature, stable across t)
+	v3 axis;    // POINTS/FACE_B: world frame; FACE_A: A-local frame
 } ToiSepFn;
 
 // Extract (kA, kB) = counts of unique supporting features on each side of
@@ -128,17 +137,21 @@ static void toi_simplex_feature_counts(const GJK_Simplex* s, int* out_kA, int* o
 	*out_kB = nB;
 }
 
-// Build a separation function from the GJK simplex at the current pose.
-// Feature type is chosen from the unique-support counts on each side:
-//   kA=1, kB=1:              POINTS
-//   kA>=2, kB==1:            FACE_A
-//   kA==1, kB>=2:            FACE_B
-//   kA==2, kB==2 (3D):       EDGE_EDGE (with parallel-edge fallback to FACE_A)
-//   kA>=3 or kB>=3:          FACE on the side with more supports
-// The axis is derived from the GJK closest-point direction (coincides with
-// the relevant face normal when a face feature dominates, and with the
-// edge-cross-product direction for edge-edge when non-parallel).
-static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0, v3 pos_A, quat rot_A)
+// Compute world-frame axis for this sep-fn at the given A pose. FACE_A
+// rotates the stored A-local axis into world; FACE_B and POINTS already
+// store world-frame axes.
+static v3 toi_axis_world(const ToiSepFn* f, quat rot_A)
+{
+	if (f->type == TOI_FACE_A) return rotate(rot_A, f->axis);
+	return f->axis;
+}
+
+// Build a separation function from the GJK simplex at seed pose.
+//   kA=1, kB=1    -> POINTS (axis world-frame = normalize(pB - pA))
+//   kA>=2         -> FACE_A (axis stored A-local, rotates with A)
+//   kA=1, kB>=2   -> FACE_B (axis stored world-frame; B static)
+// Falls back to POINTS if GJK returned a zero-direction (degenerate).
+static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0, quat rot_A, GJK_Shape* shapeA_at_seed, GJK_Shape* shapeB)
 {
 	ToiSepFn f = {0};
 	int kA = 0, kB = 0;
@@ -149,242 +162,83 @@ static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0
 	float dlen = v3_len(diff);
 	v3 axis_world = dlen > 1e-8f ? scale(diff, 1.0f / dlen) : V3(0, 1, 0);
 
-	quat rot_A_inv = quat_inv(rot_A);
-	v3 local_pA = rotate(rot_A_inv, sub(r0->point1, pos_A));
+	// Pick representative feature indices (first entry from each side's
+	// unique-supports list).
+	f.idxA = fa[0];
+	f.idxB = fb[0];
 
-	// Edge-edge: two distinct supports on each side. Axis from (eA x eB).
-	// Guard: when the GJK closest-point direction (dlen > tol) is a credible
-	// separating axis, prefer it — cross-product axis is only correct for true
-	// edge-vs-edge contact. Capsule-vs-box-face routinely returns kA=2 kB=2
-	// (two capsule endpoints + two face corners) but the correct axis is the
-	// face normal, not cross(capsule_axis, face_edge). dlen > tol means GJK
-	// found a well-defined direction; trust it over the cross product.
-	if (kA == 2 && kB == 2 && dlen <= 1e-8f) {
-		// Recover the simplex vertices that produced each side's edge.
-		v3 a0_w = V3(0,0,0), a1_w = V3(0,0,0), b0_w = V3(0,0,0), b1_w = V3(0,0,0);
-		int nA = 0, nB = 0;
-		for (int i = 0; i < simplex->count && (nA < 2 || nB < 2); i++) {
-			if (nA < 2) {
-				int dup = 0;
-				for (int j = 0; j < nA; j++) {
-					v3 w = j == 0 ? a0_w : a1_w;
-					if (len2(sub(w, simplex->v[i].point1)) < 1e-12f) { dup = 1; break; }
-				}
-				if (!dup) {
-					if (nA == 0) a0_w = simplex->v[i].point1;
-					else         a1_w = simplex->v[i].point1;
-					nA++;
-				}
-			}
-			if (nB < 2) {
-				int dup = 0;
-				for (int j = 0; j < nB; j++) {
-					v3 w = j == 0 ? b0_w : b1_w;
-					if (len2(sub(w, simplex->v[i].point2)) < 1e-12f) { dup = 1; break; }
-				}
-				if (!dup) {
-					if (nB == 0) b0_w = simplex->v[i].point2;
-					else         b1_w = simplex->v[i].point2;
-					nB++;
-				}
-			}
-		}
-		v3 eA_w = sub(a1_w, a0_w);
-		v3 eB_w = sub(b1_w, b0_w);
-		v3 n_w = cross(eA_w, eB_w);
-		float nl2 = len2(n_w);
-		if (nl2 > 1e-10f) {
-			// Axis captured at SEED from a known non-parallel (eA × eB) and
-			// then STORED IN A'S LOCAL FRAME so it rotates with A. The
-			// scalar-triple-product bug came from *recomputing* the cross
-			// product at every sample — crossing through the parallel locus
-			// sends |cross| → 0 with an indeterminate direction, which is
-			// what produced the spurious pos↔neg flips mid-step. Recording
-			// the seed axis in A-local sidesteps that: axis_world(t) =
-			// rotate(rot_A(t), axis_local) is always unit-length, always
-			// smooth, and tracks A's edge orientation (one half of the
-			// cross product) correctly through rotation. Small rotations
-			// within a step match "cross product with A's current edge"
-			// almost exactly; large rotations don't matter because the
-			// feature will be reseeded by the outer loop before then.
-			f.type = TOI_EDGE_EDGE;
-			v3 axis_world = scale(n_w, 1.0f / sqrtf(nl2));
-			// Sign-lock so positive = B on the + side of A's edge plane at
-			// seed. A sign change in the sep function now corresponds to an
-			// actual edge-plane crossing, not to an axis direction flip.
-			v3 pA_seed = r0->point1, pB_seed = r0->point2;
-			if (dot(sub(pB_seed, pA_seed), axis_world) < 0.0f) axis_world = neg(axis_world);
-			f.axis_local = rotate(rot_A_inv, axis_world); // A-local
-			f.axis_sign = 0;            // unused; kept for struct layout
-			f.edge_a_loc0 = rotate(rot_A_inv, sub(a0_w, pos_A));
-			f.edge_a_loc1 = rotate(rot_A_inv, sub(a1_w, pos_A));
-			f.edge_b_w0 = b0_w;
-			f.edge_b_w1 = b1_w;
-			f.local_point_a = local_pA;
-			f.world_point_b = pB_seed;
-			return f;
-		}
-		// Fall through if edges are parallel: FACE_A handles it.
-	}
-
-	if (kB >= 2 && kA == 1) {
-		f.type = TOI_FACE_B;
-		f.axis_local = axis_world;
-		f.world_point_b = r0->point2;
-		f.local_point_a = local_pA;
-		return f;
-	}
-	if (kA >= 2) {
+	// Classification. If GJK direction is degenerate (shapes overlap at seed)
+	// the outer TOI loop has already bailed before we get here, so dlen is
+	// effectively always > tol here; fallback is defensive.
+	if (kA >= 2 && dlen > 1e-8f) {
+		// A-side face/edge. Axis rotates with A.
 		f.type = TOI_FACE_A;
-		f.axis_local = rotate(rot_A_inv, axis_world);
-		f.local_point_a = local_pA;
-		f.world_point_b = r0->point2;
+		f.axis = rotate(quat_inv(rot_A), axis_world);
+		// Re-evaluate support along the stored axis to pin idxA to A's
+		// deepest vertex on that axis — gives stable feature across sweep.
+		v3 pa; int fi_a;
+		gjk_support(shapeA_at_seed, axis_world, &fi_a, pa);
+		f.idxA = fi_a;
+		// And B's deepest vertex in -axis (toward A).
+		v3 pb; int fi_b;
+		gjk_support(shapeB, neg(axis_world), &fi_b, pb);
+		f.idxB = fi_b;
 		return f;
 	}
+	if (kB >= 2 && dlen > 1e-8f) {
+		// B-side face/edge. B static, so world-frame axis is equivalent to
+		// B-local axis rotated by B's fixed rotation.
+		f.type = TOI_FACE_B;
+		f.axis = axis_world;
+		v3 pa; int fi_a;
+		gjk_support(shapeA_at_seed, axis_world, &fi_a, pa);
+		f.idxA = fi_a;
+		v3 pb; int fi_b;
+		gjk_support(shapeB, neg(axis_world), &fi_b, pb);
+		f.idxB = fi_b;
+		return f;
+	}
+	// Vertex-vertex (POINTS). Axis stored in world (fixed direction from
+	// A's seed vertex to B's seed vertex). Translational sweeps produce a
+	// linear sep(t); any re-frame (A-local / B-local) would inject rotation
+	// noise when no face feature is involved.
 	f.type = TOI_POINTS;
-	f.local_point_a = local_pA;
-	f.world_point_b = r0->point2;
-	// Axis must be SEED-anchored, not re-derived from live witness points.
-	// If we recomputed axis = normalize(pB - pA(t)) each sample, the
-	// direction flips when A crosses past B's seed side, making the root
-	// finder think the shapes have already separated (positive axis-dot
-	// on both sides of the crossing) and return a false miss. Store the
-	// seed-time direction in A's local frame so it rotates correctly with
-	// A's pose but never flips purely from translation.
-	f.axis_local = rotate(rot_A_inv, axis_world);
+	f.axis = axis_world;
 	return f;
 }
 
-// Compute the world-frame axis of the separation function at time t, given
-// A's integrated pose.
-static v3 toi_axis_world(const ToiSepFn* f, v3 pos_A, quat rot_A)
+// FindMinSeparation (box2d b2FindMinSeparation): find deepest feature along
+// the current world-axis at time t and return the separation. Updates the
+// stored indices to the newly-found features — after this call, Evaluate
+// with the same sep-fn will use the updated features.
+static float toi_find_min_sep(ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* shapeB, quat rot_A)
 {
-	switch (f->type) {
-	case TOI_FACE_A: return rotate(rot_A, f->axis_local);
-	case TOI_FACE_B: return f->axis_local; // world-frame, B static
-	case TOI_POINTS: return rotate(rot_A, f->axis_local); // seed direction in A's frame
-	case TOI_EDGE_EDGE:
-		// Seed axis stored in A's local frame — rotates with A, never
-		// recomputed via cross product at sample time. See make_sep_fn.
-		return rotate(rot_A, f->axis_local);
-	default:
-		// Unreachable: all ToiSepType values are covered above. The POINTS
-		// case is handled as `case TOI_POINTS` earlier.
-		return V3(0, 1, 0);
-	}
-}
-
-// Find the witness pair giving minimum separation at time t. Returns the
-// minimum separation value; writes the supporting world points (on A and B)
-// into *out_pa and *out_pb. Box2D's b2FindMinSeparation analog — but since
-// we operate on GJK_Shape (which internally handles any shape type), we
-// store world support points directly rather than vertex indices.
-// Compute the edge-edge scalar-triple-product separation at a given A-pose.
-// s = ((eA(t) x eB) . (pB - pA(t))) / |eA(t) x eB|  — the signed distance
-// between the two infinite lines. Smooth through the parallel-edge locus
-// because both numerator and denominator vanish together (the singularity
-// Edge-edge separation function. Signed projection of the current closest-
-// point pair onto a SEED-LOCKED world axis — the cross product eA × eB
-// measured at make_sep_fn time and sign-adjusted so positive means B is on
-// the + side of A's edge plane.
-//
-// Design goals (requested feature):
-//   * Smooth: the closest-points pair (qA, qB) is a continuous function of
-//     A's pose (pose → clamped segment-segment solve); projecting onto a
-//     fixed axis stays smooth.
-//   * Convex-ish: for linear A-motion with fixed A-rotation, the projection
-//     is affine in t (qA moves linearly, axis is fixed). Rotation makes it
-//     locally smooth rather than affine, but for one TOI step the rotation
-//     is small.
-//   * No parallel-axis singularity: axis is recorded ONCE at seed from a
-//     non-parallel cross product; we never recompute it at sample time, so
-//     near-parallel sample poses don't divide by zero.
-//   * Pos-to-neg sign change ONLY at actual edge-plane crossings: sign
-//     flips when (qB - qA) . n̂_seed changes sign, which happens when A's
-//     edge crosses the plane containing B's edge perpendicular to n̂_seed.
-//     At that crossing the segments are in the same plane — geometrically
-//     the "intersection event" the TOI root finder is meant to locate.
-//   * Root finder gets a real sign change to bracket, not a U-shape.
-//
-// The old scalar-triple-product form was the same projection but with the
-// axis RE-DERIVED at each sample, which reintroduced the parallel singularity
-// and produced spurious sign flips when A swept across the plane mid-step.
-static float toi_edge_edge_sep(const ToiSepFn* f, v3 pos_A, quat rot_A)
-{
-	v3 a0 = add(pos_A, rotate(rot_A, f->edge_a_loc0));
-	v3 a1 = add(pos_A, rotate(rot_A, f->edge_a_loc1));
-	v3 b0 = f->edge_b_w0;
-	v3 b1 = f->edge_b_w1;
-	v3 dA = sub(a1, a0);
-	v3 dB = sub(b1, b0);
-	v3 r  = sub(a0, b0);
-	float a = dot(dA, dA);
-	float c = dot(dB, dB);
-	float b = dot(dA, dB);
-	float e = dot(dA, r);
-	float fv = dot(dB, r);
-	const float EPS = 1e-10f;
-	float s, t;
-	if (a < EPS && c < EPS) { s = 0.0f; t = 0.0f; }
-	else if (a < EPS) { s = 0.0f; t = fmaxf(0.0f, fminf(1.0f, fv / c)); }
-	else if (c < EPS) { t = 0.0f; s = fmaxf(0.0f, fminf(1.0f, -e / a)); }
-	else {
-		float denom = a * c - b * b;
-		s = denom > EPS ? fmaxf(0.0f, fminf(1.0f, (b * fv - c * e) / denom)) : 0.0f;
-		t = (b * s + fv) / c;
-		if (t < 0.0f) { t = 0.0f; s = fmaxf(0.0f, fminf(1.0f, -e / a)); }
-		else if (t > 1.0f) { t = 1.0f; s = fmaxf(0.0f, fminf(1.0f, (b - e) / a)); }
-	}
-	v3 qA = add(a0, scale(dA, s));
-	v3 qB = add(b0, scale(dB, t));
-	v3 axis_world = rotate(rot_A, f->axis_local);
-	return dot(sub(qB, qA), axis_world);
-}
-
-static float toi_find_min_sep(const ToiSepFn* f, ShapeInternal* sa, v3 pos_A, quat rot_A, GJK_Shape* gjk_b, v3* out_pa, v3* out_pb)
-{
-	GJK_Shape ga = toi_shape_at_pose(sa, pos_A, rot_A);
-	v3 axis_world = toi_axis_world(f, pos_A, rot_A);
-
-	// Support on A along +axis (closest to B), on B along -axis (closest
-	// to A). Recorded for the root-finder's EvaluateSeparation path.
-	int featA;
-	v3 pa;
-	gjk_support(&ga, axis_world, &featA, pa);
-	int featB;
-	v3 pb;
-	gjk_support(gjk_b, neg(axis_world), &featB, pb);
-	*out_pa = pa;
-	*out_pb = pb;
-
-	// For edge-edge, replace the axis-dot separation with the scalar
-	// triple product (divided by the cross-product magnitude). This is
-	// the signed line-to-line distance and stays smooth across the
-	// parallel-edges singularity — the failure mode that plagues a
-	// cross-product + sign-lock axis.
-	if (f->type == TOI_EDGE_EDGE) return toi_edge_edge_sep(f, pos_A, rot_A);
-
-	float rA = ga.radius, rB = gjk_b->radius;
+	v3 axis_world = toi_axis_world(f, rot_A);
+	int fi_a, fi_b;
+	v3 pa, pb;
+	gjk_support(shapeA_at_t, axis_world, &fi_a, pa);
+	gjk_support(shapeB, neg(axis_world), &fi_b, pb);
+	f->idxA = fi_a;
+	f->idxB = fi_b;
+	float rA = shapeA_at_t->radius, rB = shapeB->radius;
 	v3 pa_eff = add(pa, scale(axis_world, rA));
 	v3 pb_eff = sub(pb, scale(axis_world, rB));
 	return dot(sub(pb_eff, pa_eff), axis_world);
 }
 
-// Evaluate separation at time t using the witness points cached from a prior
-// toi_find_min_sep call. For POINTS/FACE_A this uses local-frame points
-// rotated to world by A's pose at t; for FACE_B it uses the fixed world
-// point on B. Analog of b2EvaluateSeparation.
-static float toi_eval_sep(const ToiSepFn* f, v3 pa_world_ref_local_A, v3 pb_world, float rA, float rB, v3 pos_A, quat rot_A)
+// EvaluateSeparation (box2d b2EvaluateSeparation): compute separation at
+// time t with feature indices held FIXED (from a prior FindMinSep). Does
+// no support search — just re-fetches the stored vertex indices at the
+// current pose via gjk_support_feature. This is what the root finder
+// iterates on.
+static float toi_eval_sep(const ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* shapeB, quat rot_A)
 {
-	// Edge-edge uses the scalar triple product directly (depends only on
-	// the stored edge anchors + A's pose, not on the cached witness
-	// points). Match the FindMinSep formula so the root finder is
-	// consistent.
-	if (f->type == TOI_EDGE_EDGE) return toi_edge_edge_sep(f, pos_A, rot_A);
-	v3 pa_world = add(pos_A, rotate(rot_A, pa_world_ref_local_A));
-	v3 axis_world = toi_axis_world(f, pos_A, rot_A);
-	v3 pa_eff = add(pa_world, scale(axis_world, rA));
-	v3 pb_eff = sub(pb_world, scale(axis_world, rB));
+	v3 axis_world = toi_axis_world(f, rot_A);
+	v3 pa = gjk_support_feature(shapeA_at_t, f->idxA);
+	v3 pb = gjk_support_feature(shapeB, f->idxB);
+	float rA = shapeA_at_t->radius, rB = shapeB->radius;
+	v3 pa_eff = add(pa, scale(axis_world, rA));
+	v3 pb_eff = sub(pb, scale(axis_world, rB));
 	return dot(sub(pb_eff, pa_eff), axis_world);
 }
 
@@ -430,44 +284,28 @@ static float toi_pair_advance(ShapeInternal* sa, BodyState* bs, BodyHot* bh, flo
 			return t1;
 		}
 
-		ToiSepFn fcn = toi_make_sep_fn(&simplex, &r_t1, pos_A_t1, rot_A_t1);
+		ToiSepFn fcn = toi_make_sep_fn(&simplex, &r_t1, rot_A_t1, &ga_t1, static_b);
 
 		// Inner (pushback) loop: advance along the separation axis.
-		int done = 0;
 		float t2 = t_max;
-		float rA = ga_t1.radius;
-		float rB = static_b->radius;
 
 		for (int push = 0; push < TOI_PUSHBACK_ITER_MAX; push++) {
 			v3 pos_A_t2; quat rot_A_t2;
 			toi_pose_at(bs, bh, dt, t2, &pos_A_t2, &rot_A_t2);
-			v3 pa2, pb2;
-			float s2 = toi_find_min_sep(&fcn, sa, pos_A_t2, rot_A_t2, static_b, &pa2, &pb2);
-	if (s2 > target + tol) {
-				// Sep-fn at t2 claims "separated through the step". For the
-				// edge-edge scalar-triple-product, the sign convention flips
-				// when the body sweeps across the plane spanned by the two
-				// edges — a large moving body at a glancing angle can produce
-				// a positive s2 even though it tunnels deep through the
-				// feature. If we're already close enough at t1 that a real
-				// contact is plausible, trust GJK's distance over sep-fn's
-				// sign and accept t1 as the TOI.
-				if (fcn.type == TOI_EDGE_EDGE && r_t1.distance < LINEAR_SLOP * 4.0f) return t1;
-				return 1.0f;
-			}
-			if (s2 > target - tol) { t1 = t2; break; }
-			// Convert world support points back into A's local frame for
-			// root-finder-stable re-evaluation. B stays in world (static).
-			v3 pa_local_A = rotate(quat_inv(rot_A_t2), sub(pa2, pos_A_t2));
+			GJK_Shape ga_t2 = toi_shape_at_pose(sa, pos_A_t2, rot_A_t2);
 
-			float s1 = toi_eval_sep(&fcn, pa_local_A, pb2, rA, rB, pos_A_t1, rot_A_t1);
-			if (s1 < target - tol) {
-				// Initial overlap at t1 with this witness pair — accept t1 as TOI.
-				return t1;
-			}
-			if (s1 <= target + tol) {
-				return t1; // touching at t1
-			}
+			// FindMinSep at t2: picks deepest feature at current axis and
+			// updates fcn.idxA/idxB in-place. After this, Evaluate uses
+			// the same fixed indices.
+			float s2 = toi_find_min_sep(&fcn, &ga_t2, static_b, rot_A_t2);
+			if (s2 > target + tol) return 1.0f;
+			if (s2 > target - tol) { t1 = t2; break; }
+
+			// Evaluate sep at t1 with the features FindMinSep just pinned.
+			GJK_Shape ga_t1_ref = toi_shape_at_pose(sa, pos_A_t1, rot_A_t1);
+			float s1 = toi_eval_sep(&fcn, &ga_t1_ref, static_b, rot_A_t1);
+			if (s1 < target - tol) return t1;
+			if (s1 <= target + tol) return t1;
 
 			// Bisection + secant root find on eval_sep(...) - target in [t1, t2].
 			float a1 = t1, a2 = t2;
@@ -476,26 +314,22 @@ static float toi_pair_advance(ShapeInternal* sa, BodyState* bs, BodyHot* bh, flo
 			for (int root = 0; root < TOI_ROOT_ITER_MAX; root++) {
 				float t;
 				if (root & 1) {
-					// Secant rule
 					float denom = sa2 - sa1;
 					t = (fabsf(denom) > 1e-12f) ? a1 + (target - sa1) * (a2 - a1) / denom : 0.5f * (a1 + a2);
 				} else {
-					// Bisection guarantees progress
 					t = 0.5f * (a1 + a2);
 				}
 				v3 pos_A_t; quat rot_A_t;
 				toi_pose_at(bs, bh, dt, t, &pos_A_t, &rot_A_t);
-				float s = toi_eval_sep(&fcn, pa_local_A, pb2, rA, rB, pos_A_t, rot_A_t);
+				GJK_Shape ga_t = toi_shape_at_pose(sa, pos_A_t, rot_A_t);
+				float s = toi_eval_sep(&fcn, &ga_t, static_b, rot_A_t);
 				if (fabsf(s - target) < tol) { t_star = t; break; }
 				if (s > target) { a1 = t; sa1 = s; } else { a2 = t; sa2 = s; }
 				t_star = t;
 			}
 			t2 = t_star;
-			// Loop: the shrunk [t1, t2] now brackets the root under the fixed
-			// witness pair; re-test if the feature pair changed.
+			// Outer loop reseeds sep-fn if features changed.
 		}
-
-		if (done) break;
 	}
 
 	return t1 < 1.0f ? t1 : 1.0f;
