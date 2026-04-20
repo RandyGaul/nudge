@@ -55,7 +55,11 @@ static GJK_Shape toi_shape_at_pose(ShapeInternal* s, v3 body_pos, quat body_rot)
 		return gjk_capsule(sub(world_pos, axis), add(world_pos, axis), s->capsule.radius);
 	}
 	case SHAPE_BOX:
-		return gjk_box(world_pos, world_rot, s->box.half_extents);
+		// Route through the unit-box hull so boxes participate in hull-aware
+		// sep-fn paths (edge-edge Gauss validation). Semantically identical
+		// to gjk_box for support calls, but now exposes half-edge + face-plane
+		// data for Gregorius edge-edge axis validation.
+		return gjk_hull_scaled(hull_unit_box(), world_pos, world_rot, s->box.half_extents);
 	case SHAPE_HULL: {
 		const Hull* h = s->hull.hull;
 		return gjk_hull_scaled(h, world_pos, world_rot, s->hull.scale);
@@ -107,7 +111,17 @@ static GJK_Shape toi_shape_at_pose(ShapeInternal* s, v3 body_pos, quat body_rot)
 //   - Evaluate uses fixed vertex indices via gjk_support_feature rather than
 //     world-space witnesses re-rotated through A's pose. Matches box2d's
 //     proxyA->points[cache->indexA] approach and is simpler.
-enum { TOI_POINTS = 0, TOI_FACE_A = 1, TOI_FACE_B = 2 };
+// EDGE_EDGE (Gregorius GDC 2013 "The Separating Axis Test"):
+// Both shapes are hulls and the GJK simplex identifies an edge-vs-edge
+// closest-feature pair (kA=2, kB=2 from distinct vertices that form an
+// edge on each side). Axis is the live cross product cross(eA(t), eB(t))
+// normalized — tracks both bodies' rotations exactly. The pair is only a
+// valid separating-axis candidate when the four arc endpoints formed by
+// each edge's two adjacent face normals intersect on the unit sphere
+// (Gauss-map overlap test). If the arcs stop intersecting mid-sweep, the
+// edge-edge axis no longer bounds the true min-separation, so the outer
+// TOI loop reseeds on the next iteration.
+enum { TOI_POINTS = 0, TOI_FACE_A = 1, TOI_FACE_B = 2, TOI_EDGE_EDGE = 3 };
 
 typedef struct ToiSepFn
 {
@@ -115,7 +129,56 @@ typedef struct ToiSepFn
 	int idxA;   // A vertex index (reference feature, stable across t)
 	int idxB;   // B vertex index (reference feature, stable across t)
 	v3 axis;    // POINTS/FACE_B: world frame; FACE_A: A-local frame
+	// Edge-edge only. idxA2/idxB2 are the second endpoint of each edge.
+	// Adjacent face normals stored in body-local frames so each body's
+	// rotation propagates to the Gauss arc at eval time.
+	int idxA2, idxB2;
+	v3 nA0_local, nA1_local;  // A's two adjacent face normals (A-local)
+	v3 nB0_local, nB1_local;  // B's two adjacent face normals (B-local)
+	int axis_sign;             // +/-1, orienting cross(eA, eB) so +sep = B above A's edge plane
 } ToiSepFn;
+
+// Gregorius Gauss-arc overlap predicate. Arc (a0, a1) is A's edge-adjacent
+// face normals; arc (b0, b1) is NEGATED B-face normals. Returns true iff
+// the two arcs cross on the unit sphere — the necessary condition for
+// cross(eA, eB) to be the minimum-separating axis. Branchless, ~20 flops.
+static inline int toi_gauss_arcs_overlap(v3 a0, v3 a1, v3 b0, v3 b1)
+{
+	v3 ba = cross(a0, a1);
+	v3 dc = cross(b0, b1);
+	float cba = dot(b0, ba), dba = dot(b1, ba);
+	float adc = dot(a0, dc), bdc = dot(a1, dc);
+	return (cba * dba < 0.0f) && (adc * bdc < 0.0f) && (cba * bdc > 0.0f);
+}
+
+// Find the half-edge on a GJK hull shape whose origin = v0 and destination
+// = v1. Returns half-edge index, or -1. GJK_Shape carries edge_origin[] and
+// edge_twin[]; destination = origin[twin[e]].
+static int toi_hull_find_halfedge(const GJK_Shape* s, int v0, int v1)
+{
+	if (s->type != GJK_HULL || !s->hull.edge_twin || !s->hull.edge_origin) return -1;
+	int ec = s->hull.edge_count;
+	for (int e = 0; e < ec; e++) {
+		int o = s->hull.edge_origin[e];
+		int d = s->hull.edge_origin[s->hull.edge_twin[e]];
+		if (o == v0 && d == v1) return e;
+	}
+	return -1;
+}
+
+// Fetch adjacent face plane normals for a half-edge (in LOCAL frame of the
+// hull — shared across faces either side). Returns 0 on failure, 1 on
+// success. edge_face[e] gives the left-face of half-edge e; edge_face of
+// its twin gives the right-face.
+static int toi_hull_edge_face_normals(const GJK_Shape* s, int he, v3* out_n0, v3* out_n1)
+{
+	if (s->type != GJK_HULL || !s->hull.edge_face || !s->hull.planes || !s->hull.edge_twin) return 0;
+	int f0 = s->hull.edge_face[he];
+	int f1 = s->hull.edge_face[s->hull.edge_twin[he]];
+	*out_n0 = s->hull.planes[f0].normal;
+	*out_n1 = s->hull.planes[f1].normal;
+	return 1;
+}
 
 // Extract (kA, kB) = counts of unique supporting features on each side of
 // the Minkowski simplex. `out_feats_a[0..kA-1]` and `out_feats_b[0..kB-1]`
@@ -139,12 +202,14 @@ static void toi_simplex_feature_counts(const GJK_Simplex* s, int* out_kA, int* o
 
 // Compute world-frame axis for this sep-fn at the given A pose. FACE_A
 // rotates the stored A-local axis into world; FACE_B and POINTS already
-// store world-frame axes.
+// store world-frame axes. EDGE_EDGE isn't handled here — it recomputes the
+// cross-product axis live inside its evaluate paths.
 static v3 toi_axis_world(const ToiSepFn* f, quat rot_A)
 {
 	if (f->type == TOI_FACE_A) return rotate(rot_A, f->axis);
 	return f->axis;
 }
+
 
 // Build a separation function from the GJK simplex at seed pose.
 //   kA=1, kB=1    -> POINTS (axis world-frame = normalize(pB - pA))
@@ -170,6 +235,59 @@ static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0
 	// Classification. If GJK direction is degenerate (shapes overlap at seed)
 	// the outer TOI loop has already bailed before we get here, so dlen is
 	// effectively always > tol here; fallback is defensive.
+
+	// Edge-edge (Gregorius): exactly 2 distinct supports on each side AND
+	// both shapes carry hull half-edge + face-plane data AND the Gauss arcs
+	// overlap. If the predicate fails at seed, cross(eA, eB) is not the
+	// minimum-separating direction; fall through to FACE_A.
+	if (kA == 2 && kB == 2 && dlen > 1e-8f
+	 && shapeA_at_seed->hull.edge_twin && shapeA_at_seed->hull.planes
+	 && shapeB->hull.edge_twin && shapeB->hull.planes) {
+		int eA_he = toi_hull_find_halfedge(shapeA_at_seed, fa[0], fa[1]);
+		int eB_he = toi_hull_find_halfedge(shapeB, fb[0], fb[1]);
+		if (eA_he >= 0 && eB_he >= 0) {
+			// Adjacent face-plane normals in each hull's LOCAL frame —
+			// Hull.planes[].normal is stored local. That's what we want
+			// to cache: future t poses rotate them into world via each
+			// body's rotation.
+			v3 nA0_l, nA1_l, nB0_l, nB1_l;
+			if (toi_hull_edge_face_normals(shapeA_at_seed, eA_he, &nA0_l, &nA1_l)
+			 && toi_hull_edge_face_normals(shapeB, eB_he, &nB0_l, &nB1_l)) {
+				// Gauss arc test at seed: rotate local normals to world and
+				// check overlap. shapeA is at the seed pose; shapeB's basis
+				// columns encode B's static rotation.
+				v3 nA0_w = rotate(rot_A, nA0_l);
+				v3 nA1_w = rotate(rot_A, nA1_l);
+				#define MB(col0,col1,col2,v) V3( \
+					(col0).x*(v).x + (col1).x*(v).y + (col2).x*(v).z, \
+					(col0).y*(v).x + (col1).y*(v).y + (col2).y*(v).z, \
+					(col0).z*(v).x + (col1).z*(v).y + (col2).z*(v).z)
+				v3 nB0_w = MB(shapeB->hull.col0, shapeB->hull.col1, shapeB->hull.col2, nB0_l);
+				v3 nB1_w = MB(shapeB->hull.col0, shapeB->hull.col1, shapeB->hull.col2, nB1_l);
+				#undef MB
+				if (toi_gauss_arcs_overlap(nA0_w, nA1_w, neg(nB0_w), neg(nB1_w))) {
+					v3 a0w = gjk_support_feature(shapeA_at_seed, fa[0]);
+					v3 a1w = gjk_support_feature(shapeA_at_seed, fa[1]);
+					v3 b0w = gjk_support_feature(shapeB, fb[0]);
+					v3 b1w = gjk_support_feature(shapeB, fb[1]);
+					v3 ee = cross(sub(a1w, a0w), sub(b1w, b0w));
+					float L = v3_len(ee);
+					if (L > 1e-8f) {
+						v3 n_w = scale(ee, 1.0f / L);
+						int sign = dot(sub(b0w, a0w), n_w) >= 0.0f ? 1 : -1;
+						f.type = TOI_EDGE_EDGE;
+						f.idxA = fa[0]; f.idxA2 = fa[1];
+						f.idxB = fb[0]; f.idxB2 = fb[1];
+						f.axis_sign = sign;
+						f.nA0_local = nA0_l; f.nA1_local = nA1_l;
+						f.nB0_local = nB0_l; f.nB1_local = nB1_l;
+						return f;
+					}
+				}
+			}
+		}
+	}
+
 	if (kA >= 2 && dlen > 1e-8f) {
 		// A-side face/edge. Axis rotates with A.
 		f.type = TOI_FACE_A;
@@ -207,12 +325,35 @@ static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0
 	return f;
 }
 
+// Edge-edge separation at time t: live cross(eA, eB) axis, signed projection
+// of one edge endpoint pair onto it. Both edge endpoints on each side come
+// from stored vertex indices — shapeA_at_t rotates A; shapeB static. If the
+// axis length is degenerate (edges parallel mid-sweep) returns 0; the outer
+// loop will reseed on the next iteration.
+static float toi_edge_edge_sep(const ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* shapeB)
+{
+	v3 a0 = gjk_support_feature(shapeA_at_t, f->idxA);
+	v3 a1 = gjk_support_feature(shapeA_at_t, f->idxA2);
+	v3 b0 = gjk_support_feature(shapeB, f->idxB);
+	v3 b1 = gjk_support_feature(shapeB, f->idxB2);
+	v3 n = cross(sub(a1, a0), sub(b1, b0));
+	float L = v3_len(n);
+	if (L <= 1e-8f) return 0.0f;
+	n = scale(n, (float)f->axis_sign / L);
+	float rA = shapeA_at_t->radius, rB = shapeB->radius;
+	v3 pa_eff = add(a0, scale(n, rA));
+	v3 pb_eff = sub(b0, scale(n, rB));
+	return dot(sub(pb_eff, pa_eff), n);
+}
+
 // FindMinSeparation (box2d b2FindMinSeparation): find deepest feature along
 // the current world-axis at time t and return the separation. Updates the
-// stored indices to the newly-found features — after this call, Evaluate
-// with the same sep-fn will use the updated features.
+// stored indices to the newly-found features. For EDGE_EDGE it keeps the
+// edge endpoints (idxA/A2, idxB/B2) fixed — live cross-product evaluates
+// in closed form.
 static float toi_find_min_sep(ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* shapeB, quat rot_A)
 {
+	if (f->type == TOI_EDGE_EDGE) return toi_edge_edge_sep(f, shapeA_at_t, shapeB);
 	v3 axis_world = toi_axis_world(f, rot_A);
 	int fi_a, fi_b;
 	v3 pa, pb;
@@ -233,6 +374,7 @@ static float toi_find_min_sep(ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* sh
 // iterates on.
 static float toi_eval_sep(const ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* shapeB, quat rot_A)
 {
+	if (f->type == TOI_EDGE_EDGE) return toi_edge_edge_sep(f, shapeA_at_t, shapeB);
 	v3 axis_world = toi_axis_world(f, rot_A);
 	v3 pa = gjk_support_feature(shapeA_at_t, f->idxA);
 	v3 pb = gjk_support_feature(shapeB, f->idxB);

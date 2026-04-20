@@ -66,7 +66,7 @@ typedef struct GJK_Shape
 		struct { v3 center; } point;
 		struct { v3 p, q; } segment;
 		struct { v3 center; v3 col0, col1, col2; v3 half_extents; } box;
-		struct { v3 center; v3 col0, col1, col2; v3 scale; const v3* verts; const float* soa; const int* edge_twin; const int* edge_next; const int* edge_origin; const int* vert_edge; int count; int hint; } hull;
+		struct { v3 center; v3 col0, col1, col2; v3 scale; const v3* verts; const float* soa; const int* edge_twin; const int* edge_next; const int* edge_origin; const int* vert_edge; const int* edge_face; const HullPlane* planes; int count; int edge_count; int hint; } hull;
 		struct { v3 a, b, c; } tri;
 	};
 } GJK_Shape;
@@ -89,12 +89,12 @@ static GJK_Shape gjk_box_m(v3 center, v3 col0, v3 col1, v3 col2, v3 half_extents
 static GJK_Shape gjk_hull(v3 center, quat rot, v3 sc, const v3* verts, int count, const float* soa, const int* edge_twin, const int* edge_next, const int* edge_origin, const int* vert_edge)
 {
 	v3 c0 = quat_rotate(rot, V3(1,0,0)), c1 = quat_rotate(rot, V3(0,1,0)), c2 = quat_rotate(rot, V3(0,0,1));
-	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = c0, .hull.col1 = c1, .hull.col2 = c2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edge_twin = edge_twin, .hull.edge_next = edge_next, .hull.edge_origin = edge_origin, .hull.vert_edge = vert_edge, .hull.count = count };
+	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = c0, .hull.col1 = c1, .hull.col2 = c2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edge_twin = edge_twin, .hull.edge_next = edge_next, .hull.edge_origin = edge_origin, .hull.vert_edge = vert_edge, .hull.edge_face = NULL, .hull.planes = NULL, .hull.count = count, .hull.edge_count = 0 };
 }
 
 static GJK_Shape gjk_hull_m(v3 center, v3 col0, v3 col1, v3 col2, v3 sc, const v3* verts, int count, const float* soa, const int* edge_twin, const int* edge_next, const int* edge_origin, const int* vert_edge)
 {
-	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = col0, .hull.col1 = col1, .hull.col2 = col2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edge_twin = edge_twin, .hull.edge_next = edge_next, .hull.edge_origin = edge_origin, .hull.vert_edge = vert_edge, .hull.count = count };
+	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = col0, .hull.col1 = col1, .hull.col2 = col2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edge_twin = edge_twin, .hull.edge_next = edge_next, .hull.edge_origin = edge_origin, .hull.vert_edge = vert_edge, .hull.edge_face = NULL, .hull.planes = NULL, .hull.count = count, .hull.edge_count = 0 };
 }
 
 // -----------------------------------------------------------------------------
@@ -128,7 +128,11 @@ static GJK_Shape gjk_hull_scaled(const Hull* hull, v3 pos, quat rot, v3 sc)
 			}
 			ve_cache_hull[slot] = hull;
 		}
-		return gjk_hull(pos, rot, sc, raw_verts, n, soa, hull->edge_twin, hull->edge_next, hull->edge_origin, ve_cache_buf[slot]);
+		GJK_Shape s = gjk_hull(pos, rot, sc, raw_verts, n, soa, hull->edge_twin, hull->edge_next, hull->edge_origin, ve_cache_buf[slot]);
+		s.hull.edge_face = hull->edge_face;
+		s.hull.planes = hull->planes;
+		s.hull.edge_count = hull->edge_count;
+		return s;
 	}
 	return gjk_hull(pos, rot, sc, raw_verts, n, soa, NULL, NULL, NULL, NULL);
 }
