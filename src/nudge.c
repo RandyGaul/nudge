@@ -1298,8 +1298,6 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	case SHAPE_BOX:     s.box.half_extents = params.box.half_extents; break;
 	case SHAPE_HULL:    s.hull.hull = params.hull.hull;
 	                    s.hull.scale = params.hull.scale; break;
-	case SHAPE_CYLINDER: s.cylinder.half_height = params.cylinder.half_height;
-	                     s.cylinder.radius = params.cylinder.radius; break;
 	case SHAPE_MESH:    assert(w->body_hot[idx].inv_mass == 0.0f && "SHAPE_MESH requires mass=0 (static body)");
 	                    assert(params.mesh.mesh && "SHAPE_MESH.mesh is NULL");
 	                    s.mesh.mesh = params.mesh.mesh; break;
@@ -1308,8 +1306,6 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	                        s.heightfield.hf = params.heightfield.hf; break;
 	}
 	apush(w->body_cold[idx].shapes, s);
-	if (params.type == SHAPE_CYLINDER && w->body_state[idx].angular_damping < 0.15f)
-		w->body_state[idx].angular_damping = 0.15f;
 	recompute_body_inertia(w, idx);
 
 	// Insert into BVH on first shape add.

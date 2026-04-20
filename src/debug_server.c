@@ -102,7 +102,7 @@ typedef struct R_EnumTable
 
 // --- Enum tables ---
 
-static const R_EnumEntry renum_ShapeType_entries[] = { {"sphere",0}, {"capsule",1}, {"box",2}, {"hull",3}, {"cylinder",4}, {"mesh",5} };
+static const R_EnumEntry renum_ShapeType_entries[] = { {"sphere",0}, {"capsule",1}, {"box",2}, {"hull",3}, {"mesh",4} };
 static const R_EnumEntry renum_SolverType_entries[] = { {"soft_step",0}, {"si_soft",1}, {"si",2} };
 static const R_EnumEntry renum_BroadphaseType_entries[] = { {"n2",0}, {"bvh",1} };
 static const R_EnumEntry renum_JointType_entries[] = {
@@ -473,11 +473,6 @@ REFLECT(WorldInternal,
 	RF_ENUM(WorldInternal, narrowphase_backend, NarrowphaseBackend),
 	RF_MAP(WorldInternal, epa_cache, EpaManifold),
 	RF_STRUCT(WorldInternal, epa_stats, EpaStats),
-	RF_INT(WorldInternal, cyl_native_sphere),
-	RF_INT(WorldInternal, cyl_native_capsule),
-	RF_INT(WorldInternal, cyl_native_box),
-	RF_INT(WorldInternal, cyl_native_hull),
-	RF_INT(WorldInternal, cyl_native_cyl),
 	RF_INT(WorldInternal, thread_count),
 	RF_INT(WorldInternal, ldl_enabled),
 	RF_INT(WorldInternal, ldl_topo_version),

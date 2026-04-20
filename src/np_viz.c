@@ -10,7 +10,6 @@ typedef enum
 	NPV_SPHERE,
 	NPV_CAPSULE,
 	NPV_BOX,
-	NPV_CYLINDER,
 	NPV_HULL_TETRA,
 	NPV_HULL_OCTA,
 	NPV_HULL_ICOSA,
@@ -19,7 +18,7 @@ typedef enum
 	NPV_SHAPE_COUNT,
 } NPV_ShapeKind;
 
-static const char* s_npv_shape_names = "Sphere\0Capsule\0Box\0Cylinder\0Tetrahedron\0Octahedron\0Icosahedron\0Dodecahedron\0Random Hull\0";
+static const char* s_npv_shape_names = "Sphere\0Capsule\0Box\0Tetrahedron\0Octahedron\0Icosahedron\0Dodecahedron\0Random Hull\0";
 
 typedef struct NPV_Shape
 {
@@ -204,9 +203,6 @@ static void npv_rebuild_mesh(NPV_Shape* s)
 	case NPV_CAPSULE:
 		mesh_generate_capsule(m, s->radius, s->half_height);
 		break;
-	case NPV_CYLINDER:
-		mesh_generate_cylinder(m, s->radius, s->half_height);
-		break;
 	default: // hull types
 		if (s->hull) mesh_generate_hull(m, s->hull, V3(1, 1, 1));
 		break;
@@ -238,7 +234,6 @@ static ShapeType npv_engine_type(int kind)
 	case NPV_SPHERE: return SHAPE_SPHERE;
 	case NPV_CAPSULE: return SHAPE_CAPSULE;
 	case NPV_BOX: return SHAPE_BOX;
-	case NPV_CYLINDER: return SHAPE_CYLINDER;
 	default: return SHAPE_HULL;
 	}
 }
@@ -257,11 +252,6 @@ static Capsule npv_make_capsule(NPV_Shape* s)
 static Box npv_make_box(NPV_Shape* s)
 {
 	return (Box){ .center = s->pos, .rotation = s->rot, .half_extents = s->half_extents };
-}
-
-static Cylinder npv_make_cylinder(NPV_Shape* s)
-{
-	return (Cylinder){ .center = s->pos, .rotation = s->rot, .half_height = s->half_height, .radius = s->radius };
 }
 
 static ConvexHull npv_make_hull(NPV_Shape* s)
@@ -521,9 +511,6 @@ static void npv_run_collide()
 			hit = collide_sphere_box(npv_make_sphere(sa), npv_make_box(sb), &npv_manifold);
 		} else if (ta == SHAPE_SPHERE && tb == SHAPE_HULL) {
 			hit = collide_sphere_hull(npv_make_sphere(sa), npv_make_hull(sb), &npv_manifold);
-		} else if (ta == SHAPE_SPHERE && tb == SHAPE_CYLINDER) {
-			hit = collide_cylinder_sphere(npv_make_cylinder(sb), npv_make_sphere(sa), &npv_manifold);
-			npv_flip_manifold(&npv_manifold);
 		} else if (ta == SHAPE_CAPSULE && tb == SHAPE_SPHERE) {
 			hit = collide_sphere_capsule(npv_make_sphere(sb), npv_make_capsule(sa), &npv_manifold);
 			npv_flip_manifold(&npv_manifold);
@@ -533,9 +520,6 @@ static void npv_run_collide()
 			hit = collide_capsule_box(npv_make_capsule(sa), npv_make_box(sb), &npv_manifold);
 		} else if (ta == SHAPE_CAPSULE && tb == SHAPE_HULL) {
 			hit = collide_capsule_hull(npv_make_capsule(sa), npv_make_hull(sb), &npv_manifold);
-		} else if (ta == SHAPE_CAPSULE && tb == SHAPE_CYLINDER) {
-			hit = collide_cylinder_capsule(npv_make_cylinder(sb), npv_make_capsule(sa), &npv_manifold);
-			npv_flip_manifold(&npv_manifold);
 		} else if (ta == SHAPE_BOX && tb == SHAPE_SPHERE) {
 			hit = collide_sphere_box(npv_make_sphere(sb), npv_make_box(sa), &npv_manifold);
 			npv_flip_manifold(&npv_manifold);
@@ -548,16 +532,6 @@ static void npv_run_collide()
 		} else if (ta == SHAPE_HULL && tb == SHAPE_CAPSULE) {
 			hit = collide_capsule_hull(npv_make_capsule(sb), npv_make_hull(sa), &npv_manifold);
 			npv_flip_manifold(&npv_manifold);
-		} else if (ta == SHAPE_CYLINDER && tb == SHAPE_SPHERE) {
-			hit = collide_cylinder_sphere(npv_make_cylinder(sa), npv_make_sphere(sb), &npv_manifold);
-		} else if (ta == SHAPE_CYLINDER && tb == SHAPE_CAPSULE) {
-			hit = collide_cylinder_capsule(npv_make_cylinder(sa), npv_make_capsule(sb), &npv_manifold);
-		} else if (ta == SHAPE_CYLINDER && tb == SHAPE_BOX) {
-			hit = collide_cylinder_box(npv_make_cylinder(sa), npv_make_box(sb), &npv_manifold);
-		} else if (ta == SHAPE_CYLINDER && tb == SHAPE_HULL) {
-			hit = collide_cylinder_hull(npv_make_cylinder(sa), npv_make_hull(sb), &npv_manifold);
-		} else if (ta == SHAPE_CYLINDER && tb == SHAPE_CYLINDER) {
-			hit = collide_cylinder_cylinder(npv_make_cylinder(sa), npv_make_cylinder(sb), &npv_manifold);
 		}
 	}
 
@@ -937,10 +911,6 @@ static int npv_shape_ui(NPV_Shape* s, const char* label, int shape_idx)
 	case NPV_BOX:
 		if (ImGui_DragFloat3Ex("Half Extents", &s->half_extents.x, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
 		break;
-	case NPV_CYLINDER:
-		if (ImGui_DragFloatEx("Radius##cyl", &s->radius, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
-		if (ImGui_DragFloatEx("Half Height##cyl", &s->half_height, 0.01f, 0.05f, 10.0f, "%.2f", 0)) changed = 1;
-		break;
 	default: // hull types
 		if (s->kind == NPV_HULL_RANDOM) {
 			if (ImGui_SliderInt("Vertices", &s->rand_verts, 4, 128)) {
@@ -959,7 +929,7 @@ static int npv_shape_ui(NPV_Shape* s, const char* label, int shape_idx)
 		break;
 	}
 
-	if (changed && (s->kind == NPV_CAPSULE || s->kind == NPV_CYLINDER)) npv_rebuild_mesh(s);
+	if (changed && s->kind == NPV_CAPSULE) npv_rebuild_mesh(s);
 
 	ImGui_PopID();
 	return changed;

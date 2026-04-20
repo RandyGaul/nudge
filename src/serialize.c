@@ -496,10 +496,6 @@ SV_SERIALIZABLE(ShapeParams)
 	case SHAPE_BOX:
 		SV_ADD(SV_INITIAL, box.half_extents);
 		break;
-	case SHAPE_CYLINDER:
-		SV_ADD(SV_INITIAL, cylinder.half_height);
-		SV_ADD(SV_INITIAL, cylinder.radius);
-		break;
 	case SHAPE_HULL: {
 		// Hulls serialize as a name string (set via hull_set_name) + scale.
 		// On load the pointer is temporarily reinterpreted as the sinterned

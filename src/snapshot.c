@@ -56,10 +56,6 @@ static ShapeParams snapshot_shape_from_internal(const ShapeInternal* sh)
 	case SHAPE_BOX:
 		sp.box.half_extents = sh->box.half_extents;
 		break;
-	case SHAPE_CYLINDER:
-		sp.cylinder.half_height = sh->cylinder.half_height;
-		sp.cylinder.radius = sh->cylinder.radius;
-		break;
 	case SHAPE_HULL:
 		sp.hull.hull = sh->hull.hull;   // SV_SERIALIZABLE reads the name field
 		sp.hull.scale = sh->hull.scale;

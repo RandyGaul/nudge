@@ -356,10 +356,6 @@ static void test_gjk_known_distances()
 	r = gjk_distance_v(gjk_sphere(V3(0,0,0), 1), gjk_capsule(V3(4,-1,0), V3(4,1,0), 0.5f), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.5f, 0.01f);
 
-	TEST_BEGIN("sphere-cylinder separated");
-	r = gjk_distance_v(gjk_sphere(V3(0,0,0), 1), gjk_cylinder(V3(4,-1,0), V3(4,1,0), 0.5f), NULL);
-	TEST_ASSERT_FLOAT(r.distance, 2.5f, 0.02f);
-
 	// --- Capsule ---
 	TEST_BEGIN("capsule-capsule parallel separated");
 	r = gjk_distance_v(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_capsule(V3(3,-1,0), V3(3,1,0), 0.5f), NULL);
@@ -376,10 +372,6 @@ static void test_gjk_known_distances()
 	TEST_BEGIN("capsule-box face");
 	r = gjk_distance_v(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_box(V3(3,0,0), id, V3(1,1,1)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 1.5f, 0.01f);
-
-	TEST_BEGIN("capsule-cylinder separated");
-	r = gjk_distance_v(gjk_capsule(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_cylinder(V3(3,-1,0), V3(3,1,0), 0.5f), NULL);
-	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.02f);
 
 	// --- Box ---
 	TEST_BEGIN("box-box face separated");
@@ -409,19 +401,6 @@ static void test_gjk_known_distances()
 	TEST_BEGIN("box-box Z axis");
 	r = gjk_distance_v(gjk_box(V3(0,0,0), id, V3(1,1,1)), gjk_box(V3(0,0,4), id, V3(1,1,1)), NULL);
 	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.01f);
-
-	// --- Cylinder ---
-	TEST_BEGIN("cylinder-box face");
-	r = gjk_distance_v(gjk_cylinder(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_box(V3(3,0,0), id, V3(1,1,1)), NULL);
-	TEST_ASSERT_FLOAT(r.distance, 1.5f, 0.02f);
-
-	TEST_BEGIN("cylinder-cylinder parallel");
-	r = gjk_distance_v(gjk_cylinder(V3(0,-1,0), V3(0,1,0), 0.5f), gjk_cylinder(V3(3,-1,0), V3(3,1,0), 0.5f), NULL);
-	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.02f);
-
-	TEST_BEGIN("cylinder-cylinder crossed");
-	r = gjk_distance_v(gjk_cylinder(V3(0,-2,0), V3(0,2,0), 0.5f), gjk_cylinder(V3(3,0,-2), V3(3,0,2), 0.5f), NULL);
-	TEST_ASSERT_FLOAT(r.distance, 2.0f, 0.02f);
 
 	// --- Triangle ---
 	TEST_BEGIN("sphere-triangle face");
@@ -809,7 +788,7 @@ typedef struct PerfMotion
 	quat rotA, rotB;     // current rotations
 	v3 omegaA, omegaB;   // angular velocity (rad/s)
 	v3 heA, heB;         // half-extents / scale
-	float radiusA, radiusB; // for capsule/cylinder
+	float radiusA, radiusB; // for capsule
 } PerfMotion;
 
 static PerfRow perf_box_box()
@@ -925,280 +904,6 @@ static PerfRow perf_capsule_capsule()
 	double t1 = qpc_now();
 	volatile float sink = sum; (void)sink;
 	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
-}
-
-static PerfRow perf_cylinder_box()
-{
-	gjk_perf_rng = 401;
-	PerfMotion m[PERF_CONFIGS];
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		float sep = 0.5f + (float)(c % 4) * 2.5f;
-		float sc = 0.5f + (float)(c / 4 % 4) * 2.0f;
-		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc*2, 0, 0);
-		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
-		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].heA = V3(sc, sc, sc); m[c].heB = V3(sc, sc*0.8f, sc*0.6f);
-		m[c].radiusA = sc * 0.5f;
-	}
-	GJK_Cache cache[PERF_CONFIGS] = {0};
-	int total = PERF_N * PERF_CONFIGS;
-	float sum = 0; int iters = 0;
-	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		PerfMotion* mc = &m[c];
-		for (int i = 0; i < PERF_N; i++) {
-			v3 ca = quat_rotate(mc->rotA, V3(0,1,0));
-			v3 cp = sub(mc->posA, scale(ca, mc->heA.y));
-			v3 cq = add(mc->posA, scale(ca, mc->heA.y));
-			GJK_Shape a = gjk_cylinder(cp, cq, mc->radiusA), b = gjk_box(mc->posB, mc->rotB, mc->heB);
-			GJK_Result r = gjk_distance(&a, &b, &cache[c]);
-			sum += r.distance; iters += r.iterations;
-			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
-			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
-			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
-			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
-		}
-	}
-	double t1 = qpc_now();
-	volatile float sink = sum; (void)sink;
-	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
-}
-
-static PerfRow perf_cylinder_cylinder()
-{
-	gjk_perf_rng = 523;
-	PerfMotion m[PERF_CONFIGS];
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		float sep = 0.5f + (float)(c % 4) * 2.5f;
-		float sc = 0.5f + (float)(c / 4 % 4) * 2.0f;
-		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc*2, 0, 0);
-		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
-		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].heA = V3(sc, sc, sc); m[c].heB = V3(sc*0.7f, sc*0.7f, sc*0.7f);
-		m[c].radiusA = sc * 0.5f; m[c].radiusB = sc * 0.4f;
-	}
-	GJK_Cache cache[PERF_CONFIGS] = {0};
-	int total = PERF_N * PERF_CONFIGS;
-	float sum = 0; int iters = 0;
-	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		PerfMotion* mc = &m[c];
-		for (int i = 0; i < PERF_N; i++) {
-			v3 da = quat_rotate(mc->rotA, V3(0,1,0)), db = quat_rotate(mc->rotB, V3(0,1,0));
-			GJK_Shape a = gjk_cylinder(sub(mc->posA, scale(da, mc->heA.y)), add(mc->posA, scale(da, mc->heA.y)), mc->radiusA);
-			GJK_Shape b = gjk_cylinder(sub(mc->posB, scale(db, mc->heB.y)), add(mc->posB, scale(db, mc->heB.y)), mc->radiusB);
-			GJK_Result r = gjk_distance(&a, &b, &cache[c]);
-			sum += r.distance; iters += r.iterations;
-			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
-			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
-			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
-			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
-		}
-	}
-	double t1 = qpc_now();
-	volatile float sink = sum; (void)sink;
-	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
-}
-
-// =============================================================================
-// Cylinder narrowphase perf bench.
-
-static PerfRow perf_cyl_sphere()
-{
-	gjk_perf_rng = 0x515aa1u;
-	PerfMotion m[PERF_CONFIGS];
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		float sep = 0.2f + (float)(c % 4) * 1.5f;
-		float sc = 0.5f + (float)(c / 4 % 4) * 1.8f;
-		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc, 0, 0);
-		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
-		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].heA = V3(sc, sc, sc); m[c].radiusA = sc * 0.5f;
-		m[c].radiusB = sc * 0.4f;
-	}
-	int total = PERF_N * PERF_CONFIGS;
-	float sum = 0;
-	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		PerfMotion* mc = &m[c];
-		for (int i = 0; i < PERF_N; i++) {
-			Cylinder cyl = { mc->posA, mc->rotA, mc->heA.y, mc->radiusA };
-			Sphere sph = { mc->posB, mc->radiusB };
-			Manifold man = {0};
-			int hit = collide_cylinder_sphere(cyl, sph, &man);
-			sum += hit ? man.contacts[0].penetration : 0.0f;
-			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
-			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
-			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
-		}
-	}
-	double t1 = qpc_now();
-	volatile float sink = sum; (void)sink;
-	return (PerfRow){ (t1 - t0) * 1e9 / total, 0.0f };
-}
-
-static PerfRow perf_cyl_capsule()
-{
-	gjk_perf_rng = 0x626501u;
-	PerfMotion m[PERF_CONFIGS];
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		float sep = 0.2f + (float)(c % 4) * 1.5f;
-		float sc = 0.5f + (float)(c / 4 % 4) * 1.8f;
-		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc, 0, 0);
-		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
-		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].heA = V3(sc, sc, sc); m[c].radiusA = sc * 0.5f;
-		m[c].heB = V3(sc, sc*0.8f, sc); m[c].radiusB = sc * 0.3f;
-	}
-	int total = PERF_N * PERF_CONFIGS;
-	float sum = 0;
-	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		PerfMotion* mc = &m[c];
-		for (int i = 0; i < PERF_N; i++) {
-			Cylinder cyl = { mc->posA, mc->rotA, mc->heA.y, mc->radiusA };
-			v3 cap_dir = quat_rotate(mc->rotB, V3(0,1,0));
-			Capsule cap = { sub(mc->posB, scale(cap_dir, mc->heB.y)), add(mc->posB, scale(cap_dir, mc->heB.y)), mc->radiusB };
-			Manifold man = {0};
-			int hit = collide_cylinder_capsule(cyl, cap, &man);
-			sum += hit ? man.contacts[0].penetration : 0.0f;
-			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
-			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
-			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
-			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
-		}
-	}
-	double t1 = qpc_now();
-	volatile float sink = sum; (void)sink;
-	return (PerfRow){ (t1 - t0) * 1e9 / total, 0.0f };
-}
-
-static PerfRow perf_cyl_hull()
-{
-	gjk_perf_rng = 0xc11a01u;
-	Hull* test_hull = gjk_perf_make_random_hull(20, 1.0f);
-	PerfMotion m[PERF_CONFIGS];
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		float sep = 0.2f + (float)(c % 4) * 1.5f;
-		float sc = 0.5f + (float)(c / 4 % 4) * 1.8f;
-		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc, 0, 0);
-		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
-		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].heA = V3(sc, sc, sc); m[c].radiusA = sc * 0.5f;
-		m[c].heB = V3(sc*0.6f, sc*0.8f, sc*0.5f);
-	}
-	int total = PERF_N * PERF_CONFIGS;
-	float sum = 0;
-	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		PerfMotion* mc = &m[c];
-		for (int i = 0; i < PERF_N; i++) {
-			Cylinder cyl = { mc->posA, mc->rotA, mc->heA.y, mc->radiusA };
-			ConvexHull ch = { test_hull, mc->posB, mc->rotB, mc->heB };
-			Manifold man = {0};
-			int hit = collide_cylinder_hull(cyl, ch, &man);
-			sum += hit ? man.contacts[0].penetration : 0.0f;
-			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
-			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
-			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
-			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
-		}
-	}
-	double t1 = qpc_now();
-	volatile float sink = sum; (void)sink;
-	hull_free(test_hull);
-	return (PerfRow){ (t1 - t0) * 1e9 / total, 0.0f };
-}
-
-static PerfRow perf_cyl_box()
-{
-	gjk_perf_rng = 0xb00bb00u;
-	PerfMotion m[PERF_CONFIGS];
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		float sep = 0.2f + (float)(c % 4) * 1.5f;
-		float sc = 0.5f + (float)(c / 4 % 4) * 1.8f;
-		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc, 0, 0);
-		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
-		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].heA = V3(sc, sc, sc); m[c].radiusA = sc * 0.5f;
-		m[c].heB = V3(sc*0.8f, sc*0.6f, sc*0.5f);
-	}
-	int total = PERF_N * PERF_CONFIGS;
-	float sum = 0;
-	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		PerfMotion* mc = &m[c];
-		for (int i = 0; i < PERF_N; i++) {
-			Cylinder cyl = { mc->posA, mc->rotA, mc->heA.y, mc->radiusA };
-			Box box = { mc->posB, mc->rotB, mc->heB };
-			Manifold man = {0};
-			int hit = collide_cylinder_box(cyl, box, &man);
-			sum += hit ? man.contacts[0].penetration : 0.0f;
-			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
-			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
-			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
-			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
-		}
-	}
-	double t1 = qpc_now();
-	volatile float sink = sum; (void)sink;
-	return (PerfRow){ (t1 - t0) * 1e9 / total, 0.0f };
-}
-
-static PerfRow perf_cyl_cyl()
-{
-	gjk_perf_rng = 0xcc11ccu;
-	PerfMotion m[PERF_CONFIGS];
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		float sep = 0.2f + (float)(c % 4) * 1.5f;
-		float sc = 0.5f + (float)(c / 4 % 4) * 1.8f;
-		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc, 0, 0);
-		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
-		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].heA = V3(sc, sc, sc); m[c].radiusA = sc * 0.5f;
-		m[c].heB = V3(sc*0.7f, sc*0.7f, sc*0.7f); m[c].radiusB = sc * 0.4f;
-	}
-	int total = PERF_N * PERF_CONFIGS;
-	float sum = 0;
-	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		PerfMotion* mc = &m[c];
-		for (int i = 0; i < PERF_N; i++) {
-			Cylinder ca = { mc->posA, mc->rotA, mc->heA.y, mc->radiusA };
-			Cylinder cb = { mc->posB, mc->rotB, mc->heB.y, mc->radiusB };
-			Manifold man = {0};
-			int hit = collide_cylinder_cylinder(ca, cb, &man);
-			sum += hit ? man.contacts[0].penetration : 0.0f;
-			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
-			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
-			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
-			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
-		}
-	}
-	double t1 = qpc_now();
-	volatile float sink = sum; (void)sink;
-	return (PerfRow){ (t1 - t0) * 1e9 / total, 0.0f };
 }
 
 // =============================================================================
@@ -1418,52 +1123,6 @@ static PerfRow perf_box_hull(int n_target)
 	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
 }
 
-// Cylinder-hull perf.
-static PerfRow perf_cylinder_hull(int n_target)
-{
-	gjk_perf_rng = 10500 + n_target;
-	Hull* hb = gjk_perf_make_random_hull(n_target, 1.0f);
-	PerfMotion m[PERF_CONFIGS];
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		float sep = 0.5f + (float)(c % 4) * 2.5f;
-		float sc = 0.5f + (float)(c / 4 % 4) * 2.0f;
-		m[c].posA = V3(0,0,0); m[c].posB = V3(sep + sc*3, 0, 0);
-		m[c].velA = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].velB = V3(gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f, gjk_perf_randf()-0.5f);
-		m[c].rotA = gjk_perf_random_quat(); m[c].rotB = gjk_perf_random_quat();
-		m[c].omegaA = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].omegaB = V3((gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4, (gjk_perf_randf()-0.5f)*4);
-		m[c].heA = V3(sc, sc, sc); m[c].heB = V3(sc*0.8f, sc, sc*0.6f);
-		m[c].radiusA = sc * 0.5f;
-	}
-	GJK_Cache cache[PERF_CONFIGS] = {0};
-	int n_iters = PERF_N;
-	if (n_target >= 200) n_iters = PERF_N / 10;
-	if (n_target >= 1000) n_iters = PERF_N / 100;
-	int total = n_iters * PERF_CONFIGS;
-	float sum = 0; int iters = 0;
-	double t0 = qpc_now();
-	for (int c = 0; c < PERF_CONFIGS; c++) {
-		PerfMotion* mc = &m[c];
-		for (int i = 0; i < n_iters; i++) {
-			v3 ca = quat_rotate(mc->rotA, V3(0,1,0));
-			v3 cp = sub(mc->posA, scale(ca, mc->heA.y));
-			v3 cq = add(mc->posA, scale(ca, mc->heA.y));
-			GJK_Shape gb = gjk_hull_scaled(hb, mc->posB, mc->rotB, mc->heB, NULL, NULL);
-			GJK_Shape a = gjk_cylinder(cp, cq, mc->radiusA);
-			GJK_Result r = gjk_distance(&a, &gb, &cache[c]);
-			sum += r.distance; iters += r.iterations;
-			mc->posA = add(mc->posA, scale(mc->velA, PERF_DT));
-			mc->posB = add(mc->posB, scale(mc->velB, PERF_DT));
-			mc->rotA = perf_integrate_rot(mc->rotA, mc->omegaA, PERF_DT);
-			mc->rotB = perf_integrate_rot(mc->rotB, mc->omegaB, PERF_DT);
-		}
-	}
-	double t1 = qpc_now();
-	volatile float sink = sum; (void)sink;
-	hull_free(hb);
-	return (PerfRow){ (t1 - t0) * 1e9 / total, (float)iters / total };
-}
 
 // Box-triangle perf: box vs rotating triangle.
 static PerfRow perf_box_triangle()
@@ -1569,7 +1228,7 @@ static void run_gjk_perf_tests()
 	// Performance
 	int hull_sizes[] = { 20, 50, 200, 1000 };
 	int nh = 4;
-	enum { N_PERF = 5 + 5*4 + 2 + 5 }; // 5 prim-prim + 5 shape types * 4 hull sizes + 2 triangle + 5 cyl
+	enum { N_PERF = 3 + 4*4 + 2 }; // 3 prim-prim + 4 shape types * 4 hull sizes + 2 triangle
 	const char* names[N_PERF];
 	PerfRow p[N_PERF];
 	char name_bufs[N_PERF][20];
@@ -1577,19 +1236,11 @@ static void run_gjk_perf_tests()
 	names[pi] = "box-box";       p[pi++] = perf_box_box();
 	names[pi] = "capsule-box";   p[pi++] = perf_capsule_box();
 	names[pi] = "capsule-cap";   p[pi++] = perf_capsule_capsule();
-	names[pi] = "cylinder-box";  p[pi++] = perf_cylinder_box();
-	names[pi] = "cylinder-cyl";  p[pi++] = perf_cylinder_cylinder();
-	names[pi] = "cyl-sphere";    p[pi++] = perf_cyl_sphere();
-	names[pi] = "cyl-capsule";   p[pi++] = perf_cyl_capsule();
-	names[pi] = "cyl-hull";      p[pi++] = perf_cyl_hull();
-	names[pi] = "cyl-box";       p[pi++] = perf_cyl_box();
-	names[pi] = "cyl-cyl";       p[pi++] = perf_cyl_cyl();
 	for (int h = 0; h < nh; h++) {
 		int n = hull_sizes[h];
 		sprintf(name_bufs[pi], "sph-h%d", n);    names[pi] = name_bufs[pi]; p[pi] = perf_sphere_hull(n);   pi++;
 		sprintf(name_bufs[pi], "cap-h%d", n);    names[pi] = name_bufs[pi]; p[pi] = perf_capsule_hull(n);  pi++;
 		sprintf(name_bufs[pi], "box-h%d", n);    names[pi] = name_bufs[pi]; p[pi] = perf_box_hull(n);      pi++;
-		sprintf(name_bufs[pi], "cyl-h%d", n);    names[pi] = name_bufs[pi]; p[pi] = perf_cylinder_hull(n); pi++;
 		sprintf(name_bufs[pi], "hull-h%d", n);   names[pi] = name_bufs[pi]; p[pi] = perf_hull_hull(n);     pi++;
 	}
 

@@ -44,6 +44,7 @@
 #include "tests_multishape_unit.c"
 #include "tests_contacts_unit.c"
 #include "tests_heightfield_unit.c"
+#include "tests_trimesh_unit.c"
 #include "tests_epa_debug.c"
 #include "tests_epa_perf.c"
 #include "tests_determinism.c"
@@ -258,7 +259,6 @@ int main(int argc, char* argv[])
 		bench_trimesh_stress();
 		return 0;
 	}
-
 	if (bench_stack > 0) {
 		WorldParams wp = { .gravity = V3(0, -9.81f, 0), .sub_steps = sub_steps, .velocity_iters = vel_iters, .contact_hertz = hertz, .contact_damping_ratio = damping };
 		bench_box_stack_ex(bench_stack, wp);
@@ -291,6 +291,7 @@ int main(int argc, char* argv[])
 		run_multishape_unit_tests();
 		run_contacts_unit_tests();
 		run_heightfield_unit_tests();
+		run_trimesh_unit_tests();
 		run_ldl_unit_tests();
 		run_inertia_unit_tests();
 		run_jacobian_unit_tests();
@@ -380,6 +381,7 @@ int main(int argc, char* argv[])
 		run_multishape_unit_tests();
 		run_contacts_unit_tests();
 		run_heightfield_unit_tests();
+		run_trimesh_unit_tests();
 		run_ldl_unit_tests();
 		run_inertia_unit_tests();
 		run_jacobian_unit_tests();

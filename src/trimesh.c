@@ -15,8 +15,8 @@
 //
 // Collision: dispatch iterates AABB-BVH candidates; each candidate triangle
 // becomes a ConvexHull (pointing at its stored Hull) passed to the existing
-// sphere-hull / capsule-hull / hull-hull / cylinder-hull routines. Output
-// is one InternalManifold per (body_pair, triangle).
+// sphere-hull / capsule-hull / hull-hull routines. Output is one
+// InternalManifold per (body_pair, triangle).
 
 // -----------------------------------------------------------------------------
 // Shared half-edge topology for all triangles.
@@ -610,6 +610,141 @@ static void collide_sphere_mesh_emit(WorldInternal* w, int body_a, int body_b, S
 }
 
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Dedicated capsule-vs-triangle narrowphase. Replaces collide_capsule_hull on a
+// zero-volume triangle-as-hull. The generic path relies on GJK, and GJK's
+// simplex can collapse on a zero-volume polytope (observed in Trimesh Stress:
+// distance=0 returned with witness points both at (0,0,0) for geometry
+// actually separated by ~0.35). When that happens, collide_capsule_hull's
+// deep path treats the triangle as an infinite plane and emits a contact
+// outside the triangle with pen 0.136 -- kicks the body off the mesh
+// ("capsule lurch"). This routine uses the known face normal and samples the
+// capsule segment's deepest projected point against the plane, then closes
+// edge cases via segment-edge closest-point.
+static int capsule_segment_edge_closest(v3 p1, v3 q1, v3 p2, v3 q2, v3* c1, v3* c2)
+{
+	// Ericson's Real-Time Collision Detection segment-segment closest point.
+	v3 d1 = sub(q1, p1);
+	v3 d2 = sub(q2, p2);
+	v3 rv = sub(p1, p2);
+	float a = dot(d1, d1);
+	float e = dot(d2, d2);
+	float f = dot(d2, rv);
+	float s, tt;
+	if (a <= 1e-12f && e <= 1e-12f) { s = 0; tt = 0; }
+	else if (a <= 1e-12f) { s = 0; tt = f / e; if (tt < 0) tt = 0; else if (tt > 1) tt = 1; }
+	else {
+		float c = dot(d1, rv);
+		if (e <= 1e-12f) { tt = 0; s = -c / a; if (s < 0) s = 0; else if (s > 1) s = 1; }
+		else {
+			float b = dot(d1, d2);
+			float denom = a * e - b * b;
+			if (denom != 0.0f) { s = (b * f - c * e) / denom; if (s < 0) s = 0; else if (s > 1) s = 1; }
+			else s = 0;
+			tt = (b * s + f) / e;
+			if (tt < 0) { tt = 0; s = -c / a; if (s < 0) s = 0; else if (s > 1) s = 1; }
+			else if (tt > 1) { tt = 1; s = (b - c) / a; if (s < 0) s = 0; else if (s > 1) s = 1; }
+		}
+	}
+	*c1 = add(p1, scale(d1, s));
+	*c2 = add(p2, scale(d2, tt));
+	return 0;
+}
+
+static int collide_capsule_triangle_local(Capsule cap, v3 v0, v3 v1, v3 v2, v3 tri_n, Manifold* m)
+{
+	float plane_off = dot(tri_n, v0);
+	float dp = dot(cap.p, tri_n) - plane_off;
+	float dq = dot(cap.q, tri_n) - plane_off;
+	float r = cap.radius;
+
+	float c_d = 0.5f * (dp + dq);
+	int on_plus_side = c_d >= 0.0f;
+	v3 contact_n = on_plus_side ? neg(tri_n) : tri_n;
+
+	// Early-out: if the deepest surface point on the capsule along the body's
+	// direction still sits past the plane by more than LINEAR_SLOP, no contact.
+	float min_d = fminf(dp, dq);
+	float max_d = fmaxf(dp, dq);
+	float deepest_signed = on_plus_side ? (min_d - r) : (max_d + r);
+	float gap = on_plus_side ? deepest_signed : -deepest_signed;
+	if (gap > LINEAR_SLOP) return 0;
+
+	#define CAP_TRI_MAX_SAMPLES 8
+	v3 s_points[CAP_TRI_MAX_SAMPLES]; float s_depths[CAP_TRI_MAX_SAMPLES]; v3 s_normals[CAP_TRI_MAX_SAMPLES]; int sc = 0;
+
+	// Face sample: both endpoints of the segment. Project to plane, keep if
+	// the projection is inside the triangle AND the sphere cap at that
+	// endpoint dips past the plane.
+	v3 endpoints[2] = { cap.p, cap.q };
+	for (int i = 0; i < 2; i++) {
+		v3 on_axis = endpoints[i];
+		float d_ax = dot(on_axis, tri_n) - plane_off;
+		float d_surf = on_plus_side ? (d_ax - r) : (d_ax + r);
+		if (on_plus_side ? (d_surf > 0.0f) : (d_surf < 0.0f)) continue;
+		v3 surface = add(on_axis, scale(contact_n, r));
+		v3 on_plane = sub(surface, scale(tri_n, d_surf));
+		if (!point_in_triangle_2d(on_plane, v0, v1, v2, tri_n)) continue;
+		s_points[sc] = on_plane;
+		s_depths[sc] = fabsf(d_surf);
+		s_normals[sc] = contact_n;
+		sc++;
+	}
+
+	// Edge samples: for each triangle edge, closest capsule-to-edge point pair.
+	// Fires only when no face sample succeeded -- face samples already cover
+	// the common case, adding duplicates hurts solver conditioning in dense
+	// packs. Edge samples handle the case where the capsule's projection falls
+	// outside the triangle but the bulk is over an edge.
+	if (sc == 0) {
+		v3 edge_p[3][2] = { { v0, v1 }, { v1, v2 }, { v2, v0 } };
+		for (int e = 0; e < 3; e++) {
+			v3 cs, ce;
+			capsule_segment_edge_closest(cap.p, cap.q, edge_p[e][0], edge_p[e][1], &cs, &ce);
+			v3 d = sub(cs, ce);
+			float d2 = dot(d, d);
+			if (d2 > r * r) continue;
+			float dist = sqrtf(d2);
+			if (dist < 1e-6f) continue;
+			v3 cn = scale(d, -1.0f / dist); // A->B: capsule toward edge
+			if (on_plus_side && dot(cn, tri_n) > 0.05f) continue;
+			if (!on_plus_side && dot(cn, tri_n) < -0.05f) continue;
+			if (sc >= CAP_TRI_MAX_SAMPLES) break;
+			s_points[sc] = ce;
+			s_depths[sc] = r - dist;
+			s_normals[sc] = cn;
+			sc++;
+		}
+	}
+
+	if (sc == 0) return 0;
+
+	// Reduce to MAX_CONTACTS, picking deepest + spatially-separated samples.
+	int cp = 0;
+	v3 points[MAX_CONTACTS]; float depths[MAX_CONTACTS]; v3 normals[MAX_CONTACTS];
+	for (int pass = 0; pass < MAX_CONTACTS; pass++) {
+		int best = -1; float best_d = -1e18f;
+		for (int i = 0; i < sc; i++) {
+			if (s_depths[i] < 0.0f) continue;
+			int too_close = 0;
+			for (int j = 0; j < cp; j++) {
+				if (len2(sub(s_points[i], points[j])) < 1e-4f) { too_close = 1; break; }
+			}
+			if (too_close) { s_depths[i] = -1.0f; continue; }
+			if (s_depths[i] > best_d) { best_d = s_depths[i]; best = i; }
+		}
+		if (best < 0) break;
+		points[cp] = s_points[best]; depths[cp] = s_depths[best]; normals[cp] = s_normals[best];
+		s_depths[best] = -1.0f; cp++;
+	}
+	if (cp == 0) return 0;
+
+	m->count = cp;
+	for (int i = 0; i < cp; i++) m->contacts[i] = (Contact){ .point = points[i], .normal = normals[i], .penetration = depths[i] };
+	return 1;
+}
+
+// -----------------------------------------------------------------------------
 // Capsule vs mesh.
 static void collide_capsule_mesh_emit(WorldInternal* w, int body_a, int body_b, Capsule capsule_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds)
 {
@@ -627,8 +762,9 @@ static void collide_capsule_mesh_emit(WorldInternal* w, int body_a, int body_b, 
 	ReduceRec recs[TRIMESH_MAX_LOCAL_MANIFOLDS]; int n_recs = 0;
 	for (int i = 0; i < asize(cands) && n_recs < TRIMESH_MAX_LOCAL_MANIFOLDS; i++) {
 		int t = cands[i];
+		uint32_t i0 = mesh->indices[3*t + 0], i1 = mesh->indices[3*t + 1], i2 = mesh->indices[3*t + 2];
 		Manifold m = {0};
-		if (!collide_capsule_hull(local, trimesh_tri_as_hull_local(mesh, t), &m)) continue;
+		if (!collide_capsule_triangle_local(local, mesh->verts[i0], mesh->verts[i1], mesh->verts[i2], mesh->tri_normal[t], &m)) continue;
 		trimesh_collect(mesh, t, m, recs, &n_recs);
 	}
 	trimesh_reduce(recs, n_recs);
@@ -772,28 +908,10 @@ static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, Con
 	afree(cands);
 }
 
-// -----------------------------------------------------------------------------
-// Cylinder vs flat triangle (single-triangle collision, mesh-local space).
-// Replaces collide_cylinder_hull for triangle-mesh because the generic hull
-// routine treats a zero-volume triangle as a degenerate polyhedron and its
-// edge-edge SAT family produces false-positive lateral contacts (edge axes
-// treat the edge as an infinite 3D prism, not a 2D segment).
-//
-// Strategy:
-//   1. Signed distance from cyl center to tri plane; reject if separated.
-//   2. Contact normal = tri plane normal, oriented from cyl toward tri.
-//   3. CAP-like contacts (cyl axis ~parallel to tri normal): emit up to 4
-//      rim-point projections AND up to 3 tri-vertex projections that lie
-//      inside the cylinder disk, clipping rim points to the triangle.
-//   4. SIDE-like contacts (cyl axis ~perpendicular to tri normal): emit two
-//      contacts at the cylinder axis endpoints offset by radius toward tri.
-//   5. Depth = (cyl_extent_along_normal) - |signed_distance|.
-//
-// All contacts share the same face normal per triangle -- no false lateral
-// normals from edge-prism SAT.
+// Point-in-triangle test (barycentric via normal-projected cross products).
+// Used by box/hull triangle clip paths above.
 static int point_in_triangle_2d(v3 p, v3 v0, v3 v1, v3 v2, v3 n)
 {
-	// Barycentric via normal-projected cross products.
 	v3 e0 = sub(v1, v0), e1 = sub(v2, v1), e2 = sub(v0, v2);
 	v3 c0 = cross(e0, sub(p, v0));
 	v3 c1 = cross(e1, sub(p, v1));
@@ -802,144 +920,3 @@ static int point_in_triangle_2d(v3 p, v3 v0, v3 v1, v3 v2, v3 n)
 	return (d0 >= 0.0f && d1 >= 0.0f && d2 >= 0.0f) || (d0 <= 0.0f && d1 <= 0.0f && d2 <= 0.0f);
 }
 
-// Sample cylinder surface at representative points (both cap rims + axial side
-// band), project each to triangle plane, keep those below the plane AND inside
-// the triangle. Reduce to MAX_CONTACTS deepest. This unifies CAP/SIDE handling:
-// vertical cyls dominated by cap-rim contacts, horizontal by axial, tilted get
-// both -- no discontinuity at any tilt.
-static int collide_cylinder_triangle_local(Cylinder cyl, v3 v0, v3 v1, v3 v2, v3 tri_n, Manifold* m)
-{
-	v3 cyl_axis = rotate(cyl.rotation, V3(0, 1, 0));
-	float hh = cyl.half_height, r = cyl.radius;
-
-	// Signed distance of cyl center from tri plane (positive = same side as tri_n).
-	float plane_off = dot(tri_n, v0);
-	float c_signed_d = dot(cyl.center, tri_n) - plane_off;
-
-	// Cylinder extent along +/- tri_n.
-	float an = dot(cyl_axis, tri_n);
-	float axial = fabsf(an) * hh;
-	float sin2 = 1.0f - an * an;
-	float radial = sin2 > 0.0f ? sqrtf(sin2) * r : 0.0f;
-	float cyl_extent = axial + radial;
-
-	float c_abs_d = fabsf(c_signed_d);
-	float gap = c_abs_d - cyl_extent;
-	if (gap > LINEAR_SLOP) return 0;
-
-	// Contact normal: cyl A toward tri B. Cyl on +tri_n side -> points -tri_n.
-	v3 contact_n = c_signed_d >= 0.0f ? neg(tri_n) : tri_n;
-	int on_plus_side = c_signed_d >= 0.0f;
-
-	// Build orthonormal basis for cylinder: axis + two perpendicular directions.
-	v3 probe = fabsf(cyl_axis.y) < 0.9f ? V3(0, 1, 0) : V3(1, 0, 0);
-	v3 perp1 = norm(cross(cyl_axis, probe));
-	v3 perp2 = cross(cyl_axis, perp1);
-
-	// Candidate contact samples on the cylinder surface. Combine: cap rims at
-	// both ends (8 directions each) + axial samples along the side (5 axial
-	// positions at 2 opposing perpendicular directions = 10 samples).
-	// Keep only those below tri plane AND inside triangle.
-	#define CYL_TRI_MAX_SAMPLES 32
-	v3 s_points[CYL_TRI_MAX_SAMPLES]; float s_depths[CYL_TRI_MAX_SAMPLES];
-	int sc = 0;
-
-	// Cap rims at +hh and -hh along cyl_axis (8 directions per cap).
-	float cap_axials[2] = { -hh, +hh };
-	int rim_dirs_n = 8;
-	for (int cap = 0; cap < 2; cap++) {
-		v3 cap_center = add(cyl.center, scale(cyl_axis, cap_axials[cap]));
-		for (int i = 0; i < rim_dirs_n && sc < CYL_TRI_MAX_SAMPLES; i++) {
-			float theta = (float)i / (float)rim_dirs_n * 6.28318530718f;
-			v3 rim = add(cap_center, add(scale(perp1, cosf(theta) * r), scale(perp2, sinf(theta) * r)));
-			float d_signed = dot(rim, tri_n) - plane_off;
-			if (on_plus_side && d_signed > 0.0f) continue;
-			if (!on_plus_side && d_signed < 0.0f) continue;
-			v3 on_plane = sub(rim, scale(tri_n, d_signed));
-			if (!point_in_triangle_2d(on_plane, v0, v1, v2, tri_n)) continue;
-			s_points[sc] = on_plane;
-			s_depths[sc] = fabsf(d_signed);
-			sc++;
-		}
-	}
-
-	// Axial side samples along cylinder's deepest contact line: at each of
-	// 5 axial positions, the cyl surface point nearest the tri plane.
-	int axial_samples = 5;
-	for (int i = 0; i < axial_samples && sc < CYL_TRI_MAX_SAMPLES; i++) {
-		float t = (float)i / (float)(axial_samples - 1) * 2.0f - 1.0f;
-		v3 on_axis = add(cyl.center, scale(cyl_axis, t * hh));
-		// Deepest perpendicular offset: project contact_n onto axis-perp plane, scale to r.
-		float ap = dot(contact_n, cyl_axis);
-		v3 perp = sub(contact_n, scale(cyl_axis, ap));
-		float pl2 = len2(perp);
-		v3 offset = pl2 > 1e-8f ? scale(perp, r / sqrtf(pl2)) : V3(0, 0, 0);
-		v3 on_surface = add(on_axis, offset);
-		float d_signed = dot(on_surface, tri_n) - plane_off;
-		if (on_plus_side && d_signed > 0.0f) continue;
-		if (!on_plus_side && d_signed < 0.0f) continue;
-		v3 on_plane = sub(on_surface, scale(tri_n, d_signed));
-		if (!point_in_triangle_2d(on_plane, v0, v1, v2, tri_n)) continue;
-		s_points[sc] = on_plane;
-		s_depths[sc] = fabsf(d_signed);
-		sc++;
-	}
-
-	if (sc == 0) return 0;
-
-	// Reduce to MAX_CONTACTS by picking the 4 deepest and well-separated points.
-	// Simple greedy: sort by depth desc, dedupe by spatial distance.
-	int cp = 0;
-	v3 points[MAX_CONTACTS]; float depths[MAX_CONTACTS];
-	for (int pass = 0; pass < MAX_CONTACTS; pass++) {
-		int best = -1; float best_d = -1e18f;
-		for (int i = 0; i < sc; i++) {
-			if (s_depths[i] < 0.0f) continue; // already consumed
-			int too_close = 0;
-			for (int j = 0; j < cp; j++) {
-				if (len2(sub(s_points[i], points[j])) < 1e-4f) { too_close = 1; break; }
-			}
-			if (too_close) { s_depths[i] = -1.0f; continue; }
-			if (s_depths[i] > best_d) { best_d = s_depths[i]; best = i; }
-		}
-		if (best < 0) break;
-		points[cp] = s_points[best]; depths[cp] = s_depths[best];
-		s_depths[best] = -1.0f; cp++;
-	}
-	if (cp == 0) return 0;
-
-	m->count = cp;
-	for (int i = 0; i < cp; i++) m->contacts[i] = (Contact){ .point = points[i], .normal = contact_n, .penetration = depths[i] };
-	return 1;
-}
-
-// Cylinder vs mesh.
-static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds)
-{
-	quat inv_rot = inv(mesh_rot);
-	v3 local_center = rotate(inv_rot, sub(cyl_world.center, mesh_pos));
-	quat local_rot = mul(inv_rot, cyl_world.rotation);
-	Cylinder local = { local_center, local_rot, cyl_world.half_height, cyl_world.radius };
-
-	v3 axis = rotate(local_rot, V3(0, 1, 0));
-	float hh = cyl_world.half_height, r = cyl_world.radius;
-	v3 abs_axis = V3(fabsf(axis.x), fabsf(axis.y), fabsf(axis.z));
-	v3 half = V3(abs_axis.x * hh + r, abs_axis.y * hh + r, abs_axis.z * hh + r);
-	AABB q = { sub(local_center, half), add(local_center, half) };
-	if (!aabb_overlaps(q, (AABB){ mesh->aabb_min, mesh->aabb_max })) return;
-
-	CK_DYNA int* cands = NULL;
-	trimesh_query_aabb(mesh, q, &cands);
-	ReduceRec recs[TRIMESH_MAX_LOCAL_MANIFOLDS]; int n_recs = 0;
-	for (int i = 0; i < asize(cands) && n_recs < TRIMESH_MAX_LOCAL_MANIFOLDS; i++) {
-		int t = cands[i];
-		uint32_t i0 = mesh->indices[3*t + 0], i1 = mesh->indices[3*t + 1], i2 = mesh->indices[3*t + 2];
-		v3 v0 = mesh->verts[i0], v1 = mesh->verts[i1], v2 = mesh->verts[i2];
-		Manifold m = {0};
-		if (!collide_cylinder_triangle_local(local, v0, v1, v2, mesh->tri_normal[t], &m)) continue;
-		trimesh_collect(mesh, t, m, recs, &n_recs);
-	}
-	trimesh_reduce(recs, n_recs);
-	trimesh_flush(w, body_a, body_b, mesh_pos, mesh_rot, sub_id_base, recs, n_recs, manifolds);
-	afree(cands);
-}

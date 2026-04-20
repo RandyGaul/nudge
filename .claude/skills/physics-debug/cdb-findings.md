@@ -218,9 +218,9 @@ Once `AT_BP` fires (at world_step entry for frame-before-bug):
 ```
 p                                  ; advance one source line
 ?? w                               ; inspect w once assigned
-bu nudge_tests!collide_cylinder_hull   ; add a bp inside the suspicious function
+bu nudge_tests!collide_capsule_hull    ; add a bp inside the suspicious function
 g                                  ; continue into frame 106's narrowphase
-?? a.center; ?? b.hull->face_count ; spot-inspect first args of collide_cylinder_hull
+?? a.p; ?? b.hull->face_count      ; spot-inspect first args of collide_capsule_hull
 ```
 
 ### Body-specific break on narrowphase

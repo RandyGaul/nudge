@@ -62,17 +62,6 @@ static World det_build_scene()
 		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
 	}
 
-	// A cylinder rolling in with lateral velocity so the cylinder pair and
-	// friction code paths all contribute to the hash.
-	Body cyl = create_body(w, (BodyParams){
-		.position = V3(-4, 2, 0),
-		.rotation = quat_identity(),
-		.mass = 1.0f,
-		.friction = 0.5f,
-	});
-	body_add_shape(w, cyl, (ShapeParams){ .type = SHAPE_CYLINDER, .cylinder = { .half_height = 0.5f, .radius = 0.4f } });
-	body_set_velocity(w, cyl, V3(3, 0, 0));
-
 	// A capsule lofted over the stack, gives us sphere-capsule + capsule-box hits.
 	Body cap = create_body(w, (BodyParams){
 		.position = V3(2, 5, 0.3f),
@@ -206,7 +195,7 @@ static void det_trace()
 // -- produces this exact hash after 240 simulation steps. Any single bit drift
 // in any FP op propagates through the solver and flips this hash, so CI is
 // a hard regression gate for the whole floating-point pipeline.
-#define DET_EXPECTED_HASH 0x4ccaff0b821c5850ULL
+#define DET_EXPECTED_HASH 0x4ff470995e6f41c2ULL
 
 // Runs the canonical scene twice (single-threaded and N-threaded) and checks:
 //   1. Both runs produce the same hash -- threading does not affect output.

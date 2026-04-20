@@ -328,7 +328,7 @@ Stop on frame 105 means the bad frame (106) is about to execute — watch it unf
 #### Target a specific body inside a hot function
 
 Don't break at `world_step` — you'll stop 900 times. Narrow to the suspected function:
-- Narrowphase: `collide_cylinder_hull`, `collide_hull_hull_ex`, `sat_query_edges`
+- Narrowphase: `collide_hull_hull_ex`, `sat_query_edges`, `collide_capsule_hull`
 - Constraint setup: `pre_solve_manifold`
 - Solver iteration: `solver_pgs_iterate_island`
 - Integration: `integrate_positions`, `integrate_velocities`
@@ -362,7 +362,7 @@ Then step, inspect, compare.
 | Goal | cdb command | win-debugger tool |
 |------|-------------|-------------------|
 | List locals | `dv` | `locals` |
-| Dump struct | `dt Cylinder @@c++(&cyl)` | `eval &cyl` + struct type |
+| Dump struct | `dt Capsule @@c++(&cap)` | `eval &cap` + struct type |
 | Evaluate C expression | `?? body_state[85].position.y` | `eval` |
 | Stack trace | `k` / `kn` / `kv` | `stack` |
 | Step over one line | `p` | `step_over` |

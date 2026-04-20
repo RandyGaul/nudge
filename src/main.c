@@ -171,7 +171,6 @@ static World g_world;
 static Hull* g_test_hull;
 static int g_mesh_capsule;
 static int g_mesh_hull;
-static int g_mesh_cylinder;
 static bool g_show_contacts = true;
 static bool g_show_joints = true;
 static bool g_show_bvh = false;
@@ -207,8 +206,6 @@ static float g_label_timer; // seconds remaining to show label
 // Capsule rendering params (baked into mesh)
 static const float CAP_RADIUS = 0.3f;
 static const float CAP_HALF_H = 0.5f;
-static const float CYL_RADIUS = 0.4f;
-static const float CYL_HALF_H = 0.5f;
 
 // Scene system: each scene has a name, setup, and optional extra draw (joints etc.)
 typedef struct DrawEntry { Body body; int mesh; v3 scale; v3 color; } DrawEntry;
@@ -267,7 +264,6 @@ static Scene g_scenes[] = {
 	{ "Weld Bridge",     scene_weld_bridge_setup },
 	{ "Slider Crane",    scene_slider_crane_setup, scene_slider_crane_tick },
 	{ "Hinge Limits",    scene_hinge_limits_setup },
-	{ "Cylinder Playground", scene_cylinder_playground_setup },
 	{ "Capsule Test", scene_capsule_test_setup },
 	{ "Joint Gallery", scene_joint_gallery_setup },
 	{ "Ragdoll",      scene_ragdoll_setup },
@@ -507,7 +503,6 @@ void init()
 	// Register custom meshes
 	g_mesh_capsule = render_create_capsule_mesh(CAP_RADIUS, CAP_HALF_H);
 	g_mesh_hull = render_create_hull_mesh(g_test_hull, V3(1, 1, 1));
-	g_mesh_cylinder = render_create_cylinder_mesh(CYL_RADIUS, CYL_HALF_H);
 
 	setup_scene();
 

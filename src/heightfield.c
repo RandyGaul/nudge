@@ -339,39 +339,6 @@ static void collide_hull_heightfield_emit(WorldInternal* w, int body_a, int body
 	trimesh_flush(w, body_a, body_b, hf_pos, hf_rot, sub_id_base, recs, n_recs, manifolds);
 }
 
-static void collide_cylinder_heightfield_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 hf_pos, quat hf_rot, const Heightfield* hf, uint32_t sub_id_base, InternalManifold** manifolds)
-{
-	quat inv_rot = inv(hf_rot);
-	v3 local_center = rotate(inv_rot, sub(cyl_world.center, hf_pos));
-	quat local_rot = mul(inv_rot, cyl_world.rotation);
-	Cylinder local = { local_center, local_rot, cyl_world.half_height, cyl_world.radius };
-
-	v3 axis = rotate(local_rot, V3(0, 1, 0));
-	float hh = cyl_world.half_height, cr = cyl_world.radius;
-	v3 abs_axis = V3(fabsf(axis.x), fabsf(axis.y), fabsf(axis.z));
-	v3 half = V3(abs_axis.x * hh + cr, abs_axis.y * hh + cr, abs_axis.z * hh + cr);
-	AABB q = { sub(local_center, half), add(local_center, half) };
-	if (!aabb_overlaps(q, (AABB){ hf->aabb_min, hf->aabb_max })) return;
-	int i0, i1, j0, j1;
-	if (!hf_cell_range(hf, q, &i0, &i1, &j0, &j1)) return;
-
-	ReduceRec recs[TRIMESH_MAX_LOCAL_MANIFOLDS]; int n_recs = 0;
-	for (int j = j0; j < j1 && n_recs + 2 <= TRIMESH_MAX_LOCAL_MANIFOLDS; j++) {
-		for (int i = i0; i < i1 && n_recs + 2 <= TRIMESH_MAX_LOCAL_MANIFOLDS; i++) {
-			int cell = j * (hf->N - 1) + i;
-			for (int t = 0; t < 2; t++) {
-				v3 a, b, c, n;
-				hf_tri_verts(hf, i, j, t, &a, &b, &c, &n);
-				Manifold m = {0};
-				if (!collide_cylinder_triangle_local(local, a, b, c, n, &m)) continue;
-				hf_collect(cell * 2 + t, a, b, c, n, m, recs, &n_recs);
-			}
-		}
-	}
-	trimesh_reduce(recs, n_recs);
-	trimesh_flush(w, body_a, body_b, hf_pos, hf_rot, sub_id_base, recs, n_recs, manifolds);
-}
-
 // -----------------------------------------------------------------------------
 // Raycast: walk cells along the ray, Moeller-Trumbore on each triangle.
 

@@ -75,8 +75,6 @@ void sensor_add_shape(World world, Sensor sensor, ShapeParams params)
 	case SHAPE_BOX:      sh.box.half_extents = params.box.half_extents; break;
 	case SHAPE_HULL:     sh.hull.hull = params.hull.hull;
 	                     sh.hull.scale = params.hull.scale; break;
-	case SHAPE_CYLINDER: sh.cylinder.half_height = params.cylinder.half_height;
-	                     sh.cylinder.radius = params.cylinder.radius; break;
 	case SHAPE_MESH:     break;
 	case SHAPE_HEIGHTFIELD: break;
 	}
@@ -110,7 +108,6 @@ static int sensor_shape_overlap(BodyState* bs_a, ShapeInternal* sh_a, BodyState*
 		case SHAPE_CAPSULE:  return collide_sphere_capsule(a, make_capsule(bs_b, sh_b),     &m);
 		case SHAPE_BOX:      return collide_sphere_box    (a, make_box(bs_b, sh_b),         &m);
 		case SHAPE_HULL:     return collide_sphere_hull   (a, make_convex_hull(bs_b, sh_b), &m);
-		case SHAPE_CYLINDER: return collide_cylinder_sphere(make_cylinder(bs_b, sh_b), a,   &m);
 		default: return 0;
 		}
 	}
@@ -120,7 +117,6 @@ static int sensor_shape_overlap(BodyState* bs_a, ShapeInternal* sh_a, BodyState*
 		case SHAPE_CAPSULE:  return collide_capsule_capsule(a, make_capsule(bs_b, sh_b),     &m);
 		case SHAPE_BOX:      return collide_capsule_box    (a, make_box(bs_b, sh_b),         &m);
 		case SHAPE_HULL:     return collide_capsule_hull   (a, make_convex_hull(bs_b, sh_b), &m);
-		case SHAPE_CYLINDER: return collide_cylinder_capsule(make_cylinder(bs_b, sh_b), a,   &m);
 		default: return 0;
 		}
 	}
@@ -131,7 +127,6 @@ static int sensor_shape_overlap(BodyState* bs_a, ShapeInternal* sh_a, BodyState*
 		case SHAPE_HULL:     return collide_hull_hull(
 		                         (ConvexHull){ hull_unit_box(), ab.center, ab.rotation, ab.half_extents },
 		                         make_convex_hull(bs_b, sh_b), &m);
-		case SHAPE_CYLINDER: return collide_cylinder_box(make_cylinder(bs_b, sh_b), ab, &m);
 		default: return 0;
 		}
 	}
@@ -139,14 +134,8 @@ static int sensor_shape_overlap(BodyState* bs_a, ShapeInternal* sh_a, BodyState*
 		ConvexHull a = make_convex_hull(bs_a, sh_a);
 		switch (sh_b->type) {
 		case SHAPE_HULL:     return collide_hull_hull(a, make_convex_hull(bs_b, sh_b), &m);
-		case SHAPE_CYLINDER: return collide_cylinder_hull(make_cylinder(bs_b, sh_b), a, &m);
 		default: return 0;
 		}
-	}
-	case SHAPE_CYLINDER: {
-		if (sh_b->type == SHAPE_CYLINDER)
-			return collide_cylinder_cylinder(make_cylinder(bs_a, sh_a), make_cylinder(bs_b, sh_b), &m);
-		return 0;
 	}
 	default: return 0;
 	}

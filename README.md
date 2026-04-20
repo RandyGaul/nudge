@@ -31,8 +31,8 @@ What you get
 
 ### Shapes
 
-Sphere, capsule, box, convex hull, cylinder, static triangle mesh, and
-heightfield. Build convex hulls from arbitrary point clouds with `quickhull`,
+Sphere, capsule, box, convex hull, static triangle mesh, and heightfield.
+Build convex hulls from arbitrary point clouds with `quickhull`,
 or use the built-in unit box. One body can hold several child shapes with
 local offsets and rotations -- compound colliders come for free.
 
@@ -105,9 +105,8 @@ create_distance(world, (DistanceParams){
 
 Rigid body stacking, friction, restitution, linear / angular damping. Sleep
 so stacks and piles stop burning CPU once at rest. Rolling friction for
-balls / cylinders that should lose spin on contact. Gyroscopic integration
-for tops, cylinders on edge. Picks up free threads when available;
-single-threaded works too.
+balls that should lose spin on contact. Gyroscopic integration for tops.
+Picks up free threads when available; single-threaded works too.
 
 ```c
 Body die = create_body(world, (BodyParams){
@@ -393,11 +392,6 @@ What's missing
 Known issues
 ------------
 
-- **Cylinder collisions** can jitter or lose contacts on edge-rest poses.
-  The native cylinder-vs-{sphere,capsule,box,hull,cyl} paths are newer
-  and less battle-tested than the hull-backed fallback; if you hit a
-  regression, toggling the native-cyl flags in the debug panel is the
-  fastest workaround.
 - **LDL solver** is new and buggy. The underlying math isn't fully
   sussed out yet, and it's only equality-constraint anyway -- any joint
   with active limits or a motor falls back to PGS for that row. Expect

@@ -1537,112 +1537,6 @@ void hull_set_name(Hull* hull, const char* name)
 const char* hull_get_name(const Hull* hull) { return hull->name; }
 
 // -----------------------------------------------------------------------------
-// Cylinder Voronoi region classification.
-//
-// Used by native cylinder narrowphase routines. Takes a world-space point
-// (typically the witness on the other shape from GJK on the cylinder's axis
-// segment) and returns the true nearest point on the cylinder surface, plus
-// its outward normal and signed distance.
-//
-// The four regions partition space outside the cylinder into distinct feature
-// owners, plus INSIDE for the interior:
-//   SIDE:   |axial| <= hh && rad >= r   -- curved wall owns the witness
-//   CAP:    |axial| >  hh && rad <= r   -- flat top/bottom owns the witness
-//   RIM:    |axial| >  hh && rad >  r   -- the circular edge owns the witness
-//   INSIDE: |axial| <  hh && rad <  r   -- escape via nearest side or cap face
-//
-// Distance is positive outside, negative inside (value = -escape_depth).
-
-typedef enum
-{
-	CYL_REGION_SIDE,
-	CYL_REGION_CAP,
-	CYL_REGION_RIM,
-	CYL_REGION_INSIDE,
-} CylRegion;
-
-typedef struct CylFeature
-{
-	CylRegion region;
-	float distance; // signed: >0 outside, <0 inside (-escape_depth)
-	v3 surface_pt;  // world-space point on cylinder surface
-	v3 normal;      // unit outward cylinder normal at surface_pt (world)
-} CylFeature;
-
-static CylFeature cyl_classify_point(v3 x_world, v3 cyl_pos, quat cyl_rot, float half_height, float radius)
-{
-	// Transform witness into cylinder-local space.
-	v3 lp = rotate(inv(cyl_rot), sub(x_world, cyl_pos));
-	float rad2 = lp.x * lp.x + lp.z * lp.z;
-	float rad = sqrtf(rad2);
-	float axial = lp.y;
-	float abs_axial = fabsf(axial);
-	float sign_y = axial >= 0.0f ? 1.0f : -1.0f;
-
-	CylFeature feat;
-	v3 sp_local, n_local;
-
-	if (abs_axial <= half_height) {
-		if (rad >= radius) {
-			// SIDE: perpendicular distance to the curved wall.
-			feat.region = CYL_REGION_SIDE;
-			feat.distance = rad - radius;
-			// rad is >= radius > 0 so inv_rad is finite.
-			float inv_rad = 1.0f / rad;
-			float rx = lp.x * inv_rad, rz = lp.z * inv_rad;
-			sp_local = V3(rx * radius, axial, rz * radius);
-			n_local = V3(rx, 0.0f, rz);
-		} else {
-			// INSIDE: pick the nearest escape face (side vs cap).
-			feat.region = CYL_REGION_INSIDE;
-			float side_esc = radius - rad;
-			float cap_esc = half_height - abs_axial;
-			if (cap_esc < side_esc) {
-				feat.distance = -cap_esc;
-				sp_local = V3(lp.x, sign_y * half_height, lp.z);
-				n_local = V3(0.0f, sign_y, 0.0f);
-			} else {
-				feat.distance = -side_esc;
-				if (rad > 1e-12f) {
-					float inv_rad = 1.0f / rad;
-					float rx = lp.x * inv_rad, rz = lp.z * inv_rad;
-					sp_local = V3(rx * radius, axial, rz * radius);
-					n_local = V3(rx, 0.0f, rz);
-				} else {
-					// Exactly on the axis -- arbitrary radial (+X).
-					sp_local = V3(radius, axial, 0.0f);
-					n_local = V3(1.0f, 0.0f, 0.0f);
-				}
-			}
-		}
-	} else {
-		if (rad <= radius) {
-			// CAP: perpendicular distance to the flat disk.
-			feat.region = CYL_REGION_CAP;
-			feat.distance = abs_axial - half_height;
-			sp_local = V3(lp.x, sign_y * half_height, lp.z);
-			n_local = V3(0.0f, sign_y, 0.0f);
-		} else {
-			// RIM: closest feature is the circular edge at (rad=r, axial=+/-hh).
-			feat.region = CYL_REGION_RIM;
-			float dr = rad - radius;
-			float da = abs_axial - half_height;
-			feat.distance = sqrtf(dr * dr + da * da);
-			float inv_rad = 1.0f / rad; // rad > radius > 0
-			float rx = lp.x * inv_rad, rz = lp.z * inv_rad;
-			sp_local = V3(rx * radius, sign_y * half_height, rz * radius);
-			// Outward normal along the direction from the rim point to the witness.
-			float inv_d = feat.distance > 1e-12f ? 1.0f / feat.distance : 0.0f;
-			n_local = V3(rx * dr * inv_d, sign_y * da * inv_d, rz * dr * inv_d);
-		}
-	}
-
-	feat.surface_pt = add(cyl_pos, rotate(cyl_rot, sp_local));
-	feat.normal = rotate(cyl_rot, n_local);
-	return feat;
-}
-
-// -----------------------------------------------------------------------------
 // Incremental narrowphase: validate + refresh cached feature pairs.
 
 // Box face validation: check if the cached local axis is still the dominant
@@ -1827,538 +1721,13 @@ static ConvexHull make_convex_hull(BodyState* bs, ShapeInternal* s)
 	return (ConvexHull){ s->hull.hull, world_pos, world_rot, s->hull.scale };
 }
 
-// Build a Cylinder from an internal body+shape (mirror of make_box/make_sphere).
-static Cylinder make_cylinder(BodyState* bs, ShapeInternal* s)
-{
-	v3 world_pos = add(bs->position, rotate(bs->rotation, s->local_pos));
-	quat world_rot = quat_mul(bs->rotation, s->local_rot);
-	return (Cylinder){ world_pos, world_rot, s->cylinder.half_height, s->cylinder.radius };
-}
-
 // -----------------------------------------------------------------------------
-// Cylinder narrowphase.
-//
-// Analytical implementations using cyl_classify_point for surface contacts.
-
-// Analytical cyl-sphere: classify the sphere center as a point against the
-// cylinder, compare against sphere radius. No GJK iteration -- one call to
-// cyl_classify_point handles all four Voronoi regions.
-int collide_cylinder_sphere(Cylinder a, Sphere b, Manifold* manifold)
-{
-	CylFeature feat = cyl_classify_point(b.center, a.center, a.rotation, a.half_height, a.radius);
-
-	float gap = feat.distance - b.radius;
-	if (gap > 0.0f) return 0;
-	if (!manifold) return 1;
-
-	// Normal points from cyl surface toward sphere center.
-	// External regions (SIDE/CAP/RIM): feat.normal already points outward and
-	// the sphere center lies in that direction.
-	// INSIDE: the sphere center lies OPPOSITE to feat.normal (inside the cyl),
-	// so flip to get the A->B direction that the solver will use to push them
-	// apart through the nearest escape face.
-	v3 normal = feat.region == CYL_REGION_INSIDE ? neg(feat.normal) : feat.normal;
-	manifold->count = 1;
-	manifold->contacts[0] = (Contact){
-		.point = feat.surface_pt,
-		.normal = normal,
-		.penetration = b.radius - feat.distance,
-		.feature_id = 0,
-	};
-	return 1;
-}
-
-// Cyl axis in world space as a segment (helper used by several pairs).
-static void cylinder_axis_segment(Cylinder c, v3* p, v3* q)
-{
-	v3 axis = rotate(c.rotation, V3(0, 1, 0));
-	*p = sub(c.center, scale(axis, c.half_height));
-	*q = add(c.center, scale(axis, c.half_height));
-}
-
-// Analytical cyl-capsule: closest-points between cyl axis segment and capsule segment,
-// classify the capsule-side witness, inflate by capsule radius. Detects the parallel
-// SIDE-SIDE / CAP-CAP case by classifying both capsule endpoints -- when both land in
-// the same region with matching normals, emit a 2-point manifold.
-int collide_cylinder_capsule(Cylinder a, Capsule b, Manifold* manifold)
-{
-	v3 cyl_p, cyl_q;
-	cylinder_axis_segment(a, &cyl_p, &cyl_q);
-
-	v3 cpa, cpb;
-	segments_closest_points(cyl_p, cyl_q, b.p, b.q, &cpa, &cpb);
-
-	CylFeature feat = cyl_classify_point(cpb, a.center, a.rotation, a.half_height, a.radius);
-	float gap = feat.distance - b.radius;
-	if (gap > 0.0f) return 0;
-	if (!manifold) return 1;
-
-	// Check for parallel 2-point manifold: both capsule endpoints land in the same
-	// SIDE or CAP region with matching normals (dot > 0.99 ~ 8 degrees).
-	CylFeature feat_p = cyl_classify_point(b.p, a.center, a.rotation, a.half_height, a.radius);
-	CylFeature feat_q = cyl_classify_point(b.q, a.center, a.rotation, a.half_height, a.radius);
-	int parallel =
-		feat_p.region == feat_q.region
-		&& (feat_p.region == CYL_REGION_SIDE || feat_p.region == CYL_REGION_CAP)
-		&& feat_p.distance - b.radius <= 0.0f
-		&& feat_q.distance - b.radius <= 0.0f
-		&& dot(feat_p.normal, feat_q.normal) > 0.99f;
-
-	if (parallel) {
-		manifold->count = 2;
-		manifold->contacts[0] = (Contact){
-			.point = feat_p.surface_pt,
-			.normal = feat_p.normal,
-			.penetration = b.radius - feat_p.distance,
-		};
-		manifold->contacts[1] = (Contact){
-			.point = feat_q.surface_pt,
-			.normal = feat_q.normal,
-			.penetration = b.radius - feat_q.distance,
-		};
-		return 1;
-	}
-
-	// Single contact at the closest-approach witness.
-	v3 normal = feat.region == CYL_REGION_INSIDE ? neg(feat.normal) : feat.normal;
-	manifold->count = 1;
-	manifold->contacts[0] = (Contact){
-		.point = feat.surface_pt,
-		.normal = normal,
-		.penetration = b.radius - feat.distance,
-	};
-	return 1;
-}
-
-// Cyl-box: delegate to cyl-hull using the unit box hull. The unit box has only
-// 8 verts / 6 faces / 24 edges, so the SAT is cheap.
-int collide_cylinder_box(Cylinder a, Box b, Manifold* manifold)
-{
-	ConvexHull cb = { &s_unit_box_hull, b.center, b.rotation, b.half_extents };
-	return collide_cylinder_hull(a, cb, manifold);
-}
-
-// Cylinder support projection onto an arbitrary axis (tight, analytical).
-// Returns the half-extent: max of dot(surface_point, n) over all cylinder surface points, minus center.
-static float cyl_half_support(v3 cyl_axis, float hh, float radius, v3 n)
-{
-	float an = dot(cyl_axis, n);
-	float axial = fabsf(an) * hh;
-	float sin2 = 1.0f - an * an;
-	float radial = sin2 > 0.0f ? sqrtf(sin2) * radius : 0.0f;
-	return axial + radial;
-}
-
-// Cyl-hull: GJK(axis_segment, hull) shallow + SAT deep.
-// Deep SAT tests hull face normals, cylinder axis, and cyl_axis x hull_edge.
-int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold)
-{
-	v3 cyl_p, cyl_q;
-	cylinder_axis_segment(a, &cyl_p, &cyl_q);
-	v3 cyl_axis = rotate(a.rotation, V3(0, 1, 0));
-	const Hull* hull = b.hull;
-
-	// Quick bounding-sphere rejection before running full SAT.
-	{
-		GJK_Result r = gjk_query_segment_hull(cyl_p, cyl_q, b);
-		float bound = sqrtf(a.radius * a.radius + a.half_height * a.half_height);
-		if (r.distance > bound) return 0;
-	}
-
-	// --- Deep SAT ---
-	// Track best separating axis across three families.
-	float best_sep = -1e18f;
-	v3 best_n = V3(0,0,0);
-	int best_type = -1; // 0 = hull face, 1 = cap, 2 = edge
-
-	// Family 1: hull face normals.
-	HullPlane best_face_plane = {0};
-	for (int i = 0; i < hull->face_count; i++) {
-		HullPlane wp = plane_transform(hull->planes[i], b.center, b.rotation, b.scale);
-		float cyl_min = dot(a.center, wp.normal) - cyl_half_support(cyl_axis, a.half_height, a.radius, wp.normal);
-		float sep = cyl_min - wp.offset;
-		if (sep > 0.0f) return 0;
-		if (sep > best_sep) { best_sep = sep; best_n = wp.normal; best_type = 0; best_face_plane = wp; }
-	}
-
-	// Family 2: cylinder axis (cap face contacts).
-	{
-		float hull_min = 1e18f, hull_max = -1e18f;
-		for (int j = 0; j < hull->vert_count; j++) {
-			v3 wv = add(b.center, rotate(b.rotation, hmul(hull->verts[j], b.scale)));
-			float p = dot(wv, cyl_axis);
-			if (p < hull_min) hull_min = p;
-			if (p > hull_max) hull_max = p;
-		}
-		float cyl_min_ax = dot(a.center, cyl_axis) - a.half_height;
-		float cyl_max_ax = dot(a.center, cyl_axis) + a.half_height;
-		if (hull_max < cyl_min_ax || cyl_max_ax < hull_min) return 0;
-		// Two overlap measures: hull poking through bottom cap, hull poking through top cap.
-		float pen_bot = hull_max - cyl_min_ax; // hull above cyl bottom
-		float pen_top = cyl_max_ax - hull_min; // cyl above hull bottom
-		float pen = pen_bot < pen_top ? pen_bot : pen_top;
-		float sep = -pen;
-		int sign = pen_bot < pen_top ? -1 : 1; // -1 = bottom cap reference, +1 = top cap
-		if (sep > best_sep + 0.001f) { best_sep = sep; best_n = scale(cyl_axis, (float)sign); best_type = 1; }
-	}
-
-	// Family 3: cyl_axis x hull_edge (edge-edge contacts).
-	int best_edge = -1;
-	for (int i = 0; i < hull->edge_count; i += 2) {
-		v3 ev0 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[i]], b.scale)));
-		v3 ev1 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[hull->edge_next[i]]], b.scale)));
-		v3 ed = sub(ev1, ev0);
-		v3 ax = cross(cyl_axis, ed);
-		float al = len2(ax);
-		if (al < 1e-12f) continue;
-		ax = scale(ax, 1.0f / sqrtf(al));
-		if (dot(ax, sub(a.center, ev0)) < 0.0f) ax = neg(ax);
-		// cyl_axis · ax ≈ 0 (ax is perpendicular to cyl_axis by construction of cross product)
-		// so cylinder projects as: center · ax ± radius
-		float cyl_min_e = dot(a.center, ax) - a.radius;
-		float hull_max_e = -1e18f;
-		for (int j = 0; j < hull->vert_count; j++) {
-			v3 wv = add(b.center, rotate(b.rotation, hmul(hull->verts[j], b.scale)));
-			float d = dot(wv, ax);
-			if (d > hull_max_e) hull_max_e = d;
-		}
-		float sep = cyl_min_e - hull_max_e;
-		if (sep > 0.0f) return 0;
-		if (sep > best_sep + 0.001f) { best_sep = sep; best_n = ax; best_type = 2; best_edge = i; }
-	}
-
-	if (best_sep > 0.0f || best_type < 0) return 0;
-	if (!manifold) return 1;
-
-	// --- Manifold generation by axis type ---
-
-	if (best_type == 0) {
-		// Hull face is reference. Two sub-paths depending on the angle between
-		// the face normal and the cylinder axis:
-		//
-		// CAP path (|dot| > 0.7): face is roughly parallel to a cylinder cap.
-		// A single rim-point contact would cause pivoting/instability. Instead,
-		// project hull verts onto the cap plane and clip against the cap disk,
-		// giving up to MAX_CONTACTS multi-point support (same as Family 2).
-		//
-		// SIDE path (|dot| < 0.7): face is roughly perpendicular to the axis.
-		// Use the capsule-style approach: offset axis endpoints by full radius
-		// toward the face, giving a 2-point contact strip.
-		v3 neg_n = neg(best_n);
-		float axis_alignment = fabsf(dot(best_n, cyl_axis));
-
-		if (axis_alignment > 0.7f) {
-			// CAP path: pick the cap whose outward normal faces the hull face.
-			// cap_n points outward from the chosen cap (toward the hull).
-			v3 cap_n = dot(best_n, cyl_axis) > 0.0f ? neg(cyl_axis) : cyl_axis;
-			v3 cap_center = add(a.center, scale(cap_n, a.half_height));
-			float cap_d = dot(cap_center, cap_n); // cap plane offset
-
-			// Try projecting hull verts onto cap plane, keep those inside the disk.
-			int cp = 0;
-			v3 points[MAX_CONTACTS]; float depths[MAX_CONTACTS];
-			for (int j = 0; j < hull->vert_count && cp < MAX_CONTACTS; j++) {
-				v3 wv = add(b.center, rotate(b.rotation, hmul(hull->verts[j], b.scale)));
-				float d = dot(wv, cap_n) - cap_d;
-				if (d > 0.0f) continue; // outside cap plane
-				v3 on_cap = sub(wv, scale(cap_n, d));
-				v3 radial = sub(on_cap, cap_center);
-				if (len2(radial) > a.radius * a.radius) continue;
-				points[cp] = wv; depths[cp] = -d; cp++;
-			}
-			// Fallback for large hulls (no verts inside cap disk): rim contacts.
-			// Near-parallel: 4 quadrant rim points for full rotational stability.
-			// Tilted: 2 splayed rim points for torsional friction.
-			if (cp == 0) {
-				v3 toward_face = sub(neg_n, scale(cap_n, dot(neg_n, cap_n)));
-				float toward_len = v3_len(toward_face);
-				v3 toward_dir;
-				if (toward_len > 1e-6f)
-					toward_dir = scale(toward_face, 1.0f / toward_len);
-				else
-					toward_dir = v3_norm(v3_cross(cap_n, fabsf(cap_n.y) < 0.9f ? V3(0,1,0) : V3(1,0,0)));
-				v3 perp_dir = v3_cross(cap_n, toward_dir);
-
-				if (axis_alignment > 0.95f) {
-					v3 rim_dirs[4];
-					rim_dirs[0] = toward_dir;
-					rim_dirs[1] = perp_dir;
-					rim_dirs[2] = neg(toward_dir);
-					rim_dirs[3] = neg(perp_dir);
-					for (int i = 0; i < 4; i++) {
-						v3 rim = add(cap_center, scale(rim_dirs[i], a.radius));
-						float fd = dot(rim, best_n) - best_face_plane.offset;
-						if (-fd <= 0.0f) continue;
-						points[cp] = sub(rim, scale(best_n, fd));
-						depths[cp] = -fd;
-						cp++;
-					}
-				}
-				if (cp == 1) cp = 0; // single rim point = no patch area, fall back to 2-point splay
-				if (cp == 0) {
-					v3 d0 = add(scale(toward_dir, 0.999f), scale(perp_dir, 0.0436f));
-					v3 d1 = add(scale(toward_dir, 0.999f), scale(perp_dir, -0.0436f));
-					v3 r0 = add(cap_center, scale(d0, a.radius));
-					v3 r1 = add(cap_center, scale(d1, a.radius));
-					float f0 = dot(r0, best_n) - best_face_plane.offset;
-					float f1 = dot(r1, best_n) - best_face_plane.offset;
-					points[0] = sub(r0, scale(best_n, f0));
-					points[1] = sub(r1, scale(best_n, f1));
-					depths[0] = -f0 > 0.0f ? -f0 : -best_sep;
-					depths[1] = -f1 > 0.0f ? -f1 : -best_sep;
-					cp = 2;
-				}
-			}
-			manifold->count = cp;
-			for (int i = 0; i < cp; i++)
-				manifold->contacts[i] = (Contact){ .point = points[i], .normal = neg_n, .penetration = depths[i] };
-			return 1;
-		}
-
-		// SIDE path: project axis endpoints offset by full radius toward face.
-		float axial_proj = dot(neg_n, cyl_axis);
-		v3 perp = sub(neg_n, scale(cyl_axis, axial_proj));
-		float perp_len2 = len2(perp);
-		v3 surface_offset;
-		if (perp_len2 > 1e-8f) surface_offset = scale(perp, a.radius / sqrtf(perp_len2));
-		else surface_offset = V3(0, 0, 0);
-
-		float plane_d = best_face_plane.offset;
-		v3 sp = add(cyl_p, surface_offset);
-		v3 sq = add(cyl_q, surface_offset);
-		float dp = dot(sp, best_n);
-		float dq = dot(sq, best_n);
-		int cp = 0;
-		v3 points[2]; float depths[2];
-		if (dp < plane_d) { points[cp] = sp; depths[cp] = plane_d - dp; cp++; }
-		if (dq < plane_d) { points[cp] = sq; depths[cp] = plane_d - dq; cp++; }
-		if (cp == 0) { cp = 1; points[0] = dp < dq ? sp : sq; depths[0] = -best_sep; }
-		manifold->count = cp;
-		for (int i = 0; i < cp; i++)
-			manifold->contacts[i] = (Contact){ .point = points[i], .normal = neg_n, .penetration = depths[i] };
-		return 1;
-	}
-
-	if (best_type == 1) {
-		// Cylinder cap is reference. Project hull vertices onto cap plane,
-		// keep up to 4 that are within cap disk radius and penetrate.
-		v3 cap_n = best_n; // outward cap normal (+/- cyl_axis)
-		float cap_d = dot(a.center, cap_n) + a.half_height; // cap plane offset
-		int cp = 0;
-		v3 points[MAX_CONTACTS]; float depths[MAX_CONTACTS];
-		for (int j = 0; j < hull->vert_count && cp < MAX_CONTACTS; j++) {
-			v3 wv = add(b.center, rotate(b.rotation, hmul(hull->verts[j], b.scale)));
-			float d = dot(wv, cap_n) - cap_d;
-			if (d > 0.0f) continue; // above cap plane (outside)
-			// Check if vertex is within cap disk radius.
-			v3 on_cap = sub(wv, scale(cap_n, d)); // project onto cap plane
-			v3 radial = sub(on_cap, add(a.center, scale(cap_n, a.half_height)));
-			if (len2(radial) > a.radius * a.radius) continue;
-			points[cp] = wv;
-			depths[cp] = -d;
-			cp++;
-		}
-		if (cp == 0) { manifold->count = 1; manifold->contacts[0] = (Contact){ .point = add(a.center, scale(best_n, a.half_height)), .normal = neg(best_n), .penetration = -best_sep }; return 1; }
-		manifold->count = cp;
-		for (int i = 0; i < cp; i++)
-			manifold->contacts[i] = (Contact){ .point = points[i], .normal = neg(best_n), .penetration = depths[i] };
-		return 1;
-	}
-
-	// best_type == 2: edge-edge contact (single point).
-	// Use closest-points between cyl axis and the winning hull edge.
-	{
-		manifold->count = 1;
-		// Recompute closest pair for the winning edge.
-		int ei = best_edge;
-		v3 ev0 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[ei]], b.scale)));
-		v3 ev1 = add(b.center, rotate(b.rotation, hmul(hull->verts[hull->edge_origin[hull->edge_next[ei]]], b.scale)));
-		v3 cpa, cpb;
-		segments_closest_points(cyl_p, cyl_q, ev0, ev1, &cpa, &cpb);
-		CylFeature ef = cyl_classify_point(cpb, a.center, a.rotation, a.half_height, a.radius);
-		manifold->contacts[0] = (Contact){
-			.point = ef.surface_pt,
-			.normal = neg(best_n),
-			.penetration = -best_sep,
-		};
-		return 1;
-	}
-}
-
-// Cyl-cyl: SAT with both cylinder axes + their cross product.
-// Each cylinder projects analytically via cyl_half_support.
-int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold)
-{
-	v3 axis_a = rotate(a.rotation, V3(0, 1, 0));
-	v3 axis_b = rotate(b.rotation, V3(0, 1, 0));
-	v3 a_p, a_q, b_p, b_q;
-	cylinder_axis_segment(a, &a_p, &a_q);
-	cylinder_axis_segment(b, &b_p, &b_q);
-
-	// Quick bounding-sphere rejection.
-	float bound_a = sqrtf(a.radius * a.radius + a.half_height * a.half_height);
-	float bound_b = sqrtf(b.radius * b.radius + b.half_height * b.half_height);
-	float dist2_centers = len2(sub(a.center, b.center));
-	float bound_sum = bound_a + bound_b;
-	if (dist2_centers > bound_sum * bound_sum) return 0;
-
-	float best_sep = -1e18f;
-	v3 best_n = V3(0,0,0);
-	int best_type = -1; // 0 = axis_a, 1 = axis_b, 2 = cross
-	int best_sign = 1;
-
-	// Helper: test a candidate SAT axis. Returns 1 if separating (no collision).
-	#define CYL_CYL_TEST_AXIS(n_arg, type_arg, sign_arg) do { \
-		v3 n_ = (n_arg); \
-		float a_half = cyl_half_support(axis_a, a.half_height, a.radius, n_); \
-		float b_half = cyl_half_support(axis_b, b.half_height, b.radius, n_); \
-		float a_center = dot(a.center, n_); \
-		float b_center = dot(b.center, n_); \
-		float a_min = a_center - a_half, a_max = a_center + a_half; \
-		float b_min = b_center - b_half, b_max = b_center + b_half; \
-		if (a_max < b_min || b_max < a_min) return 0; /* separating axis */ \
-		float pen1 = a_max - b_min, pen2 = b_max - a_min; \
-		float pen = pen1 < pen2 ? pen1 : pen2; \
-		float sep = -pen; \
-		int s_ = pen1 < pen2 ? 1 : -1; \
-		if (sep > best_sep + 0.001f) { best_sep = sep; best_n = n_; best_type = (type_arg); best_sign = s_; } \
-	} while(0)
-
-	// Family 1: cylinder A axis.
-	CYL_CYL_TEST_AXIS(axis_a, 0, 0);
-
-	// Family 2: cylinder B axis.
-	CYL_CYL_TEST_AXIS(axis_b, 1, 0);
-
-	// Family 3: cross(axis_a, axis_b). Only if axes aren't parallel.
-	{
-		v3 cross_ab = cross(axis_a, axis_b);
-		float cross_len2 = len2(cross_ab);
-		if (cross_len2 > 1e-8f) {
-			v3 ax = scale(cross_ab, 1.0f / sqrtf(cross_len2));
-			if (dot(ax, sub(a.center, b.center)) < 0.0f) ax = neg(ax);
-			CYL_CYL_TEST_AXIS(ax, 2, 0);
-		}
-	}
-
-	// Family 4: "radial" direction — from closest points between the two axis segments.
-	// When axes cross at a point (radial = 0), fall back to center-to-center direction.
-	// This is the physically-preferred axis for side-side contacts, so it wins TIES
-	// (uses >= instead of the biased > comparison that other families use).
-	{
-		v3 cpa, cpb;
-		segments_closest_points(a_p, a_q, b_p, b_q, &cpa, &cpb);
-		v3 radial = sub(cpb, cpa);
-		float rl2 = len2(radial);
-		if (rl2 < 1e-12f) { radial = sub(b.center, a.center); rl2 = len2(radial); }
-		if (rl2 > 1e-12f) {
-			v3 ax = scale(radial, 1.0f / sqrtf(rl2));
-			if (dot(ax, sub(a.center, b.center)) < 0.0f) ax = neg(ax);
-			float a_half = cyl_half_support(axis_a, a.half_height, a.radius, ax);
-			float b_half = cyl_half_support(axis_b, b.half_height, b.radius, ax);
-			float a_center_proj = dot(a.center, ax);
-			float b_center_proj = dot(b.center, ax);
-			float a_min_v = a_center_proj - a_half, a_max_v = a_center_proj + a_half;
-			float b_min_v = b_center_proj - b_half, b_max_v = b_center_proj + b_half;
-			if (a_max_v < b_min_v || b_max_v < a_min_v) return 0;
-			float pen1 = a_max_v - b_min_v, pen2 = b_max_v - a_min_v;
-			float pen = pen1 < pen2 ? pen1 : pen2;
-			float sep = -pen;
-			if (sep >= best_sep) { best_sep = sep; best_n = ax; best_type = 3; }
-		}
-	}
-
-	#undef CYL_CYL_TEST_AXIS
-
-	if (best_sep > 0.0f || best_type < 0) return 0;
-	if (!manifold) return 1;
-
-	// --- Contact generation ---
-	if (best_type == 0) {
-		// A's cap wins as reference. Project B's cylinder surface onto A's cap plane.
-		// B's surface offset uses the same perp-to-axis formula as cyl-hull face gen.
-		v3 cap_n = scale(axis_a, (float)best_sign);
-		float cap_d = dot(a.center, cap_n) + a.half_height;
-		v3 neg_cap = neg(cap_n);
-		float b_axial = dot(neg_cap, axis_b);
-		v3 b_perp = sub(neg_cap, scale(axis_b, b_axial));
-		float bp2 = len2(b_perp);
-		v3 b_off = bp2 > 1e-8f ? scale(b_perp, b.radius / sqrtf(bp2)) : V3(0,0,0);
-		v3 bsp = add(b_p, b_off);
-		v3 bsq = add(b_q, b_off);
-		float d_bp = dot(bsp, cap_n);
-		float d_bq = dot(bsq, cap_n);
-		int cp = 0;
-		v3 points[2]; float depths[2];
-		if (d_bp < cap_d) {
-			v3 radial = sub(bsp, add(a.center, scale(cap_n, a.half_height)));
-			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
-			if (len2(radial) <= a.radius * a.radius) { points[cp] = bsp; depths[cp] = cap_d - d_bp; cp++; }
-		}
-		if (d_bq < cap_d) {
-			v3 radial = sub(bsq, add(a.center, scale(cap_n, a.half_height)));
-			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
-			if (len2(radial) <= a.radius * a.radius) { points[cp] = bsq; depths[cp] = cap_d - d_bq; cp++; }
-		}
-		if (cp == 0) { cp = 1; points[0] = add(a.center, scale(cap_n, a.half_height)); depths[0] = -best_sep; }
-		manifold->count = cp;
-		for (int i = 0; i < cp; i++)
-			manifold->contacts[i] = (Contact){ .point = points[i], .normal = cap_n, .penetration = depths[i] };
-		return 1;
-	}
-
-	if (best_type == 1) {
-		// B's cap wins as reference. Same as type 0 with A/B roles swapped.
-		v3 cap_n = scale(axis_b, (float)best_sign);
-		float cap_d = dot(b.center, cap_n) + b.half_height;
-		v3 neg_cap = neg(cap_n);
-		float a_axial = dot(neg_cap, axis_a);
-		v3 a_perp = sub(neg_cap, scale(axis_a, a_axial));
-		float ap2 = len2(a_perp);
-		v3 a_off = ap2 > 1e-8f ? scale(a_perp, a.radius / sqrtf(ap2)) : V3(0,0,0);
-		v3 asp = add(a_p, a_off);
-		v3 asq = add(a_q, a_off);
-		float d_ap = dot(asp, cap_n);
-		float d_aq = dot(asq, cap_n);
-		int cp = 0;
-		v3 points[2]; float depths[2];
-		if (d_ap < cap_d) {
-			v3 radial = sub(asp, add(b.center, scale(cap_n, b.half_height)));
-			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
-			if (len2(radial) <= b.radius * b.radius) { points[cp] = asp; depths[cp] = cap_d - d_ap; cp++; }
-		}
-		if (d_aq < cap_d) {
-			v3 radial = sub(asq, add(b.center, scale(cap_n, b.half_height)));
-			radial = sub(radial, scale(cap_n, dot(radial, cap_n)));
-			if (len2(radial) <= b.radius * b.radius) { points[cp] = asq; depths[cp] = cap_d - d_aq; cp++; }
-		}
-		if (cp == 0) { cp = 1; points[0] = add(b.center, scale(cap_n, b.half_height)); depths[0] = -best_sep; }
-		manifold->count = cp;
-		for (int i = 0; i < cp; i++)
-			manifold->contacts[i] = (Contact){ .point = points[i], .normal = cap_n, .penetration = depths[i] };
-		return 1;
-	}
-
-	// best_type == 2 or 3: edge/radial contact — single point from classify.
-	{
-		v3 cpa, cpb;
-		segments_closest_points(a_p, a_q, b_p, b_q, &cpa, &cpb);
-		CylFeature feat = cyl_classify_point(cpb, a.center, a.rotation, a.half_height, a.radius);
-		manifold->count = 1;
-		manifold->contacts[0] = (Contact){
-			.point = feat.surface_pt,
-			.normal = neg(best_n),
-			.penetration = -best_sep,
-		};
-		return 1;
-	}
-}
-
 // Narrowphase dispatch for a single body pair.
+
 // Narrowphase timing accumulators (indexed by shape pair type).
 // Pair encoding: type_a * NP_TYPE_COUNT + type_b (upper triangle). The stride
 // covers every SHAPE_* enum value, including MESH and HEIGHTFIELD.
-#define NP_TYPE_COUNT 7
+#define NP_TYPE_COUNT 6
 #define NP_PAIR_COUNT (NP_TYPE_COUNT * NP_TYPE_COUNT)
 static double np_time_acc[NP_PAIR_COUNT];
 static int np_call_acc[NP_PAIR_COUNT];
@@ -2372,11 +1741,11 @@ void narrowphase_print_timers()
 {
 	if (np_frame_count == 0) return;
 	double n = (double)np_frame_count;
-	const char* names[] = {"sphere", "capsule", "box", "hull", "cylinder"};
+	const char* names[] = {"sphere", "capsule", "box", "hull"};
 	printf("  --- narrowphase breakdown ---\n");
 	double total = 0;
 	int total_calls = 0;
-	for (int a = 0; a < 5; a++) for (int b = a; b < 5; b++) {
+	for (int a = 0; a < 4; a++) for (int b = a; b < 4; b++) {
 		int idx = np_pair_idx(a, b);
 		if (np_call_acc[idx] == 0) continue;
 		double avg_us = np_time_acc[idx] / n * 1e6;
@@ -2400,7 +1769,6 @@ static void collide_sphere_mesh_emit(WorldInternal* w, int body_a, int body_b, S
 static void collide_capsule_mesh_emit(WorldInternal* w, int body_a, int body_b, Capsule capsule_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds);
 static void collide_box_mesh_emit(WorldInternal* w, int body_a, int body_b, Box box_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds);
 static void collide_hull_mesh_emit(WorldInternal* w, int body_a, int body_b, ConvexHull hull_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds);
-static void collide_cylinder_mesh_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, uint32_t sub_id_base, InternalManifold** manifolds);
 static int ray_mesh(v3 ro, v3 rd, v3 mesh_pos, quat mesh_rot, const TriMesh* mesh, float max_t, float* t_out, v3* n_out);
 
 // Forward decls for the heightfield emit routines (defined in heightfield.c).
@@ -2408,7 +1776,6 @@ static void collide_sphere_heightfield_emit(WorldInternal* w, int body_a, int bo
 static void collide_capsule_heightfield_emit(WorldInternal* w, int body_a, int body_b, Capsule capsule_world, v3 hf_pos, quat hf_rot, const Heightfield* hf, uint32_t sub_id_base, InternalManifold** manifolds);
 static void collide_box_heightfield_emit(WorldInternal* w, int body_a, int body_b, Box box_world, v3 hf_pos, quat hf_rot, const Heightfield* hf, uint32_t sub_id_base, InternalManifold** manifolds);
 static void collide_hull_heightfield_emit(WorldInternal* w, int body_a, int body_b, ConvexHull hull_world, v3 hf_pos, quat hf_rot, const Heightfield* hf, uint32_t sub_id_base, InternalManifold** manifolds);
-static void collide_cylinder_heightfield_emit(WorldInternal* w, int body_a, int body_b, Cylinder cyl_world, v3 hf_pos, quat hf_rot, const Heightfield* hf, uint32_t sub_id_base, InternalManifold** manifolds);
 static int ray_heightfield(v3 ro, v3 rd, v3 hf_pos, quat hf_rot, const Heightfield* hf, float max_t, float* t_out, v3* n_out);
 
 // Forward decls (defined in epa.c, included later in the unity build).
@@ -2504,38 +1871,6 @@ static int np_hull_hull(NarrowphaseCtx* c)
 	return hit;
 }
 
-// Cylinder pairs: native routines take cylinder as shape A. For pairs where
-// the canonical ordering puts cylinder as B (all non-cyl types enum below
-// SHAPE_CYLINDER), call with cyl as first arg and flip the manifold normal.
-static int np_sphere_cyl(NarrowphaseCtx* c)
-{
-	int hit = collide_cylinder_sphere(make_cylinder(c->bs_b, c->shape_b), make_sphere(c->bs_a, c->shape_a), c->m_out);
-	for (int k = 0; k < c->m_out->count; k++) c->m_out->contacts[k].normal = neg(c->m_out->contacts[k].normal);
-	return hit;
-}
-static int np_capsule_cyl(NarrowphaseCtx* c)
-{
-	int hit = collide_cylinder_capsule(make_cylinder(c->bs_b, c->shape_b), make_capsule(c->bs_a, c->shape_a), c->m_out);
-	for (int k = 0; k < c->m_out->count; k++) c->m_out->contacts[k].normal = neg(c->m_out->contacts[k].normal);
-	return hit;
-}
-static int np_box_cyl(NarrowphaseCtx* c)
-{
-	int hit = collide_cylinder_box(make_cylinder(c->bs_b, c->shape_b), make_box(c->bs_a, c->shape_a), c->m_out);
-	for (int k = 0; k < c->m_out->count; k++) c->m_out->contacts[k].normal = neg(c->m_out->contacts[k].normal);
-	return hit;
-}
-static int np_hull_cyl(NarrowphaseCtx* c)
-{
-	int hit = collide_cylinder_hull(make_cylinder(c->bs_b, c->shape_b), make_convex_hull(c->bs_a, c->shape_a), c->m_out);
-	for (int k = 0; k < c->m_out->count; k++) c->m_out->contacts[k].normal = neg(c->m_out->contacts[k].normal);
-	return hit;
-}
-static int np_cyl_cyl(NarrowphaseCtx* c)
-{
-	return collide_cylinder_cylinder(make_cylinder(c->bs_a, c->shape_a), make_cylinder(c->bs_b, c->shape_b), c->m_out);
-}
-
 // Upper-triangle dispatch (shape_a->type <= shape_b->type). Lower-triangle
 // entries stay NULL; the canonicalisation in narrowphase_pair guarantees we
 // never index them. Mesh pairs are handled by a pre-dispatch branch in
@@ -2545,17 +1880,12 @@ static const NarrowphaseAgent g_np_table[SHAPE_TYPE_COUNT][SHAPE_TYPE_COUNT] = {
 	[SHAPE_SPHERE]  [SHAPE_CAPSULE]  = np_sphere_capsule,
 	[SHAPE_SPHERE]  [SHAPE_BOX]      = np_sphere_box,
 	[SHAPE_SPHERE]  [SHAPE_HULL]     = np_sphere_hull,
-	[SHAPE_SPHERE]  [SHAPE_CYLINDER] = np_sphere_cyl,
 	[SHAPE_CAPSULE] [SHAPE_CAPSULE]  = np_capsule_capsule,
 	[SHAPE_CAPSULE] [SHAPE_BOX]      = np_capsule_box,
 	[SHAPE_CAPSULE] [SHAPE_HULL]     = np_capsule_hull,
-	[SHAPE_CAPSULE] [SHAPE_CYLINDER] = np_capsule_cyl,
 	[SHAPE_BOX]     [SHAPE_BOX]      = np_box_box,
 	[SHAPE_BOX]     [SHAPE_HULL]     = np_box_hull,
-	[SHAPE_BOX]     [SHAPE_CYLINDER] = np_box_cyl,
 	[SHAPE_HULL]    [SHAPE_HULL]     = np_hull_hull,
-	[SHAPE_HULL]    [SHAPE_CYLINDER] = np_hull_cyl,
-	[SHAPE_CYLINDER][SHAPE_CYLINDER] = np_cyl_cyl,
 };
 
 // Build a ConvexHull from a shape that is either SHAPE_BOX or SHAPE_HULL.
@@ -2617,7 +1947,6 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 			else if (s0->type == SHAPE_CAPSULE)  collide_capsule_mesh_emit(w, body_a, body_b, make_capsule(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
 			else if (s0->type == SHAPE_BOX)      collide_box_mesh_emit(w, body_a, body_b, make_box(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
 			else if (s0->type == SHAPE_HULL)     collide_hull_mesh_emit(w, body_a, body_b, make_convex_hull(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
-			else if (s0->type == SHAPE_CYLINDER) collide_cylinder_mesh_emit(w, body_a, body_b, make_cylinder(bs0, s0), bs1->position, bs1->rotation, s1->mesh.mesh, sub_id_base, manifolds);
 			continue;
 		}
 
@@ -2630,7 +1959,6 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 			else if (s0->type == SHAPE_CAPSULE)  collide_capsule_heightfield_emit(w, body_a, body_b, make_capsule(bs0, s0), bs1->position, bs1->rotation, s1->heightfield.hf, sub_id_base, manifolds);
 			else if (s0->type == SHAPE_BOX)      collide_box_heightfield_emit(w, body_a, body_b, make_box(bs0, s0), bs1->position, bs1->rotation, s1->heightfield.hf, sub_id_base, manifolds);
 			else if (s0->type == SHAPE_HULL)     collide_hull_heightfield_emit(w, body_a, body_b, make_convex_hull(bs0, s0), bs1->position, bs1->rotation, s1->heightfield.hf, sub_id_base, manifolds);
-			else if (s0->type == SHAPE_CYLINDER) collide_cylinder_heightfield_emit(w, body_a, body_b, make_cylinder(bs0, s0), bs1->position, bs1->rotation, s1->heightfield.hf, sub_id_base, manifolds);
 			continue;
 		}
 
@@ -2642,7 +1970,7 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 
 		int* hp = NULL;
 		int hint = -1;
-		int uses_sat = (s0->type >= SHAPE_BOX && s0->type != SHAPE_CYLINDER && s1->type >= SHAPE_BOX && s1->type != SHAPE_CYLINDER);
+		int uses_sat = (s0->type >= SHAPE_BOX && s1->type >= SHAPE_BOX);
 		int uses_hint = uses_sat && !(s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull);
 		if (uses_hint && wm && w->sat_hint_enabled) { hint = wm->sat_axis; hp = &hint; }
 
@@ -2667,8 +1995,7 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		CachedFeaturePair out_pair = {0};
 
 		int epa_backend = w->narrowphase_backend == NARROWPHASE_GJK_EPA;
-		int hull_involved_pair = (s0->type == SHAPE_BOX || s0->type == SHAPE_HULL || s1->type == SHAPE_BOX || s1->type == SHAPE_HULL)
-		                      && (s0->type != SHAPE_CYLINDER && s1->type != SHAPE_CYLINDER);
+		int hull_involved_pair = (s0->type == SHAPE_BOX || s0->type == SHAPE_HULL || s1->type == SHAPE_BOX || s1->type == SHAPE_HULL);
 		if (epa_backend && hull_involved_pair) {
 			hit = epa_narrowphase_pair(w, body_a, body_b, s0, s1, bs0, bs1, &im.m);
 			np_call_acc[np_pair_idx(s0->type, s1->type)]++;
@@ -2848,58 +2175,6 @@ static int ray_hull(v3 ro, v3 rd, ConvexHull ch, float max_t, float* t_out, v3* 
 }
 
 // Test a ray against all shapes on a body. Returns closest hit.
-static int ray_cylinder(v3 ro, v3 rd, Cylinder cyl, float max_t, float* t_out, v3* n_out)
-{
-	v3 axis = rotate(cyl.rotation, V3(0, 1, 0));
-	v3 oc = sub(ro, cyl.center);
-	float rd_a = dot(rd, axis);
-	float oc_a = dot(oc, axis);
-	float r2 = cyl.radius * cyl.radius;
-
-	float best = max_t + 1.0f;
-	v3 best_n = {0};
-	int hit = 0;
-
-	// Infinite cylinder: |oc + t*rd - (oc_a + t*rd_a)*axis|^2 = r^2
-	float a = dot(rd, rd) - rd_a * rd_a;
-	float b = dot(oc, rd) - oc_a * rd_a;
-	float c = dot(oc, oc) - oc_a * oc_a - r2;
-	if (fabsf(a) > 1e-8f) {
-		float disc = b * b - a * c;
-		if (disc >= 0.0f) {
-			float sq = sqrtf(disc);
-			float t = (-b - sq) / a;
-			if (t < 0.0f) t = (-b + sq) / a;
-			if (t >= 0.0f && t < best) {
-				float y = oc_a + t * rd_a;
-				if (y >= -cyl.half_height && y <= cyl.half_height) {
-					best = t; hit = 1;
-					v3 hp = add(ro, scale(rd, t));
-					best_n = norm(sub(hp, add(cyl.center, scale(axis, y))));
-				}
-			}
-		}
-	}
-
-	// Flat caps: plane at center +/- half_height * axis.
-	for (int ci = 0; ci < 2; ci++) {
-		float sign = ci == 0 ? -1.0f : 1.0f;
-		float denom = rd_a * sign;
-		if (fabsf(denom) < 1e-8f) continue;
-		float t = (sign * cyl.half_height - oc_a) / (rd_a);
-		if (t < 0.0f || t >= best) continue;
-		v3 hp = add(ro, scale(rd, t));
-		v3 d = sub(hp, add(cyl.center, scale(axis, sign * cyl.half_height)));
-		if (dot(d, d) <= r2) {
-			best = t; hit = 1;
-			best_n = scale(axis, sign);
-		}
-	}
-
-	if (hit && best <= max_t) { *t_out = best; *n_out = best_n; return 1; }
-	return 0;
-}
-
 static int ray_body(WorldInternal* w, int body_idx, v3 origin, v3 dir, float max_t, float* t_out, v3* n_out)
 {
 	BodyState* bs = &w->body_state[body_idx];
@@ -2916,7 +2191,6 @@ static int ray_body(WorldInternal* w, int body_idx, v3 origin, v3 dir, float max
 		case SHAPE_CAPSULE:  hit = ray_capsule(origin, dir, make_capsule(bs, s), best_t, &t, &n); break;
 		case SHAPE_BOX:      hit = ray_box(origin, dir, make_box(bs, s), best_t, &t, &n); break;
 		case SHAPE_HULL:     hit = ray_hull(origin, dir, make_convex_hull(bs, s), best_t, &t, &n); break;
-		case SHAPE_CYLINDER: hit = ray_cylinder(origin, dir, make_cylinder(bs, s), best_t, &t, &n); break;
 		case SHAPE_MESH:     hit = ray_mesh(origin, dir, bs->position, bs->rotation, s->mesh.mesh, best_t, &t, &n); break;
 		case SHAPE_HEIGHTFIELD: hit = ray_heightfield(origin, dir, bs->position, bs->rotation, s->heightfield.hf, best_t, &t, &n); break;
 		}

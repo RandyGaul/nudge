@@ -5,7 +5,6 @@
 //   - Sphere/capsule: world-space core point/segment, radius applied post-hoc
 //   - Box: analytical sign-based corner selection
 //   - Hull: local-space vertex scan with rotation
-//   - Cylinder: implicit surface support (no tessellation)
 //   - Triangle: 3-vertex max-dot
 // Termination: containment, monotonic progress, support progress, duplicate vertex.
 
@@ -61,7 +60,7 @@ typedef struct GJK_Cache
 // -----------------------------------------------------------------------------
 // Shape types and constructors.
 
-enum { GJK_POINT, GJK_SEGMENT, GJK_BOX, GJK_HULL, GJK_CYLINDER, GJK_TRIANGLE };
+enum { GJK_POINT, GJK_SEGMENT, GJK_BOX, GJK_HULL, GJK_TRIANGLE };
 
 typedef struct GJK_Shape
 {
@@ -72,7 +71,6 @@ typedef struct GJK_Shape
 		struct { v3 p, q; } segment;
 		struct { v3 center; v3 col0, col1, col2; v3 half_extents; } box;
 		struct { v3 center; v3 col0, col1, col2; v3 scale; const v3* verts; const float* soa; const int* edge_twin; const int* edge_next; const int* edge_origin; const int* vert_edge; int count; int hint; } hull;
-		struct { v3 mid; v3 half_axis; float radius; v3 axis; float inv_axis_len; } cylinder;
 		struct { v3 a, b, c; } tri;
 	};
 } GJK_Shape;
@@ -101,16 +99,6 @@ static GJK_Shape gjk_hull(v3 center, quat rot, v3 sc, const v3* verts, int count
 static GJK_Shape gjk_hull_m(v3 center, v3 col0, v3 col1, v3 col2, v3 sc, const v3* verts, int count, const float* soa, const int* edge_twin, const int* edge_next, const int* edge_origin, const int* vert_edge)
 {
 	return (GJK_Shape){ .type = GJK_HULL, .hull.center = center, .hull.col0 = col0, .hull.col1 = col1, .hull.col2 = col2, .hull.scale = sc, .hull.verts = verts, .hull.soa = soa, .hull.edge_twin = edge_twin, .hull.edge_next = edge_next, .hull.edge_origin = edge_origin, .hull.vert_edge = vert_edge, .hull.count = count };
-}
-
-static GJK_Shape gjk_cylinder(v3 p, v3 q, float radius)
-{
-	v3 axis = sub(q, p);
-	float al = len(axis);
-	float inv_al = al > FLT_EPSILON ? 1.0f / al : 0.0f;
-	v3 mid = scale(add(p, q), 0.5f);
-	v3 half_axis = scale(axis, 0.5f);
-	return (GJK_Shape){ .type = GJK_CYLINDER, .cylinder.mid = mid, .cylinder.half_axis = half_axis, .cylinder.radius = radius, .cylinder.axis = scale(axis, inv_al), .cylinder.inv_axis_len = inv_al };
 }
 
 // -----------------------------------------------------------------------------
@@ -309,31 +297,7 @@ static v3 gjk_box_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict
 	return add(sp->box.center, mat3_tmul_v(sp->box.col0, sp->box.col1, sp->box.col2, lc));
 }
 
-static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __restrict feat)
-{
-	v3 cu = sp->cylinder.axis;
-	if (sp->cylinder.inv_axis_len == 0.0f) { *feat = 0; return sp->cylinder.mid; }
-	float cda = dot(sd, cu);
-	int cap = cda >= 0.0f;
-
-	// Branchless base: mid + copysign(half_axis, da)
-	simd4f sign = simd_and(simd_set1(cda), simd_sign_mask());
-	v3 cbase = add(sp->cylinder.mid, (v3){ .m = simd_xor(sp->cylinder.half_axis.m, sign) });
-	v3 cdp = sub(sd, scale(cu, cda));
-	simd4f cdp2 = v3_dot_m(cdp, cdp);
-	simd4f cpl = simd_sqrt_ss(cdp2);
-	float cplf = simd_get_x(cpl);
-	if (cplf <= FLT_EPSILON) { *feat = cap; return cbase; }
-
-	// Feature ID not needed for cylinder (warm-start uses cached world-space
-	// points instead of feature reconstruction).  Skip the expensive 3x10-bit
-	// packing entirely.
-	*feat = cap;
-	float ratio = sp->cylinder.radius / cplf;
-	return add(cbase, scale(cdp, ratio));
-}
-
-// Support dispatch macro. Box/cylinder/hull use separate functions to control inlining.
+// Support dispatch macro. Box/hull use separate functions to control inlining.
 #define gjk_support(shape, dir, out_feat, out_point) do {                                                                 \
 	GJK_Shape* sp = (shape); v3 sd = (dir);                                                                               \
 	SIMD_ASSUME(sp->type >= GJK_POINT && sp->type <= GJK_TRIANGLE);                                                          \
@@ -356,7 +320,6 @@ static v3 gjk_cylinder_support(const GJK_Shape* __restrict sp, v3 sd, int* __res
 		                  hmul(sp->hull.verts[hbi], sp->hull.scale)));                                                     \
 		break;                                                                                                            \
 	}                                                                                                                     \
-	case GJK_CYLINDER: (out_point) = gjk_cylinder_support(sp, sd, (out_feat)); break;                                      \
 	case GJK_TRIANGLE: {                                                                                                  \
 		/* 3 dots in parallel via AoS->SoA transpose */                                                                    \
 		simd4f v0 = sp->tri.a.m, v1 = sp->tri.b.m, v2 = sp->tri.c.m;                                                     \
@@ -388,12 +351,6 @@ static inline v3 gjk_support_feature(const GJK_Shape* sp, int feat)
 	}
 	case GJK_HULL:
 		return add(sp->hull.center, mat3_tmul_v(sp->hull.col0, sp->hull.col1, sp->hull.col2, hmul(sp->hull.verts[feat], sp->hull.scale)));
-	case GJK_CYLINDER: {
-		// Cylinder warm-start uses cached world-space points, not feature
-		// reconstruction.  Feature ID is just the cap index (0 or 1).
-		simd4f sign = (feat & 1) ? simd_zero() : simd_sign_mask();
-		return add(sp->cylinder.mid, (v3){ .m = simd_xor(sp->cylinder.half_axis.m, sign) });
-	}
 	case GJK_TRIANGLE:
 		return feat == 0 ? sp->tri.a : (feat == 1 ? sp->tri.b : sp->tri.c);
 	}
@@ -408,7 +365,6 @@ static v3 gjk_center(const GJK_Shape* s)
 	case GJK_SEGMENT:  return scale(add(s->segment.p, s->segment.q), 0.5f);
 	case GJK_BOX:      return s->box.center;
 	case GJK_HULL:     return s->hull.center;
-	case GJK_CYLINDER: return s->cylinder.mid;
 	case GJK_TRIANGLE: return scale(add(add(s->tri.a, s->tri.b), s->tri.c), 1.0f/3.0f);
 	}
 	return V3(0,0,0);
@@ -557,8 +513,7 @@ static SIMD_NOINLINE int gjk_solve4(GJK_Simplex* s)
 
 // -----------------------------------------------------------------------------
 // Main GJK distance function.
-// Termination: containment + monotonic progress + support progress + duplicate vertex.
-// Simplex caching: world-space points for non-cylinders, feature replay for cylinders.
+// Termination: containment + monotonic progress + duplicate vertex.
 
 #define GJK_MAX_ITERS         64
 #define GJK_CONTAINMENT_EPS2  1e-8f
@@ -639,7 +594,6 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 
 	// Main loop.
 	float dsq_prev = FLT_MAX;
-	int use_index_term = shapeA->type != GJK_CYLINDER && shapeB->type != GJK_CYLINDER;
 	int iter = 0;
 	while (iter < GJK_MAX_ITERS) {
 		SIMD_ASSUME(simplex.count >= 1 && simplex.count <= 4);
@@ -664,24 +618,12 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		gjk_support(shapeB, neg(closest), &fB, sB);
 		v3 w = sub(sB, sA);
 
-		if (use_index_term) {
-			// Duplicate vertex termination (non-cylinder shapes only).
-			int dup = 0;
-			for (int i = 0; i < simplex.count; i++) {
-				if (simplex.v[i].feat1 == fA && simplex.v[i].feat2 == fB) { dup = 1; break; }
-			}
-			if (dup) break;
-		} else {
-			// Relative progress termination (cylinder only).
-			float max_vert2 = 0.0f;
-			for (int i = 0; i < simplex.count; i++) {
-				float v2 = len2(simplex.v[i].point);
-				if (v2 > max_vert2) max_vert2 = v2;
-			}
-			float progress = dsq - dot(w, closest);
-			if (progress <= max_vert2 * GJK_PROGRESS_EPS) break;
+		// Duplicate vertex termination.
+		int dup = 0;
+		for (int i = 0; i < simplex.count; i++) {
+			if (simplex.v[i].feat1 == fA && simplex.v[i].feat2 == fB) { dup = 1; break; }
 		}
-
+		if (dup) break;
 
 		iter++;
 		GJK_Vertex* vert = &simplex.v[simplex.count];

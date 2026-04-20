@@ -46,7 +46,6 @@ typedef struct ShapeInternal
 		struct { float half_height; float radius; } capsule;
 		struct { v3 half_extents; } box;
 		struct { const Hull* hull; v3 scale; } hull;
-		struct { float half_height; float radius; } cylinder;
 		struct { const TriMesh* mesh; } mesh;
 		struct { const Heightfield* hf; } heightfield;
 	};
@@ -524,13 +523,6 @@ typedef struct WorldInternal
 	int narrowphase_backend;   // NarrowphaseBackend: 0=SAT, 1=GJK_EPA
 	CK_MAP(EpaManifold) epa_cache; // per body-pair incremental manifold cache (EPA backend)
 	EpaStats epa_stats;        // per-frame EPA telemetry (reset at start of world_step)
-	// Native cylinder narrowphase toggles (0 = route through hull-backed fallback).
-	// Flipped on per-pair as native routines land; default 0 until Phase 6 cleanup.
-	int cyl_native_sphere;
-	int cyl_native_capsule;
-	int cyl_native_box;
-	int cyl_native_hull;
-	int cyl_native_cyl;
 	int thread_count;        // 0 or 1 = single-threaded, >1 = parallel PGS solver
 	// Per-worker scratch arenas. Lazily sized to max(1, thread_count) on first
 	// step; reset at the start of each step; freed in destroy_world. Workers

@@ -108,14 +108,6 @@ typedef struct Box
 	v3 half_extents;
 } Box;
 
-typedef struct Cylinder
-{
-	v3 center;
-	quat rotation;
-	float half_height; // along local Y
-	float radius;
-} Cylinder;
-
 // Half-edge mesh for convex polyhedra.
 // Edges stored in twin pairs: edge 2k and twin 2k+1.
 typedef struct HalfEdge
@@ -310,14 +302,6 @@ NUDGE_API int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold);
 NUDGE_API int collide_box_box(Box a, Box b, Manifold* manifold);
 NUDGE_API int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold);
 
-// Native cylinder collision. Cylinder is always shape A; for cyl-as-B callers
-// swap arguments and flip manifold normals after calling.
-NUDGE_API int collide_cylinder_sphere(Cylinder a, Sphere b, Manifold* manifold);
-NUDGE_API int collide_cylinder_capsule(Cylinder a, Capsule b, Manifold* manifold);
-NUDGE_API int collide_cylinder_box(Cylinder a, Box b, Manifold* manifold);
-NUDGE_API int collide_cylinder_hull(Cylinder a, ConvexHull b, Manifold* manifold);
-NUDGE_API int collide_cylinder_cylinder(Cylinder a, Cylinder b, Manifold* manifold);
-
 // Built-in unit box hull (half-extents 1,1,1). Use with ConvexHull + scale for boxes.
 NUDGE_API const Hull* hull_unit_box();
 
@@ -345,7 +329,6 @@ typedef enum ShapeType
 	SHAPE_CAPSULE,
 	SHAPE_BOX,
 	SHAPE_HULL,
-	SHAPE_CYLINDER,
 	SHAPE_MESH,        // static triangle mesh; allowed only on mass=0 bodies
 	SHAPE_HEIGHTFIELD, // static regular-grid heightfield; mass=0 only
 } ShapeType;
@@ -360,7 +343,6 @@ typedef struct ShapeParams
 		struct { float half_height; float radius; } capsule; // segment along local Y
 		struct { v3 half_extents; } box;
 		struct { const Hull* hull; v3 scale; } hull;
-		struct { float half_height; float radius; } cylinder; // segment along local Y, flat caps
 		struct { const TriMesh* mesh; } mesh;                 // static only
 		struct { const Heightfield* hf; } heightfield;        // static only
 	};
@@ -375,8 +357,8 @@ typedef struct BodyParams
 	float rolling_friction;// rolling-resistance mu: 1 angular row per manifold,
 	                       // axis = snapshot of tangent-plane ang-vel, capped
 	                       // by (rolling_friction * lambda_n) (default 0.0 =
-	                       // off; try 0.02-0.1 for balls/cylinders that should
-	                       // decelerate while rolling)
+	                       // off; try 0.02-0.1 for balls that should decelerate
+	                       // while rolling)
 	float restitution;     // bounce coefficient (default 0.0)
 	float linear_damping;  // velocity decay coefficient (default 0.0)
 	float angular_damping; // angular velocity decay coefficient (default 0.03)
