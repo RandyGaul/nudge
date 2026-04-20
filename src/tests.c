@@ -13031,6 +13031,51 @@ static void test_post_ccd_hull_tet_not_inside_beam_5c801e62()
 	destroy_world(w);
 }
 
+// Soak repro: spawn_rng=0x2f59c53c, HULL_TET scale=0.8853,
+// vel=(110.143,2.834,4.490), omega=(-3.230,-4.335,-4.709). Body tunnels
+// fully past wall (center ends on far side). Post-solve velocity is flipped
+// (-0.93 in x) so velocity-based TOI sweep misses — body ends at (5.125)
+// past wall back face (5.05). Fix: segment-AABB clip tunnel detection
+// samples the pre_pos -> post_pos center trajectory.
+static void test_post_ccd_hull_tet_no_tunnel_2f59c53c()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	v3 tet[] = { {0, 0.6f, 0}, {0.5f, -0.3f, 0.3f}, {-0.5f, -0.3f, 0.3f}, {0, -0.3f, -0.5f} };
+	Hull* h_tet = quickhull(tet, 4);
+	float s = 0.8853f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_tet, .scale = V3(0.18f*s, 0.18f*s, 0.18f*s) } });
+	body_set_velocity(w, b, V3(110.143f, 2.834f, 4.490f));
+	body_set_angular_velocity(w, b, V3(-3.230f, -4.335f, -4.709f));
+
+	float dt = 1.0f / 60.0f;
+	int tunneled = 0;
+	for (int frame = 0; frame < 30; frame++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, b);
+		int in_wall_yz = fabsf(pos.y - 2.0f) < 3.0f && fabsf(pos.z) < 3.0f;
+		if (pos.x > 5.10f && in_wall_yz) { tunneled = 1; break; }
+	}
+	TEST_BEGIN("post-CCD hull_tet (soak 0x2f59c53c): no tunnel past wall");
+	TEST_ASSERT(!tunneled);
+	hull_free(h_tet);
+	destroy_world(w);
+}
+
 static void run_post_ccd_tests()
 {
 	printf("--- nudge post-CCD motion tests ---\n");
@@ -13041,6 +13086,7 @@ static void run_post_ccd_tests()
 	test_post_ccd_capsule_not_wedged_814d37c7();
 	test_post_ccd_capsule_not_frozen_4c9aeda6();
 	test_post_ccd_hull_tet_not_inside_beam_5c801e62();
+	test_post_ccd_hull_tet_no_tunnel_2f59c53c();
 	test_post_ccd_tet_not_stuck_in_beam();
 	test_post_ccd_box_bullet_no_freeze_after_rebound();
 	test_post_ccd_box_bullet_no_tunnel_soak_seed();

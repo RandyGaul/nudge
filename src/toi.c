@@ -730,20 +730,39 @@ static void toi_advance_one_body(WorldInternal* w, int k, float dt)
 		AABB body_aabb_now = body_aabb(bs, bc);
 		CK_DYNA int* cands = NULL;
 		bvh_query_aabb(w->bvh_static, body_aabb_now, &cands);
-		// "Overlapping" here means body CENTER is inside a static body's AABB.
-		// This flags tunneling (body ended up INSIDE the volume) while ignoring
-		// shallow gravity-induced surface penetration on resting bodies (center
-		// stays outside the static AABB, only surface crosses it).
+		// Tunnel detection: body CENTER either ends inside a static AABB, or
+		// the pre→post CENTER path crosses fully through a static AABB (body
+		// tunneled past a thin static). Sample 8 lerp points along the
+		// center trajectory and check center-in-AABB at each; also test
+		// whether the segment pre_pos→post_pos passes through any candidate
+		// static's AABB (Liang-Barsky slab clip).
 		int overlapping = 0;
+		v3 post_pos_tmp = bs->position;
 		for (int c = 0; c < asize(cands) && !overlapping; c++) {
 			int sbi = cands[c];
 			if (sbi == bi || !split_alive(w->body_gen, sbi)) continue;
 			AABB sbbox = body_aabb(&w->body_state[sbi], &w->body_cold[sbi]);
-			if (bs->position.x >= sbbox.min.x && bs->position.x <= sbbox.max.x
-			 && bs->position.y >= sbbox.min.y && bs->position.y <= sbbox.max.y
-			 && bs->position.z >= sbbox.min.z && bs->position.z <= sbbox.max.z) {
-				overlapping = 1;
+			// Liang-Barsky: segment p0 + t*(post-p0), find t-range inside AABB.
+			v3 d = sub(post_pos_tmp, p0);
+			float tmin = 0.0f, tmax = 1.0f;
+			float p_origin[3] = { p0.x, p0.y, p0.z };
+			float dd[3] = { d.x, d.y, d.z };
+			float bmin[3] = { sbbox.min.x, sbbox.min.y, sbbox.min.z };
+			float bmax[3] = { sbbox.max.x, sbbox.max.y, sbbox.max.z };
+			int hit = 1;
+			for (int a = 0; a < 3 && hit; a++) {
+				if (fabsf(dd[a]) < 1e-12f) {
+					if (p_origin[a] < bmin[a] || p_origin[a] > bmax[a]) hit = 0;
+				} else {
+					float t1 = (bmin[a] - p_origin[a]) / dd[a];
+					float t2 = (bmax[a] - p_origin[a]) / dd[a];
+					if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+					if (t1 > tmin) tmin = t1;
+					if (t2 < tmax) tmax = t2;
+					if (tmin > tmax) hit = 0;
+				}
 			}
+			if (hit) overlapping = 1;
 		}
 		afree(cands);
 		if (overlapping) {
