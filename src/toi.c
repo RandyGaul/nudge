@@ -68,16 +68,6 @@ static GJK_Shape toi_shape_at_pose(ShapeInternal* s, v3 body_pos, quat body_rot)
 	}
 }
 
-// Distance query between a moving-body shape (at integrated pose) and a static
-// shape B (pose fixed). Returns the GJK_Result; caller reads .distance.
-static GJK_Result toi_gjk_at_t(ShapeInternal* sa, BodyState* bs, BodyHot* bh, float dt, float t, GJK_Shape* static_b)
-{
-	v3 pos; quat rot;
-	toi_pose_at(bs, bh, dt, t, &pos, &rot);
-	GJK_Shape ga = toi_shape_at_pose(sa, pos, rot);
-	return gjk_distance(&ga, static_b, NULL);
-}
-
 // Declare test-only hook points so tests.c can exercise the feature-
 // extraction and separation-function paths without going through full world
 // setup. These are static helpers; tests include toi.c via main.c's unity
@@ -163,7 +153,13 @@ static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0
 	v3 local_pA = rotate(rot_A_inv, sub(r0->point1, pos_A));
 
 	// Edge-edge: two distinct supports on each side. Axis from (eA x eB).
-	if (kA == 2 && kB == 2) {
+	// Guard: when the GJK closest-point direction (dlen > tol) is a credible
+	// separating axis, prefer it — cross-product axis is only correct for true
+	// edge-vs-edge contact. Capsule-vs-box-face routinely returns kA=2 kB=2
+	// (two capsule endpoints + two face corners) but the correct axis is the
+	// face normal, not cross(capsule_axis, face_edge). dlen > tol means GJK
+	// found a well-defined direction; trust it over the cross product.
+	if (kA == 2 && kB == 2 && dlen <= 1e-8f) {
 		// Recover the simplex vertices that produced each side's edge.
 		v3 a0_w = V3(0,0,0), a1_w = V3(0,0,0), b0_w = V3(0,0,0), b1_w = V3(0,0,0);
 		int nA = 0, nB = 0;
@@ -397,8 +393,7 @@ static float toi_eval_sep(const ToiSepFn* f, v3 pa_world_ref_local_A, v3 pb_worl
 // through the whole step. The BodyState carries A's PRE-STEP pose.
 static float toi_pair_advance(ShapeInternal* sa, BodyState* bs, BodyHot* bh, float r_max, float dt, GJK_Shape* static_b)
 {
-	(void)r_max; // retained for API compat; bilateral advancement is not bound by this
-
+	(void)r_max;
 	float t1 = 0.0f;
 	float t_max = 1.0f;
 	float target = TOI_TARGET_SEPARATION;
@@ -606,7 +601,7 @@ static float toi_shape_cast_world(WorldInternal* w, ShapeInternal* sa, v3 start_
 	BodyHot ghost = {0};
 	ghost.velocity = translation;
 	ghost.angular_velocity = omega;
-	ghost.inv_mass = 1.0f; // non-static flag; not used by TOI inner loop
+	ghost.inv_mass = 1.0f;
 
 	// Swept AABB for BVH query.
 	// Shape AABB at start pose:
@@ -643,7 +638,7 @@ static float toi_shape_cast_world(WorldInternal* w, ShapeInternal* sa, v3 start_
 			ShapeInternal* ss = &sbc->shapes[sshi];
 			if (ss->type == SHAPE_MESH || ss->type == SHAPE_HEIGHTFIELD) continue;
 			GJK_Shape gb = toi_shape_at_pose(ss, sbs->position, sbs->rotation);
-			float t = toi_pair_advance(sa, &pre, &ghost, r_max, dt, &gb);
+			float t = toi_pair_advance(sa, &pre, &ghost, sa->r_max, dt, &gb);
 			if (t < earliest) {
 				earliest = t;
 				best_body = sbi;
@@ -668,6 +663,51 @@ static float toi_shape_cast_world(WorldInternal* w, ShapeInternal* sa, v3 start_
 	return earliest;
 }
 
+// Helper: lerp body pose from (pa, qa) to (pb, qb) by fraction t, with
+// shortest-arc quaternion interp + renormalize.
+static void toi_lerp_pose(v3 pa, quat qa, v3 pb, quat qb, float t, v3* out_pos, quat* out_rot)
+{
+	out_pos->x = pa.x + t * (pb.x - pa.x);
+	out_pos->y = pa.y + t * (pb.y - pa.y);
+	out_pos->z = pa.z + t * (pb.z - pa.z);
+	float d = qa.x*qb.x + qa.y*qb.y + qa.z*qb.z + qa.w*qb.w;
+	quat qbs = qb;
+	if (d < 0.0f) { qbs.x = -qbs.x; qbs.y = -qbs.y; qbs.z = -qbs.z; qbs.w = -qbs.w; }
+	quat q = { qa.x + t * (qbs.x - qa.x), qa.y + t * (qbs.y - qa.y), qa.z + t * (qbs.z - qa.z), qa.w + t * (qbs.w - qa.w) };
+	*out_rot = quat_norm(q);
+}
+
+// Helper: does body `bi` at pose (pos, rot) overlap ANY static body reachable
+// from the given query AABB? Used by the post-TOI safety clamp to decide
+// whether to binary-search for a safe pose.
+static int toi_aabb_overlaps_any_static(WorldInternal* w, int bi, v3 pos, quat rot, AABB query)
+{
+	BodyCold* bc = &w->body_cold[bi];
+	int nshapes = asize(bc->shapes);
+	CK_DYNA int* cands = NULL;
+	bvh_query_aabb(w->bvh_static, query, &cands);
+	int overlapping = 0;
+	for (int c = 0; c < asize(cands) && !overlapping; c++) {
+		int sbi = cands[c];
+		if (sbi == bi || !split_alive(w->body_gen, sbi)) continue;
+		BodyCold* sbc = &w->body_cold[sbi];
+		BodyState* sbs = &w->body_state[sbi];
+		for (int sshi = 0; sshi < asize(sbc->shapes) && !overlapping; sshi++) {
+			ShapeInternal* ss = &sbc->shapes[sshi];
+			if (ss->type == SHAPE_MESH || ss->type == SHAPE_HEIGHTFIELD) continue;
+			GJK_Shape gb = toi_shape_at_pose(ss, sbs->position, sbs->rotation);
+			for (int ashi = 0; ashi < nshapes && !overlapping; ashi++) {
+				ShapeInternal* sa = &bc->shapes[ashi];
+				if (sa->type == SHAPE_MESH || sa->type == SHAPE_HEIGHTFIELD) continue;
+				GJK_Shape ga = toi_shape_at_pose(sa, pos, rot);
+				if (gjk_distance(&ga, &gb, NULL).distance <= 0.0f) overlapping = 1;
+			}
+		}
+	}
+	afree(cands);
+	return overlapping;
+}
+
 // Per-body TOI step. Pure function of (pre-pose, post-pose, static BVH).
 // No shared writes except to this body's own pose, so calls across bodies
 // are trivially parallel.
@@ -683,7 +723,78 @@ static void toi_advance_one_body(WorldInternal* w, int k, float dt)
 	quat q0 = w->fast_body_pre_rot[k];
 
 	float earliest = toi_body_vs_static(w, bi, p0, q0, dt);
-	if (earliest >= 1.0f) return; // no hit; leave post-solve pose alone
+	if (earliest >= 1.0f) {
+		// TOI sweep reported no hit. The sweep uses straight-line integration
+		// from pre_pos with post-solve velocity. Multi-substep integration can
+		// produce a curved path whose endpoint lands INSIDE a static body even
+		// though the straight-line sweep missed. Sanity check: GJK the actual
+		// post-solve pose against static candidates; if any overlap, clamp to
+		// the last safe pose along the lerp from pre to post.
+		//
+		// Only run this check for bodies moving fast enough that the curved
+		// substep path can genuinely diverge from the linear sweep (> 5x the
+		// inscribed sphere in one frame). Resting/slow bodies have vanishingly
+		// small curvature in their path and the check would otherwise fight
+		// with the solver's speculative-contact penetration handling (shallow
+		// gravity-induced overlap at each step gets erroneously reverted,
+		// freezing the body against the resting surface).
+		BodyCold* bc = &w->body_cold[bi];
+		float v_norm_pre = v3_len(w->body_hot[bi].velocity);
+		float r_min_pre = bc->r_min_body;
+		// r_min == 0 means compound with no inscribed sphere around COM —
+		// always run overlap check (the body has no self-contained safety zone
+		// and can tunnel at any speed). For positive r_min, gate on speed.
+		if (r_min_pre > 0.0f && v_norm_pre * dt < 5.0f * r_min_pre) return;
+		int nshapes = asize(bc->shapes);
+		AABB body_aabb_now = body_aabb(bs, bc);
+		CK_DYNA int* cands = NULL;
+		bvh_query_aabb(w->bvh_static, body_aabb_now, &cands);
+		int overlapping = 0;
+		for (int c = 0; c < asize(cands) && !overlapping; c++) {
+			int sbi = cands[c];
+			if (sbi == bi || !split_alive(w->body_gen, sbi)) continue;
+			BodyCold* sbc = &w->body_cold[sbi];
+			BodyState* sbs = &w->body_state[sbi];
+			for (int sshi = 0; sshi < asize(sbc->shapes) && !overlapping; sshi++) {
+				ShapeInternal* ss = &sbc->shapes[sshi];
+				if (ss->type == SHAPE_MESH || ss->type == SHAPE_HEIGHTFIELD) continue;
+				GJK_Shape gb = toi_shape_at_pose(ss, sbs->position, sbs->rotation);
+				for (int ashi = 0; ashi < nshapes && !overlapping; ashi++) {
+					ShapeInternal* sa = &bc->shapes[ashi];
+					if (sa->type == SHAPE_MESH || sa->type == SHAPE_HEIGHTFIELD) continue;
+					GJK_Shape ga = toi_shape_at_pose(sa, bs->position, bs->rotation);
+					GJK_Result r = gjk_distance(&ga, &gb, NULL);
+					if (r.distance <= 0.0f) overlapping = 1;
+				}
+			}
+		}
+		afree(cands);
+		if (overlapping) {
+			// Post-solve pose overlaps static. If pre-step pose is also
+			// overlapping (body already embedded), keep solver's attempt.
+			// Otherwise, binary search between pre and post to find the last
+			// non-overlapping lerp fraction and clamp there — this progresses
+			// the body further than pre_pos (avoiding the "frozen against
+			// surface" oscillation where shallow gravity overlap reverts every
+			// frame) while preventing deep tunnel.
+			v3 post_pos = bs->position;
+			quat post_rot = bs->rotation;
+			int pre_overlaps = toi_aabb_overlaps_any_static(w, bi, p0, q0, body_aabb_now);
+			if (!pre_overlaps) {
+				float lo = 0.0f, hi = 1.0f;
+				for (int iter = 0; iter < 8; iter++) {
+					float mid = 0.5f * (lo + hi);
+					v3 tp; quat tr;
+					toi_lerp_pose(p0, q0, post_pos, post_rot, mid, &tp, &tr);
+					if (toi_aabb_overlaps_any_static(w, bi, tp, tr, body_aabb_now)) hi = mid;
+					else lo = mid;
+				}
+				toi_lerp_pose(p0, q0, post_pos, post_rot, lo, &bs->position, &bs->rotation);
+			}
+		}
+		afree(cands);
+		return;
+	}
 
 	// Pull back a hair so we leave a small gap for next-frame speculative.
 	float pullback = TOI_SLOP_FRACTION;
@@ -696,6 +807,83 @@ static void toi_advance_one_body(WorldInternal* w, int k, float dt)
 	BodyState pre = (BodyState){ .position = p0, .rotation = q0 };
 	toi_pose_at(&pre, bh, dt, earliest, &bs->position, &bs->rotation);
 
+	// Post-clamp safety: if the clamped pose still overlaps any static,
+	// binary-search along the lerp from pre_pos → clamped_pose for the
+	// largest non-overlapping fraction. Catches compound-body TOI where one
+	// shape's first-contact fraction pushes another already-near-contact
+	// shape deeper into a static. If the lerp has no safe fraction (pre_pos
+	// also overlaps; body is embedded and rotating into/out of contact),
+	// keep the solver's best-effort clamped pose.
+	{
+		BodyCold* bc = &w->body_cold[bi];
+		AABB body_aabb_clamped = body_aabb(bs, bc);
+		if (toi_aabb_overlaps_any_static(w, bi, bs->position, bs->rotation, body_aabb_clamped)) {
+			v3 clamped_pos = bs->position;
+			quat clamped_rot = bs->rotation;
+			float lo = -1.0f, hi = 1.0f;
+			// Sample 5 points along the lerp to find a safe seed.
+			for (int i = 0; i <= 4; i++) {
+				float u = (float)i / 4.0f;
+				v3 tp; quat tr;
+				toi_lerp_pose(p0, q0, clamped_pos, clamped_rot, u, &tp, &tr);
+				if (!toi_aabb_overlaps_any_static(w, bi, tp, tr, body_aabb_clamped)) { lo = u; break; }
+			}
+			if (lo >= 0.0f) {
+				// Binary search between safe lo and the first overlap above it.
+				for (int iter = 0; iter < 8; iter++) {
+					float mid = 0.5f * (lo + hi);
+					v3 tp; quat tr;
+					toi_lerp_pose(p0, q0, clamped_pos, clamped_rot, mid, &tp, &tr);
+					if (toi_aabb_overlaps_any_static(w, bi, tp, tr, body_aabb_clamped)) hi = mid;
+					else lo = mid;
+				}
+				toi_lerp_pose(p0, q0, clamped_pos, clamped_rot, lo, &bs->position, &bs->rotation);
+			}
+		}
+	}
+
+	// When earliest is effectively 0 (body already at boundary at pre-step)
+	// AND the body would tunnel more than its inscribed sphere in one step,
+	// narrowphase may have failed to emit a boundary contact at the clamped
+	// pose (hull-vs-hull SAT can reject near-exactly-touching pairs). Pull
+	// the body back along the sweep direction until GJK shows a visible gap
+	// matching the speculative margin, so next frame's narrowphase sees the
+	// contact. Pulling along -velocity (not along GJK normal) preserves
+	// lateral motion at corners/edges where a single normal is ambiguous.
+	float v_norm = v3_len(bh->velocity);
+	float r_min = w->body_cold[bi].r_min_body;
+	int body_is_fast = r_min > 0.0f && v_norm * dt > 2.0f * r_min;
+	if (earliest <= TOI_SLOP_FRACTION + 1e-6f && body_is_fast) {
+		BodyCold* bc = &w->body_cold[bi];
+		AABB body_aabb_now = body_aabb(bs, bc);
+		CK_DYNA int* cands = NULL;
+		bvh_query_aabb(w->bvh_static, aabb_expand(body_aabb_now, w->speculative_margin), &cands);
+		float min_dist = FLT_MAX;
+		for (int c = 0; c < asize(cands); c++) {
+			int sbi = cands[c];
+			if (sbi == bi || !split_alive(w->body_gen, sbi)) continue;
+			BodyCold* sbc = &w->body_cold[sbi];
+			BodyState* sbs = &w->body_state[sbi];
+			for (int sshi = 0; sshi < asize(sbc->shapes); sshi++) {
+				ShapeInternal* ss = &sbc->shapes[sshi];
+				if (ss->type == SHAPE_MESH || ss->type == SHAPE_HEIGHTFIELD) continue;
+				GJK_Shape gb = toi_shape_at_pose(ss, sbs->position, sbs->rotation);
+				for (int ashi = 0; ashi < asize(bc->shapes); ashi++) {
+					ShapeInternal* sa = &bc->shapes[ashi];
+					if (sa->type == SHAPE_MESH || sa->type == SHAPE_HEIGHTFIELD) continue;
+					GJK_Shape ga = toi_shape_at_pose(sa, bs->position, bs->rotation);
+					GJK_Result r = gjk_distance(&ga, &gb, NULL);
+					if (r.distance < min_dist) min_dist = r.distance;
+				}
+			}
+		}
+		afree(cands);
+		if (min_dist < w->speculative_margin) {
+			float backstep = (w->speculative_margin - min_dist);
+			if (v_norm > 1e-6f) bs->position = sub(bs->position, scale(bh->velocity, backstep / v_norm));
+		}
+	}
+
 	// Multi-pass: after clamping, re-sweep the remaining (1 - earliest) of
 	// the step so the body can slide along the struck surface or hit a
 	// second primitive. Capped by TOI_SUBSTEP_MAX.
@@ -706,16 +894,7 @@ static void toi_advance_one_body(WorldInternal* w, int k, float dt)
 		v3   p_now = bs->position;
 		quat q_now = bs->rotation;
 		float t_rel = toi_body_vs_static(w, bi, p_now, q_now, dt * remaining);
-		if (t_rel >= 1.0f) {
-			// No further hits in the remaining budget. We could advance the
-			// body by (1 - t_consumed) * v*dt to capture sliding motion along
-			// the just-struck surface, but that tunnels in the common case
-			// where the body is still approaching the wall it just clamped
-			// to and toi_pair_advance returned 1.0 from the touching-but-
-			// receding guard. Leaving the body at its clamped pose is safer;
-			// the small lost tangential motion is picked up next frame.
-			break;
-		}
+		if (t_rel >= 1.0f) break;
 		if (t_rel > pullback) t_rel -= pullback;
 		else t_rel = 0.0f;
 		BodyState pre2 = (BodyState){ .position = p_now, .rotation = q_now };

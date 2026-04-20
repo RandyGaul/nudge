@@ -12734,9 +12734,268 @@ static void test_post_ccd_tet_not_stuck_in_beam()
 	destroy_world(w);
 }
 
+// Soak-log repro: spawn_rng=0xd666f856, CAPSULE scale=0.8376,
+// vel=(86.082,-2.412,-4.102), omega=(3.429,2.428,5.870). Bullet gets
+// stuck inside the wall (x in [4.95, 5.05]) around frame 15.
+static void test_post_ccd_capsule_not_stuck_in_wall_d666f856()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	float s = 0.8376f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.12f * s, .radius = 0.06f * s } });
+	body_set_velocity(w, b, V3(86.082f, -2.412f, -4.102f));
+	body_set_angular_velocity(w, b, V3(3.429f, 2.428f, 5.870f));
+
+	float dt = 1.0f / 60.0f;
+	int stuck = 0;
+	for (int frame = 0; frame < 60; frame++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, b);
+		int inside_wall = fabsf(pos.x - 5.0f) < 0.05f && fabsf(pos.y - 2.0f) < 3.0f && fabsf(pos.z) < 3.0f;
+		int inside_beam = fabsf(pos.x - 5.0f) < 0.35f && fabsf(pos.y - 2.0f) < 0.15f && fabsf(pos.z) < 3.0f;
+		if (inside_wall || inside_beam) { stuck = 1; break; }
+	}
+	TEST_BEGIN("post-CCD capsule (soak 0xd666f856): not stuck in wall");
+	TEST_ASSERT(!stuck);
+	destroy_world(w);
+}
+
+// Soak repro: spawn_rng=0x75432777, CAPSULE scale=0.8015,
+// vel=(122.040,4.631,1.467), omega=(1.790,5.382,0.085). Sep-fn picks EDGE_EDGE
+// classification on capsule-vs-beam-face contact, converges past the actual
+// TOI, body ends up inside beam at frame 6.
+static void test_post_ccd_capsule_not_stuck_in_beam_75432777()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	float s = 0.8015f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.12f * s, .radius = 0.06f * s } });
+	body_set_velocity(w, b, V3(122.040f, 4.631f, 1.467f));
+	body_set_angular_velocity(w, b, V3(1.790f, 5.382f, 0.085f));
+
+	float dt = 1.0f / 60.0f;
+	int stuck = 0;
+	for (int frame = 0; frame < 60; frame++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, b);
+		int inside_wall = fabsf(pos.x - 5.0f) < 0.05f && fabsf(pos.y - 2.0f) < 3.0f && fabsf(pos.z) < 3.0f;
+		int inside_beam = fabsf(pos.x - 5.0f) < 0.35f && fabsf(pos.y - 2.0f) < 0.15f && fabsf(pos.z) < 3.0f;
+		if (inside_wall || inside_beam) { stuck = 1; break; }
+	}
+	TEST_BEGIN("post-CCD capsule (soak 0x75432777): not stuck in beam");
+	TEST_ASSERT(!stuck);
+	destroy_world(w);
+}
+
+// Soak repro: spawn_rng=0x4fcc94c7, HULL_TET scale=0.9580,
+// vel=(78.981,6.513,8.646), omega=(-0.670,3.365,5.333). Solver applies large
+// impulse mid-frame; post-solve pose lands inside beam but TOI's
+// velocity-based sweep misses it because the sweep end pose differs from
+// actual substep-integrated end pose.
+static void test_post_ccd_hull_tet_not_stuck_in_beam_4fcc94c7()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	v3 tet[] = { {0, 0.6f, 0}, {0.5f, -0.3f, 0.3f}, {-0.5f, -0.3f, 0.3f}, {0, -0.3f, -0.5f} };
+	Hull* h_tet = quickhull(tet, 4);
+	float s = 0.9580f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_tet, .scale = V3(0.18f*s, 0.18f*s, 0.18f*s) } });
+	body_set_velocity(w, b, V3(78.981f, 6.513f, 8.646f));
+	body_set_angular_velocity(w, b, V3(-0.670f, 3.365f, 5.333f));
+
+	float dt = 1.0f / 60.0f;
+	int stuck = 0;
+	for (int frame = 0; frame < 60; frame++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, b);
+		int inside_wall = fabsf(pos.x - 5.0f) < 0.05f && fabsf(pos.y - 2.0f) < 3.0f && fabsf(pos.z) < 3.0f;
+		int inside_beam = fabsf(pos.x - 5.0f) < 0.35f && fabsf(pos.y - 2.0f) < 0.15f && fabsf(pos.z) < 3.0f;
+		if (inside_wall || inside_beam) { stuck = 1; break; }
+	}
+	TEST_BEGIN("post-CCD hull_tet (soak 0x4fcc94c7): not stuck in beam");
+	TEST_ASSERT(!stuck);
+	hull_free(h_tet);
+	destroy_world(w);
+}
+
+// Soak repro: spawn_rng=0xd696882a, HULL_CHUNK scale=1.3527,
+// vel=(86.487,2.856,5.590), omega=(0.737,-2.347,-4.025). Body gets pinned at
+// wall boundary: TOI clamps to pre_pos (touching+approaching), narrowphase
+// fails to emit speculative contact at that exact boundary pose, solver never
+// bounces, body stays frozen with linear vel intact.
+static void test_post_ccd_hull_chunk_not_frozen_d696882a()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	v3 chunk[] = {
+		{0.5f, 0.4f, 0.3f}, {-0.4f, 0.5f, 0.2f}, {0.3f, -0.4f, 0.5f},
+		{-0.5f, -0.3f, -0.4f}, {0.4f, 0.2f, -0.5f}, {-0.3f, -0.5f, 0.3f},
+		{0.5f, -0.2f, -0.2f}, {-0.2f, 0.5f, -0.3f},
+	};
+	Hull* h_chunk = quickhull(chunk, 8);
+	float s = 1.3527f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_chunk, .scale = V3(0.18f*s, 0.18f*s, 0.18f*s) } });
+	body_set_velocity(w, b, V3(86.487f, 2.856f, 5.590f));
+	body_set_angular_velocity(w, b, V3(0.737f, -2.347f, -4.025f));
+
+	float dt = 1.0f / 60.0f;
+	v3 prev = body_get_position(w, b);
+	int frozen = 0;
+	for (int frame = 0; frame < 120; frame++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, b);
+		v3 vel = body_get_velocity(w, b);
+		float d = v3_len(sub(pos, prev));
+		if (v3_len(vel) > 1.0f && d < 0.001f) { frozen++; if (frozen >= 60) break; } else frozen = 0;
+		prev = pos;
+	}
+	TEST_BEGIN("post-CCD hull_chunk (soak 0xd696882a): not frozen at wall");
+	TEST_ASSERT(frozen < 60);
+	hull_free(h_chunk);
+	destroy_world(w);
+}
+
+// Soak repro: spawn_rng=0x814d37c7, CAPSULE scale=1.4187,
+// vel=(51.250,1.616,3.720), omega=(-5.330,-4.524,0.728). Body gets wedged at
+// wall: solver bounces vel negative, but post-solve pose still overlaps wall
+// in one extreme of tilted capsule; overlap-clamp reverts to pre_pos which
+// also overlaps, freezing body in oscillation. Fix: keep solver's attempt
+// when pre_pos is also overlapping.
+static void test_post_ccd_capsule_not_wedged_814d37c7()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	float s = 1.4187f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.12f * s, .radius = 0.06f * s } });
+	body_set_velocity(w, b, V3(51.250f, 1.616f, 3.720f));
+	body_set_angular_velocity(w, b, V3(-5.330f, -4.524f, 0.728f));
+
+	float dt = 1.0f / 60.0f;
+	// Simulate until frame 40 (post-impact window) and check body has moved
+	// away from the wall region. Original bug: body wedged at x~4.87 forever.
+	for (int i = 0; i < 40; i++) world_step(w, dt);
+	v3 pos = body_get_position(w, b);
+	TEST_BEGIN("post-CCD capsule (soak 0x814d37c7): not wedged at wall");
+	TEST_ASSERT(pos.x < 4.7f); // body must have moved at least 0.2 away from wall
+	destroy_world(w);
+}
+
+// Soak repro: spawn_rng=0x4c9aeda6, CAPSULE scale=1.3032, bounces off wall,
+// drops to floor, overlap-clamp reverted pose every frame keeping body stuck
+// at first floor-touch point. Fix: only run overlap check for very fast
+// bodies (v*dt > 5 * r_min); resting bodies left alone.
+static void test_post_ccd_capsule_not_frozen_4c9aeda6()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	float s = 1.3032f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.12f * s, .radius = 0.06f * s } });
+	body_set_velocity(w, b, V3(55.517f, 2.254f, -3.837f));
+	body_set_angular_velocity(w, b, V3(-0.860f, 5.676f, 5.351f));
+
+	float dt = 1.0f / 60.0f;
+	// Body should travel past x=3 within 40 frames without getting stuck near
+	// the initial floor-touch point (original bug: frozen at (2.76, 0.09)).
+	for (int i = 0; i < 50; i++) world_step(w, dt);
+	v3 pos = body_get_position(w, b);
+	TEST_BEGIN("post-CCD capsule (soak 0x4c9aeda6): not frozen at floor touch");
+	TEST_ASSERT(pos.x < 2.5f || pos.x > 3.0f); // must have moved past first-touch position
+	destroy_world(w);
+}
+
 static void run_post_ccd_tests()
 {
 	printf("--- nudge post-CCD motion tests ---\n");
+	test_post_ccd_capsule_not_stuck_in_wall_d666f856();
+	test_post_ccd_capsule_not_stuck_in_beam_75432777();
+	test_post_ccd_hull_tet_not_stuck_in_beam_4fcc94c7();
+	test_post_ccd_hull_chunk_not_frozen_d696882a();
+	test_post_ccd_capsule_not_wedged_814d37c7();
+	test_post_ccd_capsule_not_frozen_4c9aeda6();
 	test_post_ccd_tet_not_stuck_in_beam();
 	test_post_ccd_box_bullet_no_freeze_after_rebound();
 	test_post_ccd_box_bullet_no_tunnel_soak_seed();

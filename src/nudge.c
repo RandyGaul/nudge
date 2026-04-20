@@ -126,12 +126,23 @@ static void integrate_velocities_and_inertia(WorldInternal* w, float dt)
 static void integrate_positions(WorldInternal* w, float dt)
 {
 	int count = asize(w->body_hot);
+	// Box2D-style angular velocity cap: prevents off-center contact impulses on
+	// low-inertia bodies (thin capsules, tiny shards) from producing multi-
+	// hundred-rad/s spins that break TOI sweeps and speculative contacts.
+	// Threshold is ~90 deg per FRAME (not per substep) so the TOI sweep-angle
+	// stays small enough for bilateral advancement to track witness features,
+	// but loose enough to pass through dumbbell/compound spin-on-impact cases.
+	float frame_dt = dt * (float)(w->sub_steps > 0 ? w->sub_steps : 1);
+	float max_w = 0.5f * 3.14159265f / frame_dt;
+	float max_w2 = max_w * max_w;
 	for (int i = 0; i < count; i++) {
 		if (!split_alive(w->body_gen, i)) continue;
 		BodyHot* h = &w->body_hot[i];
 		if (h->inv_mass == 0.0f) continue;
 		int isl = w->body_cold[i].island_id;
 		if (isl >= 0 && island_alive(w, isl) && !w->islands[isl].awake) continue;
+		float w2 = len2(h->angular_velocity);
+		if (w2 > max_w2) h->angular_velocity = scale(h->angular_velocity, max_w / sqrtf(w2));
 		BodyState* s = &w->body_state[i];
 
 		float lv2 = len2(h->velocity);
