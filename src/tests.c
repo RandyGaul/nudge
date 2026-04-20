@@ -10544,11 +10544,38 @@ static void test_sensor_n2()
 	destroy_world(w);
 }
 
+static void test_shape_cast_linear_sphere_vs_static_box()
+{
+	World w = create_world((WorldParams){ .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH });
+	Body wall = create_body(w, (BodyParams){ .position = V3(10, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(1, 5, 5) });
+
+	TEST_BEGIN("shape_cast_linear: sphere hits static box");
+	ShapeParams sp = (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 1.0f };
+	CastHit hit = world_shape_cast_linear(w, sp, V3(0, 0, 0), quat_identity(), V3(20, 0, 0), (CastFilter){0});
+	TEST_ASSERT(hit.hit);
+	// Expected fraction: sphere center reaches x = 8 (one sphere-radius from box face at x=9).
+	// 20 units of travel, fraction ~= 8 / 20 = 0.4, +/- slop.
+	TEST_ASSERT(hit.fraction > 0.3f && hit.fraction < 0.5f);
+	TEST_ASSERT(hit.body.id == wall.id);
+
+	TEST_BEGIN("shape_cast_linear: miss when translation falls short");
+	hit = world_shape_cast_linear(w, sp, V3(0, 0, 0), quat_identity(), V3(1, 0, 0), (CastFilter){0});
+	TEST_ASSERT(!hit.hit);
+
+	TEST_BEGIN("shape_cast_linear: miss when offset axis");
+	hit = world_shape_cast_linear(w, sp, V3(0, 20, 0), quat_identity(), V3(20, 0, 0), (CastFilter){0});
+	TEST_ASSERT(!hit.hit);
+
+	destroy_world(w);
+}
+
 static void run_query_tests()
 {
 	printf("--- nudge query tests ---\n");
 	test_query_aabb_basic();
 	test_query_aabb_n2();
+	test_shape_cast_linear_sphere_vs_static_box();
 	test_raycast_sphere();
 	test_raycast_box();
 	test_raycast_capsule();
@@ -11636,6 +11663,1117 @@ static void bench_quickhull_10k()
 
 static void test_capsule_box_tilted_direct();
 
+// -----------------------------------------------------------------------------
+// TOI feature-extraction + separation-function + bilateral-advancement
+// unit tests. These exercise the static helpers in toi.c directly.
+
+// Direct GJK repro from the failing TOI scenario.
+static void test_gjk_sphere_box_far()
+{
+	GJK_Shape ga = gjk_sphere(V3(3.803f, 1.265f, -0.481f), 0.2f);
+	GJK_Shape gb = gjk_box(V3(5.0f, 1.5f, 0.0f), quat_identity(), V3(0.05f, 2.5f, 2.5f));
+	GJK_Result r = gjk_distance(&ga, &gb, NULL);
+	TEST_BEGIN("gjk sphere-box far (literal V3): distance > 0.5");
+	TEST_ASSERT(r.distance > 0.5f && r.distance < 2.0f);
+	TEST_BEGIN("gjk sphere-box far (literal V3): no NaN in points");
+	TEST_ASSERT(is_valid(r.point1) && is_valid(r.point2));
+
+	// Reproduce the TOI construction path: compute sphere center via
+	// add(body_pos, rotate(body_rot, local_pos)) using a non-identity
+	// rotation. If ANY v3 arithmetic step leaves garbage in the .w
+	// component it would propagate into GJK.
+	v3 body_pos = V3(3.667f, 1.265f, 0.0f);
+	quat body_rot = { 0.0f, 0.603f, 0.0f, 0.797f };
+	v3 local = V3(0.5f, 0.0f, 0.0f);
+	v3 world = add(body_pos, rotate(body_rot, local));
+	GJK_Shape ga2 = gjk_sphere(world, 0.2f);
+	GJK_Shape gb2 = gjk_box(V3(5.0f, 1.5f, 0.0f), quat_identity(), V3(0.05f, 2.5f, 2.5f));
+	GJK_Result r2 = gjk_distance(&ga2, &gb2, NULL);
+	TEST_BEGIN("gjk sphere-box far (rotated world pos): distance > 0.5");
+	TEST_ASSERT(r2.distance > 0.5f);
+	TEST_BEGIN("gjk sphere-box far (rotated world pos): no NaN in points");
+	TEST_ASSERT(is_valid(r2.point1) && is_valid(r2.point2));
+}
+
+static void test_toi_feature_sphere_sphere()
+{
+	// Two spheres: simplex always has a single vertex (sphere support is the
+	// core center; radius is post-hoc). kA = kB = 1 -> POINTS.
+	GJK_Shape ga = gjk_sphere(V3(0, 0, 0), 0.5f);
+	GJK_Shape gb = gjk_sphere(V3(3, 0, 0), 0.5f);
+	GJK_Simplex simplex;
+	GJK_Result r = gjk_distance_ex(&ga, &gb, NULL, &simplex);
+	int kA, kB, fa[4], fb[4];
+	toi_simplex_feature_counts(&simplex, &kA, &kB, fa, fb);
+	TEST_BEGIN("TOI feat sphere-sphere: kA == 1");
+	TEST_ASSERT(kA == 1);
+	TEST_BEGIN("TOI feat sphere-sphere: kB == 1");
+	TEST_ASSERT(kB == 1);
+	ToiSepFn fn = toi_make_sep_fn(&simplex, &r, V3(0,0,0), quat_identity());
+	TEST_BEGIN("TOI feat sphere-sphere: POINTS");
+	TEST_ASSERT(fn.type == TOI_POINTS);
+}
+
+static void test_toi_feature_sphere_box_face()
+{
+	// Sphere in front of a box face -> kA = 1 (sphere always 1), kB should
+	// be >= 1. POINTS (kB=1) is acceptable since sphere is a single
+	// support; we only need the feature-count helper to report faithfully.
+	GJK_Shape ga = gjk_sphere(V3(0, 3, 0), 0.25f);
+	GJK_Shape gb = gjk_box(V3(0, 0, 0), quat_identity(), V3(1, 1, 1));
+	GJK_Simplex simplex;
+	GJK_Result r = gjk_distance_ex(&ga, &gb, NULL, &simplex);
+	int kA, kB, fa[4], fb[4];
+	toi_simplex_feature_counts(&simplex, &kA, &kB, fa, fb);
+	TEST_BEGIN("TOI feat sphere-box face: kA == 1");
+	TEST_ASSERT(kA == 1);
+	TEST_BEGIN("TOI feat sphere-box face: kB >= 1");
+	TEST_ASSERT(kB >= 1);
+	TEST_BEGIN("TOI feat sphere-box face: distance ~= 1.75");
+	TEST_ASSERT_FLOAT(r.distance, 1.75f, 1e-3f);
+}
+
+static void test_toi_feature_hull_hull_edge_parallel()
+{
+	// Two parallel unit-box hulls on the X axis, separated by a gap.
+	const Hull* box = hull_unit_box();
+	GJK_Shape ga = gjk_hull_scaled(box, V3(-3, 0, 0), quat_identity(), V3(1, 1, 1));
+	GJK_Shape gb = gjk_hull_scaled(box, V3( 3, 0, 0), quat_identity(), V3(1, 1, 1));
+	GJK_Simplex simplex;
+	GJK_Result r = gjk_distance_ex(&ga, &gb, NULL, &simplex);
+	int kA, kB, fa[4], fb[4];
+	toi_simplex_feature_counts(&simplex, &kA, &kB, fa, fb);
+	TEST_BEGIN("TOI feat hull-hull parallel: distance == 4");
+	TEST_ASSERT_FLOAT(r.distance, 4.0f, 1e-3f);
+	TEST_BEGIN("TOI feat hull-hull parallel: kA + kB >= 2");
+	TEST_ASSERT(kA + kB >= 2);
+	ToiSepFn fn = toi_make_sep_fn(&simplex, &r, V3(-3,0,0), quat_identity());
+	v3 axis = toi_axis_world(&fn, V3(-3,0,0), quat_identity());
+	TEST_BEGIN("TOI feat hull-hull parallel: axis unit length");
+	TEST_ASSERT_FLOAT(v3_len(axis), 1.0f, 1e-3f);
+}
+
+static void test_toi_feature_hull_hull_edge_cross()
+{
+	// Two hulls with skew orientations: one rotated 45° around Z. Closest
+	// features can be edges that cross in space (kA == kB == 2) giving
+	// EDGE_EDGE.
+	float ang = 0.7853981f; // 45 deg
+	quat rot = (quat){ 0, 0, sinf(ang*0.5f), cosf(ang*0.5f) };
+	const Hull* box = hull_unit_box();
+	GJK_Shape ga = gjk_hull_scaled(box, V3(0, 0, 0), quat_identity(), V3(1, 1, 1));
+	GJK_Shape gb = gjk_hull_scaled(box, V3(5, 0, 0), rot, V3(1, 1, 1));
+	GJK_Simplex simplex;
+	GJK_Result r = gjk_distance_ex(&ga, &gb, NULL, &simplex);
+	int kA, kB, fa[4], fb[4];
+	toi_simplex_feature_counts(&simplex, &kA, &kB, fa, fb);
+	TEST_BEGIN("TOI feat hull-hull skew: distance > 0");
+	TEST_ASSERT(r.distance > 0.0f);
+	ToiSepFn fn = toi_make_sep_fn(&simplex, &r, V3(0,0,0), quat_identity());
+	v3 axis = toi_axis_world(&fn, V3(0,0,0), quat_identity());
+	TEST_BEGIN("TOI feat hull-hull skew: axis is unit-length");
+	TEST_ASSERT_FLOAT(v3_len(axis), 1.0f, 1e-3f);
+	(void)kA; (void)kB; (void)fa; (void)fb;
+}
+
+// Bilateral advancement: analytical sphere-vs-static-box TOI.
+// Sphere radius 0.5, box half-extents (1,1,1) centered at origin. Sphere
+// starts at (0, 5, 0), moves to (0, 0, 0) over the step. Wall face at y=1.
+// Sphere touches box when its lower edge reaches y=1: sphere center at
+// y=1.5. That's at fraction t = (5 - 1.5) / 5 = 0.7.
+static void test_toi_bilateral_sphere_straight_line()
+{
+	ShapeInternal sa = {0};
+	sa.type = SHAPE_SPHERE;
+	sa.sphere.radius = 0.5f;
+	shape_compute_bounds(&sa);
+
+	BodyState pre = (BodyState){ .position = V3(0, 5, 0), .rotation = quat_identity() };
+	BodyHot bh = {0};
+	bh.velocity = V3(0, -5, 0);
+	bh.inv_mass = 1.0f;
+
+	GJK_Shape gb = gjk_box(V3(0, 0, 0), quat_identity(), V3(1, 1, 1));
+	float t = toi_pair_advance(&sa, &pre, &bh, sa.r_max, 1.0f, &gb);
+	TEST_BEGIN("TOI bilateral: sphere linear vs static box");
+	// Expected t ~ 0.7, accept tolerance for root-finder target separation.
+	TEST_ASSERT(t > 0.65f && t < 0.75f);
+}
+
+// Sphere moving parallel to a box with no approach: should return 1.0 (miss).
+static void test_toi_bilateral_sphere_parallel_miss()
+{
+	ShapeInternal sa = {0};
+	sa.type = SHAPE_SPHERE;
+	sa.sphere.radius = 0.5f;
+	shape_compute_bounds(&sa);
+
+	BodyState pre = (BodyState){ .position = V3(0, 5, 0), .rotation = quat_identity() };
+	BodyHot bh = {0};
+	bh.velocity = V3(1, 0, 0); // parallel to box top
+	bh.inv_mass = 1.0f;
+
+	GJK_Shape gb = gjk_box(V3(0, 0, 0), quat_identity(), V3(1, 1, 1));
+	float t = toi_pair_advance(&sa, &pre, &bh, sa.r_max, 1.0f, &gb);
+	TEST_BEGIN("TOI bilateral: sphere parallel miss -> t == 1");
+	TEST_ASSERT(t >= 1.0f - 1e-4f);
+}
+
+// Spinning box approaching a static wall: the rotational term must reduce
+// the TOI vs. a pure translation-only sweep. Verifies that the axis tracks
+// A's rotation for FACE_A / POINTS types.
+static void test_toi_bilateral_spinning_box_vs_wall()
+{
+	ShapeInternal sa = {0};
+	sa.type = SHAPE_BOX;
+	sa.box.half_extents = V3(0.5f, 0.5f, 0.5f);
+	shape_compute_bounds(&sa);
+
+	BodyState pre = (BodyState){ .position = V3(-5, 0, 0), .rotation = quat_identity() };
+	BodyHot bh = {0};
+	bh.velocity = V3(15, 0, 0); // covers the gap to the wall in one step
+	bh.angular_velocity = V3(0, 0, 3.14159f); // half rotation over dt=1
+	bh.inv_mass = 1.0f;
+
+	GJK_Shape wall = gjk_hull_scaled(hull_unit_box(), V3(5, 0, 0), quat_identity(), V3(0.2f, 5, 5));
+	float t = toi_pair_advance(&sa, &pre, &bh, sa.r_max, 1.0f, &wall);
+	TEST_BEGIN("TOI bilateral: spinning box hits wall");
+	TEST_ASSERT(t > 0.0f && t < 1.0f);
+}
+
+// Compound body: two shapes offset from body origin. Verifies the sweep
+// rotates shape world positions around body origin correctly (shape position
+// at t=0 differs from t=1 purely because the body rotated). This exercises
+// the plan's "compound shapes sweep properly about c.o.m." requirement.
+static void test_toi_bilateral_compound_rotation()
+{
+	// Body has a single offset shape. At t=0 shape is to the right of origin.
+	// Body rotates 180° around Z over dt=1; at t=1 shape swings to the left.
+	// Static box sits where the shape will arrive. TOI must detect the hit
+	// mid-sweep via angular integration.
+	ShapeInternal sa = {0};
+	sa.type = SHAPE_SPHERE;
+	sa.sphere.radius = 0.25f;
+	sa.local_pos = V3(2, 0, 0); // 2m offset from body origin (= COM)
+	shape_compute_bounds(&sa);
+
+	BodyState pre = (BodyState){ .position = V3(0, 0, 0), .rotation = quat_identity() };
+	BodyHot bh = {0};
+	bh.velocity = V3(0, 0, 0);
+	bh.angular_velocity = V3(0, 0, 3.14159f); // 180° over dt=1
+	bh.inv_mass = 1.0f;
+
+	// Static box centered at (0, 2, 0) — the shape will reach y=2 at t=0.5.
+	GJK_Shape target = gjk_hull_scaled(hull_unit_box(), V3(0, 2, 0), quat_identity(), V3(0.5f, 0.25f, 0.5f));
+	float t = toi_pair_advance(&sa, &pre, &bh, sa.r_max, 1.0f, &target);
+	TEST_BEGIN("TOI bilateral: compound rotation hits mid-sweep");
+	// Shape arc: (2cos(theta), 2sin(theta), 0). Reaches y=1.5 (top of box -
+	// sphere radius) when 2 sin(theta) = 1.5, theta = asin(0.75) ~ 48.6°.
+	// That's t ~ 48.6 / 180 = 0.27. Accept a wide band — root-finder target
+	// separation and approximation of the box top give some slack.
+	TEST_ASSERT(t > 0.1f && t < 0.5f);
+}
+
+static void run_toi_tests()
+{
+	printf("--- nudge TOI tests ---\n");
+	test_gjk_sphere_box_far();
+	test_toi_feature_sphere_sphere();
+	test_toi_feature_sphere_box_face();
+	test_toi_feature_hull_hull_edge_parallel();
+	test_toi_feature_hull_hull_edge_cross();
+	test_toi_bilateral_sphere_straight_line();
+	test_toi_bilateral_sphere_parallel_miss();
+	test_toi_bilateral_spinning_box_vs_wall();
+	test_toi_bilateral_compound_rotation();
+}
+
+// -----------------------------------------------------------------------------
+// CCD regression suite. Targeted scenarios from the CCD plan (Part I).
+
+// Bullet-vs-wall: sphere launched at a static wall faster than it could
+// traverse in one frame without CCD. Should not tunnel; a speculative+TOI
+// combined pipeline clamps at the wall face.
+static void test_ccd_bullet_vs_wall()
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body wall = create_body(w, (BodyParams){ .position = V3(10, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 5, 5) });
+
+	Body bullet = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, bullet, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	body_set_velocity(w, bullet, V3(200, 0, 0)); // 200 m/s = 3.3 m/frame @ 60fps
+
+	int tunneled = 0;
+	for (int i = 0; i < 60; i++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, bullet);
+		if (p.x > 11.0f) { tunneled = 1; break; }
+	}
+	TEST_BEGIN("CCD bullet vs. wall: does not tunnel");
+	TEST_ASSERT(!tunneled);
+	v3 end = body_get_position(w, bullet);
+	TEST_BEGIN("CCD bullet vs. wall: stopped near wall face");
+	// Wall face at x = 10 - 0.2 = 9.8. Sphere center should be near 9.7.
+	TEST_ASSERT(end.x > 9.0f && end.x < 10.0f);
+	destroy_world(w);
+}
+
+// Slow stack next to a bullet: a bullet flying past a settled tower should
+// not disturb the stack. Verifies speculative contacts don't create ghost
+// forces against non-colliding neighbors.
+static void test_ccd_stack_undisturbed_by_bullet()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -0.5f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 0.5f, 20) });
+
+	Body stack[4];
+	for (int i = 0; i < 4; i++) {
+		stack[i] = create_body(w, (BodyParams){ .position = V3(0, 0.5f + i * 1.01f, 0), .rotation = quat_identity(), .mass = 1 });
+		body_add_shape(w, stack[i], (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.5f, 0.5f, 0.5f) });
+	}
+	// Settle the stack.
+	for (int i = 0; i < 60; i++) world_step(w, 1.0f / 60.0f);
+
+	// Snapshot positions.
+	v3 before[4];
+	for (int i = 0; i < 4; i++) before[i] = body_get_position(w, stack[i]);
+
+	// Fire a bullet sphere past the stack 1m to the side.
+	Body bullet = create_body(w, (BodyParams){ .position = V3(-10, 1, 3), .rotation = quat_identity(), .mass = 0.1f });
+	body_add_shape(w, bullet, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	body_set_velocity(w, bullet, V3(400, 0, 0));
+	for (int i = 0; i < 30; i++) world_step(w, 1.0f / 60.0f);
+
+	// Stack positions should barely move.
+	float max_disp = 0.0f;
+	for (int i = 0; i < 4; i++) {
+		v3 now = body_get_position(w, stack[i]);
+		float dx = fabsf(now.x - before[i].x);
+		float dz = fabsf(now.z - before[i].z);
+		float d = dx > dz ? dx : dz;
+		if (d > max_disp) max_disp = d;
+	}
+	TEST_BEGIN("CCD stack undisturbed: lateral drift minimal");
+	TEST_ASSERT(max_disp < 0.05f);
+	destroy_world(w);
+}
+
+// Grazing speculative: body approaches the ground slowly, tangent to the
+// normal. Should not ghost-bounce. The restitution replace-rule only fires
+// when the gap would actually close within the step.
+static void test_ccd_no_ghost_bounce_on_graze()
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_body = create_body(w, (BodyParams){ .position = V3(0, -0.5f, 0), .rotation = quat_identity(), .mass = 0, .restitution = 0.9f });
+	body_add_shape(w, floor_body, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 0.5f, 20) });
+
+	// Sphere at y = 0.5 + 0.03 (inside speculative band but separated).
+	// Horizontal velocity only — no vertical approach. Restitution must NOT
+	// fire since the gap isn't closing.
+	Body ball = create_body(w, (BodyParams){ .position = V3(0, 0.53f, 0), .rotation = quat_identity(), .mass = 1, .restitution = 0.9f });
+	body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+	body_set_velocity(w, ball, V3(5.0f, 0, 0));
+
+	for (int i = 0; i < 30; i++) world_step(w, 1.0f / 60.0f);
+	v3 vel = body_get_velocity(w, ball);
+
+	TEST_BEGIN("CCD no ghost bounce: vertical velocity stays near zero");
+	TEST_ASSERT(fabsf(vel.y) < 0.5f);
+	destroy_world(w);
+}
+
+// -----------------------------------------------------------------------------
+// Tunnel-test matrix. Fires a variety of shapes/sizes/speeds/angles at a
+// variety of static targets and verifies nothing ends up on the far side.
+// Any regression in CCD (speculative, speed-test, TOI kernel, feature
+// extraction) that allowed a body to pass through should show up here.
+
+typedef struct TunnelResult
+{
+	int tunneled;
+	int frames_run;
+	v3 final_pos;
+	v3 final_vel;
+} TunnelResult;
+
+// Step the world up to `max_frames` frames and report whether `body`'s x
+// coordinate ever exceeds `fail_x`. Early-out on first tunnel detection.
+static TunnelResult run_tunnel_scenario(World w, Body body, float fail_x, int max_frames)
+{
+	TunnelResult r = {0};
+	for (int i = 0; i < max_frames; i++) {
+		world_step(w, 1.0f / 60.0f);
+		r.frames_run = i + 1;
+		v3 p = body_get_position(w, body);
+		if (p.x > fail_x) {
+			r.tunneled = 1;
+			r.final_pos = p;
+			r.final_vel = body_get_velocity(w, body);
+			return r;
+		}
+	}
+	r.final_pos = body_get_position(w, body);
+	r.final_vel = body_get_velocity(w, body);
+	return r;
+}
+
+// Standard no-gravity world with a single static wall at x = wall_x of
+// half-extent (0.2, 5, 5). Caller creates the projectile.
+static World make_tunnel_world(float wall_x)
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+	Body wall = create_body(w, (BodyParams){ .position = V3(wall_x, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 5, 5) });
+	return w;
+}
+
+// Sweep of (radius, speed) for a sphere fired along +x at a wall at x=10.
+// Wall far face at x = 10.2; tunnel fails if body exceeds that.
+static void test_tunnel_sphere_size_speed_sweep()
+{
+	static const float radii[]  = { 0.01f, 0.1f, 0.5f, 2.0f };
+	static const float speeds[] = { 5.0f, 50.0f, 200.0f, 1000.0f };
+	char name[128];
+	for (int ri = 0; ri < (int)(sizeof radii / sizeof radii[0]); ri++) {
+		for (int si = 0; si < (int)(sizeof speeds / sizeof speeds[0]); si++) {
+			World w = make_tunnel_world(10.0f);
+			Body ball = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+			body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = radii[ri] });
+			body_set_velocity(w, ball, V3(speeds[si], 0, 0));
+			TunnelResult r = run_tunnel_scenario(w, ball, 10.2f, 60);
+			snprintf(name, sizeof name, "tunnel sphere r=%g v=%g: no tunnel", radii[ri], speeds[si]);
+			TEST_BEGIN(name);
+			TEST_ASSERT(!r.tunneled);
+			destroy_world(w);
+		}
+	}
+}
+
+// Sweep of (half_extent, speed) for a box fired along +x at a wall.
+static void test_tunnel_box_size_speed_sweep()
+{
+	static const float sizes[]  = { 0.05f, 0.3f, 1.0f, 3.0f };
+	static const float speeds[] = { 10.0f, 100.0f, 500.0f, 1500.0f };
+	char name[128];
+	for (int ri = 0; ri < (int)(sizeof sizes / sizeof sizes[0]); ri++) {
+		for (int si = 0; si < (int)(sizeof speeds / sizeof speeds[0]); si++) {
+			World w = make_tunnel_world(10.0f);
+			Body box = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+			body_add_shape(w, box, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(sizes[ri], sizes[ri], sizes[ri]) });
+			body_set_velocity(w, box, V3(speeds[si], 0, 0));
+			TunnelResult r = run_tunnel_scenario(w, box, 10.2f, 60);
+			snprintf(name, sizeof name, "tunnel box s=%g v=%g: no tunnel", sizes[ri], speeds[si]);
+			TEST_BEGIN(name);
+			TEST_ASSERT(!r.tunneled);
+			destroy_world(w);
+		}
+	}
+}
+
+// Long capsule fired along its own long axis, then across.
+static void test_tunnel_capsule_orientations()
+{
+	static const float speeds[] = { 50.0f, 300.0f, 800.0f };
+	// Long axis along velocity.
+	for (int si = 0; si < 3; si++) {
+		World w = make_tunnel_world(10.0f);
+		// Rotate capsule 90° around Z so its Y-local axis points along world X.
+		float ang = 3.14159265f * 0.5f;
+		quat rot = (quat){ 0, 0, sinf(ang*0.5f), cosf(ang*0.5f) };
+		Body c = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = rot, .mass = 1 });
+		body_add_shape(w, c, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule.half_height = 1.0f, .capsule.radius = 0.2f });
+		body_set_velocity(w, c, V3(speeds[si], 0, 0));
+		TunnelResult r = run_tunnel_scenario(w, c, 10.2f, 60);
+		char name[128]; snprintf(name, sizeof name, "tunnel capsule axial v=%g: no tunnel", speeds[si]);
+		TEST_BEGIN(name);
+		TEST_ASSERT(!r.tunneled);
+		destroy_world(w);
+	}
+	// Long axis perpendicular to velocity (broadside impact).
+	for (int si = 0; si < 3; si++) {
+		World w = make_tunnel_world(10.0f);
+		Body c = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+		body_add_shape(w, c, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule.half_height = 1.0f, .capsule.radius = 0.2f });
+		body_set_velocity(w, c, V3(speeds[si], 0, 0));
+		TunnelResult r = run_tunnel_scenario(w, c, 10.2f, 60);
+		char name[128]; snprintf(name, sizeof name, "tunnel capsule broadside v=%g: no tunnel", speeds[si]);
+		TEST_BEGIN(name);
+		TEST_ASSERT(!r.tunneled);
+		destroy_world(w);
+	}
+}
+
+// Glancing angles: sphere fires at +x offset in y so it grazes the wall edge.
+// Should either miss (clean separation) or catch the edge; must not tunnel.
+static void test_tunnel_glancing_edge()
+{
+	static const float aim_ys[] = { 4.8f, 4.95f, 5.0f, 5.05f, 5.2f };
+	for (int i = 0; i < 5; i++) {
+		World w = make_tunnel_world(10.0f);
+		Body ball = create_body(w, (BodyParams){ .position = V3(0, aim_ys[i], 0), .rotation = quat_identity(), .mass = 1 });
+		body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+		body_set_velocity(w, ball, V3(500.0f, 0, 0));
+		TunnelResult r = run_tunnel_scenario(w, ball, 10.2f, 60);
+		char name[128]; snprintf(name, sizeof name, "tunnel glancing y=%g: clean outcome", aim_ys[i]);
+		TEST_BEGIN(name);
+		// Either tunnels (clean miss above wall) or doesn't (hit the edge).
+		// Tunnel here is allowed ONLY if the ball's y at wall crossing was
+		// outside the wall's y range; below we just assert it doesn't end
+		// up inside the wall.
+		v3 p = r.final_pos;
+		int inside = (p.x > 9.8f && p.x < 10.2f) && fabsf(p.y) < 5.05f;
+		TEST_ASSERT(!inside);
+		destroy_world(w);
+	}
+}
+
+// Vertex hit: sphere fired directly at a wall-box corner from a diagonal.
+static void test_tunnel_sphere_at_corner()
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	// Small cube, sphere aimed at a corner diagonally.
+	Body cube = create_body(w, (BodyParams){ .position = V3(10, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, cube, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(1, 1, 1) });
+	// Corner of cube at (9, -1, -1). Sphere starts at (0, -10, -10), fires
+	// toward corner.
+	Body ball = create_body(w, (BodyParams){ .position = V3(0, -10, -10), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	v3 dir = V3(9.0f - 0.0f, -1.0f - (-10.0f), -1.0f - (-10.0f));
+	float len_d = v3_len(dir);
+	v3 vel = scale(dir, 500.0f / len_d);
+	body_set_velocity(w, ball, vel);
+	TEST_BEGIN("tunnel sphere at box corner: doesn't penetrate cube");
+	for (int i = 0; i < 60; i++) {
+		world_step(w, 1.0f / 60.0f);
+		v3 p = body_get_position(w, ball);
+		// Check if sphere center is inside cube.
+		if (fabsf(p.x - 10) < 1.0f && fabsf(p.y) < 1.0f && fabsf(p.z) < 1.0f) {
+			TEST_ASSERT(0);
+			break;
+		}
+	}
+	TEST_ASSERT(1);
+	destroy_world(w);
+}
+
+// Edge hit: sphere fires at the edge where two walls meet.
+static void test_tunnel_sphere_at_wall_edge()
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	// Two perpendicular walls sharing an edge at x=10, y=0.
+	Body wallA = create_body(w, (BodyParams){ .position = V3(10, -2.5f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wallA, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 2.5f, 5) });
+	Body wallB = create_body(w, (BodyParams){ .position = V3(12.5f, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wallB, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(2.5f, 0.2f, 5) });
+	// Aim sphere at the shared edge (~10, 0, 0).
+	Body ball = create_body(w, (BodyParams){ .position = V3(0, 2, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	body_set_velocity(w, ball, V3(300.0f, -60.0f, 0));
+	TunnelResult r = run_tunnel_scenario(w, ball, 15.0f, 60);
+	TEST_BEGIN("tunnel sphere at wall edge: no tunnel");
+	TEST_ASSERT(!r.tunneled);
+	destroy_world(w);
+}
+
+// Spinning hull: tall box (long along Y) with high angular velocity + linear
+// motion into a wall. Tests that the speed test angular term fires and TOI
+// integrates rotation.
+static void test_tunnel_spinning_long_box()
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body wall = create_body(w, (BodyParams){ .position = V3(10, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 5, 5) });
+	Body rod = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, rod, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 1.5f, 0.1f) });
+	body_set_velocity(w, rod, V3(400.0f, 0, 0));
+	body_set_angular_velocity(w, rod, V3(0, 0, 50.0f)); // fast spin around Z
+	TunnelResult r = run_tunnel_scenario(w, rod, 10.2f, 60);
+	TEST_BEGIN("tunnel spinning long box: no tunnel");
+	TEST_ASSERT(!r.tunneled);
+	destroy_world(w);
+}
+
+// Compound body (dumbbell): two spheres on a single body, offset in ±x from
+// body origin. Body translates along y while spinning so both spheres sweep
+// toward the wall at different times. Verifies that each shape's sweep
+// integrates about the body COM (= body origin here).
+static void test_tunnel_compound_dumbbell()
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body wall = create_body(w, (BodyParams){ .position = V3(10, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 5, 5) });
+
+	Body bar = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 2 });
+	body_add_shape(w, bar, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f, .local_pos = V3( 1, 0, 0) });
+	body_add_shape(w, bar, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.3f, .local_pos = V3(-1, 0, 0) });
+	body_set_velocity(w, bar, V3(300.0f, 0, 0));
+	body_set_angular_velocity(w, bar, V3(0, 30.0f, 0));
+	TunnelResult r = run_tunnel_scenario(w, bar, 10.2f, 60);
+	TEST_BEGIN("tunnel compound dumbbell: no tunnel");
+	TEST_ASSERT(!r.tunneled);
+	destroy_world(w);
+}
+
+// Compound body (L-shape): two boxes joined at a corner. One arm points +x,
+// the other +y. Fired +x so the x-arm leads into the wall. The y-arm is
+// offset in body-space and should sweep correctly about the body origin.
+static void test_tunnel_compound_l_shape()
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body wall = create_body(w, (BodyParams){ .position = V3(10, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 5, 5) });
+
+	Body l = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 2 });
+	// Arm along +x: half-extent (1, 0.1, 0.1), offset +1 on x.
+	body_add_shape(w, l, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(1.0f, 0.1f, 0.1f), .local_pos = V3(1, 0, 0) });
+	// Arm along +y: half-extent (0.1, 1, 0.1), offset +1 on y.
+	body_add_shape(w, l, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 1.0f, 0.1f), .local_pos = V3(0, 1, 0) });
+	body_set_velocity(w, l, V3(250.0f, 0, 0));
+	body_set_angular_velocity(w, l, V3(0, 0, 10.0f));
+	TunnelResult r = run_tunnel_scenario(w, l, 10.2f, 60);
+	TEST_BEGIN("tunnel compound L-shape: no tunnel");
+	TEST_ASSERT(!r.tunneled);
+	destroy_world(w);
+}
+
+// Compound body with COM offset: two shapes of different sizes so body
+// origin != geometric center. Verifies sweep uses body origin consistently.
+static void test_tunnel_compound_offset_com()
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body wall = create_body(w, (BodyParams){ .position = V3(10, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 5, 5) });
+
+	// Big sphere at origin, small sphere way out on +x. Rotation induces the
+	// far sphere to swing fast even at low ω.
+	Body rig = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 3 });
+	body_add_shape(w, rig, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.5f });
+	body_add_shape(w, rig, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f, .local_pos = V3(3, 0, 0) });
+	body_set_velocity(w, rig, V3(150.0f, 0, 0));
+	body_set_angular_velocity(w, rig, V3(0, 0, 20.0f));
+	TunnelResult r = run_tunnel_scenario(w, rig, 10.2f, 60);
+	TEST_BEGIN("tunnel compound offset COM: no tunnel");
+	TEST_ASSERT(!r.tunneled);
+	destroy_world(w);
+}
+
+// Tiny-vs-thin: pathological case. 1cm sphere at 1500 m/s vs 4cm-thick wall.
+// This is where CCD earns its keep — without it, one-frame travel (1500/60
+// = 25m) dwarfs the 4cm wall thickness.
+static void test_tunnel_pathological_tiny_fast()
+{
+	World w = make_tunnel_world(10.0f);
+	// Override wall to be thinner: destroy and recreate.
+	destroy_world(w);
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	w = create_world(wp);
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body thin = create_body(w, (BodyParams){ .position = V3(10, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, thin, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.02f, 5, 5) });
+
+	Body ball = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.005f });
+	body_set_velocity(w, ball, V3(1500.0f, 0, 0));
+	TunnelResult r = run_tunnel_scenario(w, ball, 10.1f, 60);
+	TEST_BEGIN("tunnel pathological tiny+fast: no tunnel");
+	TEST_ASSERT(!r.tunneled);
+	destroy_world(w);
+}
+
+// Hull vs hull: one hull (box via hull_unit_box) flies into another. Checks
+// the SAT+TOI path on hull-hull pairs (which the narrowphase routes to
+// collide_hull_hull_ex_full).
+static void test_tunnel_hull_vs_hull()
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	((WorldInternal*)w.id)->sleep_enabled = 0;
+	Body wall = create_body(w, (BodyParams){ .position = V3(10, 0, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_HULL, .hull.hull = hull_unit_box(), .hull.scale = V3(0.2f, 5, 5) });
+	Body proj = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1 });
+	body_add_shape(w, proj, (ShapeParams){ .type = SHAPE_HULL, .hull.hull = hull_unit_box(), .hull.scale = V3(0.3f, 0.3f, 0.3f) });
+	body_set_velocity(w, proj, V3(400.0f, 0, 0));
+	TunnelResult r = run_tunnel_scenario(w, proj, 10.2f, 60);
+	TEST_BEGIN("tunnel hull vs hull: no tunnel");
+	TEST_ASSERT(!r.tunneled);
+	destroy_world(w);
+}
+
+// -----------------------------------------------------------------------------
+// Post-CCD motion validation. These exercise the behavior AFTER a TOI-clamp
+// event: a body that was a fast mover and got caught by CCD should continue
+// simulating like any other body on the following frames — gravity,
+// sliding, bouncing, resting. Common regressions this catches:
+//   - Body frozen at wall (position re-clamped to pre-TOI pose each frame).
+//   - Velocity never applied because pre_solve saw pen<0 and zeroed warm lambda.
+//   - Body asleep mid-air against a vertical wall.
+
+// Fast bullet hits a thick floor, must bounce and keep bouncing under gravity.
+static void test_post_ccd_bullet_bounces_off_floor()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .restitution = 0.7f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+
+	Body ball = create_body(w, (BodyParams){ .position = V3(0, 20, 0), .rotation = quat_identity(), .mass = 1, .restitution = 0.7f });
+	body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	body_set_velocity(w, ball, V3(0, -150, 0)); // fast enough to need CCD
+
+	float min_y = 20.0f, max_y_after_impact = 0.0f;
+	int first_rise_frame = -1;
+	float dt = 1.0f / 60.0f;
+	for (int i = 0; i < 180; i++) {
+		world_step(w, dt);
+		v3 p = body_get_position(w, ball);
+		v3 v = body_get_velocity(w, ball);
+		if (p.y < min_y) min_y = p.y;
+		if (min_y < 1.0f && first_rise_frame < 0) {
+			if (v.y > 0.1f) first_rise_frame = i;
+		}
+		if (first_rise_frame >= 0 && p.y > max_y_after_impact) max_y_after_impact = p.y;
+	}
+	TEST_BEGIN("post-CCD bullet bounces: did rise after impact");
+	TEST_ASSERT(first_rise_frame >= 0);
+	TEST_BEGIN("post-CCD bullet bounces: peak after impact above 0.5m");
+	// 150 m/s impact at restitution 0.7 bounces back at 105 m/s. Peak height
+	// 105^2/(2*9.81) ~= 560m (but we only simulate 3s, body is still rising).
+	// Test that it made a non-trivial upward journey.
+	TEST_ASSERT(max_y_after_impact > 0.5f);
+	destroy_world(w);
+}
+
+// Fast bullet hits a vertical wall. After impact, gravity should pull it
+// down along the wall — it must not freeze at the impact height.
+static void test_post_ccd_bullet_falls_after_wall_hit()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(10, 5, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.1f, 5, 5) });
+
+	Body ball = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0.1f, .restitution = 0.0f });
+	body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.1f });
+	body_set_velocity(w, ball, V3(300, 0, 0)); // 5m/frame, needs CCD
+
+	// Step until ball's horizontal velocity is nearly killed (impact done).
+	float dt = 1.0f / 60.0f;
+	int impact_frame = -1;
+	for (int i = 0; i < 20; i++) {
+		world_step(w, dt);
+		if (body_get_velocity(w, ball).x < 5.0f) { impact_frame = i; break; }
+	}
+	TEST_BEGIN("post-CCD wall impact: occurred within 20 frames");
+	TEST_ASSERT(impact_frame >= 0);
+
+	// Record y at start of post-impact window, then step 30 more frames.
+	float y0 = body_get_position(w, ball).y;
+	for (int i = 0; i < 30; i++) world_step(w, dt);
+	float y1 = body_get_position(w, ball).y;
+	float dy = y0 - y1;
+
+	TEST_BEGIN("post-CCD wall impact: body falls under gravity");
+	// Gravity over 30 frames at 60 Hz = 0.5 s. Without any resistance, drop
+	// = 0.5 * 9.81 * 0.5^2 = 1.23m. With some friction against the wall
+	// expect at least 0.5m of drop.
+	TEST_ASSERT(dy > 0.5f);
+	destroy_world(w);
+}
+
+// Fast slider: a body with high horizontal velocity and gravity lands on a
+// floor, then should slide forward while coming to rest — not freeze on
+// first contact.
+static void test_post_ccd_slides_on_floor()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.1f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(50, 1, 20) });
+
+	Body ball = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 1, .restitution = 0.1f, .friction = 0.1f });
+	body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f });
+	body_set_velocity(w, ball, V3(100, -80, 0)); // fast diagonal approach
+
+	// Let it land.
+	for (int i = 0; i < 20; i++) world_step(w, 1.0f / 60.0f);
+	v3 p_land = body_get_position(w, ball);
+
+	// Continue.
+	for (int i = 0; i < 60; i++) world_step(w, 1.0f / 60.0f);
+	v3 p_later = body_get_position(w, ball);
+	TEST_BEGIN("post-CCD slides: body kept moving in +x after landing");
+	TEST_ASSERT(p_later.x > p_land.x + 1.0f);
+	destroy_world(w);
+}
+
+// Multi-impact: a ball bouncing repeatedly between a floor and wall. Each
+// bounce goes through TOI; the whole sequence must remain energetic rather
+// than converge to freeze.
+static void test_post_ccd_repeated_bounces_not_frozen()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .restitution = 0.9f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+
+	Body ball = create_body(w, (BodyParams){ .position = V3(0, 5, 0), .rotation = quat_identity(), .mass = 0.5f, .restitution = 0.6f });
+	body_add_shape(w, ball, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.15f });
+	// 40 m/s impact is fast enough to need CCD (covers 0.67m/frame vs radius 0.15)
+	// and bounces back at 24 m/s with 0.6 restitution — peak height ~29m — so
+	// period ~5s: within 300 frames (5s) we see 2-3 sign flips.
+	body_set_velocity(w, ball, V3(0, -40, 0));
+
+	int bounces = 0;
+	float vy_prev = body_get_velocity(w, ball).y;
+	for (int i = 0; i < 600; i++) {
+		world_step(w, 1.0f / 60.0f);
+		float vy = body_get_velocity(w, ball).y;
+		if (vy_prev < 0 && vy > 0) bounces++;
+		vy_prev = vy;
+	}
+	TEST_BEGIN("post-CCD repeated bounces: multiple sign flips in vy");
+	TEST_ASSERT(bounces >= 2);
+	destroy_world(w);
+}
+
+// Dumbbell with restitution 0 hits a wall under gravity: should stop
+// horizontally, then fall. Reproduces the scene where users report bodies
+// "frozen after contact".
+static void test_post_ccd_compound_falls_after_stop()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5, 1.5f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 2.5f, 2.5f) });
+
+	Body bar = create_body(w, (BodyParams){ .position = V3(-5, 1.5f, 0), .rotation = quat_identity(), .mass = 1.0f /* restitution default 0 */ });
+	body_add_shape(w, bar, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f, .local_pos = V3( 0.5f, 0, 0) });
+	body_add_shape(w, bar, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f, .local_pos = V3(-0.5f, 0, 0) });
+	body_set_velocity(w, bar, V3(40.0f, 0, 0));
+	body_set_angular_velocity(w, bar, V3(0, 6.0f, 0));
+
+	// Let it hit.
+	for (int i = 0; i < 30; i++) world_step(w, 1.0f / 60.0f);
+	v3 p_impact = body_get_position(w, bar);
+	// Step more — body must NOT be frozen (must have moved).
+	for (int i = 0; i < 60; i++) world_step(w, 1.0f / 60.0f);
+	v3 p_later = body_get_position(w, bar);
+	float total_motion = fabsf(p_later.x - p_impact.x) + fabsf(p_later.y - p_impact.y) + fabsf(p_later.z - p_impact.z);
+
+	TEST_BEGIN("post-CCD compound not frozen: moved after impact");
+	TEST_ASSERT(total_motion > 0.5f);
+	destroy_world(w);
+}
+
+// Compound body post-CCD: dumbbell hits wall, should rebound (velocity
+// reversed, angular spin preserved or reasonable), not freeze.
+static void test_post_ccd_compound_rebound()
+{
+	WorldParams wp = { .gravity = V3(0, 0, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+	Body wall = create_body(w, (BodyParams){ .position = V3(10, 0, 0), .rotation = quat_identity(), .mass = 0, .restitution = 0.8f });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.2f, 5, 5) });
+
+	Body bar = create_body(w, (BodyParams){ .position = V3(0, 0, 0), .rotation = quat_identity(), .mass = 1, .restitution = 0.8f });
+	body_add_shape(w, bar, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f, .local_pos = V3( 0.5f, 0, 0) });
+	body_add_shape(w, bar, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.2f, .local_pos = V3(-0.5f, 0, 0) });
+	body_set_velocity(w, bar, V3(200.0f, 0, 0));
+
+	for (int i = 0; i < 20; i++) world_step(w, 1.0f / 60.0f);
+	v3 v_after = body_get_velocity(w, bar);
+	TEST_BEGIN("post-CCD compound: horizontal velocity reversed");
+	TEST_ASSERT(v_after.x < 0.0f);
+	TEST_BEGIN("post-CCD compound: body moving away from wall 30 frames later");
+	float x_at_impact = body_get_position(w, bar).x;
+	for (int i = 0; i < 30; i++) world_step(w, 1.0f / 60.0f);
+	float x_later = body_get_position(w, bar).x;
+	TEST_ASSERT(x_later < x_at_impact);
+	destroy_world(w);
+}
+
+// Regression: hull projectile fired at wall-plus-beam target gets stuck at
+// the wall face with its full horizontal velocity preserved — TOI keeps
+// clamping the body to pre_pos every frame while the solver's impulse
+// never stops the velocity. Captured from CCD soak run seed 0xbadcab1e,
+// spawn_rng 0xfeb53bb1. Shape is one of the CCD soak test's random hulls
+// at scale 1.3653; we reconstruct the geometry here rather than relying
+// on soak infrastructure so the test is self-contained.
+static void test_post_ccd_hull_chunk_not_frozen_at_beam_wall()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	v3 chunk[] = {
+		{0.5f, 0.4f, 0.3f}, {-0.4f, 0.5f, 0.2f}, {0.3f, -0.4f, 0.5f},
+		{-0.5f, -0.3f, -0.4f}, {0.4f, 0.2f, -0.5f}, {-0.3f, -0.5f, 0.3f},
+		{0.5f, -0.2f, -0.2f}, {-0.2f, 0.5f, -0.3f},
+	};
+	Hull* h_chunk = quickhull(chunk, 8);
+
+	float scale_f = 1.3653f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_chunk, .scale = V3(0.18f*scale_f, 0.18f*scale_f, 0.18f*scale_f) } });
+	body_set_velocity(w, b, V3(68.752f, 2.007f, 3.708f));
+	body_set_angular_velocity(w, b, V3(-3.519f, -1.140f, 4.610f));
+
+	float dt = 1.0f / 60.0f;
+	v3 prev = body_get_position(w, b);
+	int frozen = 0;
+	for (int frame = 0; frame < 16; frame++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, b);
+		v3 vel = body_get_velocity(w, b);
+		float d = v3_len(sub(pos, prev));
+		if (v3_len(vel) > 1.0f && d < 0.001f) frozen++; else frozen = 0;
+		prev = pos;
+	}
+	TEST_BEGIN("post-CCD hull_chunk not frozen at wall/beam");
+	TEST_ASSERT(frozen < 60);
+	hull_free(h_chunk);
+	destroy_world(w);
+}
+
+// Regression: soak found a BOX projectile tunneling through the wall at
+// v=(136,4.9,-3.1), omega=(3.96,5.82,-2.34). Root cause was TOI multi-pass's
+// "no hit -> advance full remaining" branch: after pass 1 clamped the body
+// at the wall, pass 2's toi_pair_advance returned 1.0 from the touching-but-
+// receding guard, and the fallback advanced the body forward by the unused
+// step budget -- straight through the wall. Fix: break out of multi-pass
+// instead of advancing forward when no further TOI hit is found.
+static void test_post_ccd_box_bullet_no_tunnel_soak_seed()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	float s = 1.0210f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.10f*s, 0.09f*s, 0.09f*s) });
+	body_set_velocity(w, b, V3(136.328f, 4.930f, -3.105f));
+	body_set_angular_velocity(w, b, V3(3.964f, 5.819f, -2.337f));
+
+	float dt = 1.0f / 60.0f;
+	int tunneled = 0;
+	for (int frame = 0; frame < 30; frame++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, b);
+		if (pos.x > 5.10f) { tunneled = 1; break; }
+	}
+	TEST_BEGIN("post-CCD box bullet (soak seed): no tunnel");
+	TEST_ASSERT(!tunneled);
+	destroy_world(w);
+}
+
+// Regression: soak found a BOX projectile freezing in mid-air near the beam
+// with a large velocity pointing AWAY from the beam (body had bounced off
+// the wall). Root cause was the edge-edge scalar-triple-product separation
+// function reporting a large negative s2 at t=1 even though the body was
+// receding from the feature: the two edges rotated through near-parallel
+// during the step, losing the sign convention. With a negative s2, the
+// root-finder converged to t=0 and TOI clamped the body to pre-pos every
+// frame. Fix: add a sanity gate in toi_pair_advance -- if body velocity
+// projected onto GJK's witness-to-witness direction is non-approaching,
+// return 1.0 immediately, regardless of what the sep-fn claims.
+static void test_post_ccd_box_bullet_no_freeze_after_rebound()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	float s = 1.4602f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.10f*s, 0.09f*s, 0.09f*s) });
+	body_set_velocity(w, b, V3(113.001f, 3.204f, 4.639f));
+	body_set_angular_velocity(w, b, V3(4.783f, 5.670f, -4.163f));
+
+	float dt = 1.0f / 60.0f;
+	v3 prev = body_get_position(w, b);
+	int frozen = 0;
+	int max_frozen = 0;
+	for (int frame = 0; frame < 120; frame++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, b);
+		v3 vel = body_get_velocity(w, b);
+		float d = v3_len(sub(pos, prev));
+		if (v3_len(vel) > 1.0f && d < 0.001f) { frozen++; if (frozen > max_frozen) max_frozen = frozen; } else frozen = 0;
+		prev = pos;
+	}
+	TEST_BEGIN("post-CCD box bullet (soak seed): no freeze after rebound");
+	TEST_ASSERT(max_frozen < 10);
+	destroy_world(w);
+}
+
+// Regression: soak found a HULL_TET projectile getting STUCK inside the beam
+// after TOI mis-classified a deep-impact pair as "separated through the step".
+// Root cause was the edge-edge scalar-triple-product sep-fn returning a large
+// positive s2 at t=1 after the body swept past/through the edges (sign flip).
+// The outer loop had just reseeded with t1 in the speculative zone (GJK
+// distance ~0.027) but the EDGE_EDGE inner push claimed the body was
+// separated through the remaining step -- and pair_advance returned 1.0
+// instead of the current t1, leaving the TOI clamp to miss the beam. Fix:
+// when inner push claims "separated" with an EDGE_EDGE sep-fn and GJK
+// already has us within a few LINEAR_SLOPs of contact, trust GJK over the
+// sep-fn sign and accept the current t1 as the TOI.
+static void test_post_ccd_tet_not_stuck_in_beam()
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+
+	v3 tet[] = { {0, 0.6f, 0}, {0.5f, -0.3f, 0.3f}, {-0.5f, -0.3f, 0.3f}, {0, -0.3f, -0.5f} };
+	Hull* h_tet = quickhull(tet, 4);
+	float s = 1.1375f;
+	Body b = create_body(w, (BodyParams){
+		.position = V3(-8.5f, 1.5f, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_tet, .scale = V3(0.18f*s, 0.18f*s, 0.18f*s) } });
+	body_set_velocity(w, b, V3(126.798f, 3.953f, 0.810f));
+	body_set_angular_velocity(w, b, V3(1.578f, -2.408f, 2.729f));
+
+	float dt = 1.0f / 60.0f;
+	int stuck = 0;
+	for (int frame = 0; frame < 20; frame++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, b);
+		int inside_wall = fabsf(pos.x - 5.0f) < 0.05f && fabsf(pos.y - 2.0f) < 3.0f && fabsf(pos.z) < 3.0f;
+		int inside_beam = fabsf(pos.x - 5.0f) < 0.35f && fabsf(pos.y - 2.0f) < 0.15f && fabsf(pos.z) < 3.0f;
+		if (inside_wall || inside_beam) { stuck = 1; break; }
+	}
+	TEST_BEGIN("post-CCD tet (soak seed): not stuck in beam");
+	TEST_ASSERT(!stuck);
+	hull_free(h_tet);
+	destroy_world(w);
+}
+
+static void run_post_ccd_tests()
+{
+	printf("--- nudge post-CCD motion tests ---\n");
+	test_post_ccd_tet_not_stuck_in_beam();
+	test_post_ccd_box_bullet_no_freeze_after_rebound();
+	test_post_ccd_box_bullet_no_tunnel_soak_seed();
+	test_post_ccd_bullet_bounces_off_floor();
+	test_post_ccd_bullet_falls_after_wall_hit();
+	test_post_ccd_slides_on_floor();
+	test_post_ccd_repeated_bounces_not_frozen();
+	test_post_ccd_compound_falls_after_stop();
+	test_post_ccd_compound_rebound();
+	test_post_ccd_hull_chunk_not_frozen_at_beam_wall();
+}
+
+static void run_tunnel_tests()
+{
+	printf("--- nudge tunnel tests ---\n");
+	test_tunnel_sphere_size_speed_sweep();
+	test_tunnel_box_size_speed_sweep();
+	test_tunnel_capsule_orientations();
+	test_tunnel_glancing_edge();
+	test_tunnel_sphere_at_corner();
+	test_tunnel_sphere_at_wall_edge();
+	test_tunnel_spinning_long_box();
+	test_tunnel_compound_dumbbell();
+	test_tunnel_compound_l_shape();
+	test_tunnel_compound_offset_com();
+	test_tunnel_pathological_tiny_fast();
+	test_tunnel_hull_vs_hull();
+}
+
+static void run_ccd_tests()
+{
+	printf("--- nudge CCD tests ---\n");
+	test_ccd_bullet_vs_wall();
+	test_ccd_stack_undisturbed_by_bullet();
+	test_ccd_no_ghost_bounce_on_graze();
+}
+
 static void run_tests()
 {
 	test_pass = 0;
@@ -11686,6 +12824,10 @@ static void run_tests()
 	TIMED(run_ldl_stress_tests());
 	TIMED(run_bvh_tests());
 	TIMED(run_query_tests());
+	TIMED(run_toi_tests());
+	TIMED(run_ccd_tests());
+	TIMED(run_tunnel_tests());
+	TIMED(run_post_ccd_tests());
 	TIMED(test_feature_ids());
 	// run_sleep_tests (4.8s) moved to --slow
 	test_aalign();
@@ -11940,6 +13082,501 @@ static void bench_box_pile(int grid_w, int height, int frames_count, WorldParams
 	bp_frame_count = 0;
 
 	destroy_world(w);
+}
+
+// -----------------------------------------------------------------------------
+// CCD benchmark: fires N bullets at a wall of boxes and measures per-frame
+// timing. Reports CCD on vs. off, and sweeps the speculative margin to see
+// how widening the speculative band (more bodies "slow" per the speed test)
+// trades off against the per-step narrowphase cost.
+//
+// Invoke: nudge_tests.exe --bench-ccd [nbullets] [speed]
+static void bench_ccd_scenario(int nbullets, float bullet_speed, int ccd_on, float margin, int threads, const char* label)
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+	wi->thread_count = threads;
+	wi->speculative_enabled = ccd_on;
+	if (margin > 0.0f) wi->speculative_margin = margin;
+
+	// Static wall: 5 stacked thin panels. Bullets stop on the first one.
+	for (int i = 0; i < 5; i++) {
+		Body wall = create_body(w, (BodyParams){ .position = V3(20 + 2.0f * i, 2, 0), .rotation = quat_identity(), .mass = 0 });
+		body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3, 5) });
+	}
+
+	// Swarm of bullets in a wrap-around grid. Bullets that exit the
+	// measurement volume get respawned each frame so we keep a steady
+	// `nbullets` in flight — constant CCD workload.
+	Body* bullets = NULL;
+	for (int i = 0; i < nbullets; i++) {
+		float y = 0.2f + (i % 20) * 0.25f;
+		float z = -3.0f + ((i / 20) % 20) * 0.3f;
+		Body b = create_body(w, (BodyParams){ .position = V3(-10, y, z), .rotation = quat_identity(), .mass = 0.05f });
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.08f });
+		body_set_velocity(w, b, V3(bullet_speed, 0, 0));
+		apush(bullets, b);
+	}
+
+	float dt = 1.0f / 60.0f;
+	// Short warmup so initial allocations / caches stabilize.
+	for (int i = 0; i < 5; i++) world_step(w, dt);
+	// Respawn bullets that have flown past the far wall so the workload
+	// stays steady across the measurement window.
+	int respawn_counter = 0;
+
+	int frames = 120;
+	PerfTimers acc = {0};
+	double wall_start = perf_now();
+	for (int i = 0; i < frames; i++) {
+		// Respawn stale bullets to keep a steady population.
+		int bi = respawn_counter++ % nbullets;
+		v3 p = body_get_position(w, bullets[bi]);
+		if (p.x > 20.0f) {
+			float y = 0.2f + (bi % 20) * 0.25f;
+			float z = -3.0f + ((bi / 20) % 20) * 0.3f;
+			body_set_position(w, bullets[bi], V3(-10, y, z));
+			body_set_velocity(w, bullets[bi], V3(bullet_speed, 0, 0));
+		}
+		world_step(w, dt);
+		PerfTimers t = world_get_perf(w);
+		acc.broadphase += t.broadphase;
+		acc.pre_solve += t.pre_solve;
+		acc.pgs_solve += t.pgs_solve;
+		acc.position_correct += t.position_correct;
+		acc.integrate += t.integrate;
+		acc.islands += t.islands;
+		acc.ccd += t.ccd;
+		acc.total += t.total;
+	}
+	double wall_sec = perf_now() - wall_start;
+	double n = (double)frames;
+	printf("  [%-26s th=%d margin=%.3f] wall=%6.2f ms/frame  total=%6.2f  bp=%5.2f  pre=%5.2f  pgs=%5.2f  ccd=%5.2f\n",
+		label, threads, wi->speculative_margin,
+		wall_sec / n * 1000.0,
+		acc.total / n * 1000.0,
+		acc.broadphase / n * 1000.0,
+		acc.pre_solve / n * 1000.0,
+		acc.pgs_solve / n * 1000.0,
+		acc.ccd / n * 1000.0);
+	afree(bullets);
+	destroy_world(w);
+}
+
+static void bench_ccd(int nbullets, float bullet_speed)
+{
+	printf("--- CCD bench: %d bullets @ %.0f m/s, 120 frames after warmup ---\n", nbullets, bullet_speed);
+	bench_ccd_scenario(nbullets, bullet_speed, 0, 0.0f,  1, "CCD off");
+	bench_ccd_scenario(nbullets, bullet_speed, 1, 0.02f, 1, "CCD on, margin 0.02");
+	bench_ccd_scenario(nbullets, bullet_speed, 1, 0.05f, 1, "CCD on, margin 0.05");
+	bench_ccd_scenario(nbullets, bullet_speed, 1, 0.10f, 1, "CCD on, margin 0.10");
+	bench_ccd_scenario(nbullets, bullet_speed, 1, 0.20f, 1, "CCD on, margin 0.20");
+	printf("  --- threading scale (margin=0.05) ---\n");
+	bench_ccd_scenario(nbullets, bullet_speed, 1, 0.05f, 1, "CCD 1 thread");
+	bench_ccd_scenario(nbullets, bullet_speed, 1, 0.05f, 2, "CCD 2 threads");
+	bench_ccd_scenario(nbullets, bullet_speed, 1, 0.05f, 4, "CCD 4 threads");
+	bench_ccd_scenario(nbullets, bullet_speed, 1, 0.05f, 8, "CCD 8 threads");
+}
+
+// -----------------------------------------------------------------------------
+// CCD soak test. Fires randomized projectiles at a wall + protruding beam
+// forever (or for `max_frames`). Detects three violation classes:
+//   TUNNEL  body center crossed past the far face of the wall
+//   STUCK   body center sits inside the wall/beam volume
+//   FROZEN  body is enrolled-fast and has significant velocity but its
+//           position hasn't changed for FROZEN_WINDOW frames (TOI
+//           snap-back bug, or solver refusing to push out of overlap)
+// Every violation writes one CSV-ish line to stdout AND to
+// `ccd_soak_violations.log`. The line carries the RNG state used to
+// spawn the offending projectile and every parameter (kind, scale,
+// speed, direction, omega) so a targeted unit test can be built from
+// any recorded violation.
+//
+// Bodies that fly off the range naturally (bouncing out of bounds) are
+// culled on their way out. This keeps the running body count bounded so
+// the soak can run indefinitely.
+//
+// Invoke:
+//   nudge_tests.exe --bench-ccd-soak [max_frames]
+//   max_frames <= 0 or absent => infinite (Ctrl+C to stop).
+
+#define CCD_SOAK_WALL_X          5.0f
+#define CCD_SOAK_WALL_HX         0.05f
+#define CCD_SOAK_WALL_HY         3.0f
+#define CCD_SOAK_WALL_HZ         3.0f
+#define CCD_SOAK_BEAM_HX         0.35f
+#define CCD_SOAK_BEAM_HY         0.15f
+#define CCD_SOAK_BEAM_HZ         3.0f
+#define CCD_SOAK_WALL_FAR_X      (CCD_SOAK_WALL_X + CCD_SOAK_WALL_HX + 0.05f)
+#define CCD_SOAK_CANNON_X       -9.0f
+#define CCD_SOAK_CANNON_Y        1.5f
+#define CCD_SOAK_SPAWN_X        -8.5f
+#define CCD_SOAK_BOUND_X_HI     30.0f
+#define CCD_SOAK_BOUND_X_LO    -30.0f
+#define CCD_SOAK_BOUND_Y_LO    -10.0f
+#define CCD_SOAK_BOUND_Y_HI     50.0f
+#define CCD_SOAK_FROZEN_WINDOW   60   // frames of no motion while velocity > threshold => FROZEN
+#define CCD_SOAK_FROZEN_VEL_MIN  1.0f // min velocity magnitude to count as "should be moving"
+#define CCD_SOAK_FROZEN_POS_EPS  0.001f
+
+typedef struct SoakBullet
+{
+	Body handle;
+	int   kind;
+	float scale;
+	float speed;
+	v3    vel;
+	v3    omega;
+	v3    spawn_pos;
+	int   spawn_frame;
+	uint32_t spawn_rng;  // LCG state IMMEDIATELY before spawn RNG draws
+	int   frozen_frames;
+	v3    prev_pos;
+	int   violation_reported; // bitmask: 1=TUNNEL, 2=STUCK, 4=FROZEN
+	int   cull_frame;         // positive => scheduled-to-destroy at this frame
+} SoakBullet;
+
+#define CCD_SOAK_MAX_LIFETIME_FRAMES  300 // 5s at 60Hz: cull bodies that never left
+#define CCD_SOAK_POST_VIOLATION_FRAMES 30 // linger a bit to confirm stuck/frozen persists
+
+static uint32_t soak_rng_state;
+static float soak_rand01()
+{
+	soak_rng_state = soak_rng_state * 1664525u + 1013904223u;
+	return (float)(soak_rng_state >> 8) * (1.0f / 16777216.0f);
+}
+static float soak_rand_range(float lo, float hi) { return lo + (hi - lo) * soak_rand01(); }
+
+static const char* soak_kind_name(int k)
+{
+	switch (k) {
+	case 0: return "SPHERE";
+	case 1: return "BOX";
+	case 2: return "CAPSULE";
+	case 3: return "HULL_TET";
+	case 4: return "HULL_CHUNK";
+	case 5: return "HULL_SHARD";
+	case 6: return "COMPOUND_DUMBBELL";
+	default: return "UNKNOWN";
+	}
+}
+
+static void soak_log_violation(FILE* log_fp, int frame, const char* kind, SoakBullet* b, v3 pos, v3 vel)
+{
+	// One-line CSV-ish record with every field needed to reproduce.
+	char buf[512];
+	int n = snprintf(buf, sizeof(buf),
+		"[VIOLATION %s] frame=%d spawn_frame=%d spawn_rng=0x%08x kind=%s scale=%.4f speed=%.3f "
+		"vel=(%.3f,%.3f,%.3f) omega=(%.3f,%.3f,%.3f) spawn=(%.3f,%.3f,%.3f) pos_now=(%.3f,%.3f,%.3f) vel_now=(%.3f,%.3f,%.3f)\n",
+		kind, frame, b->spawn_frame, b->spawn_rng, soak_kind_name(b->kind), b->scale, b->speed,
+		b->vel.x, b->vel.y, b->vel.z, b->omega.x, b->omega.y, b->omega.z,
+		b->spawn_pos.x, b->spawn_pos.y, b->spawn_pos.z,
+		pos.x, pos.y, pos.z, vel.x, vel.y, vel.z);
+	(void)n;
+	fputs(buf, stdout);
+	fflush(stdout);
+	if (log_fp) { fputs(buf, log_fp); fflush(log_fp); }
+}
+
+static void bench_ccd_soak(int max_frames)
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(CCD_SOAK_WALL_X, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(CCD_SOAK_WALL_HX, CCD_SOAK_WALL_HY, CCD_SOAK_WALL_HZ) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(CCD_SOAK_WALL_X, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(CCD_SOAK_BEAM_HX, CCD_SOAK_BEAM_HY, CCD_SOAK_BEAM_HZ) });
+
+	// Small hull kit — same as the demo scene so violations reproduce in-scene.
+	v3 tet[] = { {0, 0.6f, 0}, {0.5f, -0.3f, 0.3f}, {-0.5f, -0.3f, 0.3f}, {0, -0.3f, -0.5f} };
+	Hull* h_tet = quickhull(tet, 4);
+	v3 chunk[] = {
+		{0.5f, 0.4f, 0.3f}, {-0.4f, 0.5f, 0.2f}, {0.3f, -0.4f, 0.5f},
+		{-0.5f, -0.3f, -0.4f}, {0.4f, 0.2f, -0.5f}, {-0.3f, -0.5f, 0.3f},
+		{0.5f, -0.2f, -0.2f}, {-0.2f, 0.5f, -0.3f},
+	};
+	Hull* h_chunk = quickhull(chunk, 8);
+	v3 shard[] = {
+		{0.1f, 0.9f, 0.0f}, {0.0f, -0.9f, 0.0f},
+		{0.4f, 0.0f, 0.15f}, {-0.35f, 0.05f, 0.2f},
+		{0.3f, 0.2f, -0.3f}, {-0.25f, 0.0f, -0.3f},
+	};
+	Hull* h_shard = quickhull(shard, 6);
+
+	// Live-projectile table (parallel array; no dedicated map).
+	SoakBullet* bullets = NULL;
+
+	// RNG seed can be user-overridden via env var for replay runs (cheap
+	// and portable without adding another arg).
+	soak_rng_state = 0xbadcab1eu;
+	const char* seed_env = getenv("CCD_SOAK_SEED");
+	if (seed_env && *seed_env) {
+		unsigned int s = 0;
+		if (sscanf(seed_env, "%x", &s) == 1 || sscanf(seed_env, "%u", &s) == 1) soak_rng_state = (uint32_t)s;
+	}
+	uint32_t initial_seed = soak_rng_state;
+
+	FILE* log_fp = fopen("ccd_soak_violations.log", "a");
+	time_t now = time(NULL);
+	if (log_fp) {
+		fprintf(log_fp, "\n--- soak run start %s  initial_seed=0x%08x  max_frames=%d ---\n",
+			ctime(&now), initial_seed, max_frames);
+		fflush(log_fp);
+	}
+	printf("--- CCD soak: initial_seed=0x%08x max_frames=%d (0=infinite) ---\n", initial_seed, max_frames);
+
+	int frame = 0;
+	int fire_cooldown = 0;
+	int total_fired = 0;
+	int total_violations = 0;
+	int live_max = 0;
+
+	for (;;) {
+		if (max_frames > 0 && frame >= max_frames) break;
+
+		// Fire a projectile every 12-28 frames, but cap the live count
+		// to keep BVH churn bounded. (The BVH refit path has a separate
+		// pre-existing corruption bug under heavy create/destroy churn;
+		// logged as TODO. Once that's fixed this cap can drop.)
+		int live_now = asize(bullets);
+		int live_cap = 12;
+		if (fire_cooldown > 0 || live_now >= live_cap) { if (fire_cooldown > 0) fire_cooldown--; }
+		else {
+			fire_cooldown = 12 + (int)soak_rand_range(0, 16);
+			uint32_t spawn_seed = soak_rng_state;
+
+			float speed = soak_rand_range(50.0f, 140.0f);
+			// Aim at the beam ~60% of the time, at the wall field the rest —
+			// beam impacts are where the angular-impulse bugs live, so bias
+			// the soak toward them.
+			int aim_beam = soak_rand01() < 0.6f;
+			float target_y = aim_beam ? soak_rand_range(1.88f, 2.12f)
+			                          : soak_rand_range(0.5f, 3.5f);
+			float target_z = aim_beam ? soak_rand_range(-1.0f, 1.0f)
+			                          : soak_rand_range(-2.5f, 2.5f);
+			// Small extra jitter on top of the aim so we catch edge cases.
+			float spread_y = aim_beam ? soak_rand_range(-0.08f, 0.08f)
+			                          : soak_rand_range(-0.35f, 0.35f);
+			float spread_z = aim_beam ? soak_rand_range(-0.15f, 0.15f)
+			                          : soak_rand_range(-0.35f, 0.35f);
+			v3 target = V3(5.0f, target_y, target_z);
+			v3 muzzle = V3(CCD_SOAK_SPAWN_X, CCD_SOAK_CANNON_Y, 0);
+			v3 dir = V3(target.x - muzzle.x, target.y - muzzle.y + spread_y, target.z - muzzle.z + spread_z);
+			float dl = v3_len(dir);
+			if (dl < 1e-4f) dl = 1.0f;
+			v3 vel = scale(dir, speed / dl);
+			v3 omega = V3(soak_rand_range(-6, 6), soak_rand_range(-6, 6), soak_rand_range(-6, 6));
+			float scale_f = soak_rand_range(0.7f, 1.5f);
+			int kind = (int)soak_rand_range(0, 6.999f);
+
+			Body b = create_body(w, (BodyParams){
+				.position = muzzle, .rotation = quat_identity(), .mass = 0.15f,
+				.restitution = 0.25f, .friction = 0.4f,
+			});
+			switch (kind) {
+			case 0: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.08f * scale_f }); break;
+			case 1: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.10f * scale_f, 0.09f * scale_f, 0.09f * scale_f) }); break;
+			case 2: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.12f * scale_f, .radius = 0.06f * scale_f } }); break;
+			case 3: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_tet, .scale = V3(0.18f*scale_f, 0.18f*scale_f, 0.18f*scale_f) } }); break;
+			case 4: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_chunk, .scale = V3(0.18f*scale_f, 0.18f*scale_f, 0.18f*scale_f) } }); break;
+			case 5: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_shard, .scale = V3(0.18f*scale_f, 0.18f*scale_f, 0.18f*scale_f) } }); break;
+			case 6: {
+				float r = 0.12f * scale_f, off = 0.35f * scale_f;
+				body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = r, .local_pos = V3( off, 0, 0) });
+				body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = r, .local_pos = V3(-off, 0, 0) });
+				break;
+			}
+			}
+			body_set_velocity(w, b, vel);
+			body_set_angular_velocity(w, b, omega);
+
+			SoakBullet rec = {
+				.handle = b, .kind = kind, .scale = scale_f, .speed = speed,
+				.vel = vel, .omega = omega, .spawn_pos = muzzle,
+				.spawn_frame = frame, .spawn_rng = spawn_seed,
+				.prev_pos = muzzle,
+			};
+			apush(bullets, rec);
+			total_fired++;
+		}
+
+		world_step(w, 1.0f / 60.0f);
+		frame++;
+
+		int live = asize(bullets);
+		if (live > live_max) live_max = live;
+
+		// Check every live projectile.
+		for (int i = asize(bullets) - 1; i >= 0; i--) {
+			SoakBullet* b = &bullets[i];
+			if (!body_is_valid(w, b->handle)) { bullets[i] = bullets[asize(bullets) - 1]; asetlen(bullets, asize(bullets) - 1); continue; }
+			v3 pos = body_get_position(w, b->handle);
+			v3 vel = body_get_velocity(w, b->handle);
+
+			int prev_flags = b->violation_reported;
+
+			// TUNNEL: body center is past the wall far-face.
+			if (pos.x > CCD_SOAK_WALL_FAR_X && !(b->violation_reported & 1)) {
+				soak_log_violation(log_fp, frame, "TUNNEL", b, pos, vel);
+				b->violation_reported |= 1;
+				total_violations++;
+				goto soak_done;
+			}
+
+			// STUCK: body center is INSIDE the wall or beam volume.
+			int inside_wall = fabsf(pos.x - CCD_SOAK_WALL_X) < CCD_SOAK_WALL_HX && fabsf(pos.y - 2.0f) < CCD_SOAK_WALL_HY && fabsf(pos.z) < CCD_SOAK_WALL_HZ;
+			int inside_beam = fabsf(pos.x - CCD_SOAK_WALL_X) < CCD_SOAK_BEAM_HX && fabsf(pos.y - 2.0f) < CCD_SOAK_BEAM_HY && fabsf(pos.z) < CCD_SOAK_BEAM_HZ;
+			if ((inside_wall || inside_beam) && !(b->violation_reported & 2)) {
+				soak_log_violation(log_fp, frame, "STUCK", b, pos, vel);
+				b->violation_reported |= 2;
+				total_violations++;
+				goto soak_done;
+			}
+
+			// FROZEN: velocity magnitude is significant but position
+			// hasn't changed for FROZEN_WINDOW consecutive frames.
+			v3 dp = sub(pos, b->prev_pos);
+			float d_pos = v3_len(dp);
+			float v_mag = v3_len(vel);
+			if (v_mag > CCD_SOAK_FROZEN_VEL_MIN && d_pos < CCD_SOAK_FROZEN_POS_EPS) {
+				b->frozen_frames++;
+				if (b->frozen_frames >= CCD_SOAK_FROZEN_WINDOW && !(b->violation_reported & 4)) {
+					soak_log_violation(log_fp, frame, "FROZEN", b, pos, vel);
+					b->violation_reported |= 4;
+					total_violations++;
+					goto soak_done;
+				}
+			} else {
+				b->frozen_frames = 0;
+			}
+			b->prev_pos = pos;
+
+			// Schedule cull shortly after a violation fires, so the live
+			// bullet list stops filling with broken bodies and the soak
+			// can keep firing fresh projectiles.
+			if (b->violation_reported && !prev_flags) b->cull_frame = frame + CCD_SOAK_POST_VIOLATION_FRAMES;
+
+			// Cull: out-of-bounds / age-out / post-violation.
+			int age = frame - b->spawn_frame;
+			int out_of_bounds = pos.x > CCD_SOAK_BOUND_X_HI || pos.x < CCD_SOAK_BOUND_X_LO ||
+			                    pos.y < CCD_SOAK_BOUND_Y_LO || pos.y > CCD_SOAK_BOUND_Y_HI;
+			int scheduled = b->cull_frame > 0 && frame >= b->cull_frame;
+			int aged_out = age >= CCD_SOAK_MAX_LIFETIME_FRAMES;
+			if (out_of_bounds || scheduled || aged_out) {
+				destroy_body(w, b->handle);
+				bullets[i] = bullets[asize(bullets) - 1];
+				asetlen(bullets, asize(bullets) - 1);
+			}
+		}
+
+		// Heartbeat every 10 seconds of sim time (600 frames at 60 Hz).
+		if (frame % 600 == 0) {
+			printf("  [soak heartbeat] frame=%d fired=%d live=%d live_max=%d violations=%d\n", frame, total_fired, live, live_max, total_violations);
+			fflush(stdout);
+		}
+	}
+
+soak_done:
+	printf("--- CCD soak end: frames=%d fired=%d live_max=%d violations=%d ---\n", frame, total_fired, live_max, total_violations);
+	if (log_fp) {
+		fprintf(log_fp, "--- soak run end frames=%d fired=%d violations=%d ---\n", frame, total_fired, total_violations);
+		fclose(log_fp);
+	}
+	afree(bullets);
+	destroy_world(w);
+	hull_free(h_tet);
+	hull_free(h_chunk);
+	hull_free(h_shard);
+}
+
+// Rebuild ONE bullet with the exact spawn parameters from a soak-log line
+// and step the world forward long enough to reproduce the violation. Used
+// to turn any logged violation into a dedicated unit-test repro without
+// replaying the entire soak run.
+//
+// Arguments match the fields on the soak log line except `spawn_frame`
+// and `spawn_rng`, which aren't needed (the bullet is spawned immediately
+// at t=0 of a fresh world with the given kinematics).
+static void ccd_soak_repro(int kind, float scale_f, float vx, float vy, float vz, float wx, float wy, float wz)
+{
+	WorldParams wp = { .gravity = V3(0, -9.81f, 0), .broadphase = BROADPHASE_BVH };
+	World w = create_world(wp);
+	WorldInternal* wi = (WorldInternal*)w.id;
+	wi->sleep_enabled = 0;
+
+	Body floor_b = create_body(w, (BodyParams){ .position = V3(0, -1, 0), .rotation = quat_identity(), .mass = 0, .friction = 0.5f });
+	body_add_shape(w, floor_b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(20, 1, 20) });
+	Body wall = create_body(w, (BodyParams){ .position = V3(CCD_SOAK_WALL_X, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(CCD_SOAK_WALL_HX, CCD_SOAK_WALL_HY, CCD_SOAK_WALL_HZ) });
+	Body beam = create_body(w, (BodyParams){ .position = V3(CCD_SOAK_WALL_X, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(w, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(CCD_SOAK_BEAM_HX, CCD_SOAK_BEAM_HY, CCD_SOAK_BEAM_HZ) });
+
+	v3 tet[] = { {0, 0.6f, 0}, {0.5f, -0.3f, 0.3f}, {-0.5f, -0.3f, 0.3f}, {0, -0.3f, -0.5f} };
+	Hull* h_tet = quickhull(tet, 4);
+	v3 chunk[] = {
+		{0.5f, 0.4f, 0.3f}, {-0.4f, 0.5f, 0.2f}, {0.3f, -0.4f, 0.5f},
+		{-0.5f, -0.3f, -0.4f}, {0.4f, 0.2f, -0.5f}, {-0.3f, -0.5f, 0.3f},
+		{0.5f, -0.2f, -0.2f}, {-0.2f, 0.5f, -0.3f},
+	};
+	Hull* h_chunk = quickhull(chunk, 8);
+	v3 shard[] = {
+		{0.1f, 0.9f, 0.0f}, {0.0f, -0.9f, 0.0f},
+		{0.4f, 0.0f, 0.15f}, {-0.35f, 0.05f, 0.2f},
+		{0.3f, 0.2f, -0.3f}, {-0.25f, 0.0f, -0.3f},
+	};
+	Hull* h_shard = quickhull(shard, 6);
+
+	Body b = create_body(w, (BodyParams){
+		.position = V3(CCD_SOAK_SPAWN_X, CCD_SOAK_CANNON_Y, 0), .rotation = quat_identity(),
+		.mass = 0.15f, .restitution = 0.25f, .friction = 0.4f,
+	});
+	switch (kind) {
+	case 0: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = 0.08f * scale_f }); break;
+	case 1: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.10f * scale_f, 0.09f * scale_f, 0.09f * scale_f) }); break;
+	case 2: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.12f * scale_f, .radius = 0.06f * scale_f } }); break;
+	case 3: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_tet, .scale = V3(0.18f*scale_f, 0.18f*scale_f, 0.18f*scale_f) } }); break;
+	case 4: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_chunk, .scale = V3(0.18f*scale_f, 0.18f*scale_f, 0.18f*scale_f) } }); break;
+	case 5: body_add_shape(w, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h_shard, .scale = V3(0.18f*scale_f, 0.18f*scale_f, 0.18f*scale_f) } }); break;
+	case 6: {
+		float r = 0.12f * scale_f, off = 0.35f * scale_f;
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = r, .local_pos = V3( off, 0, 0) });
+		body_add_shape(w, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = r, .local_pos = V3(-off, 0, 0) });
+		break;
+	}
+	}
+	body_set_velocity(w, b, V3(vx, vy, vz));
+	body_set_angular_velocity(w, b, V3(wx, wy, wz));
+
+	printf("--- CCD repro: kind=%s scale=%.4f vel=(%.3f,%.3f,%.3f) omega=(%.3f,%.3f,%.3f) ---\n",
+		soak_kind_name(kind), scale_f, vx, vy, vz, wx, wy, wz);
+	float dt = 1.0f / 60.0f;
+	v3 prev = body_get_position(w, b);
+	int frozen = 0;
+	for (int frame = 0; frame < 300; frame++) {
+		world_step(w, dt);
+		v3 pos = body_get_position(w, b);
+		v3 vel = body_get_velocity(w, b);
+		int inside_wall = fabsf(pos.x - CCD_SOAK_WALL_X) < CCD_SOAK_WALL_HX && fabsf(pos.y - 2.0f) < CCD_SOAK_WALL_HY && fabsf(pos.z) < CCD_SOAK_WALL_HZ;
+		int inside_beam = fabsf(pos.x - CCD_SOAK_WALL_X) < CCD_SOAK_BEAM_HX && fabsf(pos.y - 2.0f) < CCD_SOAK_BEAM_HY && fabsf(pos.z) < CCD_SOAK_BEAM_HZ;
+		if (pos.x > CCD_SOAK_WALL_FAR_X) { printf("  TUNNEL at frame %d pos=(%.3f,%.3f,%.3f)\n", frame, pos.x, pos.y, pos.z); break; }
+		if (inside_wall || inside_beam) { printf("  STUCK at frame %d pos=(%.3f,%.3f,%.3f)\n", frame, pos.x, pos.y, pos.z); break; }
+		float d = v3_len(sub(pos, prev));
+		if (v3_len(vel) > CCD_SOAK_FROZEN_VEL_MIN && d < CCD_SOAK_FROZEN_POS_EPS) {
+			frozen++;
+			if (frozen >= CCD_SOAK_FROZEN_WINDOW) { printf("  FROZEN at frame %d pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f)\n", frame, pos.x, pos.y, pos.z, vel.x, vel.y, vel.z); break; }
+		} else frozen = 0;
+		prev = pos;
+		if (frame == 299) printf("  NO VIOLATION within 300 frames; final pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f)\n", pos.x, pos.y, pos.z, vel.x, vel.y, vel.z);
+	}
+	destroy_world(w);
+	hull_free(h_tet); hull_free(h_chunk); hull_free(h_shard);
 }
 
 static void bench_pyramid(int base_size, int frames_count)

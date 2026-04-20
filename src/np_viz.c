@@ -449,7 +449,7 @@ static void npv_build_sat_trace()
 		CachedFeaturePair cp_copy = npv_cached_pair;
 		ConvexHull cha = { hull_a, pos_a, rot_a, sc_a };
 		ConvexHull chb = { hull_b, pos_b, rot_b, sc_b };
-		int refreshed = refresh_hull_hull_face(cha, chb, &refresh_m, &cp_copy);
+		int refreshed = refresh_hull_hull_face(cha, chb, &refresh_m, &cp_copy, 0.0f);
 		if (refreshed) {
 			char buf[160];
 			snprintf(buf, sizeof(buf), "Refresh succeeded: %d contact%s from cached face.", refresh_m.count, refresh_m.count != 1 ? "s" : "");

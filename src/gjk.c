@@ -474,7 +474,15 @@ static SIMD_NOINLINE int gjk_solve4(GJK_Simplex* s)
 	float uABC = dot(cross(b, c), n), vABC = dot(cross(c, a), n), wABC = dot(cross(a, b), n);
 
 	float denom = stp(sub(c, b), sub(a, b), sub(d, b));
-	if (denom == 0.0f) return 0;
+	if (denom == 0.0f) {
+		// Degenerate tetrahedron: the four Minkowski-diff points are
+		// coplanar. The immediately-prior solve3 state (still in v[0..2]
+		// with barycentrics and divisor untouched by solve4) is the best
+		// answer we can produce. Drop the 4th vertex so gjk_witness_points
+		// uses the valid triangle result rather than a garbage 4-simplex.
+		s->count = 3;
+		return 0;
+	}
 	float vol = 1.0f / denom;
 	float uABCD = stp(c, d, b) * vol, vABCD = stp(c, a, d) * vol;
 	float wABCD = stp(d, a, b) * vol, xABCD = stp(b, a, c) * vol;
@@ -513,7 +521,15 @@ static SIMD_NOINLINE int gjk_solve4(GJK_Simplex* s)
 #define GJK_CONTAINMENT_EPS2  1e-8f
 #define GJK_PROGRESS_EPS      1e-4f
 
+// Forward decl.
+static GJK_Result gjk_distance_ex(GJK_Shape* __restrict shapeA, GJK_Shape* __restrict shapeB, GJK_Cache* cache, GJK_Simplex* out_simplex);
+
 static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restrict shapeB, GJK_Cache* cache)
+{
+	return gjk_distance_ex(shapeA, shapeB, cache, NULL);
+}
+
+static GJK_Result gjk_distance_ex(GJK_Shape* __restrict shapeA, GJK_Shape* __restrict shapeB, GJK_Cache* cache, GJK_Simplex* out_simplex)
 {
 	GJK_Result result;
 
@@ -626,6 +642,13 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		vert->point = w;
 		vert->feat1 = fA;
 		vert->feat2 = fB;
+		// Initialize barycentric weight so a following solve2/3/4 that
+		// returns 0 (degenerate denominator) leaves the witness-point
+		// extraction well-defined rather than reading uninitialized stack
+		// memory. This was a real NaN source: solve4 returns 0 when the
+		// four Minkowski-diff points are coplanar, but the loop had
+		// already added the 4th vertex without setting its `u`.
+		vert->u = 1.0f;
 		simplex.count++;
 	}
 
@@ -653,6 +676,7 @@ static GJK_Result gjk_distance(GJK_Shape* __restrict shapeA, GJK_Shape* __restri
 		result.point2 = sub(result.point2, scale(normal, rB));
 		result.distance = fmaxf(0.0f, result.distance - rA - rB);
 	}
+	if (out_simplex) *out_simplex = simplex;
 	return result;
 }
 

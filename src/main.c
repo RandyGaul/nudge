@@ -184,6 +184,7 @@ static bool g_sat_hillclimb = true;
 static bool g_box_use_hull = false;
 static bool g_warm_start = true;
 static bool g_incremental_np = true;
+static bool g_ccd_enabled = true; // toggles speculative contacts + TOI in the live world
 // Coulomb friction removed -- patch friction is the only mode.
 static int g_solver_type = SOLVER_SOFT_STEP;
 static bool g_ldl_enabled = true;
@@ -208,7 +209,7 @@ static const float CAP_RADIUS = 0.3f;
 static const float CAP_HALF_H = 0.5f;
 
 // Scene system: each scene has a name, setup, and optional extra draw (joints etc.)
-typedef struct DrawEntry { Body body; int mesh; v3 scale; v3 color; } DrawEntry;
+typedef struct DrawEntry { Body body; int mesh; v3 scale; v3 color; v3 local_offset; } DrawEntry;
 static DrawEntry* g_draw_list; // ckit dynamic array
 
 typedef struct Scene {
@@ -269,6 +270,7 @@ static Scene g_scenes[] = {
 	{ "Ragdoll",      scene_ragdoll_setup },
 	{ "Trimesh Terrain", scene_trimesh_terrain_setup },
 	{ "Trimesh Stress",  scene_trimesh_stress_setup },
+	{ "CCD Compound Cannon", scene_ccd_compound_cannon_setup, scene_ccd_compound_cannon_tick },
 };
 #define SCENE_COUNT (sizeof(g_scenes) / sizeof(g_scenes[0]))
 
@@ -553,6 +555,7 @@ static void setup_scene()
 	((WorldInternal*)g_world.id)->box_use_hull = g_box_use_hull;
 	((WorldInternal*)g_world.id)->warm_start_enabled = g_warm_start;
 	((WorldInternal*)g_world.id)->incremental_np_enabled = g_incremental_np;
+	((WorldInternal*)g_world.id)->speculative_enabled = g_ccd_enabled;
 	world_set_solver_type(g_world, (SolverType)g_solver_type);
 	g_scenes[g_scene_index].setup();
 }
@@ -834,6 +837,7 @@ void update()
 	if (ImGui_Checkbox("Box via Hull", &g_box_use_hull)) dbg_w->box_use_hull = g_box_use_hull;
 	if (ImGui_Checkbox("Warm Start", &g_warm_start)) dbg_w->warm_start_enabled = g_warm_start;
 	if (ImGui_Checkbox("Incremental NP", &g_incremental_np)) dbg_w->incremental_np_enabled = g_incremental_np;
+	if (ImGui_Checkbox("CCD (speculative + TOI)", &g_ccd_enabled)) dbg_w->speculative_enabled = g_ccd_enabled;
 	if (!g_ldl_enabled) {
 		g_ldl_inspect_island = -1;
 	}
@@ -889,10 +893,13 @@ void update()
 	}
 }
 
-static void draw_body_mesh(int mesh, Body body, v3 sc, v3 color)
+static void draw_body_mesh(int mesh, Body body, v3 sc, v3 color, v3 local_offset)
 {
 	v3 pos = body_get_position(g_world, body);
 	quat rot = body_get_rotation(g_world, body);
+	if (local_offset.x != 0.0f || local_offset.y != 0.0f || local_offset.z != 0.0f) {
+		pos = v3_add(pos, quat_rotate(rot, local_offset));
+	}
 	float opacity = g_translucent_shapes ? 0.3f : 1.0f;
 	if (g_show_sleep && body_is_asleep(g_world, body)) {
 		color = V3(0.3f, 0.35f, 0.5f);
@@ -973,7 +980,7 @@ void draw()
 				}
 			}
 		}
-		draw_body_mesh(e->mesh, e->body, e->scale, color);
+		draw_body_mesh(e->mesh, e->body, e->scale, color, e->local_offset);
 	}
 
 	// Draw joint lines for selected island

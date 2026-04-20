@@ -165,18 +165,23 @@ typedef struct InternalManifold
 // -----------------------------------------------------------------------------
 // Sphere-sphere.
 
-int collide_sphere_sphere(Sphere a, Sphere b, Manifold* manifold)
+// Internal: sphere-sphere with speculative margin. When margin > 0, emits a
+// contact for separations up to margin (penetration field becomes negative =
+// gap). Solver's speculative bias branch (CCD plan step 3) drives the gap
+// closed if bodies are approaching. margin == 0 = public/discrete behavior.
+static int collide_sphere_sphere_ex(Sphere a, Sphere b, Manifold* manifold, float margin)
 {
 	v3 d = sub(b.center, a.center);
 	float dist2 = len2(d);
 	float r_sum = a.radius + b.radius;
+	float max_dist = r_sum + margin;
 
-	if (dist2 > r_sum * r_sum) return 0;
+	if (dist2 > max_dist * max_dist) return 0;
 	if (!manifold) return 1;
 
 	float dist = sqrtf(dist2);
 	v3 normal = dist > 1e-6f ? scale(d, 1.0f / dist) : V3(0, 1, 0);
-	float penetration = r_sum - dist;
+	float penetration = r_sum - dist; // signed: positive = overlap, negative = speculative gap
 
 	manifold->count = 1;
 	manifold->contacts[0] = (Contact){
@@ -185,6 +190,11 @@ int collide_sphere_sphere(Sphere a, Sphere b, Manifold* manifold)
 		.penetration = penetration,
 	};
 	return 1;
+}
+
+int collide_sphere_sphere(Sphere a, Sphere b, Manifold* manifold)
+{
+	return collide_sphere_sphere_ex(a, b, manifold, 0.0f);
 }
 
 // Segment helpers (segment_closest_t, segment_closest_point, segments_closest_points)
@@ -202,14 +212,15 @@ static void capsule_world_segment(BodyState* bs, ShapeInternal* s, v3* P, v3* Q)
 // -----------------------------------------------------------------------------
 // Sphere-capsule.
 
-int collide_sphere_capsule(Sphere a, Capsule b, Manifold* manifold)
+static int collide_sphere_capsule_ex(Sphere a, Capsule b, Manifold* manifold, float margin)
 {
 	v3 closest = segment_closest_point(b.p, b.q, a.center);
 	v3 d = sub(closest, a.center);
 	float dist2 = len2(d);
 	float r_sum = a.radius + b.radius;
+	float max_dist = r_sum + margin;
 
-	if (dist2 > r_sum * r_sum) return 0;
+	if (dist2 > max_dist * max_dist) return 0;
 	if (!manifold) return 1;
 
 	float dist = sqrtf(dist2);
@@ -224,14 +235,20 @@ int collide_sphere_capsule(Sphere a, Capsule b, Manifold* manifold)
 	return 1;
 }
 
+int collide_sphere_capsule(Sphere a, Capsule b, Manifold* manifold)
+{
+	return collide_sphere_capsule_ex(a, b, manifold, 0.0f);
+}
+
 // -----------------------------------------------------------------------------
 // Capsule-capsule.
 
-int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
+static int collide_capsule_capsule_ex(Capsule a, Capsule b, Manifold* manifold, float margin)
 {
 	v3 da = sub(a.q, a.p), db = sub(b.q, b.p);
 	float la2 = len2(da), lb2 = len2(db);
 	float r_sum = a.radius + b.radius;
+	float max_dist = r_sum + margin;
 
 	// Parallel / near-parallel capsules: generate up to 2 contacts along
 	// the overlapping segment range for rotational stability.
@@ -244,7 +261,7 @@ int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
 			v3 w = sub(a.p, b.p);
 			v3 perp = sub(w, scale(ua, dot(w, ua)));
 			float perp_len = len(perp);
-			if (perp_len > r_sum) return 0;
+			if (perp_len > max_dist) return 0;
 			if (!manifold) return 1;
 			v3 normal = perp_len > 1e-6f ? scale(perp, -1.0f / perp_len) : V3(0, 1, 0);
 
@@ -261,7 +278,7 @@ int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
 				v3 pb = segment_closest_point(b.p, b.q, pa);
 				v3 d = sub(pb, pa);
 				float dist = len(d);
-				if (dist > r_sum) return 0;
+				if (dist > max_dist) return 0;
 				v3 n = dist > 1e-6f ? scale(d, 1.0f / dist) : normal;
 				manifold->count = 1;
 				manifold->contacts[0] = (Contact){ .point = add(pa, scale(n, a.radius)), .normal = n, .penetration = r_sum - dist };
@@ -276,7 +293,7 @@ int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
 				v3 pb = segment_closest_point(b.p, b.q, pa);
 				v3 d = sub(pb, pa);
 				float dist = len(d);
-				if (dist > r_sum) continue;
+				if (dist > max_dist) continue;
 				v3 n = dist > 1e-6f ? scale(d, 1.0f / dist) : normal;
 				manifold->contacts[cp++] = (Contact){ .point = add(pa, scale(n, a.radius)), .normal = n, .penetration = r_sum - dist, .feature_id = (uint32_t)i };
 			}
@@ -292,7 +309,7 @@ int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
 	v3 d = sub(c2, c1);
 	float dist2 = len2(d);
 
-	if (dist2 > r_sum * r_sum) return 0;
+	if (dist2 > max_dist * max_dist) return 0;
 	if (!manifold) return 1;
 
 	float dist = sqrtf(dist2);
@@ -305,6 +322,11 @@ int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
 		.penetration = r_sum - dist,
 	};
 	return 1;
+}
+
+int collide_capsule_capsule(Capsule a, Capsule b, Manifold* manifold)
+{
+	return collide_capsule_capsule_ex(a, b, manifold, 0.0f);
 }
 
 // -----------------------------------------------------------------------------
@@ -426,7 +448,7 @@ int collide_sphere_hull(Sphere a, ConvexHull b, Manifold* manifold)
 
 // Analytical sphere-box: project sphere center to box local space, clamp to extents, compute distance.
 // Much faster than sphere_hull (which uses GJK + plane search).
-int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
+static int collide_sphere_box_ex(Sphere a, Box b, Manifold* manifold, float margin)
 {
 	// Transform sphere center to box local space.
 	quat inv_rot = inv(b.rotation);
@@ -438,11 +460,12 @@ int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 
 	v3 diff = sub(local_center, clamped);
 	float dist2 = len2(diff);
+	float max_dist = a.radius + margin;
 
-	if (dist2 > a.radius * a.radius && dist2 > 1e-12f) return 0;
+	if (dist2 > max_dist * max_dist && dist2 > 1e-12f) return 0;
 
 	if (dist2 > 1e-12f) {
-		// Sphere center outside box — contact on box surface.
+		// Sphere center outside box — contact on box surface (may be speculative gap).
 		float dist = sqrtf(dist2);
 		v3 local_n = scale(diff, -1.0f / dist);
 		v3 world_n = rotate(b.rotation, local_n);
@@ -469,6 +492,11 @@ int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 	manifold->count = 1;
 	manifold->contacts[0] = (Contact){ .point = world_pt, .normal = world_n, .penetration = a.radius + best_depth, .feature_id = 1 };
 	return 1;
+}
+
+int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
+{
+	return collide_sphere_box_ex(a, b, manifold, 0.0f);
 }
 
 // Capsule-hull narrowphase.
@@ -1085,7 +1113,7 @@ static SIMD_FORCEINLINE int reduce_contacts(Contact* contacts, int count)
 // Generate face-face contact between two convex hulls using Sutherland-Hodgman clipping.
 // ref_face is the separating face on (ref_hull, ref_pos, ref_rot, ref_sc).
 // flip=1 means ref is actually hull B (so normal is negated for A->B convention).
-static SIMD_FORCEINLINE int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot, v3 ref_sc, const Hull* inc_hull, v3 inc_pos, quat inc_rot, v3 inc_sc, int ref_face, int flip, Manifold* manifold)
+static SIMD_FORCEINLINE int generate_face_contact(const Hull* ref_hull, v3 ref_pos, quat ref_rot, v3 ref_sc, const Hull* inc_hull, v3 inc_pos, quat inc_rot, v3 inc_sc, int ref_face, int flip, Manifold* manifold, float margin)
 {
 	HullPlane ref_plane = plane_transform(ref_hull->planes[ref_face], ref_pos, ref_rot, ref_sc);
 	int inc_face = find_incident_face(inc_hull, inc_pos, inc_rot, inc_sc, ref_plane.normal);
@@ -1126,12 +1154,13 @@ static SIMD_FORCEINLINE int generate_face_contact(const Hull* ref_hull, v3 ref_p
 		}
 	}
 
+	float emit_band = margin > LINEAR_SLOP ? margin : LINEAR_SLOP;
 	v3 contact_n = flip ? neg(ref_plane.normal) : ref_plane.normal;
 	Contact tmp_contacts[MAX_CLIP_VERTS];
 	int cp = 0;
 	for (int i = 0; i < clip_count; i++) {
 		float depth = ref_plane.offset - dot(ref_plane.normal, in_buf[i]);
-		if (depth >= -LINEAR_SLOP) {
+		if (depth >= -emit_band) {
 			uint32_t fid;
 			if (!flip) fid = (uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16);
 			else fid = (uint32_t)inc_face | ((uint32_t)ref_face << 8) | ((uint32_t)in_fid[i] << 16);
@@ -1148,15 +1177,30 @@ static SIMD_FORCEINLINE int generate_face_contact(const Hull* ref_hull, v3 ref_p
 // -----------------------------------------------------------------------------
 // Full SAT hull vs hull with Sutherland-Hodgman face clipping.
 
-int collide_hull_hull_ex_dbg(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair, NP_DebugSnapshot* dbg);
+int collide_hull_hull_ex_full(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair, NP_DebugSnapshot* dbg, float margin, float total_rounding);
 
-int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair)
+int collide_hull_hull_ex_dbg_margin(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair, NP_DebugSnapshot* dbg, float margin)
 {
-	return collide_hull_hull_ex_dbg(a, b, manifold, sat_hint, out_pair, NULL);
+	return collide_hull_hull_ex_full(a, b, manifold, sat_hint, out_pair, dbg, margin, 0.0f);
 }
 
 int collide_hull_hull_ex_dbg(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair, NP_DebugSnapshot* dbg)
 {
+	return collide_hull_hull_ex_full(a, b, manifold, sat_hint, out_pair, dbg, 0.0f, 0.0f);
+}
+
+int collide_hull_hull_ex(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair)
+{
+	return collide_hull_hull_ex_full(a, b, manifold, sat_hint, out_pair, NULL, 0.0f, 0.0f);
+}
+
+int collide_hull_hull_ex_full(ConvexHull a, ConvexHull b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair, NP_DebugSnapshot* dbg, float margin, float total_rounding)
+{
+	// Convex rounding widens the effective contact zone by `total_rounding`
+	// (= rounding_radius_a + rounding_radius_b). SAT separations are offset
+	// by this amount before threshold checks; face-clip depths add it to
+	// emitted penetration so the solver sees signed gap vs. the rounded hulls.
+	float sat_threshold = margin + total_rounding;
 	const Hull* hull_a = a.hull;
 	v3 pos_a = a.center; quat rot_a = a.rotation; v3 scale_a = a.scale;
 	const Hull* hull_b = b.hull;
@@ -1172,18 +1216,18 @@ int collide_hull_hull_ex_dbg(ConvexHull a, ConvexHull b, Manifold* manifold, int
 
 	FaceQuery face_a = sat_query_faces_hint(hull_a, pos_a, rot_a, scale_a, hull_b, pos_b, rot_b, scale_b, face_hint_a);
 	if (dbg) { dbg->face_a_index = face_a.index; dbg->face_a_sep = face_a.separation; }
-	if (face_a.separation > 0.0f) { if (sat_hint) *sat_hint = face_a.index; if (dbg) dbg->winning_axis = -1; return 0; }
+	if (face_a.separation > sat_threshold) { if (sat_hint) *sat_hint = face_a.index; if (dbg) dbg->winning_axis = -1; return 0; }
 
 	FaceQuery face_b = sat_query_faces_hint(hull_b, pos_b, rot_b, scale_b, hull_a, pos_a, rot_a, scale_a, face_hint_b);
 	if (dbg) { dbg->face_b_index = face_b.index; dbg->face_b_sep = face_b.separation; }
-	if (face_b.separation > 0.0f) { if (sat_hint) *sat_hint = hull_a->face_count + face_b.index; if (dbg) dbg->winning_axis = -1; return 0; }
+	if (face_b.separation > sat_threshold) { if (sat_hint) *sat_hint = hull_a->face_count + face_b.index; if (dbg) dbg->winning_axis = -1; return 0; }
 
 	// NaN transforms cause face_index to stay -1 (NaN comparisons always false)
 	if (face_a.index < 0 || face_b.index < 0) { if (dbg) dbg->winning_axis = -1; return 0; }
 
 	EdgeQuery edge_q = sat_query_edges(hull_a, pos_a, rot_a, scale_a, hull_b, pos_b, rot_b, scale_b);
 	if (dbg) { dbg->edge_a_index = edge_q.index1; dbg->edge_b_index = edge_q.index2; dbg->edge_sep = edge_q.separation; }
-	if (edge_q.separation > 0.0f) { if (sat_hint) *sat_hint = -1; if (dbg) dbg->winning_axis = -1; return 0; }
+	if (edge_q.separation > sat_threshold) { if (sat_hint) *sat_hint = -1; if (dbg) dbg->winning_axis = -1; return 0; }
 
 	if (!manifold) return 1;
 
@@ -1208,7 +1252,7 @@ int collide_hull_hull_ex_dbg(ConvexHull a, ConvexHull b, Manifold* manifold, int
 		manifold->contacts[0] = (Contact){
 			.point = scale(add(ca, cb), 0.5f),
 			.normal = normal,
-			.penetration = -edge_q.separation,
+			.penetration = -edge_q.separation + total_rounding,
 			.feature_id = FEATURE_EDGE_BIT | (uint32_t)edge_q.index1 | ((uint32_t)edge_q.index2 << 16),
 		};
 		if (out_pair) *out_pair = (CachedFeaturePair){.type = 2, .edge_a = (int16_t)edge_q.index1, .edge_b = (int16_t)edge_q.index2};
@@ -1304,14 +1348,20 @@ int collide_hull_hull_ex_dbg(ConvexHull a, ConvexHull b, Manifold* manifold, int
 
 	// Keep points within margin of reference face, generate contacts with feature IDs.
 	// LINEAR_SLOP margin keeps contacts alive near zero-penetration, preventing blink.
+	// When margin > LINEAR_SLOP (speculative contacts enabled), extends the emit band
+	// so clipped vertices up to `margin` outside the reference face are emitted with
+	// negative penetration (signed separation = gap). The solver's speculative bias
+	// branch then drives these contacts closed if bodies are approaching.
 	// Feature ID encodes: ref_face | (inc_face << 8) | (clip_edge << 16).
 	// flip bit: if ref was hull_b, swap the face roles so the ID is canonical.
+	float emit_band = margin > LINEAR_SLOP ? margin : LINEAR_SLOP;
 	v3 contact_n = flip ? neg(ref_plane.normal) : ref_plane.normal;
 	Contact tmp_contacts[MAX_CLIP_VERTS];
 	int cp = 0;
 	for (int i = 0; i < clip_count; i++) {
 		float depth = ref_plane.offset - dot(ref_plane.normal, in_buf[i]);
-		if (depth >= -LINEAR_SLOP) {
+		float depth_eff = depth + total_rounding;
+		if (depth_eff >= -emit_band) {
 			uint32_t fid;
 			if (!flip)
 				fid = (uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16);
@@ -1320,7 +1370,7 @@ int collide_hull_hull_ex_dbg(ConvexHull a, ConvexHull b, Manifold* manifold, int
 			tmp_contacts[cp++] = (Contact){
 				.point = in_buf[i],
 				.normal = contact_n,
-				.penetration = depth,
+				.penetration = depth_eff,
 				.feature_id = fid,
 			};
 		}
@@ -1364,7 +1414,7 @@ int collide_hull_hull(ConvexHull a, ConvexHull b, Manifold* manifold)
 static int box_face_clip_and_emit(const v3 ref_cols[3], const v3 inc_cols[3],
 	v3 ref_pos, v3 inc_pos, v3 ref_he, v3 inc_he,
 	int la, float nsign, int inc_la, float inc_nsign,
-	int flip, int ref_face, int inc_face, Manifold* manifold)
+	int flip, int ref_face, int inc_face, Manifold* manifold, float margin)
 {
 	v3 ref_n = scale(ref_cols[la], nsign);
 	float ref_off = dot(ref_n, ref_pos) + (&ref_he.x)[la];
@@ -1405,12 +1455,13 @@ static int box_face_clip_and_emit(const v3 ref_cols[3], const v3 inc_cols[3],
 		}
 	}
 
+	float emit_band = margin > LINEAR_SLOP ? margin : LINEAR_SLOP;
 	v3 contact_n = flip ? neg(ref_n) : ref_n;
 	Contact tmp_contacts[MAX_CLIP_VERTS];
 	int cp = 0;
 	for (int i = 0; i < clip_count; i++) {
 		float depth = ref_off - dot(ref_n, in_buf[i]);
-		if (depth >= -LINEAR_SLOP) {
+		if (depth >= -emit_band) {
 			uint32_t fid = flip ? ((uint32_t)inc_face | ((uint32_t)ref_face << 8) | ((uint32_t)in_fid[i] << 16)) : ((uint32_t)ref_face | ((uint32_t)inc_face << 8) | ((uint32_t)in_fid[i] << 16));
 			tmp_contacts[cp++] = (Contact){ .point = in_buf[i], .normal = contact_n, .penetration = depth, .feature_id = fid };
 		}
@@ -1428,7 +1479,7 @@ static int box_face_clip_and_emit(const v3 ref_cols[3], const v3 inc_cols[3],
 // Falls through to collide_hull_hull for contact generation when penetrating.
 // sat_hint: if non-NULL, *sat_hint is the cached axis from last frame (-1 = no cache).
 // On return, *sat_hint is updated to the winning axis for next frame.
-static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair)
+static int collide_box_box_ex_margin(Box a, Box b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair, float margin)
 {
 	// Rotation columns for each box.
 	v3 ax = rotate(a.rotation, V3(1, 0, 0)), ay = rotate(a.rotation, V3(0, 1, 0)), az = rotate(a.rotation, V3(0, 0, 1));
@@ -1455,34 +1506,34 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint, C
 	int best_axis = -1;
 
 	// A's face normals (axes 0-2).
-	ra = ea; rb = fa*A00 + fb*A01 + fc*A02; sep = fabsf(ta); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 0; }
-	ra = eb; rb = fa*A10 + fb*A11 + fc*A12; sep = fabsf(tb); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 1; }
-	ra = ec; rb = fa*A20 + fb*A21 + fc*A22; sep = fabsf(tc); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 2; }
+	ra = ea; rb = fa*A00 + fb*A01 + fc*A02; sep = fabsf(ta); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 0; }
+	ra = eb; rb = fa*A10 + fb*A11 + fc*A12; sep = fabsf(tb); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 1; }
+	ra = ec; rb = fa*A20 + fb*A21 + fc*A22; sep = fabsf(tc); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 2; }
 
 	// B's face normals (axes 3-5).
-	ra = ea*A00 + eb*A10 + ec*A20; rb = fa; sep = fabsf(ta*R00 + tb*R10 + tc*R20); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 3; }
-	ra = ea*A01 + eb*A11 + ec*A21; rb = fb; sep = fabsf(ta*R01 + tb*R11 + tc*R21); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 4; }
-	ra = ea*A02 + eb*A12 + ec*A22; rb = fc; sep = fabsf(ta*R02 + tb*R12 + tc*R22); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 5; }
+	ra = ea*A00 + eb*A10 + ec*A20; rb = fa; sep = fabsf(ta*R00 + tb*R10 + tc*R20); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 3; }
+	ra = ea*A01 + eb*A11 + ec*A21; rb = fb; sep = fabsf(ta*R01 + tb*R11 + tc*R21); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 4; }
+	ra = ea*A02 + eb*A12 + ec*A22; rb = fc; sep = fabsf(ta*R02 + tb*R12 + tc*R22); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 5; }
 
 	// Edge cross products (axes 6-14). Skip near-parallel edges (cross product near zero).
 	// ax x bx
-	ra = eb*A20 + ec*A10; rb = fb*A02 + fc*A01; sep = fabsf(tc*R10 - tb*R20); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 6; }
+	ra = eb*A20 + ec*A10; rb = fb*A02 + fc*A01; sep = fabsf(tc*R10 - tb*R20); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 6; }
 	// ax x by
-	ra = eb*A21 + ec*A11; rb = fa*A02 + fc*A00; sep = fabsf(tc*R11 - tb*R21); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 7; }
+	ra = eb*A21 + ec*A11; rb = fa*A02 + fc*A00; sep = fabsf(tc*R11 - tb*R21); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 7; }
 	// ax x bz
-	ra = eb*A22 + ec*A12; rb = fa*A01 + fb*A00; sep = fabsf(tc*R12 - tb*R22); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 8; }
+	ra = eb*A22 + ec*A12; rb = fa*A01 + fb*A00; sep = fabsf(tc*R12 - tb*R22); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 8; }
 	// ay x bx
-	ra = ea*A20 + ec*A00; rb = fb*A12 + fc*A11; sep = fabsf(ta*R20 - tc*R00); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 9; }
+	ra = ea*A20 + ec*A00; rb = fb*A12 + fc*A11; sep = fabsf(ta*R20 - tc*R00); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 9; }
 	// ay x by
-	ra = ea*A21 + ec*A01; rb = fa*A12 + fc*A10; sep = fabsf(ta*R21 - tc*R01); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 10; }
+	ra = ea*A21 + ec*A01; rb = fa*A12 + fc*A10; sep = fabsf(ta*R21 - tc*R01); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 10; }
 	// ay x bz
-	ra = ea*A22 + ec*A02; rb = fa*A11 + fb*A10; sep = fabsf(ta*R22 - tc*R02); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 11; }
+	ra = ea*A22 + ec*A02; rb = fa*A11 + fb*A10; sep = fabsf(ta*R22 - tc*R02); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 11; }
 	// az x bx
-	ra = ea*A10 + eb*A00; rb = fb*A22 + fc*A21; sep = fabsf(tb*R00 - ta*R10); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 12; }
+	ra = ea*A10 + eb*A00; rb = fb*A22 + fc*A21; sep = fabsf(tb*R00 - ta*R10); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 12; }
 	// az x by
-	ra = ea*A11 + eb*A01; rb = fa*A22 + fc*A20; sep = fabsf(tb*R01 - ta*R11); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 13; }
+	ra = ea*A11 + eb*A01; rb = fa*A22 + fc*A20; sep = fabsf(tb*R01 - ta*R11); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 13; }
 	// az x bz
-	ra = ea*A12 + eb*A02; rb = fa*A21 + fb*A20; sep = fabsf(tb*R02 - ta*R12); pen = ra + rb - sep; if (pen < 0) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 14; }
+	ra = ea*A12 + eb*A02; rb = fa*A21 + fb*A20; sep = fabsf(tb*R02 - ta*R12); pen = ra + rb - sep; if (pen < -margin) return 0; if (pen < best_pen) { best_pen = pen; best_axis = 14; }
 
 	if (!manifold) return 1;
 
@@ -1521,7 +1572,7 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint, C
 		int inc_face = face_map[inc_la][inc_nsign > 0 ? 1 : 0];
 
 		if (!box_face_clip_and_emit(ref_cols, inc_cols, ref_pos, inc_pos, ref_he, inc_he,
-		                            la, nsign, inc_la, inc_nsign, flip, ref_face, inc_face, manifold))
+		                            la, nsign, inc_la, inc_nsign, flip, ref_face, inc_face, manifold, margin))
 			return 0;
 		if (sat_hint) *sat_hint = best_axis;
 		if (out_pair) *out_pair = (CachedFeaturePair){.type = 1, .ref_body = (int16_t)flip, .face_a = (int16_t)(flip ? inc_face : ref_face), .face_b = (int16_t)(flip ? ref_face : inc_face)};
@@ -1530,10 +1581,15 @@ static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint, C
 
 	// Edge-edge contact: fall through to hull-hull (edge contacts are rare in box piles).
 	if (sat_hint) *sat_hint = best_axis;
-	return collide_hull_hull_ex(
+	return collide_hull_hull_ex_dbg_margin(
 		(ConvexHull){ &s_unit_box_hull, a.center, a.rotation, a.half_extents },
 		(ConvexHull){ &s_unit_box_hull, b.center, b.rotation, b.half_extents },
-		manifold, NULL, out_pair);
+		manifold, NULL, out_pair, NULL, margin);
+}
+
+static int collide_box_box_ex(Box a, Box b, Manifold* manifold, int* sat_hint, CachedFeaturePair* out_pair)
+{
+	return collide_box_box_ex_margin(a, b, manifold, sat_hint, out_pair, 0.0f);
 }
 
 int collide_box_box(Box a, Box b, Manifold* manifold) { return collide_box_box_ex(a, b, manifold, NULL, NULL); }
@@ -1581,7 +1637,7 @@ static int validate_cached_face_hull(const Hull* hull, v3 pos, quat rot, v3 sc, 
 
 // Refresh box-box face contact using cached feature pair (skip full SAT).
 // Returns 1 if refresh succeeded, 0 if invalidated (caller falls through to full SAT).
-static int refresh_box_box_face(Box a, Box b, Manifold* manifold, CachedFeaturePair* cp)
+static int refresh_box_box_face(Box a, Box b, Manifold* manifold, CachedFeaturePair* cp, float margin)
 {
 	v3 ax = rotate(a.rotation, V3(1, 0, 0)), ay = rotate(a.rotation, V3(0, 1, 0)), az = rotate(a.rotation, V3(0, 0, 1));
 	v3 bx = rotate(b.rotation, V3(1, 0, 0)), by = rotate(b.rotation, V3(0, 1, 0)), bz = rotate(b.rotation, V3(0, 0, 1));
@@ -1616,12 +1672,12 @@ static int refresh_box_box_face(Box a, Box b, Manifold* manifold, CachedFeatureP
 	inc_fi = face_map[inc_la][inc_nsign > 0 ? 1 : 0];
 
 	return box_face_clip_and_emit(ref_cols, inc_cols, ref_pos, inc_pos, ref_he, inc_he,
-	                              la, nsign, inc_la, inc_nsign, flip, ref_fi, inc_fi, manifold);
+	                              la, nsign, inc_la, inc_nsign, flip, ref_fi, inc_fi, manifold, margin);
 }
 
 // Refresh hull-hull face contact using cached feature pair.
 // Validates both ref and incident faces via neighbor check, then re-clips.
-static int refresh_hull_hull_face(ConvexHull a, ConvexHull b, Manifold* manifold, CachedFeaturePair* cp)
+static int refresh_hull_hull_face(ConvexHull a, ConvexHull b, Manifold* manifold, CachedFeaturePair* cp, float margin)
 {
 	const Hull* hull_a = a.hull; v3 pos_a = a.center; quat rot_a = a.rotation; v3 sc_a = a.scale;
 	const Hull* hull_b = b.hull; v3 pos_b = b.center; quat rot_b = b.rotation; v3 sc_b = b.scale;
@@ -1645,7 +1701,7 @@ static int refresh_hull_hull_face(ConvexHull a, ConvexHull b, Manifold* manifold
 	if (!validate_cached_face_hull(ref_hull, ref_pos, ref_rot, ref_sc, ref_face, sep_dir)) return 0;
 
 	// Re-clip using existing generate_face_contact (re-discovers incident face internally).
-	return generate_face_contact(ref_hull, ref_pos, ref_rot, ref_sc, inc_hull, inc_pos, inc_rot, inc_sc, ref_face, flip, manifold);
+	return generate_face_contact(ref_hull, ref_pos, ref_rot, ref_sc, inc_hull, inc_pos, inc_rot, inc_sc, ref_face, flip, manifold, margin);
 }
 
 // -----------------------------------------------------------------------------
@@ -1744,17 +1800,25 @@ static int ray_heightfield(v3 ro, v3 rd, v3 hf_pos, quat hf_rot, const Heightfie
 // Adding a shape type = one new row/column plus any cross-pair agents; the
 // dispatch site never grows.
 
+// Resolve the world's speculative margin for a narrowphase call. Zero when
+// speculative contacts are disabled, which preserves bit-identical behavior
+// with the pre-CCD narrowphase (callers emit only on overlap).
+static inline float np_speculative_margin(NarrowphaseCtx* c)
+{
+	return c->w->speculative_enabled ? c->w->speculative_margin : 0.0f;
+}
+
 static int np_sphere_sphere(NarrowphaseCtx* c)
 {
-	return collide_sphere_sphere(make_sphere(c->bs_a, c->shape_a), make_sphere(c->bs_b, c->shape_b), c->m_out);
+	return collide_sphere_sphere_ex(make_sphere(c->bs_a, c->shape_a), make_sphere(c->bs_b, c->shape_b), c->m_out, np_speculative_margin(c));
 }
 static int np_sphere_capsule(NarrowphaseCtx* c)
 {
-	return collide_sphere_capsule(make_sphere(c->bs_a, c->shape_a), make_capsule(c->bs_b, c->shape_b), c->m_out);
+	return collide_sphere_capsule_ex(make_sphere(c->bs_a, c->shape_a), make_capsule(c->bs_b, c->shape_b), c->m_out, np_speculative_margin(c));
 }
 static int np_sphere_box(NarrowphaseCtx* c)
 {
-	return collide_sphere_box(make_sphere(c->bs_a, c->shape_a), make_box(c->bs_b, c->shape_b), c->m_out);
+	return collide_sphere_box_ex(make_sphere(c->bs_a, c->shape_a), make_box(c->bs_b, c->shape_b), c->m_out, np_speculative_margin(c));
 }
 static int np_sphere_hull(NarrowphaseCtx* c)
 {
@@ -1762,7 +1826,7 @@ static int np_sphere_hull(NarrowphaseCtx* c)
 }
 static int np_capsule_capsule(NarrowphaseCtx* c)
 {
-	return collide_capsule_capsule(make_capsule(c->bs_a, c->shape_a), make_capsule(c->bs_b, c->shape_b), c->m_out);
+	return collide_capsule_capsule_ex(make_capsule(c->bs_a, c->shape_a), make_capsule(c->bs_b, c->shape_b), c->m_out, np_speculative_margin(c));
 }
 static int np_capsule_box(NarrowphaseCtx* c)
 {
@@ -1804,26 +1868,29 @@ static int np_box_box(NarrowphaseCtx* c)
 	BodyState* ba = c->bs_a; BodyState* bb = c->bs_b;
 	ShapeInternal* sa = c->shape_a; ShapeInternal* sb = c->shape_b;
 	NP_DebugSnapshot* dbg = np_debug_begin(c);
+	float margin = np_speculative_margin(c);
+	float rr = sa->rounding_radius + sb->rounding_radius;
 	int hit;
-	if (c->w->box_use_hull)
-		hit = collide_hull_hull_ex_dbg((ConvexHull){ &s_unit_box_hull, ba->position, ba->rotation, sa->box.half_extents }, (ConvexHull){ &s_unit_box_hull, bb->position, bb->rotation, sb->box.half_extents }, c->m_out, c->sat_hint, c->out_pair, dbg);
+	if (c->w->box_use_hull || rr > 0.0f)
+		hit = collide_hull_hull_ex_full((ConvexHull){ &s_unit_box_hull, ba->position, ba->rotation, sa->box.half_extents }, (ConvexHull){ &s_unit_box_hull, bb->position, bb->rotation, sb->box.half_extents }, c->m_out, c->sat_hint, c->out_pair, dbg, margin, rr);
 	else
-		hit = collide_box_box_ex(make_box(ba, sa), make_box(bb, sb), c->m_out, c->sat_hint, c->out_pair);
+		hit = collide_box_box_ex_margin(make_box(ba, sa), make_box(bb, sb), c->m_out, c->sat_hint, c->out_pair, margin);
 	np_debug_end(dbg);
 	return hit;
 }
 static int np_box_hull(NarrowphaseCtx* c)
 {
-	BodyState* ba = c->bs_a; BodyState* bb = c->bs_b; ShapeInternal* sa = c->shape_a;
+	BodyState* ba = c->bs_a; BodyState* bb = c->bs_b; ShapeInternal* sa = c->shape_a; ShapeInternal* sb = c->shape_b;
 	NP_DebugSnapshot* dbg = np_debug_begin(c);
-	int hit = collide_hull_hull_ex_dbg((ConvexHull){ &s_unit_box_hull, ba->position, ba->rotation, sa->box.half_extents }, make_convex_hull(bb, c->shape_b), c->m_out, c->sat_hint, c->out_pair, dbg);
+	int hit = collide_hull_hull_ex_full((ConvexHull){ &s_unit_box_hull, ba->position, ba->rotation, sa->box.half_extents }, make_convex_hull(bb, sb), c->m_out, c->sat_hint, c->out_pair, dbg, np_speculative_margin(c), sa->rounding_radius + sb->rounding_radius);
 	np_debug_end(dbg);
 	return hit;
 }
 static int np_hull_hull(NarrowphaseCtx* c)
 {
 	NP_DebugSnapshot* dbg = np_debug_begin(c);
-	int hit = collide_hull_hull_ex_dbg(make_convex_hull(c->bs_a, c->shape_a), make_convex_hull(c->bs_b, c->shape_b), c->m_out, c->sat_hint, c->out_pair, dbg);
+	ShapeInternal* sa = c->shape_a; ShapeInternal* sb = c->shape_b;
+	int hit = collide_hull_hull_ex_full(make_convex_hull(c->bs_a, sa), make_convex_hull(c->bs_b, sb), c->m_out, c->sat_hint, c->out_pair, dbg, np_speculative_margin(c), sa->rounding_radius + sb->rounding_radius);
 	np_debug_end(dbg);
 	return hit;
 }
@@ -1932,11 +1999,12 @@ static void narrowphase_pair(WorldInternal* w, int i, int j, InternalManifold** 
 		if (uses_hint && wm && w->sat_hint_enabled) { hint = wm->sat_axis; hp = &hint; }
 
 		if (wm && wm->cached_pair.type == 1 && uses_sat && w->incremental_np_enabled) {
+			float spec_margin = w->speculative_enabled ? w->speculative_margin : 0.0f;
 			int refreshed = 0;
 			if (s0->type == SHAPE_BOX && s1->type == SHAPE_BOX && !w->box_use_hull)
-				refreshed = refresh_box_box_face(make_box(bs0, s0), make_box(bs1, s1), &im.m, &wm->cached_pair);
+				refreshed = refresh_box_box_face(make_box(bs0, s0), make_box(bs1, s1), &im.m, &wm->cached_pair, spec_margin);
 			else
-				refreshed = refresh_hull_hull_face(hull_from_box_or_hull(bs0, s0), hull_from_box_or_hull(bs1, s1), &im.m, &wm->cached_pair);
+				refreshed = refresh_hull_hull_face(hull_from_box_or_hull(bs0, s0), hull_from_box_or_hull(bs1, s1), &im.m, &wm->cached_pair, spec_margin);
 			if (refreshed) {
 				im.warm = wm;
 				wm->stale = 0;

@@ -2,7 +2,7 @@
 // Included from solver_pgs.c. Each call writes to fixed-stride slots in sm/sc arrays.
 // Thread-safe: warm_cache is read-only, each manifold writes to its own index range.
 
-static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, SolverManifold* sm, SolverContact* sc, float dt, float soft_dd, float bias_dd, float soft_ds, float bias_ds)
+static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, SolverManifold* sm, SolverContact* sc, SolverContactCold* sc_cold, SolverManifoldCold* sm_cold, float dt, float soft_dd, float bias_dd, float soft_ds, float bias_ds)
 {
 	BodyHot* a = &w->body_hot[im->body_a];
 	BodyHot* b = &w->body_hot[im->body_b];
@@ -29,6 +29,12 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	float bias_rate_val = has_static ? bias_ds : bias_dd;
 
 	// Per-contact setup. Only initialize fields used by patch-mode PGS and post-solve.
+	// dt here is the SUBSTEP duration. For speculative bias stiffness we want
+	// substep-scaled (stiffer = snappier gap closure); for the restitution
+	// eligibility "will they collide this frame" check we want full-frame dt.
+	float inv_dt = dt > 0.0f ? 1.0f / dt : 0.0f;
+	float frame_dt = dt * (float)(w->sub_steps > 0 ? w->sub_steps : 1);
+	float inv_frame_dt = frame_dt > 0.0f ? 1.0f / frame_dt : 0.0f;
 	for (int c = 0; c < im->m.count; c++) {
 		Contact* ct = &im->m.contacts[c];
 		v3 r_a = sub(ct->point, sa->position);
@@ -39,38 +45,59 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		v3 w_n_b = inv_inertia_world_mul(b, rn_b);
 		float K_n = inv_mass_sum + dot(w_n_a, rn_a) + dot(w_n_b, rn_b);
 		float eff_mass_n = K_n > 1e-12f ? 1.0f / K_n : 0.0f;
-		float softness = 0.0f, bias = 0.0f;
-		if (soft_val > 0.0f) {
-			float K = eff_mass_n > 0.0f ? 1.0f / eff_mass_n : 0.0f;
-			// Bepu-style softened constraint, mass-aware. With extraDt = soft_val
-			// (= 1/den) the constraint has:
-			//   softness_impulse_scale_bepu = K / (K + den)     (dimensionless, <= 1)
-			//   eff_mass_softened           = den / (K*(K+den))
-			// Our PGS update has the form
-			//     delta_lam = eff_mass * (-(vn+bias) - softness * lam_old)
-			// i.e. the softness*lam_old term is multiplied by eff_mass. Matching
-			// Bepu's decay factor requires eff_mass * softness == softness_bepu,
-			// so softness = softness_bepu / eff_mass = K * Ks (Ks = K*soft_val).
-			// Product eff_mass*softness = Ks/(1+Ks) <= 1 — stable for all masses.
-			// Prior formulation used softness = Ks/(1+Ks) directly, making the
-			// product Ks * Ks/(1+Ks)^2 / K = soft_val/(K*(1+soft_val)^2). For heavy
-			// bodies this blew up to ~5.5 and left deep-pen contacts oscillating
-			// between full and zero lambda every PGS iteration.
-			float Ks = K * soft_val;
-			float denom = 1.0f + Ks;
-			softness = K * Ks / denom;
-			eff_mass_n = (K * denom) > 1e-12f ? 1.0f / (K * denom) : 0.0f;
-			float pen = ct->penetration - SOLVER_SLOP;
-			bias = pen > 0.0f ? -bias_rate_val * pen : 0.0f;
-			if (bias < -w->max_push_velocity) bias = -w->max_push_velocity;
-		}
-		float bounce = 0.0f;
-		if (check_bounce) {
-			v3 vel_a = add(a->velocity, cross(a->angular_velocity, r_a));
-			v3 vel_b = add(b->velocity, cross(b->angular_velocity, r_b));
-			float vn_rel = dot(sub(vel_b, vel_a), ct->normal);
-			bounce = (-vn_rel > SOLVER_RESTITUTION_THRESH) ? rest * vn_rel : 0.0f;
-			if (bounce != 0.0f) bias = 0.0f;
+		// Contact-point relative normal velocity (positive = separating,
+		// negative = approaching). Used for restitution and speculative tests.
+		v3 vel_a_ct = add(a->velocity, cross(a->angular_velocity, r_a));
+		v3 vel_b_ct = add(b->velocity, cross(b->angular_velocity, r_b));
+		float vn_rel = dot(sub(vel_b_ct, vel_a_ct), ct->normal);
+
+		float softness = 0.0f, bias = 0.0f, bounce = 0.0f;
+		float pen = ct->penetration; // positive = overlap, negative = speculative gap
+
+		if (pen >= 0.0f) {
+			// Overlap (existing behavior). Soft solvers apply Bepu-style soft
+			// constraint with Baumgarte bias; hard solver relies on NGS pass.
+			if (soft_val > 0.0f) {
+				float K = eff_mass_n > 0.0f ? 1.0f / eff_mass_n : 0.0f;
+				float Ks = K * soft_val;
+				float denom = 1.0f + Ks;
+				softness = K * Ks / denom;
+				eff_mass_n = (K * denom) > 1e-12f ? 1.0f / (K * denom) : 0.0f;
+				float pen_bias = pen - SOLVER_SLOP;
+				bias = pen_bias > 0.0f ? -bias_rate_val * pen_bias : 0.0f;
+				if (bias < -w->max_push_velocity) bias = -w->max_push_velocity;
+			}
+			if (check_bounce) {
+				bounce = (-vn_rel > SOLVER_RESTITUTION_THRESH) ? rest * vn_rel : 0.0f;
+				if (bounce != 0.0f) bias = 0.0f;
+			}
+		} else {
+			// Speculative gap. "Just-touching" target: dot(v, n) >= pen*inv_dt
+			// (pen < 0 so target is negative, i.e. closing-but-not-faster-than-
+			// just-touching is allowed; faster closing gets pushed back).
+			// Non-attractive lambda clamp means no impulse when bodies are
+			// already separating or closing slowly, so speculative contacts
+			// don't kick apart resting assemblies with nearby geometry.
+			//
+			// Restitution replace-rule (not max): if the pre-solve relative
+			// velocity would actually impact within this step, swap the
+			// speculative bias for the restitution target. Combining via max
+			// produces ghost bounces for slow distant approaches and loses
+			// restitution on fast close-in impacts.
+			// "Will the bodies close the gap within this FRAME?" Checked
+			// against full-frame dt, not sub_dt — the solver runs multiple
+			// substeps per frame and should fire restitution once per frame
+			// when an impact is imminent.
+			int rest_eligible = rest > 0.0f
+			    && vn_rel < pen * inv_frame_dt
+			    && -vn_rel > SOLVER_RESTITUTION_THRESH;
+			if (rest_eligible) {
+				bounce = rest * vn_rel;
+				bias = 0.0f;
+			} else {
+				bias = -pen * inv_dt;
+				if (bias > w->max_push_velocity) bias = w->max_push_velocity;
+			}
 		}
 		SolverContact* s = &sc[contact_base + c];
 		s->r_a = r_a; s->r_b = r_b; s->normal = ct->normal; s->penetration = ct->penetration;
@@ -78,6 +105,10 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 		s->w_n_a = w_n_a; s->w_n_b = w_n_b; s->eff_mass_n = eff_mass_n;
 		s->softness = softness; s->bias = bias; s->bounce = bounce;
 		s->lambda_n = 0;
+		// Store body-local offsets so substep refresh can re-rotate with
+		// current body orientations (captures rotation during step).
+		sc_cold[contact_base + c].r_a_local = rotate(inv(sa->rotation), r_a);
+		sc_cold[contact_base + c].r_b_local = rotate(inv(sb->rotation), r_b);
 	}
 
 	// Patch friction: centroid, tangent basis, effective mass
@@ -86,6 +117,9 @@ static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, 
 	float inv_n = 1.0f / (float)smf.contact_count;
 	smf.centroid_r_a = scale(centroid_a, inv_n);
 	smf.centroid_r_b = scale(centroid_b, inv_n);
+	// Body-local centroid offsets for per-substep refresh.
+	sm_cold[idx].centroid_r_a_local = rotate(inv(sa->rotation), smf.centroid_r_a);
+	sm_cold[idx].centroid_r_b_local = rotate(inv(sb->rotation), smf.centroid_r_b);
 	v3 n = sc[contact_base].normal;
 	smf.normal = n;
 	contact_tangent_basis(n, &smf.tangent1, &smf.tangent2);

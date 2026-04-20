@@ -98,17 +98,25 @@ static void broadphase_bvh(WorldInternal* w, InternalManifold** manifolds)
 	CK_DYNA SAP_Entry* sap = NULL;
 	// Compute tight AABBs. Skip sleeping dynamic bodies (they don't move).
 	CK_DYNA int* sleeping_bodies = NULL;
+	// When speculative contacts are enabled, inflate tight AABBs by the
+	// speculative margin so broadphase keeps pairs where bodies are close
+	// but not overlapping. Without this inflation, narrowphase never runs
+	// for bodies sitting just outside each other's tight AABBs and
+	// speculative contacts can't fire.
+	float spec_pad = w->speculative_enabled ? w->speculative_margin : 0.0f;
 	for (int i = 0; i < body_count; i++) {
 		if (!split_alive(w->body_gen, i) || asize(w->body_cold[i].shapes) == 0) { tight[i] = aabb_empty(); continue; }
 		if (body_inv_mass(w, i) > 0.0f) {
 			int isl = w->body_cold[i].island_id;
 			if (isl >= 0 && (w->island_gen[isl] & 1) && !w->islands[isl].awake) {
 				tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]); // needed for wake detection
+				if (spec_pad > 0.0f) tight[i] = aabb_expand(tight[i], spec_pad);
 				apush(sleeping_bodies, i);
 				continue;
 			}
 		}
 		tight[i] = body_aabb(&w->body_state[i], &w->body_cold[i]);
+		if (spec_pad > 0.0f) tight[i] = aabb_expand(tight[i], spec_pad);
 		if (body_inv_mass(w, i) > 0.0f) { scene_bounds = aabb_merge(scene_bounds, tight[i]); }
 	}
 	v3 extent = sub(scene_bounds.max, scene_bounds.min);

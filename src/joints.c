@@ -803,24 +803,23 @@ static void joints_pre_solve(WorldInternal* w, float dt, SolverJoint** out_joint
 
 // Refresh joint Jacobians, lever arms, limit activation, and biases from current
 // body state. Called at the start of each substep (after integrate_positions/velocities)
-// so that limit DOFs activate based on current rotations, not stale frame-start state.
+// so that lever arms and limit DOFs activate based on current rotations, not stale
+// frame-start state. Caller (nudge.c substep loop) only invokes this when LDL is
+// disabled; when LDL runs, ldl_refresh_lever_arms_light already covers every joint
+// type. So this is the only refresh path in the LDL-off branch -- refreshes every
+// joint regardless of whether it has a limit or motor DOF.
 static void joints_refresh_substep(WorldInternal* w, SolverJoint* joints, int count, float dt)
 {
 	for (int i = 0; i < count; i++) {
 		SolverJoint* s = &joints[i];
 		JointInternal* j = &w->joints[s->joint_idx];
-		// Only refresh joints that go through PGS (not LDL).
-		// LDL joints have their own lever arm refresh in ldl_refresh_lever_arms.
-		// Also skip joints without limits -- they don't need per-substep refresh.
-		int has_dof5 = (j->type == JOINT_HINGE && (j->hinge.limit_min != 0.0f || j->hinge.limit_max != 0.0f || j->hinge.motor_max_impulse > 0.0f)) || (j->type == JOINT_DISTANCE && (j->distance.limit_min > 0 || j->distance.limit_max > 0)) || (j->type == JOINT_PRISMATIC && j->prismatic.motor_max_impulse > 0.0f);
-		if (!has_dof5) continue;
 		BodyHot* a = &w->body_hot[s->body_a];
 		BodyHot* b = &w->body_hot[s->body_b];
 		BodyState* sa = &w->body_state[s->body_a];
 		BodyState* sb = &w->body_state[s->body_b];
 		int old_dof = s->dof;
 		// Reset DOF to base (joint_fill_rows will set final dof including limits/motors)
-		s->dof = j->type == JOINT_DISTANCE ? 1 : 6; // hinge with limits or prismatic with motor = 6
+		s->dof = j->type == JOINT_DISTANCE ? 1 : 6;
 		solver_joint_init_bounds(s);
 		float saved_lambda[JOINT_MAX_DOF];
 		memcpy(saved_lambda, s->lambda, sizeof(saved_lambda));

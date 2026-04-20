@@ -1392,3 +1392,184 @@ static void scene_trimesh_stress_setup()
 	#undef TMS_N
 	#undef TMS_EXTENT
 }
+
+// ---------------------------------------------------------------------------
+// CCD showcase scenes. Each of these is designed to fail spectacularly
+// (bodies tunnel / pass through) when the "CCD (speculative + TOI)" toggle
+// in the debug UI is off, and resolve cleanly with it on. Toggle mid-run to
+// compare.
+// ---------------------------------------------------------------------------
+
+// Scene: CCD Cannon. A thin wall plus a periodic shower of randomized
+// projectiles — spheres, boxes, capsules, convex hulls, and the occasional
+// compound dumbbell. Size, speed, aim angle, and tumble are all varied so
+// the full range of CCD paths gets exercised. Without CCD, most projectiles
+// tunnel through the wall; with CCD on, they stop on first contact.
+//
+// Projectiles are culled once they pass the far end of the range or fall off
+// the floor, so the scene doesn't accumulate indefinitely.
+
+#define CCD_CANNON_X        -9.0f
+#define CCD_CANNON_Y         1.5f
+#define CCD_CANNON_HX        0.3f
+#define CCD_BULLET_SPAWN_X  (CCD_CANNON_X + CCD_CANNON_HX + 0.25f)
+#define CCD_RANGE_FAR_X     12.0f
+#define CCD_RANGE_FALL_Y   -5.0f
+
+static int      g_ccd_cannon_cooldown;
+static uint32_t g_ccd_cannon_rng;
+static Hull*    g_ccd_hull_tet;
+static Hull*    g_ccd_hull_chunk;
+static Hull*    g_ccd_hull_shard;
+static int      g_ccd_mesh_tet;
+static int      g_ccd_mesh_chunk;
+static int      g_ccd_mesh_shard;
+
+// Deterministic LCG so scene playback is repeatable run-to-run.
+static float ccd_rand01()
+{
+	g_ccd_cannon_rng = g_ccd_cannon_rng * 1664525u + 1013904223u;
+	return (float)(g_ccd_cannon_rng >> 8) * (1.0f / 16777216.0f);
+}
+static float ccd_rand_range(float lo, float hi) { return lo + (hi - lo) * ccd_rand01(); }
+
+static void scene_ccd_compound_cannon_setup()
+{
+	g_ccd_cannon_cooldown = 0;
+	g_ccd_cannon_rng = 0xbadcab1eu;
+	add_big_floor();
+
+	// Pre-build a small kit of convex hulls for the cannon to fire. Building
+	// one per projectile would leak on world destroy; a shared kit keeps the
+	// lifetimes simple.
+	if (!g_ccd_hull_tet) {
+		v3 tet[] = { {0, 0.6f, 0}, {0.5f, -0.3f, 0.3f}, {-0.5f, -0.3f, 0.3f}, {0, -0.3f, -0.5f} };
+		g_ccd_hull_tet = quickhull(tet, 4);
+		g_ccd_mesh_tet = render_create_hull_mesh(g_ccd_hull_tet, V3(1, 1, 1));
+		v3 chunk[] = {
+			{0.5f, 0.4f, 0.3f}, {-0.4f, 0.5f, 0.2f}, {0.3f, -0.4f, 0.5f},
+			{-0.5f, -0.3f, -0.4f}, {0.4f, 0.2f, -0.5f}, {-0.3f, -0.5f, 0.3f},
+			{0.5f, -0.2f, -0.2f}, {-0.2f, 0.5f, -0.3f},
+		};
+		g_ccd_hull_chunk = quickhull(chunk, 8);
+		g_ccd_mesh_chunk = render_create_hull_mesh(g_ccd_hull_chunk, V3(1, 1, 1));
+		v3 shard[] = {
+			{0.1f, 0.9f, 0.0f}, {0.0f, -0.9f, 0.0f},
+			{0.4f, 0.0f, 0.15f}, {-0.35f, 0.05f, 0.2f},
+			{0.3f, 0.2f, -0.3f}, {-0.25f, 0.0f, -0.3f},
+		};
+		g_ccd_hull_shard = quickhull(shard, 6);
+		g_ccd_mesh_shard = render_create_hull_mesh(g_ccd_hull_shard, V3(1, 1, 1));
+	}
+
+	// Target: flat wall + a horizontal beam protruding toward the cannon.
+	// Projectiles that clip the beam get an off-center impulse that
+	// induces angular velocity, stressing the rotational CCD path.
+	Body wall = create_body(g_world, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(g_world, wall, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.05f, 3.0f, 3.0f) });
+	apush(g_draw_list, ((DrawEntry){ wall, MESH_BOX, V3(0.05f, 3.0f, 3.0f), V3(0.5f, 0.4f, 0.4f) }));
+
+	Body beam = create_body(g_world, (BodyParams){ .position = V3(5.0f, 2.0f, 0), .rotation = quat_identity(), .mass = 0 });
+	body_add_shape(g_world, beam, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = V3(0.35f, 0.15f, 3.0f) });
+	apush(g_draw_list, ((DrawEntry){ beam, MESH_BOX, V3(0.35f, 0.15f, 3.0f), V3(0.65f, 0.55f, 0.35f) }));
+}
+
+// Cull projectiles that have left the range. Walks the draw list backwards
+// and swap-pops expired entries; only bodies dynamic enough to travel past
+// the cull threshold get removed.
+static void ccd_cannon_cull()
+{
+	for (int i = asize(g_draw_list) - 1; i >= 0; i--) {
+		DrawEntry* e = &g_draw_list[i];
+		if (!body_is_valid(g_world, e->body)) continue;
+		v3 p = body_get_position(g_world, e->body);
+		if (p.x > CCD_RANGE_FAR_X || p.y < CCD_RANGE_FALL_Y) {
+			// A compound body has multiple draw entries sharing the same
+			// Body handle. Destroy the body once, then sweep out every
+			// draw entry that referenced it.
+			Body dead = e->body;
+			destroy_body(g_world, dead);
+			for (int j = asize(g_draw_list) - 1; j >= 0; j--) {
+				if (g_draw_list[j].body.id == dead.id) {
+					g_draw_list[j] = g_draw_list[asize(g_draw_list) - 1];
+					asetlen(g_draw_list, asize(g_draw_list) - 1);
+				}
+			}
+		}
+	}
+}
+
+static void scene_ccd_compound_cannon_tick(float dt)
+{
+	(void)dt;
+	ccd_cannon_cull();
+	if (g_ccd_cannon_cooldown > 0) { g_ccd_cannon_cooldown--; return; }
+	// Next shot fires 12–28 frames from now (0.2–0.47s at 60 Hz).
+	g_ccd_cannon_cooldown = 12 + (int)ccd_rand_range(0, 16);
+
+	// Aim at the wall midpoint (x=5, y=1.5) with small angular jitter so
+	// hits land at different spots.
+	float speed = ccd_rand_range(50.0f, 140.0f);
+	float spread_y = ccd_rand_range(-0.35f, 0.35f);
+	float spread_z = ccd_rand_range(-0.35f, 0.35f);
+	v3 target = V3(5.0f, 1.5f, 0);
+	v3 muzzle = V3(CCD_BULLET_SPAWN_X, CCD_CANNON_Y, 0);
+	v3 dir = V3(target.x - muzzle.x, target.y - muzzle.y + spread_y, target.z - muzzle.z + spread_z);
+	float dl = v3_len(dir);
+	if (dl < 1e-4f) dl = 1.0f;
+	v3 vel = scale(dir, speed / dl);
+	v3 omega = V3(ccd_rand_range(-6, 6), ccd_rand_range(-6, 6), ccd_rand_range(-6, 6));
+	v3 color = V3(ccd_rand_range(0.4f, 1.0f), ccd_rand_range(0.4f, 1.0f), ccd_rand_range(0.4f, 1.0f));
+	float scale_f = ccd_rand_range(0.7f, 1.5f);
+
+	// 0=sphere, 1=box, 2=capsule, 3..5=hulls, 6=compound dumbbell.
+	int kind = (int)ccd_rand_range(0, 6.999f);
+	Body b = create_body(g_world, (BodyParams){
+		.position = muzzle,
+		.rotation = quat_identity(),
+		.mass = 0.15f,
+		.restitution = 0.25f,
+		.friction = 0.4f,
+	});
+
+	switch (kind) {
+	case 0: {
+		float r = 0.08f * scale_f;
+		body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = r });
+		apush(g_draw_list, ((DrawEntry){ b, MESH_SPHERE, V3(r, r, r), color }));
+		break;
+	}
+	case 1: {
+		v3 he = V3(0.10f * scale_f, 0.09f * scale_f, 0.09f * scale_f);
+		body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_BOX, .box.half_extents = he });
+		apush(g_draw_list, ((DrawEntry){ b, MESH_BOX, he, color }));
+		break;
+	}
+	case 2: {
+		body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_CAPSULE, .capsule = { .half_height = 0.12f * scale_f, .radius = 0.06f * scale_f } });
+		apush(g_draw_list, ((DrawEntry){ b, g_mesh_capsule, V3(scale_f, scale_f, scale_f), color }));
+		break;
+	}
+	case 3: case 4: case 5: {
+		Hull* h = (kind == 3) ? g_ccd_hull_tet : (kind == 4) ? g_ccd_hull_chunk : g_ccd_hull_shard;
+		int mesh = (kind == 3) ? g_ccd_mesh_tet : (kind == 4) ? g_ccd_mesh_chunk : g_ccd_mesh_shard;
+		float hs = 0.18f * scale_f;
+		body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_HULL, .hull = { .hull = h, .scale = V3(hs, hs, hs) } });
+		apush(g_draw_list, ((DrawEntry){ b, mesh, V3(hs, hs, hs), color }));
+		break;
+	}
+	case 6: {
+		// Compound dumbbell — two spheres offset along X. Renders as two
+		// draw entries sharing the same Body handle.
+		float r = 0.12f * scale_f;
+		float off = 0.35f * scale_f;
+		body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = r, .local_pos = V3( off, 0, 0) });
+		body_add_shape(g_world, b, (ShapeParams){ .type = SHAPE_SPHERE, .sphere.radius = r, .local_pos = V3(-off, 0, 0) });
+		apush(g_draw_list, ((DrawEntry){ b, MESH_SPHERE, V3(r, r, r), color, V3( off, 0, 0) }));
+		apush(g_draw_list, ((DrawEntry){ b, MESH_SPHERE, V3(r, r, r), color, V3(-off, 0, 0) }));
+		break;
+	}
+	}
+	body_set_velocity(g_world, b, vel);
+	body_set_angular_velocity(g_world, b, omega);
+}

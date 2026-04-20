@@ -103,6 +103,8 @@ int main(int argc, char* argv[])
 	int bench_ragdoll_flag = 0;
 	int bench_incr_np = 0;
 	int bench_planes = 0;
+	int bench_ccd_flag = 0;
+	int bench_ccd_soak_frames = -1; // -1 = not requested, 0 = infinite, >0 = run N frames
 	int pyramid_test = 0;
 	int pyramid_base = 5;
 	int pyramid_frames = 600;
@@ -130,6 +132,23 @@ int main(int argc, char* argv[])
 			bench_incr_np = 1;
 		else if (strcmp(argv[i], "--bench-planes") == 0)
 			bench_planes = 1;
+		else if (strcmp(argv[i], "--bench-ccd") == 0)
+			bench_ccd_flag = 1;
+		else if (strcmp(argv[i], "--bench-ccd-soak") == 0)
+			bench_ccd_soak_frames = (i + 1 < argc && argv[i+1][0] != '-') ? atoi(argv[++i]) : 0;
+		else if (strcmp(argv[i], "--ccd-repro") == 0 && i + 8 < argc) {
+			// --ccd-repro <kind> <scale> <vx> <vy> <vz> <wx> <wy> <wz>
+			int   kind   = atoi(argv[++i]);
+			float scale_ = (float)atof(argv[++i]);
+			float vx     = (float)atof(argv[++i]);
+			float vy     = (float)atof(argv[++i]);
+			float vz     = (float)atof(argv[++i]);
+			float wx     = (float)atof(argv[++i]);
+			float wy     = (float)atof(argv[++i]);
+			float wz     = (float)atof(argv[++i]);
+			ccd_soak_repro(kind, scale_, vx, vy, vz, wx, wy, wz);
+			return 0;
+		}
 		else if (strcmp(argv[i], "--chaos-bodies") == 0 && i + 1 < argc)
 			chaos_bodies = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--chaos-frames") == 0 && i + 1 < argc)
@@ -231,6 +250,14 @@ int main(int argc, char* argv[])
 	}
 	if (bench_planes) {
 		bench_plane_compute();
+		return 0;
+	}
+	if (bench_ccd_flag) {
+		bench_ccd(400, 80.0f);
+		return 0;
+	}
+	if (bench_ccd_soak_frames >= 0) {
+		bench_ccd_soak(bench_ccd_soak_frames);
 		return 0;
 	}
 	if (bench_incr_np) {

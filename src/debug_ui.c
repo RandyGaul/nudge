@@ -3,7 +3,7 @@
 //   g_world, g_show_joints, g_show_bvh, g_ldl_inspect_island,
 //   g_ldl_inspect_step, g_ldl_hover_body, WorldInternal, render functions, ImGui
 
-// --- LDL Inspector ---
+// ---] LDL Inspector ---
 extern LDL_DebugInfo g_ldl_debug_info;
 extern int g_ldl_debug_enabled;
 

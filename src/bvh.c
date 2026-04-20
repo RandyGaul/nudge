@@ -855,7 +855,30 @@ static void bvh_refit(BVH_Tree* t, WorldInternal* w)
 	bvh_fused_recurse(&r, t->root, 0, -1, 0, &changed);
 
 	// Swap new arrays into the tree (bulk memcpy instead of per-element apush).
-	int live_count = new_nodes[0].a.leaf_count + new_nodes[0].b.leaf_count - 1;
+	// Internal-node count for a binary subtree of N leaves where every node
+	// has TWO non-empty children is N-1. But when the root has exactly one
+	// non-empty child (only legal place an empty slot is allowed — see
+	// bvh_remove line 425-428 and bvh_insert line 339-346) the formula
+	// undercounts by one: the root itself is internal but not represented
+	// by the "two-children" invariant. Left uncorrected, asetlen below
+	// truncates the nodes array past a subtree child's index, leaving
+	// dangling pointers that surface as an infinite recursion in the
+	// next refit.
+	int live_count;
+	{
+		BVHNode* rn = &new_nodes[0];
+		int a_leaves = rn->a.leaf_count;
+		int b_leaves = rn->b.leaf_count;
+		int a_empty = bvh_child_is_empty(&rn->a);
+		int b_empty = bvh_child_is_empty(&rn->b);
+		if (a_empty || b_empty) {
+			int non_empty_leaves = a_leaves + b_leaves;
+			int non_empty_internal = bvh_child_is_internal(&rn->a) || bvh_child_is_internal(&rn->b);
+			live_count = 1 + (non_empty_internal ? (non_empty_leaves - 1) : 0);
+		} else {
+			live_count = a_leaves + b_leaves - 1;
+		}
+	}
 	if (live_count < 1) live_count = 1;
 	afit(t->nodes, live_count); asetlen(t->nodes, live_count);
 	memcpy(t->nodes, new_nodes, live_count * sizeof(BVHNode));

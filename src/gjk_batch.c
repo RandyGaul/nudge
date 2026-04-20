@@ -150,11 +150,11 @@ static void gjk_distance_batch_box(const GJK_Shape* a[4], const GJK_Shape* b[4],
 static inline v3w v3w_tri_support(v3w ta, v3w tb, v3w tc, v3w dir) {
 	simd4f da = v3w_dot(ta, dir), db = v3w_dot(tb, dir), dc = v3w_dot(tc, dir);
 	simd4f ab = simd_cmpge(da, db), ac = simd_cmpge(da, dc), bc = simd_cmpge(db, dc);
-	simd4f pick_a = simd_and(ab, ac);             // da >= db && da >= dc
-	simd4f pick_b = simd_andnot(pick_a, bc);       // not-a && db >= dc
-	v3w result = tc;                                  // default: pick C
-	result = v3w_sel(tb, result, pick_b);             // if pick_b: use B
-	result = v3w_sel(ta, result, pick_a);             // if pick_a: use A
+	simd4f pick_a = simd_and(ab, ac);        // da >= db && da >= dc
+	simd4f pick_b = simd_andnot(pick_a, bc); // not-a && db >= dc
+	v3w result = tc;                         // default: pick C
+	result = v3w_sel(tb, result, pick_b);    // if pick_b: use B
+	result = v3w_sel(ta, result, pick_a);    // if pick_a: use A
 	return result;
 }
 

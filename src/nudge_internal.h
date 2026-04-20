@@ -41,6 +41,9 @@ typedef struct ShapeInternal
 	ShapeType type;
 	v3 local_pos;
 	quat local_rot;   // rotation in body local frame (always valid; body_add_shape normalises)
+	float rounding_radius; // convex rounding applied to box/hull (0 otherwise)
+	float r_min;      // inscribed-sphere radius about the shape's local origin (includes rounding_radius)
+	float r_max;      // bounding-sphere radius about the shape's local origin (includes rounding_radius)
 	union {
 		struct { float radius; } sphere;
 		struct { float half_height; float radius; } capsule;
@@ -85,6 +88,13 @@ typedef struct BodyCold
 	// Default material id for this body. Reported in ContactSummary.material_a/b
 	// for non-mesh sides. Mesh sides prefer per-triangle ids when set.
 	uint8_t material_id;
+	// CCD speed-test bounds (Catto GDC 2025). r_min is the largest sphere
+	// centered at body origin that fits inside every shape; r_max is the
+	// smallest sphere centered at body origin that contains every shape.
+	// Skipped for bodies containing only static shapes (mesh/heightfield).
+	// Recomputed in body_add_shape. Zero when no valid shapes are present.
+	float r_min_body;
+	float r_max_body;
 } BodyCold;
 
 // Hot: solver working set, iterated every PGS step, packed for cache.
@@ -395,6 +405,15 @@ typedef struct Island
 #define SLEEP_TIME_THRESHOLD  0.5f   // seconds of stillness before sleep
 #define LINEAR_SLOP           0.01f  // contact margin: keeps contacts alive near zero-penetration
 
+// Speculative contact margin. When WorldInternal.speculative_enabled is 1,
+// narrowphase emits contacts with signed separation in
+// [-penetration_tol, +speculative_margin] instead of only on penetration.
+// The solver (pre_solve_manifold.inc) then drives a velocity bias that
+// prevents the gap from closing within the step.
+// Invariant: speculative_margin >= LINEAR_SLOP (required by the speed-test
+// correctness guarantee in toi.c).
+#define NUDGE_SPECULATIVE_MARGIN 0.05f
+
 // Narrowphase debug snapshot: intermediate SAT state + final contact output
 // for one pair. Written by collision.c narrowphase routines when the world's
 // np_debug_enabled flag is set and the pair matches the configured filter.
@@ -477,6 +496,22 @@ typedef struct WorldInternal
 	int box_use_hull;          // 1 = route box-box through hull-hull path (debug)
 	int incremental_np_enabled; // 1 = incremental narrowphase (cached feature pair refresh)
 	int warm_start_enabled;    // 1 = warm-start contact impulses from cache
+	// CCD speculative contacts. When speculative_enabled == 1, narrowphase
+	// emits contacts at signed separation up to speculative_margin. Default
+	// off to preserve bit-identical behavior until the solver speculative
+	// bias branch is wired (CCD plan step 3).
+	int speculative_enabled;
+	float speculative_margin;
+	// Fast-body classification (CCD speed test). Populated each world_step
+	// with body indices that failed (|v|+r_max*|w|)*dt < r_min and therefore
+	// need TOI advancement. Consumed by the post-solve TOI pass (toi.c).
+	// Cleared + rebuilt each step; stable order matches enumeration order.
+	CK_DYNA int* fast_body_list;
+	// Pre-step pose snapshot for every body in fast_body_list (parallel array,
+	// same index). Captured before integration so TOI can sweep from the true
+	// start-of-step pose to the post-solve pose.
+	CK_DYNA v3*   fast_body_pre_pos;
+	CK_DYNA quat* fast_body_pre_rot;
 	int thread_count;        // 0 or 1 = single-threaded, >1 = parallel PGS solver
 	// Per-worker scratch arenas. Lazily sized to max(1, thread_count) on first
 	// step; reset at the start of each step; freed in destroy_world. Workers
@@ -585,6 +620,26 @@ typedef struct SolverManifold
 	float patch_area;
 	float patch_radius;
 } SolverManifold;
+
+// Per-contact body-local offsets. Parallel array to the SolverContact pool,
+// same layout (manifold_idx * MAX_CONTACTS + contact_idx). Populated at
+// pre-solve; consumed at the top of each substep (sub > 0) to rotate world
+// r_a/r_b from body-local so PGS, relax, NGS, and SIMD batches see fresh
+// lever arms when bodies rotate during the step.
+typedef struct SolverContactCold
+{
+	v3 r_a_local;
+	v3 r_b_local;
+} SolverContactCold;
+
+// Per-manifold body-local patch data. Parallel array to the SolverManifold
+// pool. Holds body-local versions of centroid_r_a / centroid_r_b so patch
+// friction rows get fresh lever arms at substep start.
+typedef struct SolverManifoldCold
+{
+	v3 centroid_r_a_local;
+	v3 centroid_r_b_local;
+} SolverManifoldCold;
 
 // Warm starting: cached impulses from previous frame, keyed by body pair.
 typedef struct WarmContact

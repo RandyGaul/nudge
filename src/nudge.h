@@ -76,6 +76,7 @@ typedef struct PerfTimers
 	double position_correct;
 	double integrate;
 	double islands;
+	double ccd;           // fast-body classification + TOI pass (when speculative_enabled)
 	double total;
 	PGSTimers pgs;
 } PerfTimers;
@@ -338,6 +339,10 @@ typedef struct ShapeParams
 	ShapeType type;
 	v3 local_pos;   // offset from body origin
 	quat local_rot; // rotation in body local frame; zero-quat = identity (default)
+	float rounding_radius; // optional convex rounding on box/hull (0 = none);
+	                       // face planes shift by this along their normal,
+	                       // vertex/edge contacts inflate by this. Ignored on
+	                       // sphere/capsule/mesh/heightfield.
 	union {
 		struct { float radius; } sphere;
 		struct { float half_height; float radius; } capsule; // segment along local Y
@@ -515,6 +520,46 @@ NUDGE_API int world_query_aabb(World world, v3 lo, v3 hi, Body* results, int max
 // Cast a ray and find the closest body hit. Direction is normalized internally.
 // Returns nonzero on hit; fills *hit (may be NULL for boolean-only test).
 NUDGE_API int world_raycast(World world, v3 origin, v3 direction, float max_distance, RayHit* hit);
+
+// -----------------------------------------------------------------------------
+// Shape casts -- swept convex against static world geometry.
+//
+// Both entrypoints sweep a convex shape described by ShapeParams (sphere /
+// capsule / box / hull) from an initial pose through a linear translation
+// (and optionally an axis-angle rotation delta), and report the earliest
+// contact with any static body in the world. Implemented as a thin wrapper
+// over the CCD TOI kernel (toi.c).
+//
+// Static-only: dynamic bodies are NOT tested. Speculative contacts are the
+// dynamic-vs-dynamic path.
+//
+// Caveat (world_shape_cast): a purely rotational sweep (translation ~= 0,
+// large |axis_angle|) can still tunnel through thin static features because
+// the worst-case surface-point speed r_max * |omega| / dt may exceed r_min /
+// dt for the swept shape. Mitigation is future work; prefer
+// world_shape_cast_linear for reliable near-axis-aligned sweeps.
+
+typedef struct CastHit
+{
+	int      hit;         // 1 = hit, 0 = miss
+	float    fraction;    // [0, 1] along the sweep (0 = initial pose, 1 = end)
+	v3       point;       // world-space approximate contact point
+	v3       normal;      // world-space, from hit geometry toward caster
+	Body     body;        // hit body handle (0/0 = unset when miss)
+	uint32_t shape_index; // shape-within-body index for compound bodies
+} CastHit;
+
+typedef struct CastFilter
+{
+	uint32_t layer_mask;  // 0 = accept all layers
+	Body     ignore_body; // skip this body during the cast; {0} = no-op
+} CastFilter;
+
+// Linear sweep: translation only. No rotational-tunneling caveat.
+NUDGE_API CastHit world_shape_cast_linear(World world, ShapeParams shape, v3 start_pos, quat start_rot, v3 translation, CastFilter filter);
+
+// Full sweep: translation + axis-angle rotation delta applied over the sweep.
+NUDGE_API CastHit world_shape_cast(World world, ShapeParams shape, v3 start_pos, quat start_rot, v3 translation, v3 axis_angle, CastFilter filter);
 
 // -----------------------------------------------------------------------------
 // Rewind -- ring buffer of deterministic world snapshots.

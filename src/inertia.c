@@ -196,3 +196,139 @@ static void recompute_body_inertia(WorldInternal* w, int idx)
 
 	body_inv_inertia_local(w, idx) = inertia_to_inv(total);
 }
+
+// Fill r_min / r_max on a ShapeInternal (inscribed and bounding sphere radii
+// about the shape's local origin). Includes rounding_radius on box/hull.
+// Mesh and heightfield are static and skipped (r_min = r_max = 0).
+static void shape_compute_bounds(ShapeInternal* s)
+{
+	float rr = s->rounding_radius;
+	switch (s->type) {
+	case SHAPE_SPHERE:
+		s->r_min = s->sphere.radius;
+		s->r_max = s->sphere.radius;
+		break;
+	case SHAPE_CAPSULE:
+		s->r_min = s->capsule.radius;
+		s->r_max = s->capsule.half_height + s->capsule.radius;
+		break;
+	case SHAPE_BOX: {
+		v3 h = s->box.half_extents;
+		float hmin = h.x < h.y ? h.x : h.y;
+		if (h.z < hmin) hmin = h.z;
+		s->r_min = hmin + rr;
+		s->r_max = sqrtf(h.x*h.x + h.y*h.y + h.z*h.z) + rr;
+		break;
+	}
+	case SHAPE_HULL: {
+		const Hull* hull = s->hull.hull;
+		v3 sc = s->hull.scale;
+		// r_max: scan vertices, measure distance from centroid.
+		// Centroid lives in the hull's own local frame; we scale both the
+		// centroid reference point and the vertex so the measurement is
+		// taken in scaled-shape space.
+		v3 c = V3(hull->centroid.x * sc.x, hull->centroid.y * sc.y, hull->centroid.z * sc.z);
+		float rmax2 = 0.0f;
+		for (int i = 0; i < hull->vert_count; i++) {
+			v3 v = V3(hull->verts[i].x * sc.x, hull->verts[i].y * sc.y, hull->verts[i].z * sc.z);
+			v3 d = V3(v.x - c.x, v.y - c.y, v.z - c.z);
+			float m2 = d.x*d.x + d.y*d.y + d.z*d.z;
+			if (m2 > rmax2) rmax2 = m2;
+		}
+		// r_min: min distance from centroid to any face plane. Planes are
+		// in unscaled hull space; with non-uniform scale we conservatively
+		// use the minimum axis scale as a lower bound on inscribed radius.
+		// Uniform scale case is exact.
+		float smin = sc.x < sc.y ? sc.x : sc.y; if (sc.z < smin) smin = sc.z;
+		float rmin = 1e18f;
+		for (int i = 0; i < hull->face_count; i++) {
+			// plane: dot(n, p) = offset, for any p on the face. Distance from
+			// centroid = dot(n, centroid) - offset (signed; inside is negative
+			// for outward-pointing normals). We want the absolute.
+			float d = hull->planes[i].normal.x * hull->centroid.x
+			        + hull->planes[i].normal.y * hull->centroid.y
+			        + hull->planes[i].normal.z * hull->centroid.z
+			        - hull->planes[i].offset;
+			float ad = d < 0.0f ? -d : d;
+			if (ad < rmin) rmin = ad;
+		}
+		if (rmin >= 1e18f) rmin = 0.0f;
+		s->r_min = rmin * smin + rr;
+		s->r_max = sqrtf(rmax2) + rr;
+		break;
+	}
+	case SHAPE_MESH:
+	case SHAPE_HEIGHTFIELD:
+		s->r_min = 0.0f;
+		s->r_max = 0.0f;
+		break;
+	}
+}
+
+// CCD speed test (Catto GDC 2025). A body is "slow" this step iff the maximum
+// possible displacement of any surface point within dt fits inside the body's
+// inscribed sphere:
+//   (|v_lin| + r_max * |omega|) * dt < r_min
+// Slow bodies use speculative contacts only. Fast bodies get enrolled for TOI
+// advancement against static world geometry.
+static int body_is_slow_this_step(BodyHot* h, BodyCold* c, float dt)
+{
+	if (h->inv_mass == 0.0f) return 1; // static/kinematic never TOI'd
+	if (c->r_max_body <= 0.0f) return 1; // no dynamic shapes (mesh/heightfield bodies)
+	// Zero r_min is VALID for compound bodies whose COM lies outside any
+	// child shape's inscribed sphere. Such bodies always fail the speed
+	// test and always enroll for TOI — which is the correct fallback
+	// because no speculative guarantee can hold when the body has no
+	// interior sphere around the COM.
+	float v = sqrtf(h->velocity.x*h->velocity.x + h->velocity.y*h->velocity.y + h->velocity.z*h->velocity.z);
+	float w = sqrtf(h->angular_velocity.x*h->angular_velocity.x + h->angular_velocity.y*h->angular_velocity.y + h->angular_velocity.z*h->angular_velocity.z);
+	float disp = (v + c->r_max_body * w) * dt;
+	return disp < c->r_min_body;
+}
+
+// Rebuild WorldInternal.fast_body_list for the upcoming step. Iterates every
+// live dynamic body and enrolls those failing the speed test. Cleared and
+// repopulated each step. The list is consumed by the post-solve TOI pass.
+static void classify_fast_bodies(WorldInternal* w, float dt)
+{
+	if (w->fast_body_list)    asetlen(w->fast_body_list, 0);
+	if (w->fast_body_pre_pos) asetlen(w->fast_body_pre_pos, 0);
+	if (w->fast_body_pre_rot) asetlen(w->fast_body_pre_rot, 0);
+	int n = asize(w->body_cold);
+	for (int i = 0; i < n; i++) {
+		if (!split_alive(w->body_gen, i)) continue;
+		if (body_is_slow_this_step(&w->body_hot[i], &w->body_cold[i], dt)) continue;
+		apush(w->fast_body_list,    i);
+		apush(w->fast_body_pre_pos, w->body_state[i].position);
+		apush(w->fast_body_pre_rot, w->body_state[i].rotation);
+	}
+}
+
+// Recompute body-level r_min_body / r_max_body from current shapes.
+// Shapes with r_max == 0 (mesh/heightfield) are skipped. Per Catto's speed
+// test (GDC 2025), for compound bodies we use the conservative aggregate:
+//   r_max_body = max over shapes of (|local_pos| + r_max)
+//   r_min_body = min over shapes of max(0, r_min - |local_pos|)
+// Sets both to zero when the body has no CCD-eligible shapes.
+static void recompute_body_bounds(WorldInternal* w, int idx)
+{
+	ShapeInternal* shapes = w->body_cold[idx].shapes;
+	int n = asize(shapes);
+	float r_max_body = 0.0f;
+	float r_min_body = 1e18f;
+	int any = 0;
+	for (int i = 0; i < n; i++) {
+		ShapeInternal* s = &shapes[i];
+		if (s->r_max <= 0.0f) continue;
+		float off = sqrtf(s->local_pos.x*s->local_pos.x + s->local_pos.y*s->local_pos.y + s->local_pos.z*s->local_pos.z);
+		float rmax_i = off + s->r_max;
+		float rmin_i = s->r_min - off;
+		if (rmin_i < 0.0f) rmin_i = 0.0f;
+		if (rmax_i > r_max_body) r_max_body = rmax_i;
+		if (rmin_i < r_min_body) r_min_body = rmin_i;
+		any = 1;
+	}
+	if (!any) { r_min_body = 0.0f; r_max_body = 0.0f; }
+	w->body_cold[idx].r_min_body = r_min_body;
+	w->body_cold[idx].r_max_body = r_max_body;
+}

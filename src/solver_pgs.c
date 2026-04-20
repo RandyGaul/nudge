@@ -53,15 +53,19 @@ static int warm_match(WarmManifold* wm, uint32_t feature_id)
 
 #include "pre_solve_manifold.inc"
 
-static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, float dt)
+static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, SolverManifoldCold** out_sm_cold, SolverContactCold** out_sc_cold, float dt)
 {
 	CK_DYNA SolverManifold* sm = NULL;
 	CK_DYNA SolverContact*  sc = NULL;
+	CK_DYNA SolverManifoldCold* sm_cold = NULL;
+	CK_DYNA SolverContactCold*  sc_cold = NULL;
 	// Fixed-stride: each manifold gets MAX_CONTACTS slots. Enables parallel dispatch.
-	if (manifold_count == 0) { *out_sm = sm; *out_sc = sc; return; }
+	if (manifold_count == 0) { *out_sm = sm; *out_sc = sc; *out_sm_cold = sm_cold; *out_sc_cold = sc_cold; return; }
 	afit(sm, manifold_count); asetlen(sm, manifold_count);
 	int total_contacts = manifold_count * MAX_CONTACTS;
 	afit(sc, total_contacts); asetlen(sc, total_contacts);
+	afit(sm_cold, manifold_count); asetlen(sm_cold, manifold_count);
+	afit(sc_cold, total_contacts); asetlen(sc_cold, total_contacts);
 	// Only contact_count must be zero for early-return manifolds; the full struct
 	// is written by pre_solve_manifold for all active manifolds.
 	for (int i = 0; i < manifold_count; i++) sm[i].contact_count = 0;
@@ -79,7 +83,7 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 	}
 
 	for (int i = 0; i < manifold_count; i++) {
-		pre_solve_manifold(w, &manifolds[i], i, sm, sc, dt, soft_dd, bias_dd, soft_ds, bias_ds);
+		pre_solve_manifold(w, &manifolds[i], i, sm, sc, sc_cold, sm_cold, dt, soft_dd, bias_dd, soft_ds, bias_ds);
 	}
 
 	// Apply warm start impulses
@@ -116,6 +120,32 @@ static void solver_pre_solve(WorldInternal* w, InternalManifold* manifolds, int 
 
 	*out_sm = sm;
 	*out_sc = sc;
+	*out_sm_cold = sm_cold;
+	*out_sc_cold = sc_cold;
+}
+
+// Rotate each active manifold's per-contact r_a/r_b and patch centroid offsets
+// from their body-local versions back into world frame. Run at the top of each
+// substep after integrate_velocities (sub > 0) so PGS, relax, NGS, and SIMD
+// batches all see fresh lever arms when bodies have rotated during the step.
+// Does not touch normal, effective mass, or bias -- those stay from pre-solve
+// (normal refresh would require knowing which body a face-normal is attached
+// to; small-rotation approximation on K is fine within a substep).
+static void solver_refresh_contact_frames(WorldInternal* w, SolverManifold* sm, int sm_count, SolverContact* sc, SolverManifoldCold* sm_cold, SolverContactCold* sc_cold)
+{
+	for (int i = 0; i < sm_count; i++) {
+		SolverManifold* m = &sm[i];
+		if (m->contact_count == 0) continue;
+		BodyState* sa = &w->body_state[m->body_a];
+		BodyState* sb = &w->body_state[m->body_b];
+		for (int ci = 0; ci < m->contact_count; ci++) {
+			int idx = m->contact_start + ci;
+			sc[idx].r_a = rotate(sa->rotation, sc_cold[idx].r_a_local);
+			sc[idx].r_b = rotate(sb->rotation, sc_cold[idx].r_b_local);
+		}
+		m->centroid_r_a = rotate(sa->rotation, sm_cold[i].centroid_r_a_local);
+		m->centroid_r_b = rotate(sb->rotation, sm_cold[i].centroid_r_b_local);
+	}
 }
 
 // NGS position correction: directly fix remaining penetration after velocity solve
@@ -182,6 +212,8 @@ static void solver_relax_contacts(WorldInternal* w, SolverManifold* sm, int sm_c
 		float denom2 = hd2 + hhk2;
 		bias_rate_ds = (denom2 > 1e-12f) ? dt * k2 / denom2 : 0.0f;
 	}
+	float inv_dt = dt > 0.0f ? 1.0f / dt : 0.0f;
+	int speculative = w->speculative_enabled;
 	for (int i = 0; i < sm_count; i++) {
 		SolverManifold* m = &sm[i];
 		if (m->contact_count == 0) continue;
@@ -194,12 +226,21 @@ static void solver_relax_contacts(WorldInternal* w, SolverManifold* sm, int sm_c
 			v3 p_a = add(sa->position, s->r_a);
 			v3 p_b = add(sb->position, s->r_b);
 			float separation = dot(sub(p_b, p_a), s->normal) - s->penetration;
+			// current signed penetration: positive = overlap, negative = gap
+			float cur_pen = -separation;
 
-			float pen = -separation - SOLVER_SLOP;
-			s->bias = pen > 0.0f ? -bias_rate * pen : 0.0f;
-			if (s->bias < -w->max_push_velocity) s->bias = -w->max_push_velocity;
-
-			if (s->bounce != 0.0f) s->bias = 0.0f;
+			if (speculative && cur_pen < 0.0f && s->bounce == 0.0f) {
+				// Speculative gap: drive velocity so it doesn't close faster than
+				// the gap would permit in one step.
+				float sbias = -cur_pen * inv_dt;
+				if (sbias > w->max_push_velocity) sbias = w->max_push_velocity;
+				s->bias = sbias;
+			} else {
+				float pen = cur_pen - SOLVER_SLOP;
+				s->bias = pen > 0.0f ? -bias_rate * pen : 0.0f;
+				if (s->bias < -w->max_push_velocity) s->bias = -w->max_push_velocity;
+				if (s->bounce != 0.0f) s->bias = 0.0f;
+			}
 		}
 	}
 }

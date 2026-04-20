@@ -21,6 +21,7 @@ static void pool_dispatch(WorkFn fn, void* ctx, int total_items, int block_size,
 #include "heightfield.c"
 #include "broadphase.c"
 #include "inertia.c"
+#include "toi.c"
 #include "solver_pgs.c"
 #include "joints.c"
 #include "solver_ldl.c"
@@ -46,6 +47,8 @@ World create_world(WorldParams params)
 	w->sat_hillclimb_enabled = 1;
 	w->warm_start_enabled = 1;
 	w->incremental_np_enabled = 1;
+	w->speculative_enabled = 1;
+	w->speculative_margin = NUDGE_SPECULATIVE_MARGIN;
 	w->velocity_iters = params.velocity_iters > 0 ? params.velocity_iters : SOLVER_VELOCITY_ITERS;
 	w->position_iters = params.position_iters > 0 ? params.position_iters : SOLVER_POSITION_ITERS;
 	w->contact_hertz = params.contact_hertz > 0.0f ? params.contact_hertz : 240.0f;
@@ -71,6 +74,9 @@ void destroy_world(World world)
 		afree(w->body_cold[i].shapes);
 	}
 	afree(w->debug_contacts);
+	afree(w->fast_body_list);
+	afree(w->fast_body_pre_pos);
+	afree(w->fast_body_pre_rot);
 	afree(w->body_state);
 	map_free(w->warm_cache);
 	bvh_free(w->bvh_static); CK_FREE(w->bvh_static);
@@ -414,12 +420,12 @@ static void integrate_pos_work_fn(void* ctx, int start, int count)
 }
 
 // --- Pre-solve work function (parallel manifold setup) ---
-typedef struct PreSolveCtx { WorldInternal* w; InternalManifold* manifolds; SolverManifold* sm; SolverContact* sc; float dt; float soft_dd, bias_dd, soft_ds, bias_ds; } PreSolveCtx;
+typedef struct PreSolveCtx { WorldInternal* w; InternalManifold* manifolds; SolverManifold* sm; SolverContact* sc; SolverManifoldCold* sm_cold; SolverContactCold* sc_cold; float dt; float soft_dd, bias_dd, soft_ds, bias_ds; } PreSolveCtx;
 static void pre_solve_work_fn(void* ctx, int start, int count)
 {
 	PreSolveCtx* ps = (PreSolveCtx*)ctx;
 	for (int i = start; i < start + count; i++) {
-		pre_solve_manifold(ps->w, &ps->manifolds[i], i, ps->sm, ps->sc, ps->dt, ps->soft_dd, ps->bias_dd, ps->soft_ds, ps->bias_ds);
+		pre_solve_manifold(ps->w, &ps->manifolds[i], i, ps->sm, ps->sc, ps->sc_cold, ps->sm_cold, ps->dt, ps->soft_dd, ps->bias_dd, ps->soft_ds, ps->bias_ds);
 	}
 }
 
@@ -500,13 +506,17 @@ static void coloring_work_fn(void* ctx, int start, int count)
 // Warm start runs per-island in parallel when bucketing is available (island
 // perm/offsets non-NULL) and thread_count > 1; otherwise falls back to the
 // sequential path.
-static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, float dt, WorkFn work_fn, int* island_manifold_perm, int* island_manifold_offsets, int island_count)
+static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifolds, int manifold_count, SolverManifold** out_sm, SolverContact** out_sc, SolverManifoldCold** out_sm_cold, SolverContactCold** out_sc_cold, float dt, WorkFn work_fn, int* island_manifold_perm, int* island_manifold_offsets, int island_count)
 {
 	CK_DYNA SolverManifold* sm = NULL;
 	CK_DYNA SolverContact*  sc = NULL;
+	CK_DYNA SolverManifoldCold* sm_cold = NULL;
+	CK_DYNA SolverContactCold*  sc_cold = NULL;
 	afit(sm, manifold_count); asetlen(sm, manifold_count);
 	int total_contacts = manifold_count * MAX_CONTACTS;
 	afit(sc, total_contacts); asetlen(sc, total_contacts);
+	afit(sm_cold, manifold_count); asetlen(sm_cold, manifold_count);
+	afit(sc_cold, total_contacts); asetlen(sc_cold, total_contacts);
 	memset(sm, 0, manifold_count * sizeof(SolverManifold));
 	memset(sc, 0, total_contacts * sizeof(SolverContact));
 	float soft_dd = 0, bias_dd = 0, soft_ds = 0, bias_ds = 0;
@@ -517,7 +527,7 @@ static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifo
 		if (den1 > 1e-12f) { soft_dd = 1.0f / den1; bias_dd = dt * o1*o1 * soft_dd; }
 		if (den2 > 1e-12f) { soft_ds = 1.0f / den2; bias_ds = dt * o2*o2 * soft_ds; }
 	}
-	PreSolveCtx ps_ctx = { .w = w, .manifolds = manifolds, .sm = sm, .sc = sc, .dt = dt, .soft_dd = soft_dd, .bias_dd = bias_dd, .soft_ds = soft_ds, .bias_ds = bias_ds };
+	PreSolveCtx ps_ctx = { .w = w, .manifolds = manifolds, .sm = sm, .sc = sc, .sm_cold = sm_cold, .sc_cold = sc_cold, .dt = dt, .soft_dd = soft_dd, .bias_dd = bias_dd, .soft_ds = soft_ds, .bias_ds = bias_ds };
 	pool_dispatch(work_fn, &ps_ctx, manifold_count, 32, w->thread_count);
 
 	int n_workers = w->thread_count > 0 ? w->thread_count : 1;
@@ -528,6 +538,7 @@ static void solver_pre_solve_dispatch(WorldInternal* w, InternalManifold* manifo
 		warm_start_apply_range(w, sm, sc, 0, manifold_count);
 	}
 	*out_sm = sm; *out_sc = sc;
+	*out_sm_cold = sm_cold; *out_sc_cold = sc_cold;
 }
 
 // --- Narrowphase work function ---
@@ -579,6 +590,14 @@ void world_step(World world, float dt)
 	w->frame++;
 	int n_sub = w->sub_steps;
 	float sub_dt = dt / (float)n_sub;
+
+	// CCD speed-test classification. Enrolls bodies that can tunnel more than
+	// their inscribed sphere this step into fast_body_list for TOI advancement.
+	// Rebuilt every step; consumed by the post-solve TOI pass. Timed together
+	// with the post-solve TOI pass via w->perf.ccd.
+	double t_ccd_classify = perf_now();
+	classify_fast_bodies(w, dt);
+	w->perf.ccd = perf_now() - t_ccd_classify;
 
 	afree(w->dbg_solver_manifolds); w->dbg_solver_manifolds = NULL;
 	afree(w->dbg_solver_contacts);  w->dbg_solver_contacts = NULL;
@@ -755,11 +774,13 @@ void world_step(World world, float dt)
 	double t2 = perf_now();
 	SolverManifold* sm = NULL;
 	SolverContact*  sc = NULL;
+	SolverManifoldCold* sm_cold = NULL;
+	SolverContactCold*  sc_cold = NULL;
 	// Pre-solve: parallel when threading enabled (each manifold writes to fixed-stride slots).
 	if (n_workers > 1 && manifold_count >= 64)
-		solver_pre_solve_dispatch(w, manifolds, manifold_count, &sm, &sc, sub_dt, pre_solve_work_fn, island_manifold_perm, island_manifold_offsets, asize(w->islands));
+		solver_pre_solve_dispatch(w, manifolds, manifold_count, &sm, &sc, &sm_cold, &sc_cold, sub_dt, pre_solve_work_fn, island_manifold_perm, island_manifold_offsets, asize(w->islands));
 	else
-		solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, sub_dt);
+		solver_pre_solve(w, manifolds, manifold_count, &sm, &sc, &sm_cold, &sc_cold, sub_dt);
 
 	SolverJoint* sol_joints = NULL;
 	joints_pre_solve(w, sub_dt, &sol_joints);
@@ -917,6 +938,7 @@ void world_step(World world, float dt)
 	CK_DYNA PGS_Batch4* simd_batches = NULL;
 	int simd_batch_count = 0;
 	for (int sub = 0; sub < n_sub; sub++) {
+		int has_ldl = w->ldl_enabled && asize(sol_joints) > 0;
 		if (sub > 0) {
 			double ti = perf_now();
 			if (n_workers > 1 && body_count >= 256) {
@@ -925,12 +947,17 @@ void world_step(World world, float dt)
 			} else
 				integrate_velocities_and_inertia(w, sub_dt);
 			t_int_sub += perf_now() - ti;
-			// Refresh joint Jacobians/limits from current body state (positions
-			// changed by integrate_positions last substep, velocities just updated).
-			joints_refresh_substep(w, sol_joints, asize(sol_joints), sub_dt);
+			// Refresh contact r_a/r_b from body-local so PGS/relax/NGS see
+			// fresh lever arms after bodies rotated during prior substep.
+			solver_refresh_contact_frames(w, sm, asize(sm), sc, sm_cold, sc_cold);
+			// Refresh joint Jacobians/limits from current body state. When LDL
+			// is enabled, ldl_factor below calls ldl_refresh_lever_arms_light
+			// which already iterates all joints -- calling this here would be a
+			// redundant second pass. When LDL is off, this is the only refresh
+			// that happens, so it must cover every joint (gate removed below).
+			if (!has_ldl)
+				joints_refresh_substep(w, sol_joints, asize(sol_joints), sub_dt);
 		}
-
-		int has_ldl = w->ldl_enabled && asize(sol_joints) > 0;
 
 		// Resolve LDL correction iteration: -2 = auto (velocity_iters/2), -1 = after loop
 		int ldl_iter = w->ldl_correction_iter;
@@ -1153,6 +1180,16 @@ void world_step(World world, float dt)
 	joints_post_solve(w, sol_joints, asize(sol_joints));
 	w->perf.pgs.post_solve = perf_now() - t_ps;
 
+	// CCD post-solve: clamp every fast body to its earliest static-world TOI.
+	// Pose-only (velocity untouched) so next frame's speculative pass applies
+	// restitution via the replace-rule. Gated by speculative_enabled so the
+	// whole CCD system (speculative contacts + TOI) shares one toggle.
+	if (w->speculative_enabled && asize(w->fast_body_list) > 0) {
+		double t_toi = perf_now();
+		toi_advance_fast_bodies(w, dt);
+		w->perf.ccd += perf_now() - t_toi;
+	}
+
 	// Post-step BVH refit: update leaves after all substeps so they're correct
 	// for next frame's broadphase. Without this, bodies accelerated by the solver
 	// can escape their fat AABBs between frames.
@@ -1265,6 +1302,41 @@ void destroy_body(World world, Body body)
 	}
 	afree(w->body_cold[idx].shapes);
 	if (w->body_listeners) map_del(w->body_listeners, (uint64_t)idx);
+
+	// Purge any maps keyed by this body. If we leave stale entries in the
+	// warm cache (WarmManifold.body_a/body_b), warm_cache_age_and_evict
+	// dereferences a body slot that's since been reused or zeroed and
+	// reads its island_id — which now points into freed island storage.
+	// Same for prev_touching / joint_pairs (keyed by body_pair_key with
+	// the body index packed into 32 bits).
+	if (w->warm_cache) {
+		int i = 0;
+		while (i < map_size(w->warm_cache)) {
+			WarmManifold* wm = &w->warm_cache[i];
+			if (wm->body_a == idx || wm->body_b == idx) {
+				map_del(w->warm_cache, map_key(w->warm_cache, i));
+			} else i++;
+		}
+	}
+	if (w->prev_touching) {
+		int i = 0;
+		while (i < map_size(w->prev_touching)) {
+			uint64_t k = map_key(w->prev_touching, i);
+			uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)k;
+			if ((int)a == idx || (int)b == idx) map_del(w->prev_touching, k);
+			else i++;
+		}
+	}
+	if (w->joint_pairs) {
+		int i = 0;
+		while (i < map_size(w->joint_pairs)) {
+			uint64_t k = map_key(w->joint_pairs, i);
+			uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)k;
+			if ((int)a == idx || (int)b == idx) map_del(w->joint_pairs, k);
+			else i++;
+		}
+	}
+
 	split_del(w->body_cold, w->body_hot, w->body_gen, w->body_free, idx);
 }
 
@@ -1282,6 +1354,11 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	// Zero-quat (from designated initializers that omit local_rot) = identity.
 	float lr_m2 = params.local_rot.x*params.local_rot.x + params.local_rot.y*params.local_rot.y + params.local_rot.z*params.local_rot.z + params.local_rot.w*params.local_rot.w;
 	s.local_rot = (lr_m2 < 0.5f) ? quat_identity() : params.local_rot;
+	// Convex rounding radius: only meaningful on box/hull. Silently zero
+	// elsewhere (sphere/capsule already carry their own radius).
+	s.rounding_radius = (params.type == SHAPE_BOX || params.type == SHAPE_HULL)
+	                    ? (params.rounding_radius > 0.0f ? params.rounding_radius : 0.0f)
+	                    : 0.0f;
 	switch (params.type) {
 	case SHAPE_SPHERE:  s.sphere.radius = params.sphere.radius; break;
 	case SHAPE_CAPSULE: s.capsule.half_height = params.capsule.half_height;
@@ -1296,8 +1373,10 @@ void body_add_shape(World world, Body body, ShapeParams params)
 	                        assert(params.heightfield.hf && "SHAPE_HEIGHTFIELD.hf is NULL");
 	                        s.heightfield.hf = params.heightfield.hf; break;
 	}
+	shape_compute_bounds(&s);
 	apush(w->body_cold[idx].shapes, s);
 	recompute_body_inertia(w, idx);
+	recompute_body_bounds(w, idx);
 
 	// Insert into BVH on first shape add.
 	if (w->broadphase_type == BROADPHASE_BVH && asize(w->body_cold[idx].shapes) == 1) {
@@ -2152,3 +2231,53 @@ int world_raycast(World world, v3 origin, v3 direction, float max_distance, RayH
 	}
 	return 1;
 }
+
+CastHit world_shape_cast_linear(World world, ShapeParams shape, v3 start_pos, quat start_rot, v3 translation, CastFilter filter)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	ShapeInternal s = toi_shape_from_params(shape);
+	if (s.r_max <= 0.0f) return (CastHit){0};
+	// Normalize start rotation (zero-quat from designated initializer -> identity).
+	float rm2 = start_rot.x*start_rot.x + start_rot.y*start_rot.y + start_rot.z*start_rot.z + start_rot.w*start_rot.w;
+	if (rm2 < 0.5f) start_rot = quat_identity();
+
+	v3 pt, n; int bi = -1, si = -1;
+	float t = toi_shape_cast_world(w, &s, start_pos, start_rot, translation, V3(0,0,0), filter.ignore_body, &pt, &n, &bi, &si);
+	CastHit out = {0};
+	if (t < 1.0f && bi >= 0) {
+		out.hit = 1;
+		out.fraction = t;
+		out.point = pt;
+		out.normal = n;
+		out.body = split_handle(Body, w->body_gen, bi);
+		out.shape_index = (uint32_t)si;
+	}
+	return out;
+}
+
+CastHit world_shape_cast(World world, ShapeParams shape, v3 start_pos, quat start_rot, v3 translation, v3 axis_angle, CastFilter filter)
+{
+	WorldInternal* w = (WorldInternal*)world.id;
+	ShapeInternal s = toi_shape_from_params(shape);
+	if (s.r_max <= 0.0f) return (CastHit){0};
+	float rm2 = start_rot.x*start_rot.x + start_rot.y*start_rot.y + start_rot.z*start_rot.z + start_rot.w*start_rot.w;
+	if (rm2 < 0.5f) start_rot = quat_identity();
+
+	// axis_angle encodes the total rotation applied over the sweep (dt=1).
+	// Feed it as angular velocity so integration matches: q(t) uses omega*t*dt
+	// with dt = 1, recovering start_rot at t=0 and start_rot*exp(axis_angle)
+	// at t=1.
+	v3 pt, n; int bi = -1, si = -1;
+	float t = toi_shape_cast_world(w, &s, start_pos, start_rot, translation, axis_angle, filter.ignore_body, &pt, &n, &bi, &si);
+	CastHit out = {0};
+	if (t < 1.0f && bi >= 0) {
+		out.hit = 1;
+		out.fraction = t;
+		out.point = pt;
+		out.normal = n;
+		out.body = split_handle(Body, w->body_gen, bi);
+		out.shape_index = (uint32_t)si;
+	}
+	return out;
+}
+
