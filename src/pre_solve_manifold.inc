@@ -2,7 +2,7 @@
 // Included from solver_pgs.c. Each call writes to fixed-stride slots in sm/sc arrays.
 // Thread-safe: warm_cache is read-only, each manifold writes to its own index range.
 
-static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, SolverManifold* sm, SolverContact* sc, SolverContactCold* sc_cold, SolverManifoldCold* sm_cold, float dt, float soft_dd, float bias_dd, float soft_ds, float bias_ds)
+static void pre_solve_manifold(WorldInternal* w, InternalManifold* im, int idx, SolverManifold* sm, SolverContact* sc, float dt, float soft_dd, float bias_dd, float soft_ds, float bias_ds)
 {
 	BodyHot* a = &w->body_hot[im->body_a];
 	BodyHot* b = &w->body_hot[im->body_b];

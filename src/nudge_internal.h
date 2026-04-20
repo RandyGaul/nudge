@@ -586,27 +586,6 @@ typedef struct SolverManifold
 	float patch_radius;
 } SolverManifold;
 
-// Per-contact body-local offsets. Parallel array to the SolverContact pool,
-// same layout (manifold_idx * MAX_CONTACTS + contact_idx). Populated at
-// pre-solve; consumed at the top of each substep (sub > 0) to rotate world
-// r_a/r_b from body-local so PGS, relax, NGS, and SIMD batches see fresh
-// lever arms when bodies rotate during the step.
-typedef struct SolverContactCold
-{
-	v3 r_a_local;
-	v3 r_b_local;
-} SolverContactCold;
-
-// Per-manifold body-local patch data. Parallel array to the SolverManifold
-// pool. Holds body-local versions of centroid_r_a / centroid_r_b so patch
-// friction rows get fresh lever arms at substep start, matching the per-
-// contact refresh above.
-typedef struct SolverManifoldCold
-{
-	v3 centroid_r_a_local;
-	v3 centroid_r_b_local;
-} SolverManifoldCold;
-
 // Warm starting: cached impulses from previous frame, keyed by body pair.
 typedef struct WarmContact
 {
