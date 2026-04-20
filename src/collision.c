@@ -885,25 +885,80 @@ static FaceQuery sat_query_faces(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 // 4-wide SIMD: returns movemask of lanes where arcs intersect.
 #define gauss_map_prune(cba, dba, adc, bdc) simd_movemask(simd_and(simd_and(simd_cmpgt(simd_zero(), simd_mul(cba, dba)), simd_cmpgt(simd_zero(), simd_mul(adc, bdc))), simd_cmpgt(simd_mul(cba, bdc), simd_zero())))
 
-// Constant-time edge-pair separation (Gregorius GDC 2013, b2 rnHull.h /
-// rnSAT.cpp / lmQueryEdgeAxes). Once the Gauss-map Minkowski-face test has
-// passed, cross(eA, eB) is guaranteed to be a separating-axis candidate AND
-// the minimum separation along that axis is realized at the edge endpoints
-// themselves — no need to scan vertices. Formula: distance = dot(n, PB - PA)
-// with n oriented away from A's centroid. ~12 flops vs. the O(V1+V2) scan
-// the old sat_edge_project_full did.
-//
-// Precondition: caller already verified Gauss arcs intersect.
-static inline float sat_edge_project_gauss(v3 e1, v3 e2, v3 pA, v3 pB, v3 cA)
+// Project edge pair: signed distance along cross(e1,e2) from p1 to p2.
+// Uses support functions instead of full vertex scan — O(1) for boxes.
+static float sat_edge_project_full(v3 e1, v3 e2, v3 c1,
+	const Hull* hull1, quat rel_rot, v3 scale1,
+	const Hull* hull2, v3 scale2)
 {
 	v3 e1_x_e2 = cross(e1, e2);
 	float l2 = len2(e1_x_e2);
+
+	// Skip near-parallel edges (squared comparison avoids 2 sqrt calls).
 	float tol2 = 0.005f * 0.005f;
-	if (l2 < tol2 * len2(e1) * len2(e2)) return -1e18f;
-	v3 n = scale(e1_x_e2, 1.0f / sqrtf(l2));
-	// Orient n from A toward B using A's centroid vs edge endpoint.
-	if (dot(n, sub(pA, cA)) < 0.0f) n = neg(n);
-	return dot(n, sub(pB, pA));
+	if (l2 < tol2 * len2(e1) * len2(e2))
+		return -1e18f;
+
+	float inv_l = 1.0f / sqrtf(l2);
+	v3 n = scale(e1_x_e2, inv_l);
+
+	// For box hulls, use O(1) support function. For general hulls, keep O(V) vertex scan
+	// (avoids extra inv_rot overhead per edge pair).
+	if (hull1->vert_count == 8 && hull1->face_count == 6 && hull2->vert_count == 8 && hull2->face_count == 6) {
+		quat inv_rel = inv(rel_rot);
+		v3 sup1 = hull_support(hull1, rotate(inv_rel, n));
+		float max1 = dot(n, add(c1, rotate(rel_rot, V3(sup1.x*scale1.x, sup1.y*scale1.y, sup1.z*scale1.z))));
+		v3 sup2 = hull_support(hull2, neg(n));
+		float min2 = dot(n, V3(sup2.x*scale2.x, sup2.y*scale2.y, sup2.z*scale2.z));
+		return min2 - max1;
+	}
+
+	// Reformulate: dot(n, c1 + rot(rel, v*sc)) = dot(n,c1) + dot(rot(inv_rel,n)*sc, v)
+	// Precompute scaled direction in each hull's local space for SoA SIMD scan.
+	float bias1 = dot(n, c1);
+	quat inv_rel = inv(rel_rot);
+	v3 nd1 = rotate(inv_rel, n);
+	float d1x = nd1.x * scale1.x, d1y = nd1.y * scale1.y, d1z = nd1.z * scale1.z;
+	float d2x = -n.x * scale2.x, d2y = -n.y * scale2.y, d2z = -n.z * scale2.z; // neg for min
+
+	int nv1 = hull1->vert_count, nv2 = hull2->vert_count;
+	if (hull1->soa_verts && hull2->soa_verts) {
+		int p1 = (nv1 + 3) & ~3, p2 = (nv2 + 3) & ~3;
+		const float* s1x = hull1->soa_verts, *s1y = s1x + p1, *s1z = s1y + p1;
+		const float* s2x = hull2->soa_verts, *s2y = s2x + p2, *s2z = s2y + p2;
+		simd4f vd1x = simd_set1(d1x), vd1y = simd_set1(d1y), vd1z = simd_set1(d1z);
+		simd4f max4 = simd_set1(-1e18f);
+		for (int i = 0; i < p1; i += 4) {
+			simd4f d = simd_add(simd_add(simd_mul(vd1x, simd_load(s1x+i)), simd_mul(vd1y, simd_load(s1y+i))), simd_mul(vd1z, simd_load(s1z+i)));
+			max4 = simd_max(max4, d);
+		}
+		float ds[4]; simd_store(ds, max4);
+		float max1 = ds[0]; for (int k = 1; k < 4; k++) if (ds[k] > max1) max1 = ds[k];
+		max1 += bias1;
+
+		simd4f vd2x = simd_set1(d2x), vd2y = simd_set1(d2y), vd2z = simd_set1(d2z);
+		simd4f max4b = simd_set1(-1e18f);
+		for (int i = 0; i < p2; i += 4) {
+			simd4f d = simd_add(simd_add(simd_mul(vd2x, simd_load(s2x+i)), simd_mul(vd2y, simd_load(s2y+i))), simd_mul(vd2z, simd_load(s2z+i)));
+			max4b = simd_max(max4b, d);
+		}
+		simd_store(ds, max4b);
+		float max_neg2 = ds[0]; for (int k = 1; k < 4; k++) if (ds[k] > max_neg2) max_neg2 = ds[k];
+		return -max_neg2 - max1;
+	}
+
+	float max1 = -1e18f, min2 = 1e18f;
+	for (int i = 0; i < nv1; i++) {
+		v3 v = add(c1, rotate(rel_rot, hull_vert_scaled(hull1, i, scale1)));
+		float d = dot(n, v);
+		if (d > max1) max1 = d;
+	}
+	for (int i = 0; i < nv2; i++) {
+		v3 v = hull_vert_scaled(hull2, i, scale2);
+		float d = dot(n, v);
+		if (d < min2) min2 = d;
+	}
+	return min2 - max1;
 }
 
 // SAT: edge queries with Gauss map pruning.
@@ -926,13 +981,12 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 	// Precompute both hulls' edge data into contiguous arrays.
 	int n1 = hull1->edge_count / 2, n2 = hull2->edge_count / 2;
 	assert(n1 <= 128 && n2 <= 128);
-	v3 e1_arr[128], u1_arr[128], v1_arr[128], ne1_arr[128], p1_arr[128];
-	v3 e2_arr[128], nu2_arr[128], nv2_arr[128], ne2_arr[128], p2_arr[128];
+	v3 e1_arr[128], u1_arr[128], v1_arr[128], ne1_arr[128];
+	v3 e2_arr[128], nu2_arr[128], nv2_arr[128], ne2_arr[128];
 	for (int k = 0; k < n1; k++) {
 		int i = k * 2;
 		v3 p = add(c1_local, rotate(rel_rot, hull_vert_scaled(hull1, hull1->edge_origin[i], scale1)));
 		v3 q = add(c1_local, rotate(rel_rot, hull_vert_scaled(hull1, hull1->edge_origin[i+1], scale1)));
-		p1_arr[k] = p;
 		e1_arr[k] = sub(q, p);
 		u1_arr[k] = rotate(rel_rot, hull1->planes[hull1->edge_face[i]].normal);
 		v1_arr[k] = rotate(rel_rot, hull1->planes[hull1->edge_face[i+1]].normal);
@@ -942,7 +996,6 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 		int i = k * 2;
 		v3 p = hull_vert_scaled(hull2, hull2->edge_origin[i], scale2);
 		v3 q = hull_vert_scaled(hull2, hull2->edge_origin[i+1], scale2);
-		p2_arr[k] = p;
 		e2_arr[k] = sub(q, p);
 		nu2_arr[k] = neg(hull2->planes[hull2->edge_face[i]].normal);
 		nv2_arr[k] = neg(hull2->planes[hull2->edge_face[i+1]].normal);
@@ -964,7 +1017,6 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 	// For each hull1 edge, test all hull2 edges with 4-wide SIMD Gauss map pruning.
 	for (int k1 = 0; k1 < n1; k1++) {
 		v3 e1 = e1_arr[k1], u1 = u1_arr[k1], v1 = v1_arr[k1], b_x_a = ne1_arr[k1];
-		v3 pA = p1_arr[k1];
 
 		// Broadcast hull1 edge data for SIMD inner loop.
 		simd4f bxa_x = simd_set1(b_x_a.x), bxa_y = simd_set1(b_x_a.y), bxa_z = simd_set1(b_x_a.z);
@@ -985,7 +1037,7 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 			for (int lane = 0; lane < 4; lane++) {
 				if (!(mask & (1 << lane))) continue;
 				int k2i = k2 + lane;
-				float sep = sat_edge_project_gauss(e1, e2_arr[k2i], pA, p2_arr[k2i], c1_local);
+				float sep = sat_edge_project_full(e1, e2_arr[k2i], c1_local, hull1, rel_rot, scale1, hull2, scale2);
 				if (sep > best.separation) { best.index1 = k1*2; best.index2 = k2i*2; best.separation = sep; }
 			}
 		}
@@ -994,7 +1046,7 @@ static EdgeQuery sat_query_edges(const Hull* hull1, v3 pos1, quat rot1, v3 scale
 		for (int k2 = n2_4; k2 < n2; k2++) {
 			v3 ne2 = ne2_arr[k2];
 			if (!gauss_map_prune(simd_set1(dot(nu2_arr[k2], b_x_a)), simd_set1(dot(nv2_arr[k2], b_x_a)), simd_set1(dot(u1, ne2)), simd_set1(dot(v1, ne2)))) continue;
-			float sep = sat_edge_project_gauss(e1, e2_arr[k2], pA, p2_arr[k2], c1_local);
+			float sep = sat_edge_project_full(e1, e2_arr[k2], c1_local, hull1, rel_rot, scale1, hull2, scale2);
 			if (sep > best.separation) { best.index1 = k1*2; best.index2 = k2*2; best.separation = sep; }
 		}
 	}
