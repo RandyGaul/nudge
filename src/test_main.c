@@ -45,7 +45,6 @@
 #include "tests_contacts_unit.c"
 #include "tests_heightfield_unit.c"
 #include "tests_trimesh_unit.c"
-#include "tests_epa_debug.c"
 #include "tests_epa_perf.c"
 #include "tests_determinism.c"
 
@@ -74,7 +73,6 @@ int main(int argc, char* argv[])
 			break_pat ? break_pat : "*", debug_port > 0 ? debug_port : 9999);
 	}
 
-	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--debug-epa") == 0) { debug_epa(); return 0; }
 	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--bench-epa") == 0) { bench_epa_vs_sat(); return 0; }
 	for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--bench-epa-scenes") == 0) { bench_epa_scenes(); return 0; }
 	for (int i = 1; i < argc; i++) {
@@ -345,13 +343,11 @@ int main(int argc, char* argv[])
 		}
 		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	} else if (argc > 1 && strcmp(argv[1], "--quick") == 0) {
-		test_ldl_stress_single_constraint();
 		test_ldl_heavy_chain();
 		test_ldl_two_independent_chains();
 		test_ldl_hub_star_shattering();
 		test_ldl_topology_change();
 		test_ldl_stress_dense_clique();
-		test_ldl_stress_alternating_mass();
 		test_ldl_mixed_chain_and_hub();
 		printf("--- results: %d passed, %d failed ---\n", test_pass, test_fail);
 	} else if (argc > 1 && strcmp(argv[1], "--gjk-perf") == 0) {

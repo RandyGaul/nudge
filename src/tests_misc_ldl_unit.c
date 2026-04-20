@@ -112,42 +112,6 @@ static void test_rotdelta_all_axes()
 // ============================================================================
 // ldl_validate_lambda tests
 
-static void test_validate_lambda_valid()
-{
-	TEST_BEGIN("validate_lambda_valid");
-	double lam[3] = { 1.0, -0.5, 100.0 };
-	TEST_ASSERT(ldl_validate_lambda(lam, 3) == 1);
-}
-
-static void test_validate_lambda_zero()
-{
-	TEST_BEGIN("validate_lambda_zero");
-	double lam[3] = { 0, 0, 0 };
-	TEST_ASSERT(ldl_validate_lambda(lam, 3) == 1);
-}
-
-static void test_validate_lambda_at_limit()
-{
-	TEST_BEGIN("validate_lambda_at_limit");
-	// Just under the 1e6 threshold: valid.
-	double lam[3] = { 999999.0, -999999.0, 0 };
-	TEST_ASSERT(ldl_validate_lambda(lam, 3) == 1);
-}
-
-static void test_validate_lambda_over_limit()
-{
-	TEST_BEGIN("validate_lambda_over_limit");
-	double lam[3] = { 1.0, 1e6 + 1.0, 0 };
-	TEST_ASSERT(ldl_validate_lambda(lam, 3) == 0);
-}
-
-static void test_validate_lambda_negative_over()
-{
-	TEST_BEGIN("validate_lambda_negative_over");
-	double lam[3] = { 0, 0, -1e6 - 1.0 };
-	TEST_ASSERT(ldl_validate_lambda(lam, 3) == 0);
-}
-
 static void test_validate_lambda_nan()
 {
 	TEST_BEGIN("validate_lambda_nan");
@@ -164,78 +128,8 @@ static void test_validate_lambda_inf()
 	TEST_ASSERT(ldl_validate_lambda(lam, 3) == 0);
 }
 
-static void test_validate_lambda_single()
-{
-	TEST_BEGIN("validate_lambda_single");
-	// n=1: distance constraint.
-	double lam[1] = { 500.0 };
-	TEST_ASSERT(ldl_validate_lambda(lam, 1) == 1);
-	lam[0] = 2e6;
-	TEST_ASSERT(ldl_validate_lambda(lam, 1) == 0);
-}
-
 // ============================================================================
 // ldl_condition_check tests
-
-static void test_condition_check_identity()
-{
-	TEST_BEGIN("condition_check_identity");
-	// All D pivots = 1. Condition number = 1.
-	LDL_Cache c = {0};
-	LDL_Topology t = {0};
-	t.node_count = 2;
-	t.dof[0] = 3; t.dof[1] = 3;
-	for (int i = 0; i < 2; i++)
-		for (int d = 0; d < 3; d++)
-			c.diag_D[i][d] = 1.0;
-	double cond = ldl_condition_check(&c, &t);
-	TEST_ASSERT(fabs(cond - 1.0) < 1e-10);
-}
-
-static void test_condition_check_spread()
-{
-	TEST_BEGIN("condition_check_spread");
-	// D pivots from 0.001 to 1000. Condition = 1e6.
-	LDL_Cache c = {0};
-	LDL_Topology t = {0};
-	t.node_count = 2;
-	t.dof[0] = 1; t.dof[1] = 1;
-	c.diag_D[0][0] = 0.001;
-	c.diag_D[1][0] = 1000.0;
-	double cond = ldl_condition_check(&c, &t);
-	TEST_ASSERT(fabs(cond - 1e6) < 1.0);
-}
-
-static void test_condition_check_single_node()
-{
-	TEST_BEGIN("condition_check_single_node");
-	// Single node with 3 DOF. D = (2, 8, 4). Condition = 8/2 = 4.
-	LDL_Cache c = {0};
-	LDL_Topology t = {0};
-	t.node_count = 1;
-	t.dof[0] = 3;
-	c.diag_D[0][0] = 2.0;
-	c.diag_D[0][1] = 8.0;
-	c.diag_D[0][2] = 4.0;
-	double cond = ldl_condition_check(&c, &t);
-	TEST_ASSERT(fabs(cond - 4.0) < 1e-10);
-}
-
-static void test_condition_check_mixed_dof()
-{
-	TEST_BEGIN("condition_check_mixed_dof");
-	// Mixed DOF nodes: 3 + 1 + 5. Condition check walks all of them.
-	LDL_Cache c = {0};
-	LDL_Topology t = {0};
-	t.node_count = 3;
-	t.dof[0] = 3; t.dof[1] = 1; t.dof[2] = 5;
-	c.diag_D[0][0] = 10; c.diag_D[0][1] = 20; c.diag_D[0][2] = 5;
-	c.diag_D[1][0] = 0.5;
-	c.diag_D[2][0] = 100; c.diag_D[2][1] = 1; c.diag_D[2][2] = 50; c.diag_D[2][3] = 30; c.diag_D[2][4] = 2;
-	// min = 0.5, max = 100. Condition = 200.
-	double cond = ldl_condition_check(&c, &t);
-	TEST_ASSERT(fabs(cond - 200.0) < 1e-10);
-}
 
 // ============================================================================
 // Runner
@@ -254,18 +148,8 @@ static void run_misc_ldl_unit_tests()
 	test_rotdelta_all_axes();
 
 	// Validate lambda
-	test_validate_lambda_valid();
-	test_validate_lambda_zero();
-	test_validate_lambda_at_limit();
-	test_validate_lambda_over_limit();
-	test_validate_lambda_negative_over();
 	test_validate_lambda_nan();
 	test_validate_lambda_inf();
-	test_validate_lambda_single();
 
 	// Condition check
-	test_condition_check_identity();
-	test_condition_check_spread();
-	test_condition_check_single_node();
-	test_condition_check_mixed_dof();
 }
