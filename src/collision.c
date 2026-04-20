@@ -1376,7 +1376,69 @@ int collide_hull_hull_ex_full(ConvexHull a, ConvexHull b, Manifold* manifold, in
 		}
 	}
 
-	if (cp == 0) return 0;
+	// Face-clip degenerate fallback: ref and inc face orientations can end up
+	// such that no incident-face vertex survives the ref-face side-plane clip,
+	// even though SAT reported overlap along the ref normal. This happens when
+	// the incident face is laterally offset from the ref face beyond its side
+	// planes (common for thin projectiles hitting thick walls at a grazing
+	// angle, where face_a and face_b are the dominant overlap axes but
+	// neither face actually projects onto the other). Emit a single contact
+	// at the DEEPEST UNCLIPPED incident vertex using the reference face
+	// normal. The normal direction is correct (SAT picked this face as the
+	// separating axis); the point is a real world point on the incident hull;
+	// the depth is face_a.separation negated. This matches what the face-clip
+	// path would have emitted had any vertex survived clipping. An earlier
+	// attempt to fall back on cross(eA, eB) with the edge-query indices gave
+	// wrong normals in V-groove mesh contacts and regressed shape-terrain
+	// settling tests — the face-axis IS the correct axis here; we just need
+	// SOMEWHERE to pin the contact.
+	if (cp == 0) {
+		// in_buf contains the original incident face vertices before clipping;
+		// after clipping they may have been mutated. Re-emit from the raw
+		// incident face vertices stored at the top of the clip loop is what
+		// we want, but easier: iterate the incident hull face verts directly.
+		int n_inc = 0;
+		v3 inc_verts[32];
+		int inc_he_start = inc_hull->faces[inc_face].edge;
+		int inc_he = inc_he_start;
+		do {
+			v3 local_v = hull_vert_scaled(inc_hull, inc_hull->edge_origin[inc_he], inc_sc);
+			inc_verts[n_inc++] = add(inc_pos, rotate(inc_rot, local_v));
+			inc_he = inc_hull->edge_next[inc_he];
+		} while (inc_he != inc_he_start && n_inc < 32);
+		int deepest = 0;
+		float max_depth = -1e30f;
+		for (int i = 0; i < n_inc; i++) {
+			float depth = ref_plane.offset - dot(ref_plane.normal, inc_verts[i]);
+			if (depth > max_depth) { max_depth = depth; deepest = i; }
+		}
+		float depth_eff = max_depth + total_rounding;
+		if (depth_eff >= -emit_band) {
+			uint32_t fid;
+			if (!flip)
+				fid = (uint32_t)ref_face | ((uint32_t)inc_face << 8);
+			else
+				fid = (uint32_t)inc_face | ((uint32_t)ref_face << 8);
+			manifold->count = 1;
+			manifold->contacts[0] = (Contact){
+				.point = inc_verts[deepest],
+				.normal = contact_n,
+				.penetration = depth_eff,
+				.feature_id = fid,
+			};
+			if (sat_hint) *sat_hint = flip ? hull_a->face_count + ref_face : ref_face;
+			if (out_pair) *out_pair = (CachedFeaturePair){.type = 1, .ref_body = (int16_t)flip, .face_a = (int16_t)(flip ? inc_face : ref_face), .face_b = (int16_t)(flip ? ref_face : inc_face)};
+			if (dbg) {
+				dbg->winning_axis = flip ? 1 : 0;
+				dbg->contact_normal = contact_n;
+				dbg->contact_count = 1;
+				dbg->contact_points[0] = manifold->contacts[0].point;
+				dbg->contact_pens[0] = manifold->contacts[0].penetration;
+			}
+			return 1;
+		}
+		return 0;
+	}
 
 	cp = reduce_contacts(tmp_contacts, cp);
 	manifold->count = cp;
