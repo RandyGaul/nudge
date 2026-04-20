@@ -499,6 +499,70 @@ int collide_sphere_box(Sphere a, Box b, Manifold* manifold)
 	return collide_sphere_box_ex(a, b, manifold, 0.0f);
 }
 
+// Capsule-hull edge-axis SAT query with Gregorius Gauss-map prune
+// (simplified: capsule's "Gauss arc" is the great circle normal to its
+// segment direction N, since the capsule is rotationally symmetric).
+// The hull edge's adjacent-face arc (C, D) intersects that great circle
+// iff C and D are on opposite sides of N's perpendicular plane, i.e.
+// dot(N, C) * dot(N, D) < 0. ~5 flops per edge; skip non-candidates.
+//
+// For passing edges, the minimum separation along n = normalize(cross(N,
+// edge_vec)) is realized AT the endpoints (the axis is ⊥ both segments,
+// so both collapse to single points on the axis). ~15 flops per hit.
+typedef struct CapsuleHullEdgeQuery {
+	int edge_index;          // winning half-edge on the hull, -1 if none
+	float separation;        // signed distance along the winning axis minus capsule radius
+	v3 axis;                 // world-space axis (from capsule toward hull)
+	v3 hull_edge_p, hull_edge_q;  // world-space hull edge endpoints
+} CapsuleHullEdgeQuery;
+
+static CapsuleHullEdgeQuery sat_capsule_hull_edges(Capsule cap, ConvexHull b)
+{
+	CapsuleHullEdgeQuery best = { .edge_index = -1, .separation = -1e18f };
+	const Hull* h = b.hull;
+	if (!h->edge_twin || !h->edge_face || !h->planes) return best; // need adjacency
+
+	// All in hull-local frame for simplicity.
+	quat inv_rot = inv(b.rotation);
+	v3 pa_l = rotate(inv_rot, sub(cap.p, b.center));
+	v3 qa_l = rotate(inv_rot, sub(cap.q, b.center));
+	v3 N = sub(qa_l, pa_l);
+	v3 cap_c = scale(add(pa_l, qa_l), 0.5f);
+
+	for (int e = 0; e < h->edge_count; e += 2) {
+		int tw = h->edge_twin[e];
+		// Adjacent face normals (hull-local).
+		v3 C = h->planes[h->edge_face[e]].normal;
+		v3 D = h->planes[h->edge_face[tw]].normal;
+		// Gauss prune: capsule arc (great circle ⊥ N) vs hull edge arc (C..D).
+		if (dot(N, C) * dot(N, D) >= 0.0f) continue;
+		// Edge endpoints (hull-local, scaled).
+		v3 p = hull_vert_scaled(h, h->edge_origin[e], b.scale);
+		v3 q = hull_vert_scaled(h, h->edge_origin[tw], b.scale);
+		v3 edge_vec = sub(q, p);
+		v3 n = cross(N, edge_vec);
+		float l2 = len2(n);
+		// Near-parallel guard: squared comparison (skip sqrt on both sides).
+		float tol2 = 0.005f * 0.005f;
+		if (l2 < tol2 * len2(N) * len2(edge_vec)) continue;
+		n = scale(n, 1.0f / sqrtf(l2));
+		// Orient from capsule toward hull centroid.
+		if (dot(n, sub(h->centroid, cap_c)) < 0.0f) n = neg(n);
+		// Separation: axis is ⊥ to both segments so projections collapse.
+		// sep = dot(n, P_hull - P_cap) - capsule.radius.
+		float sep = dot(n, sub(p, pa_l)) - cap.radius;
+		if (sep > best.separation) {
+			best.edge_index = e;
+			best.separation = sep;
+			// Rotate axis back to world and record world-space edge endpoints.
+			best.axis = rotate(b.rotation, n);
+			best.hull_edge_p = add(b.center, rotate(b.rotation, p));
+			best.hull_edge_q = add(b.center, rotate(b.rotation, q));
+		}
+	}
+	return best;
+}
+
 // Capsule-hull narrowphase.
 // Shallow (GJK dist > LINEAR_SLOP): single reference plane from GJK, project
 // both endpoints.  Two contacts for face-parallel stability.
@@ -618,13 +682,22 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 		return 1;
 	}
 
-	// --- Deep path: per-endpoint face search. ---
-	// Each endpoint independently finds the hull face of minimum penetration.
-	// This handles the case where endpoints are in different Voronoi regions
-	// (one near top face, the other near a side face after tumbling in).
+	// --- Deep path: per-endpoint face search, augmented by edge-axis SAT. ---
+	// The face search handles face-Voronoi cases (endpoint-face contacts). But
+	// when the capsule is crossing a hull EDGE in deep penetration, the edge
+	// axis cross(N, hull_edge) can give a SMALLER penetration (= better
+	// separating axis) than any face. Query edge-axes with Gregorius Gauss
+	// prune (constant-time per edge), and if the winning edge-axis separation
+	// beats the best face separation by tolerance, emit an edge-edge contact
+	// using the edge-axis normal. Bias toward face contacts matches box2d/
+	// Gregorius convention for manifold stability.
+	CapsuleHullEdgeQuery eq = sat_capsule_hull_edges(a, b);
+
 	const Hull* hull = b.hull;
 	int cp = 0;
 	v3 endpoints[2] = { a.p, a.q };
+	float best_face_sep = -1e18f;
+	(void)best_face_sep;
 	for (int ei = 0; ei < 2; ei++) {
 		v3 pt = endpoints[ei];
 		float best_sep = -1e18f;
@@ -636,6 +709,7 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 			if (s > a.radius) goto next_ep;
 			if (s > best_sep) { best_sep = s; best_n = wp.normal; best_d = wp.offset; }
 		}
+		if (best_sep > best_face_sep) best_face_sep = best_sep;
 		{
 			float pen = a.radius - best_sep;
 			if (pen >= -LINEAR_SLOP) {
@@ -649,6 +723,40 @@ int collide_capsule_hull(Capsule a, ConvexHull b, Manifold* manifold)
 			}
 		}
 		next_ep:;
+	}
+
+	// Edge-edge wins: cross-product axis has smaller penetration than either
+	// endpoint-face search. Emit the edge contact at the capsule-segment vs
+	// hull-edge closest-points pair. Tolerance matches hull-hull face-bias.
+	if (eq.edge_index >= 0 && eq.separation > best_face_sep + 0.05f) {
+		// Closest-points between the two segments (capsule axis vs hull edge).
+		v3 da = sub(a.q, a.p);
+		v3 db = sub(eq.hull_edge_q, eq.hull_edge_p);
+		v3 r_pq = sub(a.p, eq.hull_edge_p);
+		float aa = dot(da, da);
+		float ee = dot(db, db);
+		float ff = dot(db, r_pq);
+		float cc = dot(da, r_pq);
+		float bb = dot(da, db);
+		float denom = aa * ee - bb * bb;
+		float ta = denom > 1e-10f ? (bb * ff - cc * ee) / denom : 0.0f;
+		if (ta < 0.0f) ta = 0.0f; else if (ta > 1.0f) ta = 1.0f;
+		float tb = ee > 1e-10f ? (bb * ta + ff) / ee : 0.0f;
+		if (tb < 0.0f) tb = 0.0f; else if (tb > 1.0f) tb = 1.0f;
+		v3 CA = add(a.p, scale(da, ta));
+		v3 CB = add(eq.hull_edge_p, scale(db, tb));
+		float pen = -eq.separation; // separation is signed; negative = overlap
+		if (pen >= -LINEAR_SLOP) {
+			if (pen < 0) pen = 0;
+			manifold->count = 1;
+			manifold->contacts[0] = (Contact){
+				.point = CB,
+				.normal = eq.axis, // already oriented capsule -> hull
+				.penetration = pen,
+				.feature_id = FEATURE_EDGE_BIT | (uint32_t)eq.edge_index,
+			};
+			return 1;
+		}
 	}
 
 	// Fallback: cylindrical portion contacts hull but neither hemisphere does.
