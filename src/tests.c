@@ -13681,6 +13681,9 @@ static void bench_ccd_soak(int max_frames)
 		fflush(log_fp);
 	}
 	printf("--- CCD soak: initial_seed=0x%08x max_frames=%d (0=infinite) ---\n", initial_seed, max_frames);
+	perf_init();
+	toi_reset_stats();
+	double _bench_t0 = perf_now();
 
 	int frame = 0;
 	int fire_cooldown = 0;
@@ -13780,7 +13783,7 @@ static void bench_ccd_soak(int max_frames)
 				soak_log_violation(log_fp, frame, "TUNNEL", b, pos, vel);
 				b->violation_reported |= 1;
 				total_violations++;
-				goto soak_done;
+				if (getenv("CCD_BENCH")) { /* bench mode: keep running past violations */ } else goto soak_done;
 			}
 
 			// STUCK: body center is INSIDE the wall or beam volume.
@@ -13790,7 +13793,7 @@ static void bench_ccd_soak(int max_frames)
 				soak_log_violation(log_fp, frame, "STUCK", b, pos, vel);
 				b->violation_reported |= 2;
 				total_violations++;
-				goto soak_done;
+				if (getenv("CCD_BENCH")) { /* bench mode: keep running past violations */ } else goto soak_done;
 			}
 
 			// FROZEN: velocity magnitude is significant but position
@@ -13804,7 +13807,7 @@ static void bench_ccd_soak(int max_frames)
 					soak_log_violation(log_fp, frame, "FROZEN", b, pos, vel);
 					b->violation_reported |= 4;
 					total_violations++;
-					goto soak_done;
+					if (getenv("CCD_BENCH")) { /* bench mode: keep running past violations */ } else goto soak_done;
 				}
 			} else {
 				b->frozen_frames = 0;
@@ -13837,7 +13840,8 @@ static void bench_ccd_soak(int max_frames)
 	}
 
 soak_done:
-	printf("--- CCD soak end: frames=%d fired=%d live_max=%d violations=%d ---\n", frame, total_fired, live_max, total_violations);
+	printf("--- CCD soak end: frames=%d fired=%d live_max=%d violations=%d wall=%.3fs ---\n", frame, total_fired, live_max, total_violations, perf_now() - _bench_t0);
+	toi_print_stats();
 	if (log_fp) {
 		fprintf(log_fp, "--- soak run end frames=%d fired=%d violations=%d ---\n", frame, total_fired, total_violations);
 		fclose(log_fp);

@@ -19,6 +19,34 @@
 // velocity untouched, and let the next frame's speculative pass apply
 // restitution via the replace-rule (see pre_solve_manifold.inc).
 
+// Perf telemetry: counts sep-fn classifications + Gauss decisions. Printed
+// by toi_print_stats() (called from bench harnesses).
+static int toi_stat_seed_edge_edge = 0;
+static int toi_stat_seed_edge_reject_gauss = 0;
+static int toi_stat_seed_face_a = 0;
+static int toi_stat_seed_face_b = 0;
+static int toi_stat_seed_points = 0;
+static int toi_stat_hi_gauss_reject = 0;
+
+static void toi_print_stats(void)
+{
+	int total = toi_stat_seed_edge_edge + toi_stat_seed_edge_reject_gauss
+		+ toi_stat_seed_face_a + toi_stat_seed_face_b + toi_stat_seed_points;
+	if (total == 0) { printf("  toi-sepfn: no classifications recorded\n"); return; }
+	printf("  toi-sepfn: total=%d  POINTS=%d  FACE_A=%d  FACE_B=%d  EDGE_EDGE=%d  (gauss-reject seed=%d hi=%d)\n",
+		total, toi_stat_seed_points, toi_stat_seed_face_a, toi_stat_seed_face_b,
+		toi_stat_seed_edge_edge, toi_stat_seed_edge_reject_gauss, toi_stat_hi_gauss_reject);
+}
+static void toi_reset_stats(void)
+{
+	toi_stat_seed_edge_edge = 0;
+	toi_stat_seed_edge_reject_gauss = 0;
+	toi_stat_seed_face_a = 0;
+	toi_stat_seed_face_b = 0;
+	toi_stat_seed_points = 0;
+	toi_stat_hi_gauss_reject = 0;
+}
+
 #define TOI_OUTER_ITER_MAX       20
 #define TOI_ROOT_ITER_MAX        50
 #define TOI_PUSHBACK_ITER_MAX    8
@@ -240,7 +268,10 @@ static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0
 	// both shapes carry hull half-edge + face-plane data AND the Gauss arcs
 	// overlap. If the predicate fails at seed, cross(eA, eB) is not the
 	// minimum-separating direction; fall through to FACE_A.
-	if (kA == 2 && kB == 2 && dlen > 1e-8f
+	// Disable with TOI_DISABLE_EDGE_EDGE=1 for benchmarking.
+	static int ee_disabled = -1;
+	if (ee_disabled < 0) ee_disabled = getenv("TOI_DISABLE_EDGE_EDGE") ? 1 : 0;
+	if (!ee_disabled && kA == 2 && kB == 2 && dlen > 1e-8f
 	 && shapeA_at_seed->hull.edge_twin && shapeA_at_seed->hull.planes
 	 && shapeB->hull.edge_twin && shapeB->hull.planes) {
 		int eA_he = toi_hull_find_halfedge(shapeA_at_seed, fa[0], fa[1]);
@@ -265,7 +296,9 @@ static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0
 				v3 nB0_w = MB(shapeB->hull.col0, shapeB->hull.col1, shapeB->hull.col2, nB0_l);
 				v3 nB1_w = MB(shapeB->hull.col0, shapeB->hull.col1, shapeB->hull.col2, nB1_l);
 				#undef MB
-				if (toi_gauss_arcs_overlap(nA0_w, nA1_w, neg(nB0_w), neg(nB1_w))) {
+				if (!toi_gauss_arcs_overlap(nA0_w, nA1_w, neg(nB0_w), neg(nB1_w))) {
+					toi_stat_seed_edge_reject_gauss++;
+				} else {
 					v3 a0w = gjk_support_feature(shapeA_at_seed, fa[0]);
 					v3 a1w = gjk_support_feature(shapeA_at_seed, fa[1]);
 					v3 b0w = gjk_support_feature(shapeB, fb[0]);
@@ -281,6 +314,7 @@ static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0
 						f.axis_sign = sign;
 						f.nA0_local = nA0_l; f.nA1_local = nA1_l;
 						f.nB0_local = nB0_l; f.nB1_local = nB1_l;
+						toi_stat_seed_edge_edge++;
 						return f;
 					}
 				}
@@ -301,6 +335,7 @@ static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0
 		v3 pb; int fi_b;
 		gjk_support(shapeB, neg(axis_world), &fi_b, pb);
 		f.idxB = fi_b;
+		toi_stat_seed_face_a++;
 		return f;
 	}
 	if (kB >= 2 && dlen > 1e-8f) {
@@ -314,6 +349,7 @@ static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0
 		v3 pb; int fi_b;
 		gjk_support(shapeB, neg(axis_world), &fi_b, pb);
 		f.idxB = fi_b;
+		toi_stat_seed_face_b++;
 		return f;
 	}
 	// Vertex-vertex (POINTS). Axis stored in world (fixed direction from
@@ -322,6 +358,7 @@ static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0
 	// noise when no face feature is involved.
 	f.type = TOI_POINTS;
 	f.axis = axis_world;
+	toi_stat_seed_points++;
 	return f;
 }
 
@@ -379,7 +416,10 @@ static float toi_find_min_sep(ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* sh
 	if (f->type == TOI_EDGE_EDGE) {
 		int gauss_valid = 1;
 		float s = toi_edge_edge_sep(f, shapeA_at_t, shapeB, rot_A, &gauss_valid);
-		if (!gauss_valid && s > TOI_TARGET_SEPARATION) s = TOI_TARGET_SEPARATION;
+		if (!gauss_valid) {
+			toi_stat_hi_gauss_reject++;
+			if (s > TOI_TARGET_SEPARATION) s = TOI_TARGET_SEPARATION;
+		}
 		return s;
 	}
 	v3 axis_world = toi_axis_world(f, rot_A);
