@@ -328,9 +328,13 @@ static ToiSepFn toi_make_sep_fn(const GJK_Simplex* simplex, const GJK_Result* r0
 // Edge-edge separation at time t: live cross(eA, eB) axis, signed projection
 // of one edge endpoint pair onto it. Both edge endpoints on each side come
 // from stored vertex indices — shapeA_at_t rotates A; shapeB static. If the
-// axis length is degenerate (edges parallel mid-sweep) returns 0; the outer
-// loop will reseed on the next iteration.
-static float toi_edge_edge_sep(const ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* shapeB)
+// axis length is degenerate (edges parallel mid-sweep) returns 0.
+// `out_gauss_valid` receives the Gregorius Gauss-arc check at the current
+// poses (rotate stored local face normals into world). Callers in the
+// "declare separation" path (FindMinSep) use this to force a root-find
+// instead of returning "separated" under an axis that's no longer the
+// minimum-separating direction.
+static float toi_edge_edge_sep(const ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* shapeB, quat rot_A, int* out_gauss_valid)
 {
 	v3 a0 = gjk_support_feature(shapeA_at_t, f->idxA);
 	v3 a1 = gjk_support_feature(shapeA_at_t, f->idxA2);
@@ -338,8 +342,22 @@ static float toi_edge_edge_sep(const ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Sh
 	v3 b1 = gjk_support_feature(shapeB, f->idxB2);
 	v3 n = cross(sub(a1, a0), sub(b1, b0));
 	float L = v3_len(n);
-	if (L <= 1e-8f) return 0.0f;
+	if (L <= 1e-8f) { if (out_gauss_valid) *out_gauss_valid = 0; return 0.0f; }
 	n = scale(n, (float)f->axis_sign / L);
+	if (out_gauss_valid) {
+		// Rotate A's face normals (A-local) by current rot_A; B's normals
+		// (B-local) by B's static rot stored in shapeB's basis columns.
+		v3 a0n = rotate(rot_A, f->nA0_local);
+		v3 a1n = rotate(rot_A, f->nA1_local);
+		#define MB(v) V3( \
+			shapeB->hull.col0.x*(v).x + shapeB->hull.col1.x*(v).y + shapeB->hull.col2.x*(v).z, \
+			shapeB->hull.col0.y*(v).x + shapeB->hull.col1.y*(v).y + shapeB->hull.col2.y*(v).z, \
+			shapeB->hull.col0.z*(v).x + shapeB->hull.col1.z*(v).y + shapeB->hull.col2.z*(v).z)
+		v3 b0n = neg(MB(f->nB0_local));
+		v3 b1n = neg(MB(f->nB1_local));
+		#undef MB
+		*out_gauss_valid = toi_gauss_arcs_overlap(a0n, a1n, b0n, b1n);
+	}
 	float rA = shapeA_at_t->radius, rB = shapeB->radius;
 	v3 pa_eff = add(a0, scale(n, rA));
 	v3 pb_eff = sub(b0, scale(n, rB));
@@ -350,10 +368,20 @@ static float toi_edge_edge_sep(const ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Sh
 // the current world-axis at time t and return the separation. Updates the
 // stored indices to the newly-found features. For EDGE_EDGE it keeps the
 // edge endpoints (idxA/A2, idxB/B2) fixed — live cross-product evaluates
-// in closed form.
+// in closed form. When Gauss arcs fail at the current pose, the cross
+// product is no longer the minimum-separating direction; clamp the returned
+// sep to the convergence target so the caller does NOT declare "separated"
+// and instead enters the root-find / outer reseed path. Under-reporting sep
+// is the safe direction — worst case we do extra bisection; alternative
+// would be a false "separated through step" and a missed TOI.
 static float toi_find_min_sep(ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* shapeB, quat rot_A)
 {
-	if (f->type == TOI_EDGE_EDGE) return toi_edge_edge_sep(f, shapeA_at_t, shapeB);
+	if (f->type == TOI_EDGE_EDGE) {
+		int gauss_valid = 1;
+		float s = toi_edge_edge_sep(f, shapeA_at_t, shapeB, rot_A, &gauss_valid);
+		if (!gauss_valid && s > TOI_TARGET_SEPARATION) s = TOI_TARGET_SEPARATION;
+		return s;
+	}
 	v3 axis_world = toi_axis_world(f, rot_A);
 	int fi_a, fi_b;
 	v3 pa, pb;
@@ -371,10 +399,13 @@ static float toi_find_min_sep(ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* sh
 // time t with feature indices held FIXED (from a prior FindMinSep). Does
 // no support search — just re-fetches the stored vertex indices at the
 // current pose via gjk_support_feature. This is what the root finder
-// iterates on.
+// iterates on. Gauss validity isn't checked here — root-find operates on
+// a continuous sep-fn inside an already-bracketed sign change, so local
+// invalidity doesn't prevent convergence. The outer loop reseeds at the
+// advanced t1.
 static float toi_eval_sep(const ToiSepFn* f, GJK_Shape* shapeA_at_t, GJK_Shape* shapeB, quat rot_A)
 {
-	if (f->type == TOI_EDGE_EDGE) return toi_edge_edge_sep(f, shapeA_at_t, shapeB);
+	if (f->type == TOI_EDGE_EDGE) return toi_edge_edge_sep(f, shapeA_at_t, shapeB, rot_A, NULL);
 	v3 axis_world = toi_axis_world(f, rot_A);
 	v3 pa = gjk_support_feature(shapeA_at_t, f->idxA);
 	v3 pb = gjk_support_feature(shapeB, f->idxB);
