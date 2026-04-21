@@ -184,7 +184,7 @@ static bool g_sat_hillclimb = true;
 static bool g_box_use_hull = false;
 static bool g_warm_start = true;
 static bool g_incremental_np = true;
-static bool g_ccd_enabled = true; // toggles speculative contacts + TOI in the live world
+static bool g_ccd_enabled = false; // toggles speculative contacts + TOI in the live world
 // Coulomb friction removed -- patch friction is the only mode.
 static int g_solver_type = SOLVER_SOFT_STEP;
 static bool g_ldl_enabled = true;
