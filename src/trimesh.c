@@ -264,7 +264,7 @@ static int ray_triangle(v3 ro, v3 rd, v3 v0, v3 v1, v3 v2, float max_t, float* t
 
 static void trimesh_query_ray_node(const BVH_Tree* t, int ni, v3 ro, v3 inv_dir, float max_t, CK_DYNA int** out)
 {
-	const BVHNode* n = &t->nodes[ni];
+	const BVH_Node* n = &t->nodes[ni];
 	for (int s = 0; s < 2; s++) {
 		const BVH_Child* c = s == 0 ? &n->a : &n->b;
 		if (c->leaf_count == 0) continue;
@@ -316,7 +316,7 @@ static int ray_mesh(v3 ro, v3 rd, v3 mesh_pos, quat mesh_rot, const TriMesh* mes
 
 static void trimesh_query_aabb_node(const BVH_Tree* t, int ni, AABB q, CK_DYNA int** out)
 {
-	const BVHNode* n = &t->nodes[ni];
+	const BVH_Node* n = &t->nodes[ni];
 	for (int s = 0; s < 2; s++) {
 		const BVH_Child* c = s == 0 ? &n->a : &n->b;
 		if (c->leaf_count == 0) continue;

@@ -9407,7 +9407,7 @@ static void test_bvh_cache_reorder()
 	TEST_BEGIN("cache reorder: DFS order property");
 	int dfs_ok = 1;
 	for (int i = 0; i < asize(t.nodes); i++) {
-		BVHNode* n = &t.nodes[i];
+		BVH_Node* n = &t.nodes[i];
 		if (bvh_child_is_internal(&n->a) && n->a.index <= i) dfs_ok = 0;
 		if (bvh_child_is_internal(&n->b) && n->b.index <= i) dfs_ok = 0;
 	}
@@ -9417,7 +9417,7 @@ static void test_bvh_cache_reorder()
 	TEST_BEGIN("cache reorder: leaf back-pointers valid");
 	int bp_ok = 1;
 	for (int i = 0; i < asize(t.leaves); i++) {
-		BVHLeaf* lf = &t.leaves[i];
+		BVH_Leaf* lf = &t.leaves[i];
 		BVH_Child* c = bvh_child(&t.nodes[lf->node_idx], lf->child_slot);
 		if (!bvh_child_is_leaf(c) || bvh_child_leaf_idx(c) != i) bp_ok = 0;
 	}
@@ -9442,7 +9442,7 @@ static int bvh_validate_backpointers(BVH_Tree* t)
 {
 	for (int i = 0; i < asize(t->leaves); i++) {
 		// Skip freed leaves (check if on freelist -- simple: just verify node_idx is in range)
-		BVHLeaf* lf = &t->leaves[i];
+		BVH_Leaf* lf = &t->leaves[i];
 		if (lf->node_idx < 0 || lf->node_idx >= asize(t->nodes)) continue;
 		BVH_Child* c = bvh_child(&t->nodes[lf->node_idx], lf->child_slot);
 		if (!bvh_child_is_leaf(c) || bvh_child_leaf_idx(c) != i) return 0;
@@ -9453,7 +9453,7 @@ static int bvh_validate_backpointers(BVH_Tree* t)
 // Compute total SAH cost of the tree (sum of all internal node child SAs).
 static float bvh_total_sah(BVH_Tree* t, int ni)
 {
-	BVHNode* n = &t->nodes[ni];
+	BVH_Node* n = &t->nodes[ni];
 	float cost = 0;
 	if (!bvh_child_is_empty(&n->a)) cost += aabb_surface_area(bvh_child_aabb(&n->a));
 	if (!bvh_child_is_empty(&n->b)) cost += aabb_surface_area(bvh_child_aabb(&n->b));
@@ -9621,7 +9621,7 @@ static void test_bvh_fat_aabb()
 	int floor_idx = handle_index(floor);
 	int fl = wi->body_cold[floor_idx].bvh_leaf;
 	TEST_BEGIN("fat aabb: static leaf has fat AABB set");
-	BVHLeaf* lf = &wi->bvh_static->leaves[fl];
+	BVH_Leaf* lf = &wi->bvh_static->leaves[fl];
 	TEST_ASSERT(lf->fat_min.x < lf->fat_max.x); // non-empty fat AABB
 
 	// Run 300 steps -- ball should settle on floor, not fall through.

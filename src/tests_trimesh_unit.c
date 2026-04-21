@@ -472,7 +472,7 @@ static void test_trimesh_bvh_single_triangle()
 	TEST_ASSERT(asize(m->bvh.leaves) == 1);
 	TEST_ASSERT(m->bvh.leaves[0].body_idx == 0);
 	// Single-tri path parks the leaf in child slot a (trimesh.c:193-198).
-	const BVHNode* n = &m->bvh.nodes[m->bvh.root];
+	const BVH_Node* n = &m->bvh.nodes[m->bvh.root];
 	TEST_ASSERT(bvh_child_is_leaf((BVH_Child*)&n->a));
 	trimesh_free(m);
 }

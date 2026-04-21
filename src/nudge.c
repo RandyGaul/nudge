@@ -1964,7 +1964,7 @@ void joint_set_prismatic_motor(World world, Joint joint, float speed, float max_
 
 static void bvh_debug_walk(BVH_Tree* t, int ni, int depth, BVHDebugFn fn, void* user)
 {
-	BVHNode* n = &t->nodes[ni];
+	BVH_Node* n = &t->nodes[ni];
 	for (int s = 0; s < 2; s++) {
 		BVH_Child* c = bvh_child(n, s);
 		if (bvh_child_is_empty(c)) continue;

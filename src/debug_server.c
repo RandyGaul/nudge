@@ -273,22 +273,22 @@ REFLECT(BVH_Child,
 	RF_INT(BVH_Child, leaf_count),
 );
 
-REFLECT(BVHNode,
-	RF_STRUCT(BVHNode, a, BVH_Child),
-	RF_STRUCT(BVHNode, b, BVH_Child),
+REFLECT(BVH_Node,
+	RF_STRUCT(BVH_Node, a, BVH_Child),
+	RF_STRUCT(BVH_Node, b, BVH_Child),
 );
 
-REFLECT(BVHLeaf,
-	RF_INT(BVHLeaf, body_idx),
-	RF_INT(BVHLeaf, node_idx),
-	RF_INT(BVHLeaf, child_slot),
-	RF_V3(BVHLeaf, fat_min),
-	RF_V3(BVHLeaf, fat_max),
+REFLECT(BVH_Leaf,
+	RF_INT(BVH_Leaf, body_idx),
+	RF_INT(BVH_Leaf, node_idx),
+	RF_INT(BVH_Leaf, child_slot),
+	RF_V3(BVH_Leaf, fat_min),
+	RF_V3(BVH_Leaf, fat_max),
 );
 
 REFLECT(BVH_Tree,
-	RF_ARRAY(BVH_Tree, nodes, BVHNode),
-	RF_ARRAY(BVH_Tree, leaves, BVHLeaf),
+	RF_ARRAY(BVH_Tree, nodes, BVH_Node),
+	RF_ARRAY(BVH_Tree, leaves, BVH_Leaf),
 	RF_INT(BVH_Tree, root),
 	RF_INT(BVH_Tree, refine_cursor),
 );
@@ -477,7 +477,7 @@ static const R_TypeDesc *g_type_registry[] = {
 	&rtype_SolverContact, &rtype_SolverManifold, &rtype_SolverJoint,
 	&rtype_WarmContact, &rtype_WarmManifold,
 	&rtype_JointInternal, &rtype_JointHot, &rtype_Island,
-	&rtype_BVH_Child, &rtype_BVHNode, &rtype_BVHLeaf, &rtype_BVH_Tree,
+	&rtype_BVH_Child, &rtype_BVH_Node, &rtype_BVH_Leaf, &rtype_BVH_Tree,
 	&rtype_PerfTimers, &rtype_PGSTimers, &rtype_NP_DebugSnapshot,
 	&rtype_RewindIsland, &rtype_RewindFrame, &rtype_RewindBuffer,
 };
